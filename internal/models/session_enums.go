@@ -259,6 +259,32 @@ func (s PRPushState) Validate() error {
 	}
 }
 
+// BranchCreationState tracks the branch-only publish action. It mirrors the
+// PR creation states but stays independent so creating a branch does not block
+// a later PR creation from the same session.
+type BranchCreationState string
+
+const (
+	BranchCreationStateIdle      BranchCreationState = "idle"
+	BranchCreationStateQueued    BranchCreationState = "queued"
+	BranchCreationStatePushing   BranchCreationState = "pushing"
+	BranchCreationStateSucceeded BranchCreationState = "succeeded"
+	BranchCreationStateFailed    BranchCreationState = "failed"
+)
+
+func (s BranchCreationState) Validate() error {
+	switch s {
+	case BranchCreationStateIdle,
+		BranchCreationStateQueued,
+		BranchCreationStatePushing,
+		BranchCreationStateSucceeded,
+		BranchCreationStateFailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid BranchCreationState: %q", s)
+	}
+}
+
 // SessionAutonomy is the per-run autonomy knob stored in
 // sessions.autonomy_level. It is intentionally distinct from the org-level
 // AutonomyLevel (manual / auto_simple / auto_all) which controls when the PM

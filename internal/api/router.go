@@ -937,6 +937,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
 
 				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/branch", sessionHandler.CreateBranch)
 				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
 			})
 

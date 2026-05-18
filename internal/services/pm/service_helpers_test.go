@@ -3,6 +3,7 @@ package pm
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,135 @@ func (helperUsageTracker) ContainerStarted(context.Context, uuid.UUID, uuid.UUID
 }
 
 func (helperUsageTracker) ContainerStopped(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, time.Time, string) {
+}
+
+type helperCodingCredentialProvider struct {
+	mu             sync.Mutex
+	resolvable     map[models.ProviderName][]models.DecryptedCodingCredential
+	rateLimitedIDs map[uuid.UUID]models.CodingCredentialRateLimit
+}
+
+func (m *helperCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]models.DecryptedCodingCredential(nil), m.resolvable[provider]...), nil
+}
+
+func (m *helperCodingCredentialProvider) PickRunnableMulti(_ context.Context, _ models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, provider := range providers {
+		for _, cred := range m.resolvable[provider] {
+			if cred.Status != models.CodingCredentialStatusActive {
+				continue
+			}
+			if limit, ok := m.rateLimitedIDs[cred.ID]; ok && limit.Until.After(time.Now()) {
+				continue
+			}
+			picked := cred
+			return &picked, nil
+		}
+	}
+	return nil, errors.New("all eligible coding credentials are currently shed")
+}
+
+func (m *helperCodingCredentialProvider) MarkRateLimitedForScope(_ context.Context, _ models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rateLimitedIDs == nil {
+		m.rateLimitedIDs = make(map[uuid.UUID]models.CodingCredentialRateLimit)
+	}
+	m.rateLimitedIDs[id] = limit
+	for provider, creds := range m.resolvable {
+		for i := range creds {
+			if creds[i].ID == id {
+				until := limit.Until
+				observedAt := time.Now()
+				message := limit.Message
+				creds[i].RateLimitedUntil = &until
+				creds[i].RateLimitedObservedAt = &observedAt
+				creds[i].RateLimitMessage = &message
+			}
+		}
+		m.resolvable[provider] = creds
+	}
+	return nil
+}
+
+func (m *helperCodingCredentialProvider) MarkAuthRejectedForScope(_ context.Context, _ models.Scope, _ uuid.UUID) error {
+	return nil
+}
+
+func (m *helperCodingCredentialProvider) MarkRateLimited(id uuid.UUID) {
+	_ = m.MarkRateLimitedForScope(context.Background(), models.Scope{}, id, models.CodingCredentialRateLimit{Until: time.Now().Add(time.Minute)})
+}
+
+func (m *helperCodingCredentialProvider) MarkAuthRejected(uuid.UUID) {}
+
+type helperRetryAdapter struct {
+	mu       sync.Mutex
+	seenKeys []string
+}
+
+func (a *helperRetryAdapter) Name() models.AgentType { return models.AgentTypeAmp }
+
+func (a *helperRetryAdapter) PreparePrompt(context.Context, *agent.AgentInput) (*agent.AgentPrompt, error) {
+	return &agent.AgentPrompt{}, nil
+}
+
+func (a *helperRetryAdapter) Execute(_ context.Context, sb *agent.Sandbox, _ *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seenKeys = append(a.seenKeys, sb.Env["AMP_API_KEY"])
+	if len(a.seenKeys) == 1 {
+		return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+	}
+	return &agent.AgentResult{Summary: "ok", ExitCode: 0}, nil
+}
+
+func (a *helperRetryAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeUnsupported
+}
+
+func (a *helperRetryAdapter) keys() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.seenKeys...)
+}
+
+type helperClaudeRetryAdapter struct {
+	mu      sync.Mutex
+	seen    []string
+	sandbox *pmSandboxMock
+}
+
+func (a *helperClaudeRetryAdapter) Name() models.AgentType { return models.AgentTypeClaudeCode }
+
+func (a *helperClaudeRetryAdapter) PreparePrompt(context.Context, *agent.AgentInput) (*agent.AgentPrompt, error) {
+	return &agent.AgentPrompt{}, nil
+}
+
+func (a *helperClaudeRetryAdapter) Execute(_ context.Context, sb *agent.Sandbox, _ *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seen = append(a.seen, sb.Env["ANTHROPIC_API_KEY"])
+	if len(a.seen) == 1 {
+		return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+	}
+	if a.sandbox.writePath == "" {
+		return &agent.AgentResult{ExitCode: 1, Error: "missing claude subscription file"}, errors.New("missing claude subscription file")
+	}
+	return &agent.AgentResult{Summary: "ok", ExitCode: 0}, nil
+}
+
+func (a *helperClaudeRetryAdapter) ResumeMode() agent.SessionResumeMode {
+	return agent.ResumeUnsupported
+}
+
+func (a *helperClaudeRetryAdapter) keys() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.seen...)
 }
 
 func TestResolveAgentType(t *testing.T) {
@@ -228,6 +358,136 @@ func TestServiceInjectRequiredAgentAuth(t *testing.T) {
 			require.NoError(t, err, "injectRequiredAgentAuth should succeed for %s", tt.name)
 		})
 	}
+}
+
+func TestExecuteAgentWithCredentialFallbackRetriesRateLimitedCredential(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	codingCreds := &helperCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	sandboxProvider := &pmSandboxMock{}
+	env := agent.NewAgentEnv(agent.AgentEnvDeps{
+		CodingCredentials: codingCreds,
+		Provider:          sandboxProvider,
+		Logger:            zerolog.Nop(),
+	})
+	svc := &Service{
+		env:     env,
+		sandbox: sandboxProvider,
+		logger:  zerolog.Nop(),
+	}
+	sbCfg := agent.SandboxConfig{
+		HomeDir: "/home/sandbox",
+		Env:     env.Resolve(ctx, orgID, models.AgentTypeAmp, nil),
+	}
+	sb := &agent.Sandbox{ID: "pm-sandbox", HomeDir: sbCfg.HomeDir, Env: sbCfg.Env}
+	adapter := &helperRetryAdapter{}
+	prompt := &agent.AgentPrompt{}
+	logCh := make(chan agent.LogEntry, 10)
+
+	result, err := svc.executeAgentWithCredentialFallback(ctx, orgID, models.AgentTypeAmp, models.OrgSettings{}, sbCfg, sb, adapter, ctx, prompt, logCh)
+
+	require.NoError(t, err, "PM execution should retry with a fallback credential after a rate-limit result")
+	require.Equal(t, &agent.AgentResult{Summary: "ok", ExitCode: 0}, result, "PM execution should return the successful fallback result")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, adapter.keys(), "PM execution should refresh credentials before retrying")
+	require.Contains(t, codingCreds.rateLimitedIDs, firstCredID, "PM execution should mark the first credential rate-limited")
+}
+
+func TestExecuteAgentWithCredentialFallbackRetriesClaudeAPIKeyWithSubscription(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	apiCredID := uuid.New()
+	subCredID := uuid.New()
+	codingCreds := &helperCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropic: {
+				{
+					ID:        apiCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAnthropic,
+					Config:    models.AnthropicConfig{APIKey: "anthropic-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       subCredID,
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:   "claude-access",
+						RefreshToken:  "claude-refresh",
+						ExpiresAt:     time.Now().Add(time.Hour),
+						AccountType:   "pro",
+						RateLimitTier: "default",
+						Scopes:        []string{"org:create_api_key"},
+					},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	sandboxProvider := &pmSandboxMock{}
+	env := agent.NewAgentEnv(agent.AgentEnvDeps{
+		CodingCredentials: codingCreds,
+		Provider:          sandboxProvider,
+		Logger:            zerolog.Nop(),
+	})
+	svc := &Service{
+		env:     env,
+		sandbox: sandboxProvider,
+		logger:  zerolog.Nop(),
+	}
+	sbCfg := agent.SandboxConfig{
+		HomeDir: "/home/sandbox",
+		Env:     env.Resolve(ctx, orgID, models.AgentTypeClaudeCode, nil),
+	}
+	sb := &agent.Sandbox{ID: "pm-sandbox", HomeDir: sbCfg.HomeDir, Env: sbCfg.Env}
+	adapter := &helperClaudeRetryAdapter{sandbox: sandboxProvider}
+	prompt := &agent.AgentPrompt{}
+	logCh := make(chan agent.LogEntry, 10)
+
+	result, err := svc.executeAgentWithCredentialFallback(ctx, orgID, models.AgentTypeClaudeCode, models.OrgSettings{}, sbCfg, sb, adapter, ctx, prompt, logCh)
+
+	require.NoError(t, err, "PM Claude execution should retry with subscription credentials after API-key rate limiting")
+	require.Equal(t, &agent.AgentResult{Summary: "ok", ExitCode: 0}, result, "PM Claude execution should return the successful subscription fallback result")
+	require.Equal(t, []string{"anthropic-first", ""}, adapter.keys(), "PM Claude execution should clear ANTHROPIC_API_KEY when retrying with subscription auth")
+	require.Equal(t, "/home/sandbox/.claude/.credentials.json", sandboxProvider.writePath, "PM Claude retry should write the subscription credentials file")
+	require.Contains(t, string(sandboxProvider.writeData), "claude-access", "PM Claude retry should write the selected subscription token")
+	require.Contains(t, codingCreds.rateLimitedIDs, apiCredID, "PM Claude execution should mark the API key rate-limited")
+	require.NotContains(t, codingCreds.rateLimitedIDs, subCredID, "PM Claude execution should not mark the successful subscription fallback rate-limited")
 }
 
 func TestServiceSetUsageTrackerPersistFailedPlanAndContainerExitReason(t *testing.T) {
