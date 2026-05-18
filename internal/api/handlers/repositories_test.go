@@ -185,8 +185,15 @@ func TestRepositoryHandler_Update(t *testing.T) {
 		expectedBody string
 	}{
 		{
-			name: "updates repository status successfully",
-			body: `{"status":"paused"}`,
+			name:         "rejects repository status updates",
+			body:         `{"status":"paused"}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "REPOSITORY_STATUS_IMMUTABLE",
+		},
+		{
+			name: "updates repository settings successfully",
+			body: `{"settings":{"pm":{"pm_schedule_hours":4}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, repoID uuid.UUID) {
 				now := time.Now()
 				integrationID := uuid.New()
@@ -208,7 +215,7 @@ func TestRepositoryHandler_Update(t *testing.T) {
 					)
 			},
 			expectedCode: http.StatusOK,
-			expectedBody: "paused",
+			expectedBody: "pm_schedule_hours",
 		},
 		{
 			name:         "returns bad request for invalid JSON body",
@@ -454,7 +461,7 @@ func TestRepositoryHandler_Disconnect_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
+func TestRepositoryHandler_Reconnect_RequiresClaimFlow(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -463,19 +470,6 @@ func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
 
 	orgID := uuid.New()
 	repoID := uuid.New()
-	integrationID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("UPDATE repositories").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(repoColumns()).AddRow(
-				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
-				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
-				nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
-
 	store := db.NewRepositoryStore(mock)
 	handler := NewRepositoryHandler(store)
 
@@ -488,8 +482,8 @@ func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	handler.Reconnect(w, req)
-	require.Equal(t, http.StatusOK, w.Code, "reconnect should return 200")
-	require.Contains(t, w.Body.String(), "active", "response should echo new status")
+	require.Equal(t, http.StatusConflict, w.Code, "reconnect should force GitHub repos through claim flow")
+	require.Contains(t, w.Body.String(), "GITHUB_REPO_CLAIM_REQUIRED", "response should explain how to reactivate the repo")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

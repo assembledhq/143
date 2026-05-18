@@ -103,6 +103,14 @@ func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T
 			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*RemoteStopActivePreviewForSessionResponse]{
 				Data: &RemoteStopActivePreviewForSessionResponse{Stopped: true},
 			}), "StopActivePreviewForSession should decode the stop result")
+		case "/internal/sessions/" + sessionID.String() + "/cancel":
+			require.Equal(t, "cancel_session", claims.Action, "CancelSession should sign the cancel_session action")
+			var body RemoteCancelSessionRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body), "CancelSession should encode its request body")
+			require.Equal(t, sessionID, body.SessionID, "CancelSession should preserve the session id")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*RemoteCancelSessionResponse]{
+				Data: &RemoteCancelSessionResponse{Accepted: true},
+			}), "CancelSession should decode the cancel result")
 		default:
 			t.Fatalf("unexpected worker path: %s", r.URL.Path)
 		}
@@ -154,6 +162,10 @@ func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T
 	stopped, err := client.StopActivePreviewForSession(context.Background(), worker, orgID, sessionID)
 	require.NoError(t, err, "StopActivePreviewForSession should succeed")
 	require.True(t, stopped, "StopActivePreviewForSession should decode the stopped result")
+
+	cancelled, err := client.CancelSession(context.Background(), worker, RemoteCancelSessionRequest{OrgID: orgID, SessionID: sessionID})
+	require.NoError(t, err, "CancelSession should succeed")
+	require.True(t, cancelled.Accepted, "CancelSession should decode the accepted result")
 }
 
 func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {

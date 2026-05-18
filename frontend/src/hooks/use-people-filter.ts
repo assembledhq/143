@@ -69,14 +69,14 @@ export function peopleFilterLabel(
   if (mode === "all") return "Everyone";
 
   const names = selectedUserIDs.map((id) => {
-    if (id === currentUser?.id) return "You";
+    if (id === currentUser?.id) return currentUser.name;
     const member = members.find((item) => item.id === id);
-    return member?.name.split(" ")[0] ?? "User";
+    return member?.name ?? "User";
   });
 
   if (names.length === 0) return "People";
   if (names.length === 1) return names[0];
-  return `${names[0]} +${names.length - 1}`;
+  return `${names[0]} +${names.length - 1} ${names.length === 2 ? "other" : "others"}`;
 }
 
 export function useFilterSuffix(

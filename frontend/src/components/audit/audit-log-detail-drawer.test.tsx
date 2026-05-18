@@ -84,6 +84,25 @@ describe('AuditLogDetailDrawer', () => {
     expect(screen.getByText('42')).toBeInTheDocument();
   });
 
+  it('renders role detail values with user-facing labels', () => {
+    render(
+      <AuditLogDetailDrawer
+        entry={makeEntry({
+          action: 'team.member_role_changed',
+          details: { previous_role: 'member', new_role: 'builder' },
+        })}
+        onClose={vi.fn()}
+        members={mockMembers}
+      />
+    );
+
+    expect(screen.getByText(/changed user role/)).toBeInTheDocument();
+    expect(screen.getByText('Engineer')).toBeInTheDocument();
+    expect(screen.getByText('Builder')).toBeInTheDocument();
+    expect(screen.queryByText('member')).not.toBeInTheDocument();
+    expect(screen.queryByText(/changed member role/)).not.toBeInTheDocument();
+  });
+
   it('renders automation update changes as before/after diff', () => {
     render(
       <AuditLogDetailDrawer

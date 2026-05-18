@@ -534,7 +534,7 @@ const (
 	// handler runtime than workers will keep renewing.
 	MaxAbsoluteRuntimeCeilingSeconds = MaxMaxSessionDurationSeconds + 15*60
 
-	DefaultNoProgressTimeoutSeconds        = 5 * 60
+	DefaultNoProgressTimeoutSeconds        = 15 * 60
 	DefaultGracefulShutdownWindowSeconds   = 30
 	DefaultCheckpointFinalizeWindowSeconds = 30
 	DefaultAutomaticExtensionSeconds       = 10 * 60

@@ -189,24 +189,27 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Name            string                          `json:"name"`
-		Goal            string                          `json:"goal"`
-		RepositoryID    string                          `json:"repository_id"`
-		Scope           *string                         `json:"scope"`
-		AgentType       *models.AgentType               `json:"agent_type"`
-		Model           *string                         `json:"model"`
-		ReasoningEffort models.ReasoningEffort          `json:"reasoning_effort"`
-		ExecutionMode   *models.ProjectExecMode         `json:"execution_mode"`
-		MaxConcurrent   *int                            `json:"max_concurrent"`
-		BaseBranch      *string                         `json:"base_branch"`
-		IdentityScope   *models.AutomationIdentityScope `json:"identity_scope"`
-		ScheduleType    *string                         `json:"schedule_type"`
-		IntervalValue   *int                            `json:"interval_value"`
-		IntervalUnit    *models.ScheduleUnit            `json:"interval_unit"`
-		IntervalRunAt   *string                         `json:"interval_run_at"`
-		CronExpression  *string                         `json:"cron_expression"`
-		Timezone        *string                         `json:"timezone"`
-		Priority        *int                            `json:"priority"`
+		Name             string                          `json:"name"`
+		Goal             string                          `json:"goal"`
+		IconType         models.AutomationIconType       `json:"icon_type"`
+		IconValue        string                          `json:"icon_value"`
+		RepositoryID     string                          `json:"repository_id"`
+		Scope            *string                         `json:"scope"`
+		AgentType        *models.AgentType               `json:"agent_type"`
+		Model            *string                         `json:"model"`
+		ReasoningEffort  models.ReasoningEffort          `json:"reasoning_effort"`
+		ExecutionMode    *models.ProjectExecMode         `json:"execution_mode"`
+		MaxConcurrent    *int                            `json:"max_concurrent"`
+		BaseBranch       *string                         `json:"base_branch"`
+		IdentityScope    *models.AutomationIdentityScope `json:"identity_scope"`
+		ScheduleType     *string                         `json:"schedule_type"`
+		IntervalValue    *int                            `json:"interval_value"`
+		IntervalUnit     *models.ScheduleUnit            `json:"interval_unit"`
+		IntervalRunAt    *string                         `json:"interval_run_at"`
+		CronExpression   *string                         `json:"cron_expression"`
+		Timezone         *string                         `json:"timezone"`
+		Priority         *int                            `json:"priority"`
+		PrePRReviewLoops *int                            `json:"pre_pr_review_loops"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -222,6 +225,11 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateAutomationNameAndGoal(name, goal); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_FIELD", err.Error())
+		return
+	}
+	iconType, iconValue, err := resolveAutomationIcon(req.IconType, req.IconValue)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ICON", err.Error())
 		return
 	}
 
@@ -388,29 +396,47 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		priority = *req.Priority
 	}
+	prePRReviewLoops := 0
+	if models.AgentSupportsNativeReview(effectiveAgentType) {
+		prePRReviewLoops = 1
+	}
+	if req.PrePRReviewLoops != nil {
+		if *req.PrePRReviewLoops < 0 || *req.PrePRReviewLoops > 5 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", "pre_pr_review_loops must be between 0 and 5")
+			return
+		}
+		prePRReviewLoops = *req.PrePRReviewLoops
+	}
+	if err := validatePrePRReviewLoopsForAgent(prePRReviewLoops, effectiveAgentType); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", err.Error())
+		return
+	}
 
 	automation := models.Automation{
-		OrgID:           orgID,
-		RepositoryID:    repoID,
-		Name:            name,
-		Goal:            goal,
-		Scope:           req.Scope,
-		AgentType:       agentType,
-		ModelOverride:   modelOverride,
-		ReasoningEffort: reasoningOverride,
-		ExecutionMode:   execMode,
-		MaxConcurrent:   maxConcurrent,
-		BaseBranch:      baseBranch,
-		IdentityScope:   identityScope,
-		ScheduleType:    scheduleType,
-		IntervalValue:   intervalValuePtr,
-		IntervalUnit:    intervalUnitPtr,
-		IntervalRunAt:   intervalRunAtPtr,
-		CronExpression:  cronExpressionPtr,
-		Timezone:        timezone,
-		Enabled:         true,
-		CreatedBy:       &user.ID,
-		Priority:        priority,
+		OrgID:            orgID,
+		RepositoryID:     repoID,
+		Name:             name,
+		Goal:             goal,
+		IconType:         iconType,
+		IconValue:        iconValue,
+		Scope:            req.Scope,
+		AgentType:        agentType,
+		ModelOverride:    modelOverride,
+		ReasoningEffort:  reasoningOverride,
+		ExecutionMode:    execMode,
+		MaxConcurrent:    maxConcurrent,
+		BaseBranch:       baseBranch,
+		IdentityScope:    identityScope,
+		PrePRReviewLoops: prePRReviewLoops,
+		ScheduleType:     scheduleType,
+		IntervalValue:    intervalValuePtr,
+		IntervalUnit:     intervalUnitPtr,
+		IntervalRunAt:    intervalRunAtPtr,
+		CronExpression:   cronExpressionPtr,
+		Timezone:         timezone,
+		Enabled:          true,
+		CreatedBy:        &user.ID,
+		Priority:         priority,
 	}
 
 	// Centralise schedule branching in ComputeNextRunAt so a new schedule kind
@@ -434,6 +460,19 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Automation]{Data: automation})
 }
 
+func resolveAutomationIcon(iconType models.AutomationIconType, iconValue string) (models.AutomationIconType, string, error) {
+	if err := iconType.Validate(); err != nil {
+		return "", "", err
+	}
+	resolvedType := iconType.OrDefault()
+	resolvedValue := strings.TrimSpace(iconValue)
+	resolvedValue = models.AutomationIconValueOrDefault(resolvedValue)
+	if len([]rune(resolvedValue)) > 16 {
+		return "", "", fmt.Errorf("icon_value must be at most 16 characters")
+	}
+	return resolvedType, resolvedValue, nil
+}
+
 func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -453,24 +492,27 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	before := automation
 
 	var req struct {
-		Name            *string                         `json:"name"`
-		Goal            *string                         `json:"goal"`
-		Scope           *string                         `json:"scope"`
-		RepositoryID    *string                         `json:"repository_id"`
-		AgentType       *models.AgentType               `json:"agent_type"`
-		Model           *string                         `json:"model"`
-		ReasoningEffort *models.ReasoningEffort         `json:"reasoning_effort"`
-		ExecutionMode   *models.ProjectExecMode         `json:"execution_mode"`
-		MaxConcurrent   *int                            `json:"max_concurrent"`
-		BaseBranch      *string                         `json:"base_branch"`
-		IdentityScope   *models.AutomationIdentityScope `json:"identity_scope"`
-		ScheduleType    *string                         `json:"schedule_type"`
-		IntervalValue   *int                            `json:"interval_value"`
-		IntervalUnit    *models.ScheduleUnit            `json:"interval_unit"`
-		IntervalRunAt   *string                         `json:"interval_run_at"`
-		CronExpression  *string                         `json:"cron_expression"`
-		Timezone        *string                         `json:"timezone"`
-		Priority        *int                            `json:"priority"`
+		Name             *string                         `json:"name"`
+		Goal             *string                         `json:"goal"`
+		IconType         *models.AutomationIconType      `json:"icon_type"`
+		IconValue        *string                         `json:"icon_value"`
+		Scope            *string                         `json:"scope"`
+		RepositoryID     *string                         `json:"repository_id"`
+		AgentType        *models.AgentType               `json:"agent_type"`
+		Model            *string                         `json:"model"`
+		ReasoningEffort  *models.ReasoningEffort         `json:"reasoning_effort"`
+		ExecutionMode    *models.ProjectExecMode         `json:"execution_mode"`
+		MaxConcurrent    *int                            `json:"max_concurrent"`
+		BaseBranch       *string                         `json:"base_branch"`
+		IdentityScope    *models.AutomationIdentityScope `json:"identity_scope"`
+		ScheduleType     *string                         `json:"schedule_type"`
+		IntervalValue    *int                            `json:"interval_value"`
+		IntervalUnit     *models.ScheduleUnit            `json:"interval_unit"`
+		IntervalRunAt    *string                         `json:"interval_run_at"`
+		CronExpression   *string                         `json:"cron_expression"`
+		Timezone         *string                         `json:"timezone"`
+		Priority         *int                            `json:"priority"`
+		PrePRReviewLoops *int                            `json:"pre_pr_review_loops"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -504,6 +546,23 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Scope != nil {
 		automation.Scope = req.Scope
+	}
+	if req.IconType != nil || req.IconValue != nil {
+		iconType := automation.IconType
+		iconValue := automation.IconValue
+		if req.IconType != nil {
+			iconType = *req.IconType
+		}
+		if req.IconValue != nil {
+			iconValue = *req.IconValue
+		}
+		resolvedType, resolvedValue, err := resolveAutomationIcon(iconType, iconValue)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ICON", err.Error())
+			return
+		}
+		automation.IconType = resolvedType
+		automation.IconValue = resolvedValue
 	}
 	if req.RepositoryID != nil {
 		repoID, err := h.resolveRepositoryID(r.Context(), orgID, *req.RepositoryID)
@@ -578,6 +637,24 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		automation.IdentityScope = identityScope.OrDefault()
+	}
+	if req.PrePRReviewLoops != nil {
+		if *req.PrePRReviewLoops < 0 || *req.PrePRReviewLoops > 5 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", "pre_pr_review_loops must be between 0 and 5")
+			return
+		}
+		automation.PrePRReviewLoops = *req.PrePRReviewLoops
+	}
+	if req.AgentType != nil || req.Model != nil || req.PrePRReviewLoops != nil {
+		effectiveAgentType, err := h.defaultAutomationAgentType(r.Context(), orgID, automation.AgentType)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
+			return
+		}
+		if err := validatePrePRReviewLoopsForAgent(automation.PrePRReviewLoops, effectiveAgentType); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", err.Error())
+			return
+		}
 	}
 	if req.MaxConcurrent != nil {
 		if *req.MaxConcurrent <= 0 || *req.MaxConcurrent > 100 {

@@ -408,6 +408,24 @@ func (s *Server) writeError(conn net.Conn, msg string) {
 	_ = json.NewEncoder(conn).Encode(&Response{Error: msg})
 }
 
+// ValidateSocketDirForStartup is the process-start preflight for production
+// workers. Listen also checks this immediately before binding a per-session
+// socket, but checking at startup keeps a misprovisioned host from registering
+// as healthy and claiming jobs it cannot run.
+func ValidateSocketDirForStartup(dir string) error {
+	if err := assertParentDirPerms(dir); err != nil {
+		return err
+	}
+	probeDir, err := os.MkdirTemp(dir, ".startup-probe-*")
+	if err != nil {
+		return fmt.Errorf("socket dir %s is not writable by uid %d: %w", dir, os.Geteuid(), err)
+	}
+	if err := os.RemoveAll(probeDir); err != nil {
+		return fmt.Errorf("remove socket dir startup probe %s: %w", probeDir, err)
+	}
+	return nil
+}
+
 // assertParentDirPerms verifies that the socket directory is mode 0750 or
 // stricter (no world-readable bit, no world-executable bit). This is the
 // gate that decides which host processes can even see the per-session

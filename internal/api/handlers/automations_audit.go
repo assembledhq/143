@@ -17,6 +17,8 @@ import (
 func automationAuditSnapshot(a *models.Automation) map[string]any {
 	snap := map[string]any{
 		"name":           a.Name,
+		"icon_type":      a.IconType.OrDefault(),
+		"icon_value":     a.IconValue,
 		"identity_scope": a.IdentityScope.OrDefault(),
 		"schedule_type":  a.ScheduleType,
 	}
@@ -62,6 +64,8 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	// Optional fields use tri-state (nil vs set) so nil→"" and 0→nil
 	// transitions are visible in the audit diff rather than collapsed away.
 	track("scope", optString(old.Scope), optString(new_.Scope))
+	track("icon_type", old.IconType.OrDefault(), new_.IconType.OrDefault())
+	track("icon_value", old.IconValue, new_.IconValue)
 	track("agent_type", optString(old.AgentType), optString(new_.AgentType))
 	track("model_override", optString(old.ModelOverride), optString(new_.ModelOverride))
 	track("execution_mode", old.ExecutionMode, new_.ExecutionMode)

@@ -217,6 +217,24 @@ func LinkedIssuesContext(data LinkedIssueContextData) string {
 	return render("linked_issues_context.template", sanitized)
 }
 
+// ─── Review Loops ────────────────────────────────────────────────────────────
+
+type ReviewLoopReviewPromptData struct {
+	AgentType any
+}
+
+func ReviewLoopReviewPrompt(data ReviewLoopReviewPromptData) string {
+	return render("review_loop_review.template", data)
+}
+
+func ReviewLoopDecisionPrompt() string {
+	return render("review_loop_decision.template", nil)
+}
+
+func ReviewLoopFixPrompt() string {
+	return render("review_loop_fix.template", nil)
+}
+
 // ─── Slack ────────────────────────────────────────────────────────────────────
 
 // SlackSummarizerPrompt returns the system prompt for Slack thread analysis.

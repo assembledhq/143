@@ -37,6 +37,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/preview"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
@@ -51,12 +52,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
+	githubInstallationStore := db.NewGitHubInstallationStore(pool)
 	issueStore := db.NewIssueStore(pool)
+	autopilotQueueStore := db.NewAutopilotQueueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
 	sessionIssueLinkStore := db.NewSessionIssueLinkStore(pool)
 	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
@@ -162,15 +166,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithGitHubInstallationStore(githubInstallationStore),
+		handlers.WithIntegrationMembershipStore(membershipStore),
+		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 	}
-	// If the GitHub App service is available, let the integration handler
-	// fetch repos directly from the API during the install redirect.
+	// If the GitHub App service is available, let the integration handler list
+	// installation repos for explicit repository claims.
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 		}
+	}
+	if appUserAuthSvc != nil {
+		integrationOpts = append(integrationOpts, handlers.WithGitHubAppUserAuth(appUserAuthSvc))
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -184,6 +194,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
+	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(
@@ -193,8 +204,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
+	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
@@ -217,6 +230,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
+	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 
 	// Inbound-agent metrics. Constructed once and shared between the
 	// linear.Service (so HandleAgentMilestone records milestone emits)
@@ -314,6 +328,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// session-level handler maintains. Without this, question state
 	// diverges from the resumed run on the thread surface.
 	threadSvc.SetQuestionStore(sessionQuestionStore)
+	// Wire durable human-input requests so a free-text answer sent through a
+	// thread composer clears the pending request and passes its id into the
+	// resumed agent run.
+	threadSvc.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
@@ -321,6 +339,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// thread tab follow-up get the same fail-soft mid-session linking the
 	// legacy session surface already provides.
 	sessionThreadHandler.SetLinearLinker(linearService)
+	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
+		Sessions: sessionStore,
+		Threads:  threadSvc,
+	})
+	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -612,8 +635,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
@@ -653,6 +678,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
 		r.Post("/internal/preview/{previewID}/stop", internalPreviewHandler.StopPreview)
@@ -730,6 +756,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
+			// GitHub App setup callbacks are validated against a signed setup
+			// intent inside the handler. Keep them outside OrgContext so a
+			// stale active org in another tab cannot block linking to the
+			// intended org recorded in the state token.
+			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			// Available to any authenticated user (no RequireRole) — an invited
 			// user may not yet have a role in the target org when they claim.
 			// Rate-limited per-IP and per-user at 10/minute: the endpoint is a
@@ -789,6 +821,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/session-composer/slash-commands", sessionComposerHandler.ListSlashCommands)
 				r.Get("/api/v1/session-composer/slash-commands/details", sessionComposerHandler.GetSlashCommandDetail)
 				r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
+				r.Get("/api/v1/autopilot/queue", autopilotHandler.Queue)
 				r.Get("/api/v1/issues", issueHandler.List)
 				r.Get("/api/v1/issues/{id}", issueHandler.Get)
 				r.Get("/api/v1/issues/{id}/priority", priorityHandler.GetPriorityScore)
@@ -805,6 +838,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
 				r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 				r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
+				r.Get("/api/v1/sessions/{id}/human-input-requests", sessionHandler.ListHumanInputRequests)
 				r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
 				r.Get("/api/v1/sessions/{id}/timeline", sessionHandler.GetTimeline)
 				r.Get("/api/v1/sessions/{id}/threads", sessionThreadHandler.ListThreads)
@@ -812,6 +846,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
+				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
+				r.Get("/api/v1/sessions/{id}/review-loops/{loop_id}", reviewLoopHandler.Get)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -921,6 +957,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 				r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
+				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
+				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/cancel", sessionHandler.CancelHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
 				r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 				r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
@@ -935,6 +973,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
+				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
+				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
@@ -1107,10 +1147,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
 				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
-				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
-				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
 				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
+				r.Get("/api/v1/integrations/github/repositories", integrationHandler.ListGitHubInstallationRepositories)
+				r.Post("/api/v1/integrations/github/repositories/claim", integrationHandler.ClaimGitHubInstallationRepositories)
 				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
@@ -1122,6 +1162,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
 				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/circleci/connect", integrationHandler.ConnectCircleCI)
+				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
@@ -1232,4 +1274,13 @@ func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Se
 		return shared[0]
 	}
 	return db.NewCodingCredentialStore(pool, cryptoSvc)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -3281,6 +3282,48 @@ func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) 
 		t.Fatal("polling stream helper did not return after reload failure")
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestHumanInputSSEEventType(t *testing.T) {
+	t.Parallel()
+
+	updatedMetadata, err := json.Marshal(map[string]string{"event": string(sse.EventHumanInputUpdated)})
+	require.NoError(t, err, "updated metadata should marshal")
+
+	tests := []struct {
+		name       string
+		log        models.SessionLog
+		expected   sse.EventType
+		expectedOK bool
+	}{
+		{
+			name:       "human input without metadata is created",
+			log:        models.SessionLog{Level: "human_input"},
+			expected:   sse.EventHumanInputCreated,
+			expectedOK: true,
+		},
+		{
+			name:       "human input updated metadata is updated",
+			log:        models.SessionLog{Level: "human_input", Metadata: updatedMetadata},
+			expected:   sse.EventHumanInputUpdated,
+			expectedOK: true,
+		},
+		{
+			name:       "ordinary log has no named human input event",
+			log:        models.SessionLog{Level: "output"},
+			expectedOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			eventType, ok := humanInputSSEEventType(tt.log)
+			require.Equal(t, tt.expectedOK, ok, "event type detection should match expectation")
+			require.Equal(t, tt.expected, eventType, "event type detection should return expected event")
+		})
+	}
 }
 
 func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testing.T) {
@@ -7877,6 +7920,30 @@ func (m *mockCanceller) CancelSession(sessionID uuid.UUID) bool {
 	return m.result
 }
 
+type fakeSessionWorkerSelector struct {
+	worker previewsvc.WorkerNode
+	err    error
+	calls  []string
+}
+
+func (f *fakeSessionWorkerSelector) ResolveNode(_ context.Context, nodeID string) (previewsvc.WorkerNode, error) {
+	f.calls = append(f.calls, nodeID)
+	return f.worker, f.err
+}
+
+type fakeSessionWorkerCancelClient struct {
+	resp   *previewsvc.RemoteCancelSessionResponse
+	err    error
+	calls  []previewsvc.RemoteCancelSessionRequest
+	worker previewsvc.WorkerNode
+}
+
+func (f *fakeSessionWorkerCancelClient) CancelSession(_ context.Context, worker previewsvc.WorkerNode, req previewsvc.RemoteCancelSessionRequest) (*previewsvc.RemoteCancelSessionResponse, error) {
+	f.calls = append(f.calls, req)
+	f.worker = worker
+	return f.resp, f.err
+}
+
 func TestSessionHandler_CancelSession_Success(t *testing.T) {
 	t.Parallel()
 
@@ -7915,6 +7982,12 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 				now,
 			),
 		)
+	mock.ExpectExec("INSERT INTO session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
 	rctx := chi.NewRouteContext()
@@ -7931,6 +8004,195 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 	require.True(t, canceller.called, "canceller should have been called")
 	require.Equal(t, sessionID, canceller.sessionID, "canceller should receive correct session ID")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CancelSession_RoutesDirectWorkerCancelWhenLocalRegistryMisses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	containerID := "sandbox-1"
+	workerNodeID := "worker-a"
+	handler := newSessionHandler(t, mock)
+	canceller := &mockCanceller{result: false}
+	selector := &fakeSessionWorkerSelector{
+		worker: previewsvc.WorkerNode{ID: workerNodeID, BaseURL: "http://worker-a"},
+	}
+	client := &fakeSessionWorkerCancelClient{resp: &previewsvc.RemoteCancelSessionResponse{Accepted: true}}
+	handler.SetCanceller(canceller)
+	handler.SetWorkerRuntime(selector, client, "api-node")
+	row := sessionTestRow(
+		sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
+		nil, nil, nil, nil,
+		nil, false, &now, nil, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil,
+		nil, // triggered_by_user_id
+		nil, 1, now, "running", nil,
+		nil, nil, nil, nil, nil,
+		nil,      // input_manifest
+		nil, nil, // archived_at, archived_by_user_id
+		nil,            // automation_run_id
+		"idle",         // pr_creation_state
+		(*string)(nil), // pr_creation_error
+		nil,            // deleted_at
+		now,
+	)
+	row[14] = &containerID
+	row[15] = &workerNodeID
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(row...))
+	mock.ExpectExec("INSERT INTO session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "cancel should be accepted after direct worker routing: %s", w.Body.String())
+	require.True(t, canceller.called, "handler should try the local registry before remote routing")
+	require.Equal(t, []string{workerNodeID}, selector.calls, "handler should resolve the session's worker node")
+	require.Equal(t, previewsvc.WorkerNode{ID: workerNodeID, BaseURL: "http://worker-a"}, client.worker, "handler should send cancel to the resolved worker")
+	require.Equal(t, []previewsvc.RemoteCancelSessionRequest{{OrgID: orgID, SessionID: sessionID}}, client.calls, "handler should send the cancel payload to the worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "direct worker cancel should not enqueue a normal worker job")
+}
+
+func TestSessionHandler_CancelSession_EnqueuesTargetedWorkerCancelWhenLocalRegistryMisses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	containerID := "sandbox-1"
+	workerNodeID := "worker-a"
+	handler := newSessionHandler(t, mock)
+	canceller := &mockCanceller{result: false}
+	handler.SetCanceller(canceller)
+	row := sessionTestRow(
+		sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
+		nil, nil, nil, nil,
+		nil, false, &now, nil, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil,
+		nil, // triggered_by_user_id
+		nil, 1, now, "running", nil,
+		nil, nil, nil, nil, nil,
+		nil,      // input_manifest
+		nil, nil, // archived_at, archived_by_user_id
+		nil,            // automation_run_id
+		"idle",         // pr_creation_state
+		(*string)(nil), // pr_creation_error
+		nil,            // deleted_at
+		now,
+	)
+	row[14] = &containerID
+	row[15] = &workerNodeID
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(row...))
+	mock.ExpectExec("INSERT INTO session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "cancel should still be accepted when routed through a worker job: %s", w.Body.String())
+	require.True(t, canceller.called, "handler should try the local registry before enqueuing")
+	require.Equal(t, sessionID, canceller.sessionID, "local registry lookup should use the requested session")
+	require.NoError(t, mock.ExpectationsWereMet(), "worker cancel job should be enqueued for the owning node")
+}
+
+func TestSessionHandler_CancelSession_RecordsPendingCancelWhenWorkerTargetMissing(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	canceller := &mockCanceller{result: false}
+	handler.SetCanceller(canceller)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 1, now, "running", nil,
+				nil, nil, nil, nil, nil,
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectExec("INSERT INTO session_cancel_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/cancel", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CancelSession(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "cancel should be accepted while durable intent waits for worker registration: %s", w.Body.String())
+	require.True(t, canceller.called, "handler should try the local registry before relying on durable intent")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not enqueue a worker job without a known worker target")
 }
 
 func TestSessionHandler_UpdateTitle(t *testing.T) {

@@ -455,3 +455,79 @@ type ProposeProjectResult struct {
 	ID               string  `json:"id"`
 	DuplicateWarning *string `json:"duplicate_warning,omitempty"`
 }
+
+// --------------------------------------------------------------------------
+// CITestInsights — CircleCI, GitHub Actions, etc.
+// --------------------------------------------------------------------------
+
+// CITestInsights provides access to CI test analytics, especially flaky-test
+// detection. A coding agent uses this to discover unreliable tests, look at
+// the failure messages for a specific occurrence, and decide on a fix.
+type CITestInsights interface {
+	// Name returns the provider identifier (e.g. "circleci").
+	Name() string
+
+	// ListFlakyTests returns tests the provider flagged as flaky in the
+	// recent window. The agent uses this to find candidates to fix.
+	ListFlakyTests(ctx context.Context, filter FlakyTestFilter) ([]FlakyTest, error)
+
+	// GetTestResults returns individual test results (passes + failures)
+	// for a specific job, so the agent can read the failure message and
+	// stack of a flaky test occurrence.
+	GetTestResults(ctx context.Context, ref JobRef) ([]TestResult, error)
+
+	// GetRecentFailures returns recent failed test occurrences for a single
+	// flaky test (matched by classname + test name). The agent uses this
+	// to look at multiple failure messages and identify the root cause.
+	GetRecentFailures(ctx context.Context, classname, testName string, limit int) ([]TestResult, error)
+}
+
+// FlakyTestFilter constrains which flaky tests to return.
+type FlakyTestFilter struct {
+	Branch       string // only tests flaking on this branch; empty = default branch
+	WorkflowName string // restrict to a specific workflow; empty = all
+	Limit        int    // max results; 0 = provider default
+}
+
+// FlakyTest is a test the CI provider has identified as flaky based on
+// repeated pass/fail flips on the same commit.
+type FlakyTest struct {
+	// TestName is the individual test function/case name.
+	TestName string `json:"test_name"`
+	// Classname groups related tests (file path or class name, provider-dependent).
+	Classname string `json:"classname,omitempty"`
+	// File is the source file containing the test, if the provider knows it.
+	File string `json:"file,omitempty"`
+	// JobName is the CI job where the flake was observed.
+	JobName string `json:"job_name,omitempty"`
+	// WorkflowName groups jobs (e.g. "build-and-test").
+	WorkflowName string `json:"workflow_name,omitempty"`
+	// TimesFlaked is how many times this test has flipped in the window
+	// the provider reports on. 0 if not provided.
+	TimesFlaked int `json:"times_flaked,omitempty"`
+	// LastFailureAt is the most recent observed failure timestamp.
+	LastFailureAt time.Time `json:"last_failure_at,omitempty"`
+	// LastJob is a reference to the most recent failing job, suitable for
+	// passing to GetTestResults.
+	LastJob *JobRef `json:"last_job,omitempty"`
+}
+
+// JobRef identifies a CI job for fetching test results.
+type JobRef struct {
+	// JobNumber is the provider's numeric job identifier.
+	JobNumber int `json:"job_number"`
+	// WebURL is a link to the job in the provider UI, if available.
+	WebURL string `json:"web_url,omitempty"`
+}
+
+// TestResult is a single test run outcome inside a job.
+type TestResult struct {
+	TestName  string    `json:"test_name"`
+	Classname string    `json:"classname,omitempty"`
+	File      string    `json:"file,omitempty"`
+	Result    string    `json:"result"` // success, failure, error, skipped
+	RunTime   float64   `json:"run_time_seconds,omitempty"`
+	Message   string    `json:"message,omitempty"` // failure message / stack
+	JobNumber int       `json:"job_number,omitempty"`
+	RunAt     time.Time `json:"run_at,omitempty"`
+}

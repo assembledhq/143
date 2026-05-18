@@ -61,6 +61,14 @@ func (s *runtimeTestSessionStore) BeginRuntime(context.Context, uuid.UUID, uuid.
 	return s.beginErr
 }
 
+func (s *runtimeTestSessionStore) RequestCancel(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (s *runtimeTestSessionStore) ConsumeCancelRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
 func (s *runtimeTestSessionStore) RecordRuntimeProgress(_ context.Context, _ uuid.UUID, _ uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	s.recordRuntimeProgressCalls++
 	s.lastProgressType = progressType
@@ -364,10 +372,13 @@ func TestRuntimeProgressFromLog(t *testing.T) {
 		wantOK       bool
 	}{
 		{name: "tool use", entry: LogEntry{Level: "tool_use"}, expectedType: models.RuntimeProgressTypeToolUse, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
+		{name: "completed command execution", entry: LogEntry{Level: "tool_use", Metadata: map[string]any{"tool": "command_execution", "status": "completed"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
+		{name: "failed command execution", entry: LogEntry{Level: "tool_use", Metadata: map[string]any{"tool": "command_execution", "status": "failed"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
 		{name: "question", entry: LogEntry{Level: "question"}, expectedType: models.RuntimeProgressTypeQuestionBlocked, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
 		{name: "tool result output", entry: LogEntry{Level: "output", Metadata: map[string]any{"type": "tool_result"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
 		{name: "assistant output", entry: LogEntry{Level: "output"}, expectedType: models.RuntimeProgressTypeAssistantOutput, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
 		{name: "debug", entry: LogEntry{Level: "debug"}, expectedType: models.RuntimeProgressTypeAssistantReason, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
+		{name: "debug item started command execution", entry: LogEntry{Level: "debug", Message: `{"type":"item.started","item":{"type":"command_execution"}}`}, expectedType: models.RuntimeProgressTypeToolUse, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
 		{name: "unknown", entry: LogEntry{Level: "trace"}, expectedType: models.RuntimeProgressTypeNone, expected: models.RuntimeProgressStrengthNone, wantOK: false},
 	}
 
@@ -662,6 +673,34 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 
 		controller.tick(context.Background(), now)
 		require.Equal(t, StopReasonNoProgress, controller.stopRequested, "tick should request a no-progress stop after the configured idle timeout")
+	})
+
+	t.Run("does not request no-progress stop while tool is active", func(t *testing.T) {
+		t.Parallel()
+
+		controller := newRuntimeController(
+			runtimeConfig{
+				SoftBudget:             10 * time.Second,
+				NoProgressTimeout:      2 * time.Second,
+				ExtensionIncrement:     time.Second,
+				AbsoluteRuntimeCeiling: time.Hour,
+			},
+			&runtimeTestSessionStore{},
+			&runtimeTestJobStore{},
+			nil,
+			zerolog.Nop(),
+			uuid.New(),
+			uuid.New(),
+			3,
+			nil,
+			newRuntimeProgressTracker(now.Add(-5*time.Second)),
+		)
+		controller.softDeadline = now.Add(5 * time.Second)
+		controller.hardDeadline = now.Add(time.Minute)
+		controller.tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(-5*time.Second))
+
+		controller.tick(context.Background(), now)
+		require.Equal(t, StopReasonNone, controller.stopRequested, "tick should not request a no-progress stop while a tool command is still active")
 	})
 
 	t.Run("requests absolute-ceiling stop", func(t *testing.T) {

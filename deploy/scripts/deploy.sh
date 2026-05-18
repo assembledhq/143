@@ -81,9 +81,9 @@ warn_docker_dns_skipped() {
 # testing without touching the script that runs as root.
 DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
 
-run_sandbox_resolv_conf() {
+run_worker_host_reconcile() {
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh"
+    "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
 }
 
 # --- Refresh secrets from .env.production.enc ---
@@ -271,19 +271,23 @@ if [ "$ROLE" = "worker" ]; then
      && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new; exit 1; }"
 
-  # Refresh /etc/143/sandbox-resolv.conf to match the version of the writer
-  # script in this deploy. This is required config, not optional hardening:
-  # stale DNS strands all new sandboxes on preview-infra lookups. Run it from
-  # the local deploy flow so legacy workers missing the new sudoers grant can
-  # use the same no-teardown repair path as other deploy-time sudo helpers.
-  echo "Refreshing sandbox resolv.conf..."
-  if ! run_sandbox_resolv_conf; then
-    echo "sandbox-resolv-conf.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  # Sync the canonical worker host reconciler. It owns the sandbox network,
+  # firewall, resolv.conf, sandbox-auth socket dir, and worker sysctl state.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/reconcile-worker-host.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/reconcile-worker-host.sh.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh \
+     && chmod +x /opt/143/deploy/scripts/reconcile-worker-host.sh \
+     || { rm -f /opt/143/deploy/scripts/reconcile-worker-host.sh.new; exit 1; }"
+
+  echo "Reconciling worker host invariants..."
+  if ! run_worker_host_reconcile; then
+    echo "reconcile-worker-host.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
-      echo "Retrying sandbox resolv.conf refresh after sudoers repair..."
-      run_sandbox_resolv_conf
+      echo "Retrying worker host reconciliation after sudoers repair..."
+      run_worker_host_reconcile
     else
-      echo "ERROR: sandbox-resolv-conf.sh failed and sudoers repair via root SSH did not complete."
+      echo "ERROR: reconcile-worker-host.sh failed and sudoers repair via root SSH did not complete."
       echo "  Run once from a machine with root SSH access:"
       echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
       echo "  Then re-run the deploy."
@@ -870,40 +874,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
     # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
     docker compose -f "$COMPOSE_FILE" build sandbox-dns
-    # Ensure the shared sandbox egress network exists with the pinned subnet
-    # 172.30.0.0/24 (idempotent). The subnet is pinned so sandbox-dns can claim
-    # the static IP 172.30.0.2 declared in docker-compose.worker.yml — without
-    # the pin, Docker auto-assigns from its default pool and `docker compose
-    # up sandbox-dns` fails with "no configured subnet contains IP address
-    # 172.30.0.2". Do not disable bridge ICC here: on some Docker / gVisor
-    # combinations it blocks sandbox traffic to the sandbox-dns sidecar before
-    # DOCKER-USER rules can carve it out, which breaks all agent DNS.
-    # Mirrors the logic in provision.sh; deploys must validate too because
-    # workers provisioned before the pin landed (PR #815) still have an
-    # auto-assigned subnet.
-    EXISTING_SANDBOX_SUBNET=$(docker network inspect 143-sandbox \
-      -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
-    if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-      docker network create --driver bridge \
-        --subnet 172.30.0.0/24 \
-        --label managed-by=143 143-sandbox
-    elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
-      echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
-      echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
-      echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
-      echo "    2. docker network rm 143-sandbox" >&2
-      echo "    3. Re-run deploy (or provision-worker) for this host." >&2
-      echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
-      exit 1
-    fi
-    # Install iptables-persistent on hosts that predate it (no-op otherwise).
-    sudo apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
-    # Re-apply sandbox egress firewall. Script is idempotent — safe to run
-    # on every deploy. Ensures rules exist even if someone flushed iptables
-    # or the sandbox network was recreated with a new subnet.
-    if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
-      sudo /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
-    fi
   elif [ "$ROLE" = "app" ]; then
     # Caddy is built locally (Dockerfile.caddy), so neither `docker compose pull`
     # nor an in-place `caddy reload` would pick up Dockerfile/base-image changes.

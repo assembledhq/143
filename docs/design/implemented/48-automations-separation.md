@@ -4,6 +4,8 @@
 >
 > **Implementation notes:** Core automations and `automation_runs` are implemented. Notification delivery and repeated-failure alerting were explicitly split out into [doc 49](../future/49-automation-notifications.md).
 >
+> **2026-05-14 update:** Automations now carry a typed icon pair (`icon_type`, `icon_value`) for visual identity. Only `emoji` is enabled today; the pair is designed to admit image-backed icons later without replacing the API contract.
+>
 > **Supersedes:** [31-automations-tab.md](31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](../backlog/32-project-cadence-and-lifecycle.md) (evergreen projects)
 >
 > **Depends on:** [29-projects.md](29-projects.md)
@@ -53,6 +55,8 @@ CREATE TABLE automations (
     name            TEXT NOT NULL,
     goal            TEXT NOT NULL,                    -- prompt/instructions for the agent
     scope           TEXT,                             -- optional file/area scope
+    icon_type       TEXT NOT NULL DEFAULT 'emoji',
+    icon_value      TEXT NOT NULL DEFAULT '⚙️',
     agent_type      TEXT,                             -- codex, claude, etc.
     model_override  TEXT,                             -- optional model override
     execution_mode  TEXT NOT NULL DEFAULT 'sequential',
@@ -572,7 +576,7 @@ The default library now spans multiple categories instead of only five short sta
 
 | Category | Examples |
 |----------|----------|
-| Reliability | Find flaky tests, CI failure triage, Performance regression sweep |
+| Reliability | Find flaky tests, CI failure triage, Performance regression sweep, Check for missing indexes |
 | Security | Security sweep, Dependency drift review |
 | Maintenance | Codebase maintenance, Dead code cleanup |
 | Planning | Backlog triage |

@@ -13,24 +13,27 @@ import (
 // Unlike projects (which are finite and goal-oriented), automations run on a
 // schedule and never "complete" — they are enabled or paused.
 type Automation struct {
-	ID              uuid.UUID               `db:"id"               json:"id"`
-	OrgID           uuid.UUID               `db:"org_id"           json:"org_id"`
-	RepositoryID    *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
-	Name            string                  `db:"name"             json:"name"`
-	Goal            string                  `db:"goal"             json:"goal"`
-	Scope           *string                 `db:"scope"            json:"scope,omitempty"`
-	AgentType       *string                 `db:"agent_type"       json:"agent_type,omitempty"`
-	ModelOverride   *string                 `db:"model_override"   json:"model_override,omitempty"`
-	ReasoningEffort *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
-	ExecutionMode   string                  `db:"execution_mode"   json:"execution_mode"`
-	MaxConcurrent   int                     `db:"max_concurrent"   json:"max_concurrent"`
-	BaseBranch      string                  `db:"base_branch"      json:"base_branch"`
-	IdentityScope   AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
-	ScheduleType    string                  `db:"schedule_type"    json:"schedule_type"`
-	IntervalValue   *int                    `db:"interval_value"   json:"interval_value,omitempty"`
-	IntervalUnit    *string                 `db:"interval_unit"    json:"interval_unit,omitempty"`
-	IntervalRunAt   *string                 `db:"interval_run_at"  json:"interval_run_at,omitempty"`
-	CronExpression  *string                 `db:"cron_expression"  json:"cron_expression,omitempty"`
+	ID               uuid.UUID               `db:"id"               json:"id"`
+	OrgID            uuid.UUID               `db:"org_id"           json:"org_id"`
+	RepositoryID     *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
+	Name             string                  `db:"name"             json:"name"`
+	Goal             string                  `db:"goal"             json:"goal"`
+	Scope            *string                 `db:"scope"            json:"scope,omitempty"`
+	IconType         AutomationIconType      `db:"icon_type"        json:"icon_type"`
+	IconValue        string                  `db:"icon_value"       json:"icon_value"`
+	AgentType        *string                 `db:"agent_type"       json:"agent_type,omitempty"`
+	ModelOverride    *string                 `db:"model_override"   json:"model_override,omitempty"`
+	ReasoningEffort  *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
+	ExecutionMode    string                  `db:"execution_mode"   json:"execution_mode"`
+	MaxConcurrent    int                     `db:"max_concurrent"   json:"max_concurrent"`
+	BaseBranch       string                  `db:"base_branch"      json:"base_branch"`
+	IdentityScope    AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
+	PrePRReviewLoops int                     `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
+	ScheduleType     string                  `db:"schedule_type"    json:"schedule_type"`
+	IntervalValue    *int                    `db:"interval_value"   json:"interval_value,omitempty"`
+	IntervalUnit     *string                 `db:"interval_unit"    json:"interval_unit,omitempty"`
+	IntervalRunAt    *string                 `db:"interval_run_at"  json:"interval_run_at,omitempty"`
+	CronExpression   *string                 `db:"cron_expression"  json:"cron_expression,omitempty"`
 	// Timezone is the IANA zone used to evaluate wall-clock schedule targets:
 	// cron_expression for cron rows, and interval_run_at for interval rows
 	// that specify one. An interval row without interval_run_at uses pure
@@ -149,6 +152,40 @@ func (s AutomationIdentityScope) OrDefault() AutomationIdentityScope {
 	return s
 }
 
+// AutomationIconType is intentionally separated from IconValue so future
+// image-backed automation icons can reuse the same API shape without changing
+// callers that already persist a typed visual identity.
+type AutomationIconType string
+
+const (
+	AutomationIconTypeEmoji AutomationIconType = "emoji"
+
+	DefaultAutomationIconValue = "⚙️"
+)
+
+func (t AutomationIconType) Validate() error {
+	switch t {
+	case "", AutomationIconTypeEmoji:
+		return nil
+	default:
+		return fmt.Errorf("invalid icon_type: %q (must be emoji)", t)
+	}
+}
+
+func (t AutomationIconType) OrDefault() AutomationIconType {
+	if t == "" {
+		return AutomationIconTypeEmoji
+	}
+	return t
+}
+
+func AutomationIconValueOrDefault(v string) string {
+	if v == "" {
+		return DefaultAutomationIconValue
+	}
+	return v
+}
+
 // BuildConfigSnapshot returns the JSON config snapshot for an automation run.
 //
 // The current fields are all string / *string and json.Marshal can't fail for
@@ -157,12 +194,13 @@ func (s AutomationIdentityScope) OrDefault() AutomationIdentityScope {
 // instead of panicking inside chi middleware.
 func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 	data, err := json.Marshal(map[string]any{
-		"agent_type":       a.AgentType,
-		"model_override":   a.ModelOverride,
-		"reasoning_effort": a.ReasoningEffort,
-		"scope":            a.Scope,
-		"identity_scope":   a.IdentityScope.OrDefault(),
-		"base_branch":      a.BaseBranch,
+		"agent_type":          a.AgentType,
+		"model_override":      a.ModelOverride,
+		"reasoning_effort":    a.ReasoningEffort,
+		"scope":               a.Scope,
+		"identity_scope":      a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops": a.PrePRReviewLoops,
+		"base_branch":         a.BaseBranch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal automation config snapshot: %w", err)

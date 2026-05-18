@@ -143,6 +143,39 @@ func emitThreadAnsweredQuestionAudit(
 	emitUserAuditWithSession(emitter, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, &sessionID, nil, marshalAuditDetails(logger, details))
 }
 
+// emitThreadAnsweredHumanInputAudit records a SessionHumanInputAnswered audit
+// when a thread composer answer clears a pending free-text human-input
+// request. This mirrors the session-level send path so audit consumers see
+// the same event whether the user answered through the dialog or the composer.
+func emitThreadAnsweredHumanInputAudit(
+	emitter *db.AuditEmitter,
+	logger zerolog.Logger,
+	r *http.Request,
+	sessionID uuid.UUID,
+	request models.HumanInputRequest,
+	userID uuid.UUID,
+	answerLength int,
+) {
+	requestIDStr := request.ID.String()
+	details := map[string]any{
+		"request_id":    request.ID.String(),
+		"session_id":    request.SessionID.String(),
+		"request_kind":  string(request.Kind),
+		"status":        string(request.Status),
+		"answer_length": answerLength,
+		"answered_by":   userID.String(),
+		"choice_count":  len(request.Choices),
+		"auto_answered": true,
+	}
+	if request.ThreadID != nil {
+		details["thread_id"] = request.ThreadID.String()
+	}
+	if request.BlocksPhase != nil {
+		details["blocks_phase"] = *request.BlocksPhase
+	}
+	emitUserAuditWithSession(emitter, r, models.AuditActionSessionHumanInputAnswered, models.AuditResourceSession, &requestIDStr, &sessionID, nil, marshalAuditDetails(logger, details))
+}
+
 // CreateThread handles POST /sessions/{id}/threads — adds a new agent thread
 // to an existing session.
 func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Request) {
@@ -465,6 +498,9 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	// per answered question regardless of the surface.
 	if result.AnsweredQuestion != nil && userID != nil {
 		emitThreadAnsweredQuestionAudit(h.audit, h.logger, r, sessionID, *result.AnsweredQuestion, *userID, len(body.Message))
+	}
+	if result.AnsweredHumanInput != nil && userID != nil {
+		emitThreadAnsweredHumanInputAudit(h.audit, h.logger, r, sessionID, *result.AnsweredHumanInput, *userID, len(body.Message))
 	}
 
 	// Audit one row per resolved comment after the tx commits — same shape
