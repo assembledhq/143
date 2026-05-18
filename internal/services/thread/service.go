@@ -173,6 +173,11 @@ type SendMessageInput struct {
 	Commands                models.SessionInputCommands
 	PlanMode                bool
 	ResolveReviewCommentIDs []uuid.UUID
+	// ContinuationDedupeKeyOverride is for system-generated follow-up turns
+	// created while the current same-thread worker job is still marked running.
+	// User sends should leave it nil so rapid-fire messages keep normal thread
+	// dedupe behavior.
+	ContinuationDedupeKeyOverride *string
 }
 
 // SendMessageResult carries everything callers need to finish handling a
@@ -629,6 +634,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// this tab collapse, while sibling sends that arrive during another tab's
 	// turn are queued without enqueueing a second shared-sandbox job.
 	dedupeKey := db.ContinueSessionDedupeKey(thread.ID)
+	if input.ContinuationDedupeKeyOverride != nil && *input.ContinuationDedupeKeyOverride != "" {
+		dedupeKey = *input.ContinuationDedupeKeyOverride
+	}
 	payload := map[string]string{
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),
