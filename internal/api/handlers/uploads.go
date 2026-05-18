@@ -136,6 +136,10 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "HEIC_CONVERSION_FAILED", "failed to convert HEIC image to JPEG", err)
 			return
 		}
+		if len(converted) > maxUploadSize {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "converted file size exceeds 10MB limit")
+			return
+		}
 		reader = bytes.NewReader(converted)
 		baseType = "image/jpeg"
 		ext = ".jpg"

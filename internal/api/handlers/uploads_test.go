@@ -222,6 +222,27 @@ func TestUploadHandler_HEICWithOctetStreamContentTypeConvertsToJPEG(t *testing.T
 	require.True(t, strings.HasSuffix(store.key, ".jpg"), "converted HEIF upload key should use a JPEG extension")
 }
 
+func TestUploadHandler_HEICRejectsOversizedConvertedJPEG(t *testing.T) {
+	t.Parallel()
+
+	converter := func(_ context.Context, body []byte) ([]byte, error) {
+		require.Equal(t, []byte("heic-data"), body, "converter should receive the uploaded HEIC bytes")
+		return bytes.Repeat([]byte("x"), maxUploadSize+1), nil
+	}
+
+	store := &captureUploadStore{}
+	h := NewUploadHandler(store)
+	h.heicConverter = converter
+	req := newUploadRequest(t, "file", "photo.heic", "image/heic", []byte("heic-data"))
+	w := httptest.NewRecorder()
+
+	h.Upload(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized converted JPEG should be rejected")
+	require.Empty(t, store.body, "oversized converted JPEG should not be stored")
+	require.Contains(t, w.Body.String(), "FILE_TOO_LARGE", "response should report the upload size limit")
+}
+
 func TestUploadHandler_ServeUpload_PathTraversal(t *testing.T) {
 	t.Parallel()
 
