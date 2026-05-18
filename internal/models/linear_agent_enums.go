@@ -9,7 +9,7 @@ import "fmt"
 // `prompted` event to it?").
 //
 // Vocabulary must stay in lockstep with the CHECK constraint in
-// migrations/000123_linear_agent.up.sql — the
+// migrations/000132_linear_agent.up.sql — the
 // TestLinearAgentSessionStateMigrationVocabularyMatchesGoEnum test parses the
 // migration and fails if the two drift.
 type LinearAgentSessionState string
@@ -74,7 +74,7 @@ func AllLinearAgentSessionStates() []LinearAgentSessionState {
 
 // LinearAgentActivityType mirrors the Linear AgentActivity type vocabulary.
 // Vocabulary kept in lockstep with the CHECK constraint in
-// migrations/000123_linear_agent.up.sql.
+// migrations/000132_linear_agent.up.sql.
 type LinearAgentActivityType string
 
 const (
