@@ -4877,7 +4877,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ref={detailTabsRef}
             aria-label="Session detail tabs"
             className={cn(
-              "min-w-0 flex-1 overflow-x-auto overflow-y-hidden pb-1",
+              "flex h-full min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden",
               detailTabsOverflow ? "mask-fade-r" : "scrollbar-hide",
             )}
           >
