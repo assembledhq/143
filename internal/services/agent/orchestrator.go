@@ -748,6 +748,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 			Orgs:              cfg.Orgs,
 			OrgSettingsCache:  cfg.OrgSettingsCache,
 			CodexAuth:         cfg.CodexAuth,
+			ClaudeCodeAuth:    cfg.ClaudeCodeAuth,
 			Provider:          cfg.Provider,
 			Logger:            cfg.Logger,
 		})
@@ -2302,7 +2303,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, primaryThreadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+	}
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -3577,19 +3581,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	if parseCredentialFailureSignal(result, time.Now()).RateLimited {
-		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
-		var retried bool
-		result, err, retried = o.retryContinueOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, log)
-		if retried && parseCredentialFailureSignal(result, time.Now()).RateLimited {
-			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
-			if authErr := o.blockedContinueAfterRateLimitExhaustion(ctx, session, threadID, sandboxCfg, log); authErr != nil {
-				err = authErr
-			}
-		} else {
-			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
-		}
-	} else {
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 	}
 
@@ -5203,6 +5196,10 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
 
+func IsClaudeCodeFallbackUnavailable(err error) bool {
+	return errors.Is(err, errClaudeCodeFallbackUnavailable)
+}
+
 func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
 	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
@@ -5993,7 +5990,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	return result, err
 }
 
-func (o *Orchestrator) retryContinueOnCredentialRateLimit(
+func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	ctx context.Context,
 	session *models.Session,
 	threadID *uuid.UUID,
@@ -6005,6 +6002,7 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	prompt *AgentPrompt,
 	result *AgentResult,
 	err error,
+	createBlockedMessage bool,
 	log zerolog.Logger,
 ) (*AgentResult, error, bool) {
 	signal := parseCredentialFailureSignal(result, time.Now())
@@ -6012,10 +6010,14 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 		return result, err, false
 	}
 
-	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+
+	refreshedEnv := o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
 	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
-		logCredentialRateLimitBlockedContinue(log, session, authErr)
-		o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+		logCredentialRateLimitBlocked(log, session, authErr)
+		if createBlockedMessage {
+			o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+		}
 		return result, authErr, false
 	}
 
@@ -6028,7 +6030,7 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	log.Info().
 		Str("session_id", session.ID.String()).
 		Str("agent_type", string(session.AgentType)).
-		Msg("retrying continue_session with fallback credential after rate-limit signal")
+		Msg("retrying agent session with fallback credential after rate-limit signal")
 
 	retryLogCh := make(chan LogEntry, 100)
 	var retryLogWg sync.WaitGroup
@@ -6042,21 +6044,32 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	retryLogWg.Wait()
 
 	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	if parseCredentialFailureSignal(retryResult, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log)
+		refreshedEnv = o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
+		if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
+			logCredentialRateLimitBlocked(log, session, authErr)
+			if createBlockedMessage {
+				o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+			}
+			return retryResult, authErr, true
+		}
+	}
 	return retryResult, retryErr, true
 }
 
 func (o *Orchestrator) blockedContinueAfterRateLimitExhaustion(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandboxCfg SandboxConfig, log zerolog.Logger) error {
-	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	refreshedEnv := o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
 	authErr := o.env.CheckAuth(session.AgentType, refreshedEnv)
 	if authErr == nil {
 		return nil
 	}
-	logCredentialRateLimitBlockedContinue(log, session, authErr)
+	logCredentialRateLimitBlocked(log, session, authErr)
 	o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
 	return authErr
 }
 
-func (o *Orchestrator) resolveContinueCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
+func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
 	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
@@ -6085,6 +6098,13 @@ func refreshAgentCredentialEnv(current, resolved map[string]string, agentType mo
 		out[k] = v
 	}
 	return out
+}
+
+// RefreshAgentCredentialEnv replaces only the agent credential keys in current
+// with a fresh AgentEnv.Resolve result, preserving execution-scoped values such
+// as HOME, GitHub auth, internal API tokens, branch metadata, and socket paths.
+func RefreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {
+	return refreshAgentCredentialEnv(current, resolved, agentType)
 }
 
 func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) {
@@ -6129,7 +6149,7 @@ func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *mo
 	}
 }
 
-func logCredentialRateLimitBlockedContinue(log zerolog.Logger, session *models.Session, authErr error) {
+func logCredentialRateLimitBlocked(log zerolog.Logger, session *models.Session, authErr error) {
 	authLog := log.Error().Err(authErr).
 		Str("session_id", session.ID.String()).
 		Str("agent_type", string(session.AgentType))
@@ -6142,7 +6162,7 @@ func logCredentialRateLimitBlockedContinue(log zerolog.Logger, session *models.S
 			authLog = authLog.Time("rate_limited_until", *structuredAuthErr.RateLimitedUntil)
 		}
 	}
-	authLog.Msg("continue_session fallback credentials unavailable after rate-limit signal")
+	authLog.Msg("fallback credentials unavailable after rate-limit signal")
 }
 
 func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, session *models.Session, threadID *uuid.UUID, authErr error, log zerolog.Logger) {
@@ -6170,11 +6190,11 @@ func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, ses
 // failures; this is the fast-path hint that prevents repeat picks before the
 // resolver cache refreshes.
 //
-// Provider mapping is intentionally limited to agent types whose API-key auth
-// flows go through AgentEnv.pickFromCodingProvider. Codex subscription auth
-// uses codexauth.Service's own selector; because that path records no
-// ProviderOpenAI pick, the shed call below remains a no-op for subscription
-// runs.
+// Provider mapping is intentionally limited to agent types whose runtime auth
+// flows go through AgentEnv credential selection. Unified Codex subscription
+// rows are recorded under the OpenAI request provider too, so subscription
+// usage-limit output sheds the picked subscription row and lets the retry pick
+// the next Codex/OpenAI credential.
 func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
 	if o.env == nil || result == nil {
 		return
@@ -6224,9 +6244,15 @@ func parseCredentialFailureSignal(result *AgentResult, now time.Time) Credential
 	}
 }
 
-// codingProviderForAgent maps an agent type to the unified provider name its
-// API-key auth uses. Subscription picks are intentionally not represented
-// here; they do not write the recentPicks tracker under these providers.
+// CredentialFailureSignalFromResult exposes the runtime credential-failure
+// parser to service packages that execute adapters outside the orchestrator
+// but still need to shed and retry the same unified coding credentials.
+func CredentialFailureSignalFromResult(result *AgentResult, now time.Time) CredentialFailureSignal {
+	return parseCredentialFailureSignal(result, now)
+}
+
+// codingProviderForAgent maps an agent type to the unified request provider
+// used for credential picking and shedding.
 func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 	switch agentType {
 	case models.AgentTypeClaudeCode:
@@ -6242,6 +6268,12 @@ func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 	default:
 		return ""
 	}
+}
+
+// CodingProviderForAgent exposes the provider mapping for PM/autopilot
+// execution paths that invoke adapters directly.
+func CodingProviderForAgent(agentType models.AgentType) models.ProviderName {
+	return codingProviderForAgent(agentType)
 }
 
 // isRateLimitedError matches the same surface as the failure classifier so

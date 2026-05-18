@@ -92,6 +92,7 @@ type AgentEnv struct {
 	orgs              OrgStore
 	orgSettingsCache  *OrgSettingsCache
 	codexAuth         CodexAuthProvider
+	claudeCodeAuth    ClaudeCodeAuthProvider
 	// linearTokens, when set, supplies the LINEAR_ACCESS_TOKEN env var via a
 	// refresh-aware resolver. Without it, the sandbox falls back to reading
 	// the raw credential row (legacy path; the access token may have aged
@@ -178,6 +179,7 @@ type AgentEnvDeps struct {
 	Orgs              OrgStore                 // optional — enables agent_config overrides
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
 	CodexAuth         CodexAuthProvider        // optional — enables ChatGPT OAuth for Codex
+	ClaudeCodeAuth    ClaudeCodeAuthProvider   // optional — enables Claude subscription OAuth for Claude Code
 	// LinearTokens optionally supplies a refresh-aware Linear access token
 	// for the sandbox env. When set, the orchestrator injects the result of
 	// GetValidAccessToken (rotating expired tokens transparently). Without
@@ -210,6 +212,7 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 		orgs:              deps.Orgs,
 		orgSettingsCache:  deps.OrgSettingsCache,
 		codexAuth:         deps.CodexAuth,
+		claudeCodeAuth:    deps.ClaudeCodeAuth,
 		linearTokens:      deps.LinearTokens,
 		provider:          deps.Provider,
 		logger:            deps.Logger,
@@ -1360,6 +1363,163 @@ func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox 
 		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
+}
+
+// InjectClaudeCodeAuth writes ~/.claude/.credentials.json when a Claude Code
+// subscription credential is selected. API-key credentials intentionally return
+// false so callers can use ANTHROPIC_API_KEY after removing any stale file.
+func (e *AgentEnv) InjectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+	return e.InjectClaudeCodeAuthForUser(ctx, orgID, nil, sandbox)
+}
+
+func (e *AgentEnv) InjectClaudeCodeAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if e == nil {
+		return false, nil
+	}
+	if e.codingCredentials != nil {
+		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
+			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, picked)
+		}
+		_, picked, handled := e.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
+			models.ProviderAnthropic,
+			models.ProviderAnthropicSubscription,
+		})
+		if handled {
+			if picked == nil {
+				return false, nil
+			}
+			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
+		}
+	}
+
+	if e.claudeCodeAuth == nil {
+		return false, nil
+	}
+	sub, _, err := e.claudeCodeAuth.GetValidToken(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get claude code subscription token: %w", err)
+	}
+	if sub == nil {
+		return false, nil
+	}
+	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+}
+
+func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+	if picked.Provider != models.ProviderAnthropicSubscription {
+		return false, nil
+	}
+	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+		return false, nil
+	}
+	sub := models.AnthropicSubscription{
+		AccessToken:   cfg.AccessToken,
+		RefreshToken:  cfg.RefreshToken,
+		ExpiresAt:     cfg.ExpiresAt,
+		AccountType:   cfg.AccountType,
+		RateLimitTier: cfg.RateLimitTier,
+		Scopes:        cfg.Scopes,
+	}
+	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
+		refresher, ok := e.claudeCodeAuth.(ClaudeCodeAuthRefresher)
+		if ok {
+			scope := models.Scope{OrgID: orgID, UserID: picked.UserID}
+			refreshed, err := refresher.RefreshTokenByID(ctx, scope, picked.ID)
+			if err == nil && refreshed != nil {
+				sub = *refreshed
+			} else if sub.IsExpired() {
+				if err != nil {
+					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+				}
+				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+			} else if err != nil {
+				e.logger.Warn().
+					Err(err).
+					Str("cred_id", picked.ID.String()).
+					Msg("unified claude subscription refresh failed; using cached token")
+			}
+		} else if sub.IsExpired() {
+			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+		}
+	}
+	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+}
+
+func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
+	oauthPayload := map[string]interface{}{
+		"accessToken":  sub.AccessToken,
+		"refreshToken": sub.RefreshToken,
+		"expiresAt":    sub.ExpiresAt.UnixMilli(),
+	}
+	if len(sub.Scopes) > 0 {
+		oauthPayload["scopes"] = sub.Scopes
+	}
+	if sub.AccountType != "" {
+		oauthPayload["subscriptionType"] = sub.AccountType
+	}
+	if sub.RateLimitTier != "" {
+		oauthPayload["rateLimitTier"] = sub.RateLimitTier
+	}
+	credsJSON, err := json.Marshal(map[string]interface{}{"claudeAiOauth": oauthPayload})
+	if err != nil {
+		return false, fmt.Errorf("marshal claude credentials: %w", err)
+	}
+
+	authDir := path.Join(sandbox.HomeDir, ".claude")
+	credsPath := authDir + "/.credentials.json"
+	prepCmd := fmt.Sprintf(
+		"mkdir -p '%s' && install -m 600 /dev/null '%s'",
+		shellEscapeSingleQuote(authDir),
+		shellEscapeSingleQuote(credsPath),
+	)
+
+	var prepOut, prepErr bytes.Buffer
+	exitCode, err := e.provider.Exec(ctx, sandbox, prepCmd, &prepOut, &prepErr)
+	if err != nil {
+		return false, fmt.Errorf("prepare claude credentials file: %w", err)
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf("prepare claude credentials file: exited with code %d: %s", exitCode, prepErr.String())
+	}
+
+	if err := e.provider.WriteFile(ctx, sandbox, credsPath, credsJSON); err != nil {
+		return false, fmt.Errorf("write claude credentials: %w", err)
+	}
+
+	e.logger.Debug().
+		Str("org_id", orgID.String()).
+		Msg("injected claude subscription credentials into sandbox")
+
+	return true, nil
+}
+
+func (e *AgentEnv) PrepareClaudeCodeAPIKeyFallback(ctx context.Context, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] == "" {
+		return errClaudeCodeFallbackUnavailable
+	}
+	return e.RemoveClaudeCodeCredentialsFile(ctx, sandbox)
+}
+
+func (e *AgentEnv) RemoveClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
+	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
+	if _, err := e.provider.ReadFile(ctx, sandbox, credsPath); err != nil {
+		if isSandboxFileMissing(err) {
+			return nil
+		}
+		return fmt.Errorf("check stale claude credentials: %w", err)
+	}
+
+	cmd := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(credsPath))
+	var stdout, stderr bytes.Buffer
+	exitCode, err := e.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale claude credentials: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale claude credentials: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
 }
 
 func (e *AgentEnv) unifiedCodingCredentialIsAPIKey(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) bool {
