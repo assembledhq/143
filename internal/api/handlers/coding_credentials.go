@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -528,21 +529,23 @@ func summaryFromDecryptedCoding(cred models.DecryptedCodingCredential) models.Co
 		scope = models.CodingCredentialScopePersonal
 	}
 	return models.CodingCredentialSummary{
-		ID:             cred.ID,
-		OrgID:          cred.OrgID,
-		UserID:         cred.UserID,
-		Scope:          scope,
-		Priority:       cred.Priority,
-		Agent:          agent,
-		AuthType:       authType,
-		Provider:       cred.Provider,
-		Label:          coalesce(cred.Label, defaultLabelFor(agent, authType)),
-		Status:         codingStatusFor(cred),
-		UsageNote:      usageNoteFor(cred),
-		LastVerifiedAt: cred.LastVerifiedAt,
-		CreatedBy:      cred.CreatedBy,
-		CreatedAt:      cred.CreatedAt,
-		UpdatedAt:      cred.UpdatedAt,
+		ID:               cred.ID,
+		OrgID:            cred.OrgID,
+		UserID:           cred.UserID,
+		Scope:            scope,
+		Priority:         cred.Priority,
+		Agent:            agent,
+		AuthType:         authType,
+		Provider:         cred.Provider,
+		Label:            coalesce(cred.Label, defaultLabelFor(agent, authType)),
+		Status:           codingStatusFor(cred),
+		UsageNote:        usageNoteFor(cred),
+		LastVerifiedAt:   cred.LastVerifiedAt,
+		RateLimitedUntil: cred.RateLimitedUntil,
+		RateLimitMessage: cred.RateLimitMessage,
+		CreatedBy:        cred.CreatedBy,
+		CreatedAt:        cred.CreatedAt,
+		UpdatedAt:        cred.UpdatedAt,
 	}
 }
 
@@ -586,6 +589,9 @@ func codingStatusFor(cred models.DecryptedCodingCredential) models.CodingAuthSta
 	case models.CodingCredentialStatusPendingAuth:
 		return models.CodingAuthStatusNeedsReauth
 	case models.CodingCredentialStatusActive:
+		if cred.RateLimitedUntil != nil && cred.RateLimitedUntil.After(time.Now()) {
+			return models.CodingAuthStatusRateLimited
+		}
 		return models.CodingAuthStatusHealthy
 	default:
 		return models.CodingAuthStatusNeedsReauth

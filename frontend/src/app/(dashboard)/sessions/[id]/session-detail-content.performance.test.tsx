@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
+import { act } from "@testing-library/react";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { mockSessions } from "@/test/mocks/handlers";
@@ -116,6 +117,7 @@ beforeEach(() => {
   recordReviewDiffViewRender.mockClear();
   recordFileTreeRender.mockClear();
   MockEventSource.instances = [];
+  window.history.pushState(null, "", "/");
   window.localStorage.clear();
   setMobileViewport(false);
 });
@@ -304,6 +306,135 @@ describe("SessionDetailContent performance", () => {
     await waitFor(() => {
       expect(diffRequestCount).toBe(1);
     });
+  });
+
+  it("starts loading the raw diff before session detail finishes for direct review links", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    let releaseSession: () => void = () => {};
+    const sessionGate = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    let diffRequestCount = 0;
+
+    server.use(
+      http.get("/api/v1/sessions/:id", async () => {
+        await sessionGate;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+            latest_diff_snapshot_id: "snapshot-1",
+            diff_collected_at: "2026-02-17T07:05:00Z",
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", () => {
+        diffRequestCount += 1;
+        return HttpResponse.json({
+          data: {
+            session_id: "session-abcdef12-3456-7890",
+            diff: reviewPerfDiff,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: false,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <SessionDetailContent id="session-abcdef12-3456-7890" />,
+      { searchParams: { review: "active" } },
+    );
+
+    await waitFor(() => {
+      expect(diffRequestCount).toBe(1);
+    });
+
+    releaseSession();
+    expect(await screen.findByTestId("review-diff-view-mock")).toBeInTheDocument();
+    expect(diffRequestCount).toBe(1);
+  });
+
+  it("does not load the hidden transcript before direct review links render the diff", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    let timelineRequestCount = 0;
+    installSessionWithDiffHandlers();
+
+    server.use(
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        timelineRequestCount += 1;
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+    );
+
+    renderWithProviders(
+      <SessionDetailContent id="session-abcdef12-3456-7890" />,
+      { searchParams: { review: "active" } },
+    );
+
+    expect(await screen.findByTestId("review-diff-view-mock")).toBeInTheDocument();
+    expect(timelineRequestCount).toBe(0);
+  });
+
+  it("defers the hidden transcript after client-side navigation from chat to a direct review link", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    const reviewSessionId = "session-review-next";
+    let timelineRequestCount = 0;
+
+    server.use(
+      http.get("/api/v1/sessions/:id", ({ params }) => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: String(params.id),
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+            latest_diff_snapshot_id: `snapshot-${String(params.id)}`,
+            diff_collected_at: "2026-02-17T07:05:00Z",
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        timelineRequestCount += 1;
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", ({ params }) => {
+        return HttpResponse.json({
+          data: {
+            session_id: String(params.id),
+            diff: reviewPerfDiff,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: false,
+          },
+        });
+      }),
+    );
+
+    const { rerender } = renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText("Send a follow-up message...");
+    expect(timelineRequestCount).toBeGreaterThan(0);
+    timelineRequestCount = 0;
+
+    act(() => {
+      window.history.pushState(null, "", `/sessions/${reviewSessionId}?review=active`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    rerender(<SessionDetailContent id={reviewSessionId} />);
+
+    expect(await screen.findByTestId("review-diff-view-mock")).toBeInTheDocument();
+    expect(timelineRequestCount).toBe(0);
   });
 
   it("shows a retryable error when the lazy diff request fails", async () => {

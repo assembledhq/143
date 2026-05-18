@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Play,
@@ -33,7 +33,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
 import {
   PREVIEW_ERROR_CODES,
@@ -326,7 +326,9 @@ export function PreviewPanel({
   const [designMode, setDesignMode] = useState(false);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
   const [startupPhaseRailLayout, setStartupPhaseRailLayout] = useState<StartupPhaseRailLayout>("default");
+  const startupErrorLogsId = useId();
 
   // Poll preview status every 3s when active
   const {
@@ -367,6 +369,10 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const lastPreviewStoppedAt =
+    status === "stopped" || status === "expired"
+      ? instance?.stopped_at || instance?.updated_at
+      : undefined;
   const isActive =
     status === "ready" ||
     status === "partially_ready" ||
@@ -375,6 +381,27 @@ export function PreviewPanel({
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
     (isActive && !isReady) || (status === "failed" && hasStartupRows);
+  const previewLogsQuery = useQuery({
+    queryKey: ["preview-logs", sessionId, instance?.id],
+    queryFn: () => api.sessions.preview.logs(sessionId),
+    enabled: status === "failed" && Boolean(instance),
+    retry: 1,
+  });
+  const startupErrorLogs = useMemo(() => {
+    const persisted = previewLogsQuery.data
+      ?.filter((log) => log.level === "error" || log.step === "start")
+      .map((log) => log.message.trim())
+      .filter(Boolean)
+      .join("\n\n");
+    return persisted || instance?.error || "";
+  }, [instance?.error, previewLogsQuery.data]);
+  const visibleStartupErrorLogs = showFullStartupLogs
+    ? previewLogsQuery.isLoading
+      ? "Loading error logs..."
+      : previewLogsQuery.isError
+        ? "Could not load persisted preview logs. The startup summary is still available."
+        : startupErrorLogs || "No startup logs were captured for this failure."
+    : instance?.error || startupErrorLogs;
 
   // Start preview
   const startMutation = useMutation({
@@ -700,10 +727,10 @@ export function PreviewPanel({
         </div>
 
         {/* Status badge */}
-        {status && (
+        {status && status !== "failed" && (
           <Badge variant="secondary" className={cn(statusColor(status))}>
             {status === "ready" && <CheckCircle2 className="size-3" />}
-            {(status === "failed" || status === "unhealthy") && <AlertTriangle className="size-3" />}
+            {status === "unhealthy" && <AlertTriangle className="size-3" />}
             {STATUS_LABELS[status]}
           </Badge>
         )}
@@ -985,19 +1012,53 @@ export function PreviewPanel({
             <AlertTriangle className="size-4" />
             Preview failed to start
           </div>
-          {instance.error && (
-            <p className="text-xs text-muted-foreground">{instance.error}</p>
+          {visibleStartupErrorLogs && (
+            <pre
+              id={startupErrorLogsId}
+              aria-label="Preview startup error logs"
+              className={cn(
+                "overflow-y-hidden whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
+                showFullStartupLogs
+                  ? "sm:max-h-[min(56vh,28rem)] text-foreground"
+                  : "line-clamp-6",
+                previewLogsQuery.isError && showFullStartupLogs && "text-muted-foreground",
+              )}
+            >
+              {visibleStartupErrorLogs}
+            </pre>
           )}
-          {/* failure_pattern and build_log will be surfaced when backend support is added */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => restartMutation.mutate()}
-            disabled={isMutating}
-          >
-            <RefreshCw className="size-3.5" />
-            Try Again
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setShowFullStartupLogs(false);
+                restartMutation.mutate();
+              }}
+              disabled={isMutating}
+            >
+              <RefreshCw className="size-3.5" />
+              Try Again
+            </Button>
+            {(startupErrorLogs || previewLogsQuery.isLoading || previewLogsQuery.isError) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground"
+                aria-expanded={showFullStartupLogs}
+                aria-controls={startupErrorLogsId}
+                onClick={() => setShowFullStartupLogs((open) => !open)}
+              >
+                {showFullStartupLogs ? "Show summary" : "Show full error logs"}
+                <ChevronDown
+                  className={cn(
+                    "size-3.5 transition-transform duration-200",
+                    showFullStartupLogs && "rotate-180",
+                  )}
+                />
+              </Button>
+            )}
+          </div>
           {hasStartupRows && (
             <Collapsible>
               <CollapsibleTrigger asChild>
@@ -1093,6 +1154,13 @@ export function PreviewPanel({
             <p className="text-xs text-muted-foreground">
               Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
             </p>
+            {instance?.created_at && lastPreviewStoppedAt && (
+              <p className="text-xs text-muted-foreground">
+                Started {formatTimeAgo(instance.created_at)}
+                <span aria-hidden="true" className="mx-1 text-muted-foreground/50">·</span>
+                Stopped {formatTimeAgo(lastPreviewStoppedAt)}
+              </p>
+            )}
           </div>
           <Button
             size="sm"

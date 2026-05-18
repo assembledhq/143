@@ -6,10 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -20,6 +29,34 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/storage"
 )
+
+type captureUploadStore struct {
+	key         string
+	body        []byte
+	contentType string
+}
+
+func (s *captureUploadStore) Save(_ context.Context, key string, reader io.Reader, contentType string) (string, error) {
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return "", err
+	}
+	s.key = key
+	s.body = body
+	s.contentType = contentType
+	return "/api/v1/uploads/files/" + key, nil
+}
+
+func (s *captureUploadStore) Open(context.Context, string) (io.ReadCloser, string, error) {
+	return nil, "", errors.New("not implemented")
+}
+
+func (s *captureUploadStore) URL(key string) string {
+	return "/api/v1/uploads/files/" + key
+}
+
+func (s *captureUploadStore) Serve(http.ResponseWriter, *http.Request, string) {
+}
 
 // stubUploadMembershipStore implements uploadMembershipStore for tests.
 // allowed lists (userID, orgID) pairs that resolve to a membership; everything
@@ -134,6 +171,76 @@ func TestUploadHandler_Success(t *testing.T) {
 	require.NotEmpty(t, resp["url"], "response should contain a url")
 	require.Equal(t, "screenshot.png", resp["file_name"])
 	require.Equal(t, "image/png", resp["content_type"])
+}
+
+func TestUploadHandler_HEICConvertsToJPEG(t *testing.T) {
+	t.Parallel()
+
+	converter := func(_ context.Context, body []byte) ([]byte, error) {
+		require.Equal(t, []byte("heic-data"), body, "converter should receive the uploaded HEIC bytes")
+		return []byte("jpeg-data"), nil
+	}
+
+	store := &captureUploadStore{}
+	h := NewUploadHandler(store)
+	h.heicConverter = converter
+	req := newUploadRequest(t, "file", "photo.HEIC", "image/heic", []byte("heic-data"))
+	w := httptest.NewRecorder()
+
+	h.Upload(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "HEIC upload should be accepted after conversion")
+	require.Equal(t, "image/jpeg", store.contentType, "converted upload should be persisted as JPEG")
+	require.Equal(t, []byte("jpeg-data"), store.body, "converted JPEG bytes should be stored")
+	require.True(t, strings.HasSuffix(store.key, ".jpg"), "converted upload key should use a JPEG extension")
+
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "upload response should be valid JSON")
+	require.Equal(t, "photo.jpg", resp["file_name"], "response filename should match the converted JPEG")
+	require.Equal(t, "image/jpeg", resp["content_type"], "response content type should match the converted JPEG")
+	require.True(t, strings.HasSuffix(resp["url"], ".jpg"), "returned URL should point at the converted JPEG object")
+}
+
+func TestUploadHandler_HEICWithOctetStreamContentTypeConvertsToJPEG(t *testing.T) {
+	t.Parallel()
+
+	converter := func(_ context.Context, body []byte) ([]byte, error) {
+		require.Equal(t, []byte("heif-data"), body, "converter should receive the uploaded HEIF bytes")
+		return []byte("jpeg-data"), nil
+	}
+
+	store := &captureUploadStore{}
+	h := NewUploadHandler(store)
+	h.heicConverter = converter
+	req := newUploadRequest(t, "file", "photo.heif", "application/octet-stream", []byte("heif-data"))
+	w := httptest.NewRecorder()
+
+	h.Upload(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "HEIF upload with generic browser content type should be accepted after conversion")
+	require.Equal(t, "image/jpeg", store.contentType, "converted HEIF upload should be persisted as JPEG")
+	require.True(t, strings.HasSuffix(store.key, ".jpg"), "converted HEIF upload key should use a JPEG extension")
+}
+
+func TestUploadHandler_HEICRejectsOversizedConvertedJPEG(t *testing.T) {
+	t.Parallel()
+
+	converter := func(_ context.Context, body []byte) ([]byte, error) {
+		require.Equal(t, []byte("heic-data"), body, "converter should receive the uploaded HEIC bytes")
+		return bytes.Repeat([]byte("x"), maxUploadSize+1), nil
+	}
+
+	store := &captureUploadStore{}
+	h := NewUploadHandler(store)
+	h.heicConverter = converter
+	req := newUploadRequest(t, "file", "photo.heic", "image/heic", []byte("heic-data"))
+	w := httptest.NewRecorder()
+
+	h.Upload(w, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "oversized converted JPEG should be rejected")
+	require.Empty(t, store.body, "oversized converted JPEG should not be stored")
+	require.Contains(t, w.Body.String(), "FILE_TOO_LARGE", "response should report the upload size limit")
 }
 
 func TestUploadHandler_ServeUpload_PathTraversal(t *testing.T) {
@@ -348,6 +455,10 @@ func TestExtensionFromMIME(t *testing.T) {
 		{"image/jpeg", ".jpg"},
 		{"image/gif", ".gif"},
 		{"image/webp", ".webp"},
+		{"image/heic", ".heic"},
+		{"image/heif", ".heif"},
+		{"image/heic-sequence", ".heic"},
+		{"image/heif-sequence", ".heif"},
 		{"image/svg+xml", ".svg"},
 		{"application/pdf", ".pdf"},
 		{"text/plain", ".txt"},
@@ -363,4 +474,66 @@ func TestExtensionFromMIME(t *testing.T) {
 			require.Equal(t, tt.ext, extensionFromMIME(tt.mime))
 		})
 	}
+}
+
+func TestRunHEICConverterRequiresDedicatedConverter(t *testing.T) {
+	t.Parallel()
+
+	err := runHEICConverterWithLookPath(
+		context.Background(),
+		"/tmp/input.heic",
+		"/tmp/output.jpg",
+		func(name string) (string, error) {
+			require.Equal(t, "heif-convert", name, "HEIC conversion should only look for the dedicated converter")
+			return "", errors.New("not found")
+		},
+	)
+
+	require.Error(t, err, "missing heif-convert should fail conversion")
+	require.Contains(t, err.Error(), "install heif-convert", "missing converter error should name the required dependency")
+	require.NotContains(t, err.Error(), "ImageMagick", "missing converter error should not suggest broad fallback dependencies")
+}
+
+func TestConvertHEICToJPEGWithCommand_ConvertsRealHEICFixture(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("heif-convert"); err != nil {
+		t.Skip("heif-convert is not installed")
+	}
+	heifEncPath, err := exec.LookPath("heif-enc")
+	if err != nil {
+		t.Skip("heif-enc is not installed")
+	}
+
+	tmpDir := t.TempDir()
+	pngPath := filepath.Join(tmpDir, "input.png")
+	heicPath := filepath.Join(tmpDir, "input.heic")
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	img.Set(1, 0, color.RGBA{G: 255, A: 255})
+	img.Set(0, 1, color.RGBA{B: 255, A: 255})
+	img.Set(1, 1, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+
+	pngFile, err := os.Create(pngPath)
+	require.NoError(t, err, "test PNG fixture should be creatable")
+	require.NoError(t, png.Encode(pngFile, img), "test PNG fixture should be encodable")
+	require.NoError(t, pngFile.Close(), "test PNG fixture should close cleanly")
+
+	encodeCmd := exec.CommandContext(context.Background(), heifEncPath, pngPath, "-o", heicPath)
+	encodeOutput, err := encodeCmd.CombinedOutput()
+	require.NoError(t, err, "heif-enc should create a real HEIC fixture: %s", strings.TrimSpace(string(encodeOutput)))
+
+	heicBytes, err := os.ReadFile(heicPath)
+	require.NoError(t, err, "real HEIC fixture should be readable")
+	require.NotEmpty(t, heicBytes, "real HEIC fixture should not be empty")
+
+	jpegBytes, err := convertHEICToJPEGWithCommand(context.Background(), heicBytes)
+	require.NoError(t, err, "real HEIC fixture should convert to JPEG")
+	require.NotEmpty(t, jpegBytes, "converted JPEG should not be empty")
+
+	decoded, err := jpeg.Decode(bytes.NewReader(jpegBytes))
+	require.NoError(t, err, "converted bytes should decode as JPEG")
+	require.Equal(t, 2, decoded.Bounds().Dx(), "converted JPEG should preserve fixture width")
+	require.Equal(t, 2, decoded.Bounds().Dy(), "converted JPEG should preserve fixture height")
 }

@@ -91,9 +91,9 @@ export function TimezonePicker({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          // Match the sibling SelectTrigger (h-9 / text-sm) so the trio in
+          // Match the sibling SelectTrigger so the trio in
           // the schedule row lines up visually.
-          className={cn("h-9 min-w-0 justify-between font-normal", className)}
+          className={cn("h-9 min-w-0 justify-between text-base font-normal sm:text-xs", className)}
           title={value}
         >
           <span className="min-w-0 max-w-[180px] truncate">{value}</span>

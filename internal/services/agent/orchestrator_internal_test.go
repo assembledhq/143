@@ -898,7 +898,7 @@ func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, &threadID, 2, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, &threadID, 2, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
 	require.NotNil(t, logs.logs[0].ThreadID, "persisted log should preserve the thread id")
@@ -929,7 +929,7 @@ func TestStreamLogs_PersistsMetadataAsJSON(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, nil, 1, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, nil, 1, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
 	require.NotNil(t, logs.logs[0].Metadata, "non-nil metadata should be marshaled and persisted")
@@ -959,10 +959,40 @@ func TestStreamLogs_DropsUnmarshalableMetadata(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, nil, 1, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, nil, 1, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should still persist the log entry when metadata fails to marshal")
 	require.Nil(t, logs.logs[0].Metadata, "unmarshalable metadata should be dropped to nil rather than blocking the log")
+}
+
+func TestHumanInputRequestFromQuestionLog(t *testing.T) {
+	t.Parallel()
+
+	req := humanInputRequestFromQuestionLog(LogEntry{
+		Level:   "question",
+		Message: "Which approach should Claude use?",
+		Metadata: map[string]interface{}{
+			"title":        "Choose approach",
+			"context":      "Migration touches settings.",
+			"blocks_phase": "implementation",
+			"options": []interface{}{
+				map[string]interface{}{"label": "Reuse table", "description": "Keep the current schema."},
+				"Create table",
+			},
+		},
+	})
+
+	require.Equal(t, models.HumanInputRequestKindFreeText, req.Kind, "legacy question logs should remain free-text compatible")
+	require.Equal(t, "Choose approach", req.Title, "metadata title should become request title")
+	require.Equal(t, "Which approach should Claude use?", req.Body, "log message should become request body")
+	require.NotNil(t, req.Context, "metadata context should be preserved")
+	require.Equal(t, "Migration touches settings.", *req.Context, "metadata context should round-trip")
+	require.NotNil(t, req.BlocksPhase, "metadata phase should be preserved")
+	require.Equal(t, "implementation", *req.BlocksPhase, "metadata phase should round-trip")
+	require.Equal(t, []models.HumanInputChoice{
+		{ID: "reuse-table", Label: "Reuse table", Description: "Keep the current schema."},
+		{ID: "create-table", Label: "Create table"},
+	}, req.Choices, "metadata options should become normalized choice rows")
 }
 
 func TestPrepareSandboxGitHubAuth_LegacyAddsCoAuthorTrailer(t *testing.T) {

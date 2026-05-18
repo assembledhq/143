@@ -1,5 +1,5 @@
 -- Seed data for preview dogfooding.
--- Creates a default organization and admin user so the preview is
+-- Creates a default organization and four users so the preview is
 -- immediately usable without requiring the registration flow, plus a
 -- placeholder integration and a couple of repositories/projects so the
 -- logged-in UI shows populated screens instead of empty states.
@@ -10,13 +10,14 @@
 -- them into the sign-in form. If you change either side, regenerate the
 -- bcrypt hash below (cost 10) and update the config defaults in lockstep.
 --
--- Password: "preview-dogfood" (bcrypt hash below).
+-- Password for all preview users: "preview" (bcrypt hash below).
 --
--- All rows use fixed UUIDs + ON CONFLICT DO NOTHING so the seed is
--- safely re-runnable. Tables with secondary unique indexes (e.g.
+-- All rows use fixed UUIDs and conflict handlers so the seed is safely
+-- re-runnable. Tables with secondary unique indexes (e.g.
 -- repositories.idx_repositories_org_github) use the unqualified
 -- ON CONFLICT DO NOTHING form so any unique violation — not just on id —
--- no-ops rather than aborting the transaction.
+-- no-ops rather than aborting the transaction; identity rows use DO UPDATE
+-- so old dogfood credentials converge to the current preview credentials.
 
 INSERT INTO organizations (id, name, settings, created_at, updated_at)
 VALUES (
@@ -29,17 +30,82 @@ VALUES (
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO users (id, org_id, email, name, role, password_hash, created_at)
-VALUES (
-  '00000000-0000-4000-a000-000000000002'::uuid,
-  '00000000-0000-4000-a000-000000000001'::uuid,
-  'dogfood@143.dev',
-  'Preview Admin',
-  'admin',
-  -- bcrypt hash of "preview-dogfood" (cost 10)
-  '$2a$10$yq0Z0nFAzgJa1IuC.zbMh.RmEdX2dAJk8XQwELbmOA1AztcbCUyVi',
-  now()
-)
-ON CONFLICT (email) DO NOTHING;
+VALUES
+  (
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'preview-admin@143.dev',
+    'Preview Admin',
+    'admin',
+    -- bcrypt hash of "preview" (cost 10)
+    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    now()
+  ),
+  (
+    '00000000-0000-4000-a000-000000000003'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'preview-member@143.dev',
+    'Preview Member',
+    'member',
+    -- bcrypt hash of "preview" (cost 10)
+    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    now()
+  ),
+  (
+    '00000000-0000-4000-a000-000000000004'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'preview-builder@143.dev',
+    'Preview Builder',
+    'builder',
+    -- bcrypt hash of "preview" (cost 10)
+    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    now()
+  ),
+  (
+    '00000000-0000-4000-a000-000000000005'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'preview-viewer@143.dev',
+    'Preview Viewer',
+    'viewer',
+    -- bcrypt hash of "preview" (cost 10)
+    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    now()
+  )
+ON CONFLICT (id) DO UPDATE
+SET org_id = EXCLUDED.org_id,
+    email = EXCLUDED.email,
+    name = EXCLUDED.name,
+    role = EXCLUDED.role,
+    password_hash = EXCLUDED.password_hash;
+
+INSERT INTO organization_memberships (user_id, org_id, role, created_at)
+VALUES
+  (
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'admin',
+    now()
+  ),
+  (
+    '00000000-0000-4000-a000-000000000003'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'member',
+    now()
+  ),
+  (
+    '00000000-0000-4000-a000-000000000004'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'builder',
+    now()
+  ),
+  (
+    '00000000-0000-4000-a000-000000000005'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    'viewer',
+    now()
+  )
+ON CONFLICT (user_id, org_id) DO UPDATE
+SET role = EXCLUDED.role;
 
 -- Placeholder GitHub integration so repositories have a valid FK target.
 -- The preview does not actually talk to GitHub, so the config is empty.

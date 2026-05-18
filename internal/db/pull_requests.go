@@ -180,6 +180,23 @@ func (s *PullRequestStore) GetByRepoAndNumber(ctx context.Context, repo string, 
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
 }
 
+func (s *PullRequestStore) GetByOrgRepoAndNumber(ctx context.Context, orgID uuid.UUID, repo string, number int) (models.PullRequest, error) {
+	query := `
+		SELECT ` + prSelectColumns + `
+		FROM pull_requests
+		WHERE org_id = @org_id AND github_repo = @github_repo AND github_pr_number = @github_pr_number`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":           orgID,
+		"github_repo":      repo,
+		"github_pr_number": number,
+	})
+	if err != nil {
+		return models.PullRequest{}, fmt.Errorf("query pull request by org, repo, and number: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
+}
+
 func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uuid.UUID, reviewStatus string) error {
 	query := `UPDATE pull_requests SET review_status = @review_status, updated_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{

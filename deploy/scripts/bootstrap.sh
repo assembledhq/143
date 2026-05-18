@@ -22,6 +22,10 @@ chown deploy:deploy /var/log/143
 # Docker (idempotent)
 command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
 
+# Provision-time helpers merge JSON config with jq. Cloud-init installs it
+# through package metadata, but SSH provisioning only runs this bootstrap.
+command -v jq &>/dev/null || (apt-get update && apt-get install -y jq)
+
 # Add deploy to docker group (must be after Docker install creates the group)
 usermod -aG docker deploy
 
@@ -42,6 +46,7 @@ Cmnd_Alias DEPLOY_CMDS = \
     /usr/bin/apt-get install -y --no-install-recommends iptables-persistent, \
     /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox, \
     /opt/143/deploy/scripts/sandbox-resolv-conf.sh, \
+    /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox, \
     /opt/143/deploy/scripts/install-log-rotation.sh *, \
     /opt/143/deploy/scripts/install-docker-dns.sh *
 

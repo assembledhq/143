@@ -106,6 +106,24 @@ describe("OrgSwitcher", () => {
     expect(screen.getByTestId("org-switcher-item-org-2")).toBeInTheDocument();
   });
 
+  it("labels member memberships as Engineer in the dropdown", async () => {
+    mockMemberships(
+      [
+        { org_id: "org-1", org_name: "Acme", role: "admin" },
+        { org_id: "org-2", org_name: "Globex", role: "member" },
+      ],
+      "org-1",
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<OrgSwitcher />);
+
+    await user.click(await screen.findByTestId("org-switcher"));
+
+    expect(await screen.findByTestId("org-switcher-item-org-2")).toHaveTextContent("Engineer");
+    expect(screen.getByTestId("org-switcher-item-org-2")).not.toHaveTextContent("member");
+  });
+
   it("switching orgs writes sessionStorage and pushes /sessions", async () => {
     let persistedOrgId: string | null = null;
     mockMemberships(
@@ -296,6 +314,8 @@ describe("OrgSwitcher", () => {
     await user.click(screen.getByTestId("org-switcher"));
     await screen.findByTestId("pending-invitations-section");
     expect(screen.getByTestId("pending-invitation-inv-1")).toHaveTextContent("Globex");
+    expect(screen.getByTestId("pending-invitation-inv-1")).toHaveTextContent("Engineer");
+    expect(screen.getByTestId("pending-invitation-inv-1")).not.toHaveTextContent("member");
     expect(screen.getByTestId("pending-invitation-inv-1")).toHaveTextContent("Invited by Bob");
   });
 

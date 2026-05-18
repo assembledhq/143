@@ -57,6 +57,27 @@ func TestBuildRegistryFromEnv_GitHub_SocketFallback(t *testing.T) {
 	require.Equal(t, "github", src.Name())
 }
 
+func TestBuildRegistryFromEnv_CircleCI(t *testing.T) {
+	t.Setenv("CIRCLECI_TOKEN", "cci-tok")
+	t.Setenv("CIRCLECI_PROJECT_SLUG", "gh/octocat/hello")
+
+	reg := BuildRegistryFromEnv(io.Discard)
+
+	p, err := reg.CITestInsightsProvider("circleci")
+	require.NoError(t, err, "CIRCLECI_TOKEN + slug should register the circleci provider")
+	require.Equal(t, "circleci", p.Name())
+}
+
+func TestBuildRegistryFromEnv_CircleCI_MissingSlugSkips(t *testing.T) {
+	t.Setenv("CIRCLECI_TOKEN", "cci-tok")
+	t.Setenv("CIRCLECI_PROJECT_SLUG", "")
+
+	reg := BuildRegistryFromEnv(io.Discard)
+
+	_, err := reg.CITestInsightsProvider("circleci")
+	require.Error(t, err, "without a project slug, the CLI surface would 404 — provider must not register")
+}
+
 func TestBuildRegistryFromEnv_GitHub_NoCredsSkipsSource(t *testing.T) {
 	clearGitHubEnv(t)
 	// Owner/repo present but neither credential path — the source must NOT

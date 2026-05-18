@@ -23,8 +23,9 @@ func NewAutomationStore(db TxStarter) *AutomationStore {
 }
 
 const automationColumns = `id, org_id, repository_id, name, goal, scope,
+	icon_type, icon_value,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-	identity_scope, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, created_at, updated_at, deleted_at`
 
@@ -40,8 +41,9 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 	var a models.Automation
 	err := row.Scan(
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
+		&a.IconType, &a.IconValue,
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
-		&a.IdentityScope, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
+		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
 	)
@@ -64,39 +66,44 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 	query := `
 		INSERT INTO automations (
 			org_id, repository_id, name, goal, scope,
+			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-			identity_scope, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+			identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			next_run_at, enabled, created_by, priority
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
+			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
-			@identity_scope, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
+			@identity_scope, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@next_run_at, @enabled, @created_by, @priority
 		) RETURNING id, created_at, updated_at`
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":           a.OrgID,
-		"repository_id":    a.RepositoryID,
-		"name":             a.Name,
-		"goal":             a.Goal,
-		"scope":            a.Scope,
-		"agent_type":       a.AgentType,
-		"model_override":   a.ModelOverride,
-		"reasoning_effort": a.ReasoningEffort,
-		"execution_mode":   a.ExecutionMode,
-		"max_concurrent":   a.MaxConcurrent,
-		"base_branch":      a.BaseBranch,
-		"identity_scope":   a.IdentityScope.OrDefault(),
-		"schedule_type":    a.ScheduleType,
-		"interval_value":   a.IntervalValue,
-		"interval_unit":    a.IntervalUnit,
-		"interval_run_at":  a.IntervalRunAt,
-		"cron_expression":  a.CronExpression,
-		"timezone":         a.Timezone,
-		"next_run_at":      a.NextRunAt,
-		"enabled":          a.Enabled,
-		"created_by":       a.CreatedBy,
-		"priority":         a.Priority,
+		"org_id":              a.OrgID,
+		"repository_id":       a.RepositoryID,
+		"name":                a.Name,
+		"goal":                a.Goal,
+		"scope":               a.Scope,
+		"icon_type":           a.IconType.OrDefault(),
+		"icon_value":          models.AutomationIconValueOrDefault(a.IconValue),
+		"agent_type":          a.AgentType,
+		"model_override":      a.ModelOverride,
+		"reasoning_effort":    a.ReasoningEffort,
+		"execution_mode":      a.ExecutionMode,
+		"max_concurrent":      a.MaxConcurrent,
+		"base_branch":         a.BaseBranch,
+		"identity_scope":      a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops": a.PrePRReviewLoops,
+		"schedule_type":       a.ScheduleType,
+		"interval_value":      a.IntervalValue,
+		"interval_unit":       a.IntervalUnit,
+		"interval_run_at":     a.IntervalRunAt,
+		"cron_expression":     a.CronExpression,
+		"timezone":            a.Timezone,
+		"next_run_at":         a.NextRunAt,
+		"enabled":             a.Enabled,
+		"created_by":          a.CreatedBy,
+		"priority":            a.Priority,
 	})
 	return row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 }
@@ -176,9 +183,11 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 	query := `
 		UPDATE automations SET
 			name = @name, goal = @goal, scope = @scope, repository_id = @repository_id,
+			icon_type = @icon_type, icon_value = @icon_value,
 			agent_type = @agent_type, model_override = @model_override, reasoning_effort = @reasoning_effort,
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch, identity_scope = @identity_scope,
+			pre_pr_review_loops = @pre_pr_review_loops,
 			schedule_type = @schedule_type, interval_value = @interval_value,
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
 			timezone = @timezone, next_run_at = @next_run_at,
@@ -187,30 +196,33 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":               a.ID,
-		"org_id":           a.OrgID,
-		"name":             a.Name,
-		"goal":             a.Goal,
-		"scope":            a.Scope,
-		"repository_id":    a.RepositoryID,
-		"agent_type":       a.AgentType,
-		"model_override":   a.ModelOverride,
-		"reasoning_effort": a.ReasoningEffort,
-		"execution_mode":   a.ExecutionMode,
-		"max_concurrent":   a.MaxConcurrent,
-		"base_branch":      a.BaseBranch,
-		"identity_scope":   a.IdentityScope.OrDefault(),
-		"schedule_type":    a.ScheduleType,
-		"interval_value":   a.IntervalValue,
-		"interval_unit":    a.IntervalUnit,
-		"interval_run_at":  a.IntervalRunAt,
-		"cron_expression":  a.CronExpression,
-		"timezone":         a.Timezone,
-		"next_run_at":      a.NextRunAt,
-		"enabled":          a.Enabled,
-		"paused_by":        a.PausedBy,
-		"paused_at":        a.PausedAt,
-		"priority":         a.Priority,
+		"id":                  a.ID,
+		"org_id":              a.OrgID,
+		"name":                a.Name,
+		"goal":                a.Goal,
+		"scope":               a.Scope,
+		"repository_id":       a.RepositoryID,
+		"icon_type":           a.IconType.OrDefault(),
+		"icon_value":          models.AutomationIconValueOrDefault(a.IconValue),
+		"agent_type":          a.AgentType,
+		"model_override":      a.ModelOverride,
+		"reasoning_effort":    a.ReasoningEffort,
+		"execution_mode":      a.ExecutionMode,
+		"max_concurrent":      a.MaxConcurrent,
+		"base_branch":         a.BaseBranch,
+		"identity_scope":      a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops": a.PrePRReviewLoops,
+		"schedule_type":       a.ScheduleType,
+		"interval_value":      a.IntervalValue,
+		"interval_unit":       a.IntervalUnit,
+		"interval_run_at":     a.IntervalRunAt,
+		"cron_expression":     a.CronExpression,
+		"timezone":            a.Timezone,
+		"next_run_at":         a.NextRunAt,
+		"enabled":             a.Enabled,
+		"paused_by":           a.PausedBy,
+		"paused_at":           a.PausedAt,
+		"priority":            a.Priority,
 	})
 	return err
 }
@@ -632,6 +644,16 @@ func (s *AutomationRunStore) GetByID(ctx context.Context, orgID, automationID, r
 		"id":            runID,
 		"automation_id": automationID,
 		"org_id":        orgID,
+	})
+	return scanAutomationRun(row)
+}
+
+func (s *AutomationRunStore) GetByRunID(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
+	query := fmt.Sprintf(`SELECT %s FROM automation_runs
+		WHERE id = @id AND org_id = @org_id`, automationRunColumns)
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     runID,
+		"org_id": orgID,
 	})
 	return scanAutomationRun(row)
 }

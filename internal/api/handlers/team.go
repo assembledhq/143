@@ -348,16 +348,18 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 
 // --- Invitation endpoints ---
 
-// CreateInvitation creates a new invitation and logs the accept link to console.
-// Exactly one of email or github_username must be provided.
+// CreateInvitation creates a new invitation and sends an email notification
+// when a durable contact email is present. GitHub-addressed invites keep that
+// email for notifications, but acceptance is locked to the GitHub username.
 func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	currentUser := middleware.UserFromContext(r.Context())
 
 	var body struct {
-		Email          string `json:"email"`
-		GitHubUsername string `json:"github_username"`
-		Role           string `json:"role"`
+		Email            string                            `json:"email"`
+		GitHubUsername   string                            `json:"github_username"`
+		AcceptanceMethod models.InvitationAcceptanceMethod `json:"acceptance_method"`
+		Role             string                            `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -382,6 +384,25 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 
 	if body.GitHubUsername != "" && !isValidGitHubUsername(body.GitHubUsername) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid github username")
+		return
+	}
+	if body.AcceptanceMethod == "" {
+		if body.GitHubUsername != "" {
+			body.AcceptanceMethod = models.InvitationAcceptanceMethodGitHub
+		} else {
+			body.AcceptanceMethod = models.InvitationAcceptanceMethodEmail
+		}
+	}
+	if err := body.AcceptanceMethod.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid acceptance method: must be email, github, or either")
+		return
+	}
+	if body.AcceptanceMethod == models.InvitationAcceptanceMethodEmail && body.Email == "" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "email is required for email acceptance")
+		return
+	}
+	if body.AcceptanceMethod == models.InvitationAcceptanceMethodGitHub && body.GitHubUsername == "" {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "github_username is required for github acceptance")
 		return
 	}
 
@@ -432,11 +453,12 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inv := &models.Invitation{
-		OrgID:     orgID,
-		Role:      body.Role,
-		InvitedBy: currentUser.ID,
-		Token:     token,
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		OrgID:            orgID,
+		AcceptanceMethod: body.AcceptanceMethod,
+		Role:             body.Role,
+		InvitedBy:        currentUser.ID,
+		Token:            token,
+		ExpiresAt:        time.Now().Add(7 * 24 * time.Hour),
 	}
 	if body.Email != "" {
 		email := body.Email
@@ -458,7 +480,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	invIDStr := inv.ID.String()
-	auditPayload := map[string]string{"role": body.Role}
+	auditPayload := map[string]string{"role": body.Role, "acceptance_method": string(body.AcceptanceMethod)}
 	if body.Email != "" {
 		auditPayload["email"] = body.Email
 	}
@@ -504,11 +526,12 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		Msg("invitation created")
 
 	resp := models.InvitationResponse{
-		ID:             inv.ID,
-		Email:          inv.Email,
-		GitHubUsername: inv.GitHubUsername,
-		Role:           inv.Role,
-		Status:         inv.Status,
+		ID:               inv.ID,
+		Email:            inv.Email,
+		GitHubUsername:   inv.GitHubUsername,
+		AcceptanceMethod: inv.AcceptanceMethod,
+		Role:             inv.Role,
+		Status:           inv.Status,
 		InvitedBy: models.UserBrief{
 			ID:   currentUser.ID,
 			Name: currentUser.Name,
@@ -555,11 +578,12 @@ func (h *TeamHandler) ListInvitations(w http.ResponseWriter, r *http.Request) {
 	responses := make([]models.InvitationResponse, 0, len(invitations))
 	for _, inv := range invitations {
 		responses = append(responses, models.InvitationResponse{
-			ID:             inv.ID,
-			Email:          inv.Email,
-			GitHubUsername: inv.GitHubUsername,
-			Role:           inv.Role,
-			Status:         inv.Status,
+			ID:               inv.ID,
+			Email:            inv.Email,
+			GitHubUsername:   inv.GitHubUsername,
+			AcceptanceMethod: inv.AcceptanceMethod,
+			Role:             inv.Role,
+			Status:           inv.Status,
 			InvitedBy: models.UserBrief{
 				ID:   inv.InvitedBy,
 				Name: inv.InviterName,
@@ -656,6 +680,15 @@ func (h *TeamHandler) AcceptInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 	if inv.GitHubUsername != nil {
 		payload["github_username"] = *inv.GitHubUsername
+	}
+	if inv.AcceptanceMethod != "" {
+		payload["acceptance_method"] = string(inv.AcceptanceMethod)
+	}
+
+	if inv.AcceptanceMethod == models.InvitationAcceptanceMethodGitHub {
+		payload["action"] = "login"
+		writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: payload})
+		return
 	}
 
 	// If the invitation is bound to an email, and that email already has an

@@ -101,6 +101,48 @@ func (m *mockIssueCreator) CreateIssue(_ context.Context, params integration.Cre
 }
 
 // --------------------------------------------------------------------------
+// Mock: CITestInsights
+// --------------------------------------------------------------------------
+
+type mockCITestInsights struct {
+	name string
+}
+
+func (m *mockCITestInsights) Name() string { return m.name }
+
+func (m *mockCITestInsights) ListFlakyTests(_ context.Context, filter integration.FlakyTestFilter) ([]integration.FlakyTest, error) {
+	return []integration.FlakyTest{
+		{
+			TestName:     "TestFlaky",
+			Classname:    "pkg/foo",
+			JobName:      "build",
+			WorkflowName: filter.WorkflowName,
+			TimesFlaked:  3,
+			LastJob:      &integration.JobRef{JobNumber: 42},
+		},
+	}, nil
+}
+
+func (m *mockCITestInsights) GetTestResults(_ context.Context, ref integration.JobRef) ([]integration.TestResult, error) {
+	return []integration.TestResult{
+		{
+			TestName:  "TestFlaky",
+			Classname: "pkg/foo",
+			Result:    "failure",
+			Message:   "expected true, got false",
+			JobNumber: ref.JobNumber,
+		},
+	}, nil
+}
+
+func (m *mockCITestInsights) GetRecentFailures(_ context.Context, _, testName string, _ int) ([]integration.TestResult, error) {
+	return []integration.TestResult{
+		{TestName: testName, Result: "failure", Message: "failure A"},
+		{TestName: testName, Result: "failure", Message: "failure B"},
+	}, nil
+}
+
+// --------------------------------------------------------------------------
 // Helper: build a registry with all integration types
 // --------------------------------------------------------------------------
 
@@ -113,7 +155,50 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
 	reg.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
 	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
+	reg.RegisterCITestInsights(&mockCITestInsights{name: "circleci"})
 	return reg
+}
+
+func TestCallToolCITestInsights_ListFlakyTests(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	args := `{"workflow_name":"ci","limit":5}`
+	result := tr.CallTool(context.Background(), "circleci_list_flaky_tests", json.RawMessage(args))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var got []integration.FlakyTest
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &got); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got) != 1 || got[0].TestName != "TestFlaky" {
+		t.Errorf("unexpected list_flaky_tests result: %+v", got)
+	}
+}
+
+func TestCallToolCITestInsights_GetJobTestResults(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "circleci_get_job_test_results", json.RawMessage(`{"job_number":42}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var got []integration.TestResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &got); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got) != 1 || got[0].Message == "" {
+		t.Errorf("expected one result with a failure message: %+v", got)
+	}
+}
+
+func TestCallToolCITestInsights_GetRecentTestFailures_RequiresName(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "circleci_get_recent_test_failures", json.RawMessage(`{}`))
+	if !result.IsError {
+		t.Fatalf("expected error when test_name is missing")
+	}
 }
 
 // --------------------------------------------------------------------------
@@ -402,24 +487,27 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 project proposer = 17
-	if len(tools) != 17 {
+	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 project proposer + 3 ci test insights = 20
+	if len(tools) != 20 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 17 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 20 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
-		"github_list_recent_prs":  false,
-		"github_get_pr_reviews":   false,
-		"notion_search_documents": false,
-		"notion_get_document":     false,
-		"slack_search_messages":   false,
-		"slack_get_thread":        false,
-		"issue_create":            false,
-		"project_propose":         false,
+		"github_list_recent_prs":            false,
+		"github_get_pr_reviews":             false,
+		"notion_search_documents":           false,
+		"notion_get_document":               false,
+		"slack_search_messages":             false,
+		"slack_get_thread":                  false,
+		"issue_create":                      false,
+		"project_propose":                   false,
+		"circleci_list_flaky_tests":         false,
+		"circleci_get_job_test_results":     false,
+		"circleci_get_recent_test_failures": false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; ok {
