@@ -1539,6 +1539,55 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 	}
 }
 
+func TestAgentEnvInjectClaudeCodeAuthRequiresSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	credID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+	coding := &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       credID,
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "claude-access",
+						RefreshToken: "claude-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Logger:            zerolog.Nop(),
+	})
+
+	injected, err := env.InjectClaudeCodeAuth(ctx, orgID, sandbox)
+
+	require.False(t, injected, "Claude auth injection should not report success when sandbox provider is missing")
+	require.Error(t, err, "Claude auth injection should return a configuration error instead of panicking")
+	require.Contains(t, err.Error(), "sandbox provider", "Claude auth injection error should identify the missing dependency")
+}
+
+func TestAgentEnvPrepareClaudeCodeAPIKeyFallbackRequiresSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	env := NewAgentEnv(AgentEnvDeps{Logger: zerolog.Nop()})
+
+	err := env.PrepareClaudeCodeAPIKeyFallback(context.Background(), &Sandbox{HomeDir: "/home/test"}, map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+	})
+
+	require.Error(t, err, "Claude API-key fallback preparation should return a configuration error instead of panicking")
+	require.Contains(t, err.Error(), "sandbox provider", "Claude fallback error should identify the missing dependency")
+}
+
 // TestAgentEnvInjectCodexAuth_ErrorClassification verifies that
 // InjectCodexAuth tags genuine auth failures with ErrCodexAuthInvalid while
 // leaving sandbox/transport errors un-tagged. The orchestrator branches on

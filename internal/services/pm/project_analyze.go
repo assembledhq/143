@@ -146,7 +146,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	defer close(logCh)
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := s.executeAgentWithCredentialFallback(ctx, orgID, agentType, settings, sbCfg, sb, adapter, execCtx, prompt, logCh)
 	if err != nil {
 		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("project pm agent execution: %w", err)
