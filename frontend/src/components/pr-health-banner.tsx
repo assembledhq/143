@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, ExternalLink, GitMerge, GitPullRequest, Loader2, Upload, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ClipboardList, ExternalLink, GitMerge, GitPullRequest, Loader2, Upload, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -30,6 +30,13 @@ export type PushChangesAction = {
   onClick: () => void;
 };
 
+export type ReviewPRAction = {
+  disabled: boolean;
+  spinning: boolean;
+  title?: string;
+  onClick: () => void;
+};
+
 type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
   currentSessionId?: string;
@@ -41,6 +48,7 @@ type PRHealthBannerProps = {
   onMerge: () => void;
   onOpenRepairSession?: (sessionId: string) => void;
   pushChanges?: PushChangesAction;
+  reviewAction?: ReviewPRAction;
 };
 
 export function PRHealthBanner({
@@ -54,6 +62,7 @@ export function PRHealthBanner({
   onMerge,
   onOpenRepairSession,
   pushChanges,
+  reviewAction,
 }: PRHealthBannerProps) {
   const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId);
   const isHealthy = activeRepairState.label === null && !health.can_fix_tests && !health.can_resolve_conflicts;
@@ -69,6 +78,7 @@ export function PRHealthBanner({
     canShowResolveConflictsButton ||
     canShowFixTestsButton ||
     canShowMergeButton ||
+    !!reviewAction ||
     !!pushChanges ||
     !!activeRepairState.openSessionID;
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
@@ -227,6 +237,22 @@ export function PRHealthBanner({
                         <GitMerge className="mr-1.5 h-3.5 w-3.5" />
                       )}
                       {pendingAction === "merge" ? "Merging…" : "Merge"}
+                    </Button>
+                  )}
+                  {reviewAction && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={reviewAction.disabled || pendingAction !== null}
+                      title={reviewAction.title}
+                      onClick={reviewAction.onClick}
+                    >
+                      {reviewAction.spinning ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      Review
                     </Button>
                   )}
                   {pushChanges && (

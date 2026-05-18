@@ -188,16 +188,16 @@ describe('SessionDetailPage', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  it('shows a disabled review-loop action in the Overview readiness area when no session snapshot is available', async () => {
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+  it('shows a disabled review action in the Overview readiness area when no PR or session snapshot is available', async () => {
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByRole('button', { name: 'Review this work' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeDisabled();
+    expect(screen.getByText('Review and fix in a loop before creating a PR.')).toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
-  it('shows the review loop action in Overview after a PR exists when a snapshot is available', async () => {
+  it('moves the review action into PR health after a PR exists when a snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -218,7 +218,10 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review this work' })).toBeInTheDocument();
+    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.queryByText('Review work')).not.toBeInTheDocument();
+    expect(screen.queryByText('Review this work')).not.toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
@@ -265,7 +268,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
     await user.click(await screen.findByRole('button', { name: 'Increase review passes' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
@@ -331,7 +334,7 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByText('Codex 1')).toBeInTheDocument();
 
-    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     const reviewTab = await screen.findByRole('tab', { name: /Codex Review/ });
@@ -393,7 +396,7 @@ describe('SessionDetailPage', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Open session details' }));
     const detailSheet = await screen.findByRole('dialog', { name: 'Session details' });
-    await user.click(within(detailSheet).getByRole('button', { name: 'Review this work' }));
+    await user.click(within(detailSheet).getByRole('button', { name: 'Review' }));
     await user.click(await screen.findByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
