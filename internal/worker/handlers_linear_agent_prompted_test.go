@@ -235,6 +235,7 @@ func TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure(t *testin
 		context.Background(),
 		deps,
 		orgID,
+		uuid.New(),
 		db.SessionMessageAppendState{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 7},
 		linearAgentEventPayload{LinearAgentSessionID: "as_committed_fail"},
 		"please retry",
@@ -244,6 +245,53 @@ func TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure(t *testin
 	require.ErrorIs(t, err, commitErr, "the underlying commit error should be wrapped, not swallowed")
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"the deferred Rollback must fire when committed=false, even on commit failure")
+}
+
+func TestAppendPromptedMessageAndEnqueueContinueSkipsDuplicateComment(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	session := models.Session{
+		ID:          sessionID,
+		OrgID:       orgID,
+		CurrentTurn: 3,
+	}
+	msg := &models.SessionMessage{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		TurnNumber: 4,
+		Role:       models.MessageRoleUser,
+		Content:    "please retry",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO linear_agent_prompted_messages").
+		WithArgs(orgID, rowID, sessionID, "comment_1").
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	err = appendPromptedMessageAndEnqueueContinue(
+		context.Background(),
+		&Stores{
+			Sessions:        db.NewSessionStore(mock),
+			SessionMessages: db.NewSessionMessageStore(mock),
+			Jobs:            db.NewJobStore(mock),
+		},
+		orgID,
+		rowID,
+		"comment_1",
+		session,
+		msg,
+	)
+
+	require.ErrorIs(t, err, errPromptedMessageAlreadyProcessed, "duplicate Linear prompted comment should be reported without inserting another message")
+	require.NoError(t, mock.ExpectationsWereMet(), "duplicate prompted comment should reserve-check inside the transaction and skip message/job writes")
 }
 
 func TestPromptedRunningSessionAppendsUnderSessionLockWithoutContinuationJob(t *testing.T) {

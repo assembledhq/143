@@ -118,13 +118,14 @@ type linearAgentBootstrapEmitter interface {
 // ignored" vs ingestion's "issue upsert succeeded, return 200 processed")
 // and grouping the logic keeps HandleLinear's branch a one-liner.
 type LinearAgentDispatcher struct {
-	logger         zerolog.Logger
-	agentSessions  *db.LinearAgentSessionStore
-	jobs           linearAgentJobEnqueuer
-	emitter        linearAgentBootstrapEmitter
-	activities     *db.LinearAgentActivityLogStore
-	settingsLoader func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
-	clientForOrg   func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	logger           zerolog.Logger
+	agentSessions    *db.LinearAgentSessionStore
+	jobs             linearAgentJobEnqueuer
+	emitter          linearAgentBootstrapEmitter
+	activities       *db.LinearAgentActivityLogStore
+	settingsLoader   func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
+	clientForOrg     func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	credentialLookup webhookSecretLookup
 	// metrics records dispatch-side observability. Optional — nil falls
 	// back to no-op counters via the nil-safe RecordX helpers, so a boot
 	// stage that hasn't constructed the metrics package can still wire
@@ -147,6 +148,7 @@ type LinearAgentDispatcherConfig struct {
 	Jobs           linearAgentJobEnqueuer
 	SettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
 	ClientForOrg   func(ctx context.Context, orgID uuid.UUID) (linear.Client, error)
+	Credentials    webhookSecretLookup
 	Metrics        *metrics.LinearAgentMetrics
 	FeatureEnabled bool
 }
@@ -159,15 +161,16 @@ func NewLinearAgentDispatcher(cfg LinearAgentDispatcherConfig) *LinearAgentDispa
 		return nil
 	}
 	return &LinearAgentDispatcher{
-		logger:         cfg.Logger.With().Str("component", "linear_agent_dispatcher").Logger(),
-		agentSessions:  cfg.AgentSessions,
-		activities:     cfg.Activities,
-		jobs:           cfg.Jobs,
-		emitter:        newLinearAgentBootstrapWriter(cfg.ClientForOrg, cfg.Activities, cfg.Logger),
-		settingsLoader: cfg.SettingsLoader,
-		clientForOrg:   cfg.ClientForOrg,
-		metrics:        cfg.Metrics,
-		featureEnabled: cfg.FeatureEnabled,
+		logger:           cfg.Logger.With().Str("component", "linear_agent_dispatcher").Logger(),
+		agentSessions:    cfg.AgentSessions,
+		activities:       cfg.Activities,
+		jobs:             cfg.Jobs,
+		emitter:          newLinearAgentBootstrapWriter(cfg.ClientForOrg, cfg.Activities, cfg.Logger),
+		settingsLoader:   cfg.SettingsLoader,
+		clientForOrg:     cfg.ClientForOrg,
+		credentialLookup: cfg.Credentials,
+		metrics:          cfg.Metrics,
+		featureEnabled:   cfg.FeatureEnabled,
 	}
 }
 
@@ -294,13 +297,21 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	// today because Linear's per-app webhook routes events for that app
 	// only, but possible in shared-tenant or wildcard-subscription setups
 	// — skip it. We compare the envelope's appUserId against the AppUserID
-	// the OAuth callback persisted for this integration; mismatch means
+	// the OAuth callback persisted on the Linear credential; mismatch means
 	// the webhook is not addressed to our agent. Empty on either side
 	// means "can't filter, fall through" (legacy installs, slimmer
 	// payloads). The check is intentionally before the agent-row upsert
 	// so a stray event doesn't pollute the bridge table.
 	if env.AppUserID != "" {
-		if expected, ok := decodeIntegrationAppUserID(integration.Config); ok && expected != "" && expected != env.AppUserID {
+		expected, ok, err := d.expectedLinearAppUserID(ctx, integration)
+		if err != nil {
+			d.logger.Error().Err(err).
+				Str("integration_id", integration.ID.String()).
+				Str("org_id", integration.OrgID.String()).
+				Msg("agent dispatcher: failed to load Linear app user filter; requesting Linear redelivery")
+			return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("load Linear app user filter: %w", err)}
+		}
+		if ok && expected != "" && expected != env.AppUserID {
 			d.logger.Info().
 				Str("integration_id", integration.ID.String()).
 				Str("envelope_app_user_id", env.AppUserID).
@@ -511,6 +522,25 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		Bool("bootstrap_emit_failed", result.BootstrapEmitFailed).
 		Msg("linear agent event dispatched")
 	return result
+}
+
+func (d *LinearAgentDispatcher) expectedLinearAppUserID(ctx context.Context, integration *models.Integration) (string, bool, error) {
+	if d.credentialLookup != nil {
+		cred, err := d.credentialLookup.Get(ctx, integration.OrgID, models.ProviderLinear)
+		if err != nil {
+			return "", false, err
+		}
+		if cred == nil {
+			return "", false, nil
+		}
+		cfg, ok := cred.Config.(models.LinearConfig)
+		if !ok || cfg.AppUserID == "" {
+			return "", false, nil
+		}
+		return cfg.AppUserID, true, nil
+	}
+	expected, ok := decodeIntegrationAppUserID(integration.Config)
+	return expected, ok, nil
 }
 
 func hasEnabledTeamOverride(settings models.LinearAgentSettings) bool {

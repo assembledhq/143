@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -277,6 +278,48 @@ func TestLinearAgentDispatcher_SettingsLoaderErrorSurfacesAsRetryable(t *testing
 		"no worker job should be enqueued when settings could not be resolved")
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"dispatcher must short-circuit before touching the AgentSession row when settings cannot be loaded")
+}
+
+func TestLinearAgentDispatcher_AppUserMismatchUsesCredentialConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	jobs := &fakeJobs{}
+	enabled := true
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{Enabled: &enabled}, nil
+		},
+		credentialLookup: &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID:       uuid.New(),
+				OrgID:    orgID,
+				Provider: models.ProviderLinear,
+				Config:   models.LinearConfig{AppUserID: "app_user_expected"},
+				Status:   "active",
+			},
+		},
+		featureEnabled: true,
+	}
+
+	body := []byte(`{"type":"AgentSessionEvent","action":"created","appUserId":"app_user_other","payload":{"agentSession":{"id":"as_1","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`)
+	res := d.Dispatch(context.Background(), &models.Integration{
+		ID:     integrationID,
+		OrgID:  orgID,
+		Config: json.RawMessage(`{"workspace_id":"workspace_1"}`),
+	}, LinearAgentEventAgentSession, body, nil)
+
+	require.Equal(t, "ignored", res.Status, "dispatcher should ignore events addressed to a different stored Linear app user")
+	require.Empty(t, jobs.calls, "dispatcher should not enqueue jobs for a mismatched Linear app user")
+	require.NoError(t, mock.ExpectationsWereMet(), "app-user mismatch should short-circuit before touching agent session rows")
 }
 
 func TestLinearAgentDispatcher_UsesParsedEnvelopeWhenProvided(t *testing.T) {
