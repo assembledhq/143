@@ -43,6 +43,8 @@ var promptedAwaitingCreateDeadline = 2 * time.Minute
 // idle/resume path and atomically enqueues continue_session.
 var promptedAppendRaceBackoff = 500 * time.Millisecond
 
+var errPromptedMessageAlreadyProcessed = errors.New("linear_agent_event: prompted comment already processed")
+
 // handleLinearAgentPrompted processes a `prompted` AgentSessionEvent.
 // Linear delivers this when a follow-up @mention or comment lands on an
 // issue whose AgentSession is already alive. We turn-append the comment
@@ -154,7 +156,11 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	if err != nil {
 		appendState, stateErr := deps.Stores.Sessions.GetMessageAppendState(ctx, orgID, sessionID)
 		if stateErr == nil && appendState.Status == string(models.SessionStatusRunning) {
-			return appendPromptedMessageToRunningSession(ctx, deps, orgID, appendState, payload, commentBody, logger)
+			err := appendPromptedMessageToRunningSession(ctx, deps, orgID, row.ID, appendState, payload, commentBody, logger)
+			if errors.Is(err, errPromptedMessageAlreadyProcessed) {
+				return nil
+			}
+			return err
 		}
 		if stateErr != nil {
 			return fmt.Errorf("inspect session append state for prompted turn: %w", stateErr)
@@ -186,7 +192,7 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		Role:       models.MessageRoleUser,
 		Content:    commentBody,
 	}
-	if err := appendPromptedMessageAndEnqueueContinue(ctx, deps.Stores, orgID, session, msg); err != nil {
+	if err := appendPromptedMessageAndEnqueueContinue(ctx, deps.Stores, orgID, row.ID, payload.LinearCommentID, session, msg); err != nil {
 		// Best-effort revert: the session is now claimed (running) but
 		// we couldn't atomically persist the message and queue the
 		// continuation. Restore the pre-claim status so terminal or paused
@@ -194,6 +200,9 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 		if updateErr := deps.Stores.Sessions.UpdateStatus(ctx, orgID, sessionID, revertStatus); updateErr != nil {
 			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).
 				Msg("prompted: failed to revert session status after append/enqueue failure")
+		}
+		if errors.Is(err, errPromptedMessageAlreadyProcessed) {
+			return nil
 		}
 		return err
 	}
@@ -244,7 +253,7 @@ func emitPromptedAwaitingCreatedTimeout(ctx context.Context, deps LinearAgentEve
 	return agentSessions.SetState(ctx, orgID, row.ID, models.LinearAgentSessionStateError)
 }
 
-func appendPromptedMessageAndEnqueueContinue(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session, msg *models.SessionMessage) error {
+func appendPromptedMessageAndEnqueueContinue(ctx context.Context, stores *Stores, orgID, agentSessionRowID uuid.UUID, linearCommentID string, session models.Session, msg *models.SessionMessage) error {
 	if stores == nil || stores.Sessions == nil {
 		return errors.New("sessions store unavailable")
 	}
@@ -266,6 +275,13 @@ func appendPromptedMessageAndEnqueueContinue(ctx context.Context, stores *Stores
 		_ = tx.Rollback(ctx)
 	}()
 
+	inserted, err := db.NewLinearAgentPromptedMessageStore(tx).Reserve(ctx, orgID, agentSessionRowID, session.ID, linearCommentID)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return errPromptedMessageAlreadyProcessed
+	}
 	if err := db.NewSessionMessageStore(tx).Create(ctx, msg); err != nil {
 		return fmt.Errorf("create session message: %w", err)
 	}
@@ -341,6 +357,7 @@ func appendPromptedMessageToRunningSession(
 	ctx context.Context,
 	deps LinearAgentEventHandlerDeps,
 	orgID uuid.UUID,
+	agentSessionRowID uuid.UUID,
 	appendState db.SessionMessageAppendState,
 	payload linearAgentEventPayload,
 	commentBody string,
@@ -373,6 +390,13 @@ func appendPromptedMessageToRunningSession(
 			Err:        fmt.Errorf("linear_agent_event: prompted append raced with session status %q", lockedState.Status),
 			RetryAfter: &promptedAppendRaceBackoff,
 		}
+	}
+	inserted, err := db.NewLinearAgentPromptedMessageStore(tx).Reserve(ctx, orgID, agentSessionRowID, lockedState.ID, payload.LinearCommentID)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return errPromptedMessageAlreadyProcessed
 	}
 
 	msg := &models.SessionMessage{

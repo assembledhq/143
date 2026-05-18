@@ -374,6 +374,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Jobs:           jobStore,
 		Metrics:        linearAgentMetrics,
 		FeatureEnabled: cfg.LinearAgentEnabled,
+		Credentials:    credentialStore,
 		SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
 		ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
 			return linearService.ClientForOrg(ctx, orgID)
