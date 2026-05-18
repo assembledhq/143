@@ -92,4 +92,12 @@ describe("AutopilotPageContent", () => {
     expect(table).not.toHaveClass("table-fixed");
     expect(await screen.findByText("Source")).toBeInTheDocument();
   });
+
+  it("keeps the queue table header sticky while the issue rows scroll", async () => {
+    renderWithProviders(<AutopilotPageContent />);
+
+    const sourceHeader = await screen.findByText("Source");
+    const tableHeader = sourceHeader.closest("thead");
+    expect(tableHeader).toHaveClass("sticky", "top-0", "z-10", "bg-card");
+  });
 });
