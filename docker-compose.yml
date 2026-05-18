@@ -33,7 +33,10 @@ services:
     restart: on-failure:3
     working_dir: /app
     command: >
-      sh -c "go install github.com/air-verse/air@latest &&
+      sh -c "apt-get update &&
+             apt-get install -y --no-install-recommends libheif-examples &&
+             rm -rf /var/lib/apt/lists/* &&
+             go install github.com/air-verse/air@latest &&
              go run cmd/migrate/main.go up &&
              air"
     depends_on:

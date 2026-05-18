@@ -1810,7 +1810,7 @@ function SessionComposer({
             <input
               ref={uploadInputRef}
               type="file"
-              accept="image/*,.pdf,.txt,.md,.json,.csv"
+              accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
               multiple
               className="hidden"
               onChange={onUpload}
