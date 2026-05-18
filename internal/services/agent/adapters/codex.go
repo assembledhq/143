@@ -102,7 +102,7 @@ func buildCodexPromptContent(prompt *agent.AgentPrompt) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, userPrompt), nil
+	return composeFreshExecPrompt(prompt.SystemPrompt, userPrompt), nil
 }
 
 func appendCodexHumanInputAnswer(message string, answer *agent.HumanInputAnswer) (string, error) {
