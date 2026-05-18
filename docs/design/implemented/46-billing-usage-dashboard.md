@@ -127,7 +127,9 @@ No schema change to `container_usage_events` needed — the session → user lin
 
 The `total_cost_usd` from agent output reflects the **raw API provider cost** (what Anthropic/OpenAI charges per token). This is useful as a relative measure ("Alice uses 3x more than Bob") but doesn't represent what a subscription-plan user is actually billed.
 
-**Approach:** Display cost as "Estimated API cost" with a tooltip: *"Estimated cost at standard provider rates. Your actual billing may differ based on your plan."* This is accurate for pay-as-you-go users and still useful for subscription users as a consumption signal. The column header in the breakdown table reads "Est. cost" to keep it compact.
+**Approach:** Display cost as "Estimated API cost" with a tooltip: *"Estimated cost at standard provider rates. Your actual billing may differ based on your plan."* This is accurate for pay-as-you-go users and still useful for subscription users as a consumption signal. The column header in the breakdown table reads "Est. API cost" so it is explicit that the value is not an invoice amount.
+
+If a row has LLM tokens but no computed USD cost, the UI must show the cost as unavailable rather than `$0.00`. A zero in the rollup can mean "no normalized USD was reported or safely derived" for subscription/native-credit runs, not that the run was free. Very small positive USD costs should render as `<$0.01` instead of being rounded down to zero.
 
 When actual billing integration exists (Stripe, etc.), we can add a "Billed cost" column that reflects the real charge. Until then, estimated API cost is the best signal we have and is strictly more useful than showing nothing.
 

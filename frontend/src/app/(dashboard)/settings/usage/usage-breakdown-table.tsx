@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatCost, formatMinutes, formatNumber, formatTokenCount } from "./usage-helpers";
+import { formatEstimatedCost, formatMinutes, formatNumber, formatTokenCount } from "./usage-helpers";
 import { cn } from "@/lib/utils";
 
 export type UsageBreakdownDimension = "user" | "capacity" | "agent" | "model" | "reasoning";
@@ -96,7 +96,7 @@ export function UsageBreakdownTable({ start, end, dimension, filters, onRowClick
                   <TableHead className="text-right text-xs">Minutes / Session</TableHead>
                   <TableHead className="text-right text-xs">Total Tokens</TableHead>
                   <TableHead className="text-right text-xs">Tokens / Session</TableHead>
-                  <TableHead className="text-right text-xs">Est. Cost</TableHead>
+                  <TableHead className="text-right text-xs">Est. API Cost</TableHead>
                   <TableHead className="pr-4 text-right text-xs">Share of Tokens</TableHead>
                 </TableRow>
               </TableHeader>
@@ -118,7 +118,7 @@ export function UsageBreakdownTable({ start, end, dimension, filters, onRowClick
                       <TableCell className="text-right text-[13px] tabular-nums">{formatMinutes(minutesPerSession)}</TableCell>
                       <TableCell className="text-right text-[13px] tabular-nums">{formatTokenCount(row.total_tokens)}</TableCell>
                       <TableCell className="text-right text-[13px] tabular-nums">{formatTokenCount(tokensPerSession)}</TableCell>
-                      <TableCell className="text-right text-[13px] tabular-nums">{formatCost(row.total_llm_cost_usd)}</TableCell>
+                      <TableCell className="text-right text-[13px] tabular-nums">{formatEstimatedCost(row.total_llm_cost_usd, row.total_tokens)}</TableCell>
                       <TableCell className="pr-4 text-right text-[13px] tabular-nums">
                         {shareOfTokens.toFixed(1)}%
                       </TableCell>
