@@ -6058,17 +6058,6 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	return retryResult, retryErr, true
 }
 
-func (o *Orchestrator) blockedContinueAfterRateLimitExhaustion(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandboxCfg SandboxConfig, log zerolog.Logger) error {
-	refreshedEnv := o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
-	authErr := o.env.CheckAuth(session.AgentType, refreshedEnv)
-	if authErr == nil {
-		return nil
-	}
-	logCredentialRateLimitBlocked(log, session, authErr)
-	o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
-	return authErr
-}
-
 func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
 	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
 	if refreshedEnv == nil {

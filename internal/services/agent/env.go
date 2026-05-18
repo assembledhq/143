@@ -187,7 +187,7 @@ type AgentEnvDeps struct {
 	// tests and pre-refresh-flow installs, but those env vars can be stale
 	// for any session that starts within refreshWindow of expiry.
 	LinearTokens LinearTokenResolver
-	Provider     SandboxProvider // required for InjectCodexAuth
+	Provider     SandboxProvider // required for sandbox credential file injection
 	Logger       zerolog.Logger
 }
 
@@ -1447,6 +1447,9 @@ func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UU
 }
 
 func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
+	if e.provider == nil {
+		return false, fmt.Errorf("sandbox provider is required to write claude credentials")
+	}
 	oauthPayload := map[string]interface{}{
 		"accessToken":  sub.AccessToken,
 		"refreshToken": sub.RefreshToken,
@@ -1502,6 +1505,9 @@ func (e *AgentEnv) PrepareClaudeCodeAPIKeyFallback(ctx context.Context, sandbox 
 }
 
 func (e *AgentEnv) RemoveClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
+	if e == nil || e.provider == nil {
+		return fmt.Errorf("sandbox provider is required to remove claude credentials")
+	}
 	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
 	if _, err := e.provider.ReadFile(ctx, sandbox, credsPath); err != nil {
 		if isSandboxFileMissing(err) {

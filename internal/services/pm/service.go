@@ -1,6 +1,7 @@
 package pm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -253,13 +254,7 @@ func (s *Service) executeAgentWithCredentialFallback(
 	}
 
 	s.shedCredentialFailure(ctx, orgID, agentType, result)
-	refreshedEnv := agent.RefreshAgentCredentialEnv(sbCfg.Env, s.env.Resolve(ctx, orgID, agentType, nil), agentType)
-	if refreshedEnv == nil {
-		refreshedEnv = make(map[string]string)
-	}
-	if _, ok := refreshedEnv["HOME"]; !ok {
-		refreshedEnv["HOME"] = sbCfg.HomeDir
-	}
+	refreshedEnv := s.refreshPMCredentialEnv(ctx, orgID, agentType, sbCfg)
 	if authErr := s.finalizeSandboxEnv(agentType, refreshedEnv); authErr != nil {
 		return result, authErr
 	}
@@ -278,18 +273,23 @@ func (s *Service) executeAgentWithCredentialFallback(
 	retryResult, retryErr := adapter.Execute(execCtx, sb, prompt, logCh)
 	if agent.CredentialFailureSignalFromResult(retryResult, time.Now()).RateLimited {
 		s.shedCredentialFailure(ctx, orgID, agentType, retryResult)
-		refreshedEnv = agent.RefreshAgentCredentialEnv(sbCfg.Env, s.env.Resolve(ctx, orgID, agentType, nil), agentType)
-		if refreshedEnv == nil {
-			refreshedEnv = make(map[string]string)
-		}
-		if _, ok := refreshedEnv["HOME"]; !ok {
-			refreshedEnv["HOME"] = sbCfg.HomeDir
-		}
+		refreshedEnv = s.refreshPMCredentialEnv(ctx, orgID, agentType, sbCfg)
 		if authErr := s.finalizeSandboxEnv(agentType, refreshedEnv); authErr != nil {
 			return retryResult, authErr
 		}
 	}
 	return retryResult, retryErr
+}
+
+func (s *Service) refreshPMCredentialEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sbCfg agent.SandboxConfig) map[string]string {
+	refreshedEnv := agent.RefreshAgentCredentialEnv(sbCfg.Env, s.env.Resolve(ctx, orgID, agentType, nil), agentType)
+	if refreshedEnv == nil {
+		refreshedEnv = make(map[string]string)
+	}
+	if _, ok := refreshedEnv["HOME"]; !ok {
+		refreshedEnv["HOME"] = sbCfg.HomeDir
+	}
+	return refreshedEnv
 }
 
 func (s *Service) shedCredentialFailure(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, result *agent.AgentResult) {
@@ -321,7 +321,7 @@ func (s *Service) prepareAgentAuthForRetry(ctx context.Context, orgID uuid.UUID,
 func (s *Service) removeCodexAuthFile(ctx context.Context, sb *agent.Sandbox) error {
 	authPath := path.Join(sb.HomeDir, ".codex", "auth.json")
 	cmd := fmt.Sprintf("rm -f '%s'", pmShellEscapeSingleQuote(authPath))
-	var stdout, stderr syncBuffer
+	var stdout, stderr bytes.Buffer
 	exitCode, err := s.sandbox.Exec(ctx, sb, cmd, &stdout, &stderr)
 	if err != nil {
 		return fmt.Errorf("remove stale codex auth: %w", err)
@@ -330,24 +330,6 @@ func (s *Service) removeCodexAuthFile(ctx context.Context, sb *agent.Sandbox) er
 		return fmt.Errorf("remove stale codex auth: exited with code %d: %s", exitCode, stderr.String())
 	}
 	return nil
-}
-
-type syncBuffer struct {
-	mu sync.Mutex
-	b  []byte
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.b = append(b.b, p...)
-	return len(p), nil
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return string(b.b)
 }
 
 func pmShellEscapeSingleQuote(s string) string {
