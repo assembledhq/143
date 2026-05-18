@@ -87,6 +87,7 @@ import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
+import { useFileDropzone } from "@/hooks/use-file-dropzone";
 import {
   COMPOSER_TRIGGER_SPECS,
   findActiveTrigger,
@@ -1328,6 +1329,18 @@ function SessionComposer({
     });
   }
 
+  const fileDropzone = useFileDropzone({
+    enabled: canSendMessage,
+    onFilesDropped: onPasteFiles,
+    onAfterDrop: () => {
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+      });
+    },
+  });
+
   const firstError = uploadError || sendError;
   const errorMessage = typeof firstError === "string"
     ? firstError
@@ -1461,7 +1474,12 @@ function SessionComposer({
         <div
           ref={composerInputSurfaceRef}
           data-testid="session-composer-input-surface"
-          className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}
+          {...fileDropzone.dropzoneProps}
+          className={cn(
+            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
+            fileDropzone.isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
+          )}
         >
           {openComments.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
