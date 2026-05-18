@@ -1,11 +1,16 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,19 +25,25 @@ import (
 // maxUploadSize is the maximum allowed file size (10 MB).
 const maxUploadSize = 10 << 20
 
-// allowedImageTypes are the MIME types accepted for upload.
+// allowedUploadTypes are the MIME types accepted for upload.
 var allowedUploadTypes = map[string]bool{
-	"image/png":        true,
-	"image/jpeg":       true,
-	"image/gif":        true,
-	"image/webp":       true,
-	"image/svg+xml":    true,
-	"application/pdf":  true,
-	"text/plain":       true,
-	"text/markdown":    true,
-	"text/csv":         true,
-	"application/json": true,
+	"image/png":           true,
+	"image/jpeg":          true,
+	"image/gif":           true,
+	"image/webp":          true,
+	"image/heic":          true,
+	"image/heif":          true,
+	"image/heic-sequence": true,
+	"image/heif-sequence": true,
+	"image/svg+xml":       true,
+	"application/pdf":     true,
+	"text/plain":          true,
+	"text/markdown":       true,
+	"text/csv":            true,
+	"application/json":    true,
 }
+
+type heicConverterFunc func(context.Context, []byte) ([]byte, error)
 
 // uploadMembershipStore is the subset of OrganizationMembershipStore that
 // ServeUpload needs to authorize file reads. Defined as an interface so tests
@@ -43,13 +54,14 @@ type uploadMembershipStore interface {
 
 // UploadHandler handles file uploads to object storage.
 type UploadHandler struct {
-	store       storage.UploadStore
-	memberships uploadMembershipStore
+	store         storage.UploadStore
+	memberships   uploadMembershipStore
+	heicConverter heicConverterFunc
 }
 
 // NewUploadHandler creates an UploadHandler backed by the given store.
 func NewUploadHandler(store storage.UploadStore) *UploadHandler {
-	return &UploadHandler{store: store}
+	return &UploadHandler{store: store, heicConverter: convertHEICToJPEGWithCommand}
 }
 
 // SetMembershipStore wires the membership store used by ServeUpload to
@@ -93,6 +105,7 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	// Normalize content type (strip charset params).
 	baseType := strings.Split(contentType, ";")[0]
 	baseType = strings.TrimSpace(baseType)
+	baseType = normalizeUploadContentType(baseType, header.Filename)
 
 	if !allowedUploadTypes[baseType] {
 		writeError(w, r, http.StatusBadRequest, "INVALID_FILE_TYPE",
@@ -106,6 +119,32 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	if ext == "" {
 		ext = extensionFromMIME(baseType)
 	}
+	reader := io.Reader(file)
+	fileName := header.Filename
+	if isHEICUpload(baseType) {
+		data, err := io.ReadAll(io.LimitReader(file, maxUploadSize+1))
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "failed to read uploaded HEIC file", err)
+			return
+		}
+		if len(data) > maxUploadSize {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "file size exceeds 10MB limit")
+			return
+		}
+		converted, err := h.heicConverter(r.Context(), data)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "HEIC_CONVERSION_FAILED", "failed to convert HEIC image to JPEG", err)
+			return
+		}
+		if len(converted) > maxUploadSize {
+			writeError(w, r, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "converted file size exceeds 10MB limit")
+			return
+		}
+		reader = bytes.NewReader(converted)
+		baseType = "image/jpeg"
+		ext = ".jpg"
+		fileName = replaceExtension(header.Filename, ".jpg")
+	}
 	now := time.Now().UTC()
 	key := fmt.Sprintf("%s/%s/%s%s",
 		orgID.String(),
@@ -114,7 +153,7 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		ext,
 	)
 
-	url, err := h.store.Save(r.Context(), key, file, baseType)
+	url, err := h.store.Save(r.Context(), key, reader, baseType)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPLOAD_FAILED", "failed to store file", err)
 		return
@@ -122,7 +161,7 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"url":          url,
-		"file_name":    header.Filename,
+		"file_name":    fileName,
 		"content_type": baseType,
 	})
 }
@@ -187,6 +226,14 @@ func extensionFromMIME(mime string) string {
 		return ".gif"
 	case "image/webp":
 		return ".webp"
+	case "image/heic":
+		return ".heic"
+	case "image/heif":
+		return ".heif"
+	case "image/heic-sequence":
+		return ".heic"
+	case "image/heif-sequence":
+		return ".heif"
 	case "image/svg+xml":
 		return ".svg"
 	case "application/pdf":
@@ -202,4 +249,74 @@ func extensionFromMIME(mime string) string {
 	default:
 		return ""
 	}
+}
+
+func isHEICUpload(contentType string) bool {
+	return contentType == "image/heic" ||
+		contentType == "image/heif" ||
+		contentType == "image/heic-sequence" ||
+		contentType == "image/heif-sequence"
+}
+
+func normalizeUploadContentType(contentType, fileName string) string {
+	if contentType == "application/octet-stream" {
+		switch strings.ToLower(path.Ext(fileName)) {
+		case ".heic":
+			return "image/heic"
+		case ".heif":
+			return "image/heif"
+		}
+	}
+	return contentType
+}
+
+func replaceExtension(name, ext string) string {
+	base := strings.TrimSuffix(name, path.Ext(name))
+	if base == "" {
+		base = "upload"
+	}
+	return base + ext
+}
+
+func convertHEICToJPEGWithCommand(ctx context.Context, body []byte) ([]byte, error) {
+	tmpDir, err := os.MkdirTemp("", "143-heic-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	inputPath := filepath.Join(tmpDir, "input.heic")
+	outputPath := filepath.Join(tmpDir, "output.jpg")
+	if err := os.WriteFile(inputPath, body, 0o600); err != nil {
+		return nil, fmt.Errorf("write temp HEIC: %w", err)
+	}
+
+	if err := runHEICConverter(ctx, inputPath, outputPath); err != nil {
+		return nil, err
+	}
+
+	converted, err := os.ReadFile(outputPath) // #nosec G304 -- outputPath is created under tmpDir by this function and is not user-controlled
+	if err != nil {
+		return nil, fmt.Errorf("read converted JPEG: %w", err)
+	}
+	if len(converted) == 0 {
+		return nil, fmt.Errorf("converted JPEG is empty")
+	}
+	return converted, nil
+}
+
+func runHEICConverter(ctx context.Context, inputPath, outputPath string) error {
+	return runHEICConverterWithLookPath(ctx, inputPath, outputPath, exec.LookPath)
+}
+
+func runHEICConverterWithLookPath(ctx context.Context, inputPath, outputPath string, lookPath func(string) (string, error)) error {
+	if _, err := lookPath("heif-convert"); err != nil {
+		return fmt.Errorf("missing HEIC converter: install heif-convert")
+	}
+	cmd := exec.CommandContext(ctx, "heif-convert", inputPath, outputPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("heif-convert failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
