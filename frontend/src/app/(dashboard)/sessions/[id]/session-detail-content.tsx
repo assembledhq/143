@@ -75,7 +75,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
@@ -2652,7 +2651,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
-  const [reviewPopoverOpen, setReviewPopoverOpen] = useState(false);
+  const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
   const [reviewPasses, setReviewPasses] = useState(2);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
@@ -3356,6 +3355,13 @@ export function SessionDetailContent({ id }: { id: string }) {
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
+  const reviewUnavailableReason = reviewLoopRunning
+    ? "Review loop is running"
+    : !hasSnapshot
+      ? "A reusable sandbox snapshot is required before review"
+      : isRunning
+        ? "Review can start after the current turn finishes"
+        : undefined;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -3420,7 +3426,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }),
     onSuccess: (response) => {
       toast.success("Review loop started");
-      setReviewPopoverOpen(false);
+      setReviewSetupOpen(false);
       const reviewThread = buildReviewLoopThreadPreview(response.data, session);
       if (reviewThread) {
         setPendingThreadPreview(reviewThread);
@@ -3447,6 +3453,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(msg);
     },
   });
+  const reviewActionDisabled = !canStartReviewLoop || startReviewLoopMutation.isPending;
+  const reviewActionDisabledReason = startReviewLoopMutation.isPending
+    ? "Starting review loop..."
+    : reviewUnavailableReason;
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -4645,108 +4655,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
-            {canManageSession && canUseNativeReviewLoop ? (
-              <Popover
-                open={reviewPopoverOpen}
-                onOpenChange={(open) => setReviewPopoverOpen(open && canStartReviewLoop && !startReviewLoopMutation.isPending)}
-              >
-                <DisabledTooltip
-                  disabled={!canStartReviewLoop || startReviewLoopMutation.isPending}
-                  content={
-                    reviewLoopRunning
-                      ? "Review loop is running"
-                      : !hasSnapshot
-                        ? "A reusable sandbox snapshot is required before review"
-                        : isRunning
-                          ? "Review can start after the current turn finishes"
-                          : "Start a review loop"
-                  }
-                >
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs gap-1.5"
-                      disabled={!canStartReviewLoop || startReviewLoopMutation.isPending}
-                    >
-                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <ClipboardList className="h-3 w-3" />
-                      )}
-                      Review
-                    </Button>
-                  </PopoverTrigger>
-                </DisabledTooltip>
-                <PopoverContent align="end" className="w-72 space-y-3 p-3">
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">Review this work</p>
-                    <p className="text-xs text-muted-foreground">
-                      Run the agent review before you ship more changes.
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="review-pass-count">Review passes</Label>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        className="h-8 w-8 shrink-0"
-                        aria-label="Decrease review passes"
-                        disabled={reviewPasses <= 1 || startReviewLoopMutation.isPending}
-                        onClick={() => setReviewPasses((current) => Math.max(1, current - 1))}
-                      >
-                        <Minus className="h-3.5 w-3.5" />
-                      </Button>
-                      <Input
-                        id="review-pass-count"
-                        aria-label="Review passes"
-                        type="number"
-                        min={1}
-                        max={5}
-                        value={reviewPasses}
-                        disabled={startReviewLoopMutation.isPending}
-                        onChange={(event) => {
-                          const next = Number.parseInt(event.target.value, 10);
-                          if (Number.isNaN(next)) {
-                            setReviewPasses(1);
-                            return;
-                          }
-                          setReviewPasses(Math.min(5, Math.max(1, next)));
-                        }}
-                        className="h-8 text-center"
-                      />
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        className="h-8 w-8 shrink-0"
-                        aria-label="Increase review passes"
-                        disabled={reviewPasses >= 5 || startReviewLoopMutation.isPending}
-                        onClick={() => setReviewPasses((current) => Math.min(5, current + 1))}
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="w-full gap-1.5"
-                    disabled={!canStartReviewLoop || startReviewLoopMutation.isPending}
-                    onClick={() => startReviewLoopMutation.mutate()}
-                  >
-                    {startReviewLoopMutation.isPending ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <ClipboardList className="h-3.5 w-3.5" />
-                    )}
-                    Start review
-                  </Button>
-                </PopoverContent>
-              </Popover>
-            ) : null}
             {hasPR && prData?.data?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
@@ -4832,6 +4740,44 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          {canManageSession && canUseNativeReviewLoop ? (
+            <Card className="border-border/60">
+              <CardContent className="p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                        <ClipboardList className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-foreground">Review this work</p>
+                        <p className="text-xs text-muted-foreground">
+                          Run the current agent&apos;s review loop in this sandbox before shipping.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full gap-1.5 sm:w-auto"
+                      disabled={reviewActionDisabled}
+                      onClick={() => setReviewSetupOpen(true)}
+                    >
+                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <ClipboardList className="h-3.5 w-3.5" />
+                      )}
+                      Review this work
+                    </Button>
+                  </DisabledTooltip>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
@@ -5236,6 +5182,104 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
+      <Dialog open={reviewSetupOpen} onOpenChange={setReviewSetupOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Review this work</DialogTitle>
+            <DialogDescription>
+              Run the selected agent&apos;s native review loop in this session&apos;s sandbox. The loop opens a dedicated review tab and keeps changes on the same branch.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-lg border border-border bg-muted/30 p-3">
+              <div className="flex items-start gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground">
+                  <ClipboardList className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 space-y-1">
+                  <p className="text-sm font-medium text-foreground">
+                    {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Reviews the current working tree, fixes findings, and stops early if the follow-up pass is clean.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="review-pass-count">Review passes</Label>
+                <span className="text-xs text-muted-foreground">2 is the standard pass</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  aria-label="Decrease review passes"
+                  disabled={reviewPasses <= 1 || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.max(1, current - 1))}
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </Button>
+                <Input
+                  id="review-pass-count"
+                  aria-label="Review passes"
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={reviewPasses}
+                  disabled={startReviewLoopMutation.isPending}
+                  onChange={(event) => {
+                    const next = Number.parseInt(event.target.value, 10);
+                    if (Number.isNaN(next)) {
+                      setReviewPasses(1);
+                      return;
+                    }
+                    setReviewPasses(Math.min(5, Math.max(1, next)));
+                  }}
+                  className="h-9 text-center"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  aria-label="Increase review passes"
+                  disabled={reviewPasses >= 5 || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.min(5, current + 1))}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={startReviewLoopMutation.isPending}
+              onClick={() => setReviewSetupOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="gap-1.5"
+              disabled={reviewActionDisabled}
+              onClick={() => startReviewLoopMutation.mutate()}
+            >
+              {startReviewLoopMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ClipboardList className="h-3.5 w-3.5" />
+              )}
+              Start review
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {session.agent_type !== "pm_agent" ? (
         <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
           <SheetContent
