@@ -29,6 +29,7 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
+	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
 }
 
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {
@@ -65,6 +66,9 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 			"severity": 0.30,
 			"recency": 0.15,
 			"revenue_risk": 0.15
+		},
+		"builder_permissions": {
+			"require_review_before_pr": false
 		}
 	}`)
 
@@ -91,6 +95,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 0.30, s.PriorityWeights.Severity, "should override severity")
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
 	require.Equal(t, 0.15, s.PriorityWeights.RevenueRisk, "should override revenue_risk")
+	require.False(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "should allow admins to disable builder review requirement")
 }
 
 func TestParseOrgSettings_PartialOverride(t *testing.T) {
