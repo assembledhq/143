@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -158,6 +159,7 @@ func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID
 func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, orgIDScope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var candidates []models.DecryptedCodingCredential
 	for _, provider := range providers {
 		for _, cred := range m.resolvable[provider] {
 			if cred.Status != models.CodingCredentialStatusActive {
@@ -169,9 +171,26 @@ func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, or
 			if limit, ok := m.rateLimitedIDs[cred.ID]; ok && limit.Until.After(time.Now()) {
 				continue
 			}
-			picked := cred
-			return &picked, nil
+			candidates = append(candidates, cred)
 		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftPersonal := candidates[i].UserID != nil
+		rightPersonal := candidates[j].UserID != nil
+		if leftPersonal != rightPersonal {
+			return leftPersonal
+		}
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+		}
+		return false
+	})
+	if len(candidates) > 0 {
+		picked := candidates[0]
+		return &picked, nil
 	}
 	return nil, errors.New("all eligible coding credentials are currently shed")
 }
@@ -1504,6 +1523,117 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeAmp
+
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	d.issues.issue = issue
+
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
+		if len(seenKeys) == 1 {
+			return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+		}
+		return &agent.AgentResult{
+			Diff:            "--- a/main.go\n+++ b/main.go",
+			Summary:         "completed with fallback",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should retry with a fallback credential after a rate-limit result")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "RunAgent should refresh agent credentials before retrying")
+	require.Len(t, d.sessions.getResultUpdates(), 1, "RunAgent should persist one successful result after fallback retry")
+}
+
+func TestRunAgent_RateLimitFallbackExhaustionFailsWithBlockedAuth(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeAmp
+
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	codingCreds := &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
+	d.codingCreds = codingCreds
+	d.issues.issue = issue
+
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
+		return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when every fallback credential is rate limited")
+	require.Contains(t, err.Error(), "all Amp auths are rate limited", "RunAgent should return the clear blocked-auth message")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "RunAgent should try the next credential before blocking")
+	require.Contains(t, codingCreds.rateLimitedIDs, firstCredID, "RunAgent should mark the first credential rate-limited")
+	require.Contains(t, codingCreds.rateLimitedIDs, secondCredID, "RunAgent should mark the fallback credential rate-limited")
 }
 
 func TestRunAgent_MaterializesUploadedAttachments(t *testing.T) {
@@ -7456,6 +7586,75 @@ func TestRunAgent_CodexTokenExpiredRetryKeepsTriggeredUserScope(t *testing.T) {
 	tokens, ok := authJSON["tokens"].(map[string]interface{})
 	require.True(t, ok, "auth.json should contain tokens after retry injection")
 	require.Equal(t, "personal-access", tokens["access_token"], "retry injection should use the triggering user's personal subscription")
+}
+
+func TestRunAgent_CodexSubscriptionUsageLimitRetriesWithFallbackCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	subCredID := uuid.New()
+	apiCredID := uuid.New()
+	codingCreds := &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAISubscription: {
+				{
+					ID:        subCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderOpenAISubscription,
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+					Config: models.OpenAISubscriptionConfig{
+						AccessToken:  "sub-access",
+						RefreshToken: "sub-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+			models.ProviderOpenAI: {
+				{
+					ID:        apiCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderOpenAI,
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+					Config:    models.OpenAIConfig{APIKey: "sk-fallback"},
+				},
+			},
+		},
+	}
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil
+	d.codingCreds = codingCreds
+
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["OPENAI_API_KEY"])
+		if len(seenKeys) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:50 AM.",
+			}, errors.New("usage limit")
+		}
+		return &agent.AgentResult{
+			Diff:            "--- a/main.go\n+++ b/main.go",
+			Summary:         "codex fallback succeeded",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should retry Codex with the fallback credential after a subscription usage-limit result")
+	require.Equal(t, []string{"", "sk-fallback"}, seenKeys, "RunAgent should move from subscription auth.json to the OpenAI API-key fallback in the same attempt")
+	require.Contains(t, codingCreds.rateLimitedIDs, subCredID, "RunAgent should mark the subscription credential rate-limited after usage-limit output")
+	require.NotContains(t, codingCreds.rateLimitedIDs, apiCredID, "RunAgent should not mark the successful API-key fallback rate-limited")
 }
 
 func TestRunAgent_CancelReturnsToIdle(t *testing.T) {

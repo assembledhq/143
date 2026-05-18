@@ -100,7 +100,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -316,7 +316,15 @@ func padWorkerIdentityNils(row []any) []any {
 	if len(row) >= len(workerSessionColumns) {
 		return row
 	}
-	if len(row) != len(workerSessionColumns)-6 {
+	if len(row) == len(workerSessionColumns)-3 {
+		const branchCreationStateIndex = 76
+		padded := make([]any, 0, len(workerSessionColumns))
+		padded = append(padded, row[:branchCreationStateIndex]...)
+		padded = append(padded, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
+		padded = append(padded, row[branchCreationStateIndex:]...)
+		return padded
+	}
+	if len(row) != len(workerSessionColumns)-9 {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
@@ -338,10 +346,16 @@ func padWorkerIdentityNils(row []any) []any {
 	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
 	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
 
+	const branchCreationStateIndex = prPushStateIndex + 2
+	withBranch := make([]any, 0, len(withPRPush)+3)
+	withBranch = append(withBranch, withPRPush[:branchCreationStateIndex]...)
+	withBranch = append(withBranch, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
+	withBranch = append(withBranch, withPRPush[branchCreationStateIndex:]...)
+
 	padded := make([]any, 0, len(workerSessionColumns))
-	padded = append(padded, withPRPush[:len(withPRPush)-1]...)
+	padded = append(padded, withBranch[:len(withBranch)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, withPRPush[len(withPRPush)-1])
+	padded = append(padded, withBranch[len(withBranch)-1])
 	return padded
 }
 
@@ -1629,6 +1643,7 @@ type mockPMService struct {
 
 type stubPRService struct {
 	createPRFn                func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	createBranchFn            func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	pushChangesToPRFn         func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
@@ -1638,6 +1653,13 @@ type stubPRService struct {
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
 	if s.createPRFn != nil {
 		return s.createPRFn(ctx, run, params...)
+	}
+	return nil, nil
+}
+
+func (s *stubPRService) CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error) {
+	if s.createBranchFn != nil {
+		return s.createBranchFn(ctx, run, params...)
 	}
 	return nil, nil
 }
@@ -2130,6 +2152,48 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	err := handler(context.Background(), "open_pr", payload)
 
 	require.NoError(t, err, "open_pr handler should succeed when PR creation succeeds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCreateBranchHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-create-branch-success"
+	branchURL := "https://github.com/acme/repo/tree/143/session/branch"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+
+	called := false
+	services := &Services{
+		PR: &stubPRService{
+			createBranchFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error) {
+				called = true
+				require.Equal(t, sessionID, run.ID, "create_branch should pass the fetched session into PRService")
+				return &ghservice.CreateBranchResult{Name: "143/session/branch", URL: branchURL, HeadSHA: strings.Repeat("a", 40)}, nil
+			},
+		},
+	}
+
+	handler := newCreateBranchHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "create_branch", payload)
+
+	require.NoError(t, err, "create_branch handler should succeed when branch creation succeeds")
+	require.True(t, called, "create_branch handler should invoke PRService.CreateBranch")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

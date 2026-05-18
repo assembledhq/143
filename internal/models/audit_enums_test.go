@@ -45,6 +45,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "session.created is valid", value: AuditActionSessionCreated},
+		{name: "session.branch_requested is valid", value: AuditActionSessionBranchRequested},
 		{name: "project.started is valid", value: AuditActionProjectStarted},
 		{name: "auth.login is valid", value: AuditActionAuthLogin},
 		{name: "team.member_invited is valid", value: AuditActionTeamMemberInvited},

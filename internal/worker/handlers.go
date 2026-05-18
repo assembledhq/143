@@ -215,6 +215,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
+		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
@@ -308,6 +309,7 @@ type MemoryReinforcer interface {
 
 type prCreator interface {
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
@@ -1814,6 +1816,78 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
+		}
+		return nil
+	}
+}
+
+// create_branch pushes a completed session snapshot to GitHub without opening
+// a pull request, so a human can fetch and test the branch locally.
+func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			SessionID  string `json:"session_id"`
+			OrgID      string `json:"org_id"`
+			AuthorMode string `json:"author_mode,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal create_branch payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		runID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("fetch session: %w", err)
+		}
+		if stores.SessionIssueLinks != nil {
+			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("hydrate linked issues for create_branch: %w", err)
+			}
+			run.LinkedIssues = links
+		}
+
+		logger.Info().
+			Str("session_id", runID.String()).
+			Str("org_id", orgID.String()).
+			Msg("starting create_branch job")
+
+		if err := stores.Sessions.UpdateBranchCreationState(ctx, orgID, runID, models.BranchCreationStatePushing, "", nil); err != nil {
+			logger.Error().Err(err).Msg("failed to mark branch creation as pushing")
+		}
+
+		var params []ghservice.CreatePRParams
+		if input.AuthorMode != "" {
+			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+		}
+
+		branch, branchErr := services.PR.CreateBranch(ctx, &run, params...)
+		if branchErr != nil {
+			if errors.Is(branchErr, ghservice.ErrNoChanges) {
+				logger.Info().Str("session_id", runID.String()).Msg("create_branch: no changes to push")
+			} else {
+				logger.Error().Err(branchErr).Str("session_id", runID.String()).Msg("create_branch failed")
+			}
+			msg := userFacingPRError(branchErr)
+			if stateErr := stores.Sessions.UpdateBranchCreationState(ctx, orgID, runID, models.BranchCreationStateFailed, msg, nil); stateErr != nil {
+				logger.Error().Err(stateErr).Msg("failed to mark branch creation as failed")
+			}
+			if shouldDeadLetterPRError(branchErr) {
+				return &FatalError{Err: branchErr}
+			}
+			return branchErr
+		}
+
+		if stateErr := stores.Sessions.UpdateBranchCreationState(ctx, orgID, runID, models.BranchCreationStateSucceeded, "", &branch.URL); stateErr != nil {
+			logger.Error().Err(stateErr).Msg("failed to mark branch creation as succeeded")
 		}
 		return nil
 	}
