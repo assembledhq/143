@@ -3,10 +3,11 @@ import {
   formatDuration,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
+  hasCleanReviewLoopForSnapshot,
   invalidateSessionHumanInputRequests,
   trackInFlightAgentUpdate,
 } from "./session-detail-content";
-import type { SessionThread } from "@/lib/types";
+import type { SessionReviewLoop, SessionThread } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
@@ -99,6 +100,38 @@ describe("getInitialComposerSelectedModel", () => {
 
   it("uses the default composer selection when the created thread has no override", () => {
     expect(getInitialComposerSelectedModel(baseThread)).toBe("");
+  });
+});
+
+describe("hasCleanReviewLoopForSnapshot", () => {
+  const baseLoop: SessionReviewLoop = {
+    id: "loop-1",
+    org_id: "org-1",
+    session_id: "session-1",
+    status: "clean",
+    source: "manual",
+    agent_type: "codex",
+    max_passes: 2,
+    completed_passes: 1,
+    review_required: false,
+    started_at: "2026-01-01T00:00:00.000Z",
+    completed_at: "2026-01-01T00:01:00.000Z",
+  };
+
+  it("requires a clean review loop on the current session snapshot", () => {
+    expect(hasCleanReviewLoopForSnapshot([
+      { ...baseLoop, latest_checkpoint_key: "snap-older" },
+      { ...baseLoop, id: "loop-2", status: "failed", latest_checkpoint_key: "snap-current" },
+    ], "snap-current")).toBe(false);
+
+    expect(hasCleanReviewLoopForSnapshot([
+      { ...baseLoop, latest_checkpoint_key: "snap-current" },
+    ], "snap-current")).toBe(true);
+  });
+
+  it("does not allow missing snapshot or missing review checkpoint", () => {
+    expect(hasCleanReviewLoopForSnapshot([{ ...baseLoop, latest_checkpoint_key: undefined }], "snap-current")).toBe(false);
+    expect(hasCleanReviewLoopForSnapshot([{ ...baseLoop, latest_checkpoint_key: "snap-current" }], undefined)).toBe(false);
   });
 });
 

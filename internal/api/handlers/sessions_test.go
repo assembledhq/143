@@ -138,6 +138,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 	// review-comment store. The store presence is just a feature gate; tx-
 	// scoped instances are created on demand inside the handler.
 	h.SetReviewCommentStore(db.NewSessionReviewCommentStore(mock))
+	h.SetReviewLoopStore(db.NewSessionReviewLoopStore(mock))
 	return h
 }
 
@@ -161,6 +162,31 @@ var sessionColumns = []string{
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+}
+
+var reviewLoopColumns = []string{
+	"id", "org_id", "session_id", "automation_run_id", "thread_id",
+	"status", "source", "agent_type", "max_passes", "completed_passes", "review_required",
+	"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
+	"latest_summary", "started_by_user_id", "started_at", "completed_at",
+}
+
+func reviewLoopRow(loopID, sessionID uuid.UUID, status, source string) []any {
+	return reviewLoopRowWithLatestCheckpoint(loopID, sessionID, status, source, nil)
+}
+
+func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, source string, latestCheckpointKey *string) []any {
+	now := time.Now()
+	return []any{
+		loopID, uuid.New(), sessionID, nil, nil,
+		status, source, "claude_code", 2, 1, false,
+		nil, nil, nil, latestCheckpointKey,
+		nil, nil, now, &now,
+	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
@@ -6210,6 +6236,129 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		settings       json.RawMessage
+		reviewRows     *pgxmock.Rows
+		expectedStatus int
+		expectedBody   string
+		expectEnqueue  bool
+	}{
+		{
+			name:           "blocks builder when no review loop exists",
+			settings:       json.RawMessage(`{}`),
+			reviewRows:     pgxmock.NewRows(reviewLoopColumns),
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
+		},
+		{
+			name:     "allows builder after clean review loop",
+			settings: json.RawMessage(`{}`),
+			reviewRows: pgxmock.NewRows(reviewLoopColumns).AddRow(
+				reviewLoopRowWithLatestCheckpoint(uuid.New(), uuid.New(), "clean", "manual", ptr("snap-allows-builder-after-clean-review-loop"))...,
+			),
+			expectedStatus: http.StatusAccepted,
+			expectedBody:   `"status":"queued"`,
+			expectEnqueue:  true,
+		},
+		{
+			name:     "blocks builder when clean review loop is for older snapshot",
+			settings: json.RawMessage(`{}`),
+			reviewRows: pgxmock.NewRows(reviewLoopColumns).AddRow(
+				reviewLoopRowWithLatestCheckpoint(uuid.New(), uuid.New(), "clean", "manual", ptr("snap-older-review-loop"))...,
+			),
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
+		},
+		{
+			name:           "allows builder when org disables requirement",
+			settings:       json.RawMessage(`{"builder_permissions":{"require_review_before_pr":false}}`),
+			expectedStatus: http.StatusAccepted,
+			expectedBody:   `"status":"queued"`,
+			expectEnqueue:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			snapshotKey := "snap-" + strings.ReplaceAll(tt.name, " ", "-")
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			issueID := uuid.New()
+			jobID := uuid.New()
+			handler := newSessionHandler(t, mock)
+
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					addSessionRow(pgxmock.NewRows(sessionColumns),
+						sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+						nil, nil, nil, nil,
+						nil, false, &now, &now, nil,
+						nil, nil, nil, false,
+						nil, nil, nil, nil, nil,
+						nil, nil, nil, nil,
+						nil, nil,
+						nil,
+						nil, 0, now, "none", &snapshotKey,
+						nil, nil, nil, nil, nil,
+						nil,
+						nil, nil,
+						nil,
+						"idle", (*string)(nil),
+						nil,
+						now,
+					),
+				)
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+			mock.ExpectQuery("SELECT .+ FROM organizations").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+					AddRow(orgID, "Acme", tt.settings, now, now))
+			if tt.reviewRows != nil {
+				mock.ExpectQuery("SELECT .+ FROM session_review_loops").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(tt.reviewRows)
+			}
+			if tt.expectEnqueue {
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			ctx = middleware.WithActiveRole(ctx, models.RoleBuilder)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.CreatePR(w, req)
+
+			require.Equal(t, tt.expectedStatus, w.Code, "CreatePR should return the expected status for builder review policy")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "CreatePR should return the expected builder review policy response")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	t.Parallel()
 
@@ -7541,6 +7690,111 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted")
 	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_BuilderRequiresCleanReviewLoopForCurrentSnapshot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		settings       json.RawMessage
+		reviewRows     *pgxmock.Rows
+		expectedStatus int
+		expectedBody   string
+		expectEnqueue  bool
+	}{
+		{
+			name:     "allows builder after clean review loop for current snapshot",
+			settings: json.RawMessage(`{}`),
+			reviewRows: pgxmock.NewRows(reviewLoopColumns).AddRow(
+				reviewLoopRowWithLatestCheckpoint(uuid.New(), uuid.New(), "clean", "manual", ptr("snap-push-current"))...,
+			),
+			expectedStatus: http.StatusAccepted,
+			expectedBody:   `"status":"queued"`,
+			expectEnqueue:  true,
+		},
+		{
+			name:     "blocks builder when clean review loop is for older snapshot",
+			settings: json.RawMessage(`{}`),
+			reviewRows: pgxmock.NewRows(reviewLoopColumns).AddRow(
+				reviewLoopRowWithLatestCheckpoint(uuid.New(), uuid.New(), "clean", "manual", ptr("snap-push-older"))...,
+			),
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
+		},
+		{
+			name:           "allows builder when org disables requirement",
+			settings:       json.RawMessage(`{"builder_permissions":{"require_review_before_pr":false}}`),
+			expectedStatus: http.StatusAccepted,
+			expectedBody:   `"status":"queued"`,
+			expectEnqueue:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			issueID := uuid.New()
+			prID := uuid.New()
+			jobID := uuid.New()
+			handler := newSessionHandler(t, mock)
+
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{snapshotKey: "snap-push-current"}))
+
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(sessionPullRequestColumns).
+						AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
+				)
+
+			mock.ExpectQuery("SELECT .+ FROM organizations").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+					AddRow(orgID, "Acme", tt.settings, now, now))
+			if tt.reviewRows != nil {
+				mock.ExpectQuery("SELECT .+ FROM session_review_loops").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(tt.reviewRows)
+			}
+			if tt.expectEnqueue {
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+						snapshotKey: "snap-push-current",
+						pushState:   "queued",
+					}))
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			ctx = middleware.WithActiveRole(ctx, models.RoleBuilder)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.PushChangesToPR(w, req)
+
+			require.Equal(t, tt.expectedStatus, w.Code, "PushChangesToPR should return the expected status for builder review policy")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "PushChangesToPR should return the expected builder review policy response")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T) {
