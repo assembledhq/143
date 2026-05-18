@@ -3649,7 +3649,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
   });
 
-  it('hides PR mutation controls and skips the team roster lookup for builders', async () => {
+  it('shows builder PR creation as review-gated and skips the team roster lookup', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'completed',
@@ -3686,9 +3686,9 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findAllByText('Fixed TypeError by adding null check');
-    await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
-    });
+    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
+    expect(createPRButton).toBeDisabled();
+    expect(createPRButton).toHaveAttribute('title', expect.stringContaining('Run Review successfully before creating a PR'));
     expect(teamRequestCount).toBe(0);
   });
 

@@ -228,6 +228,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
+	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 
 	// Linear session-linking: detection, primary resolution + context
@@ -929,9 +930,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 			})
 
+			// PR shipping routes. Builders may create PRs only through handler-
+			// enforced org guardrails such as the pre-PR review requirement.
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.OrgContext)
+				r.Use(middleware.RequireRole("admin", "builder", "member"))
+
+				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/branch", sessionHandler.CreateBranch)
+				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
+			})
+
 			// Member settings / operations routes. Builders do not inherit this
-			// broader org-management and PR-shipping surface until dedicated
-			// guardrails are in place.
+			// broader org-management surface; PR shipping lives in the guarded
+			// route group above.
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
 				r.Use(middleware.RequireRole("admin", "member"))
@@ -958,9 +970,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
 
-				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
-				r.Post("/api/v1/sessions/{id}/branch", sessionHandler.CreateBranch)
-				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
 				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
 				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
 				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)

@@ -751,6 +751,9 @@ export interface OrgSettings {
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
+  builder_permissions?: {
+    require_review_before_pr?: boolean;
+  };
 }
 
 export interface ProductContext {

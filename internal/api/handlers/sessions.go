@@ -71,6 +71,7 @@ type SessionHandler struct {
 	orgStore           *db.OrganizationStore
 	jobStore           *db.JobStore
 	messageStore       *db.SessionMessageStore
+	reviewLoopStore    *db.SessionReviewLoopStore
 	reviewCommentStore *db.SessionReviewCommentStore
 	linkStore          *db.SessionIssueLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
@@ -1480,6 +1481,35 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: &pr})
 }
 
+// SetReviewLoopStore enables PR policy checks that depend on completed
+// first-party review loops.
+func (h *SessionHandler) SetReviewLoopStore(store *db.SessionReviewLoopStore) {
+	h.reviewLoopStore = store
+}
+
+func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseWriter, r *http.Request, settings models.OrgSettings, orgID, sessionID uuid.UUID, snapshotKey string) bool {
+	role := middleware.ActiveRoleFromContext(r.Context())
+	if role != models.RoleBuilder || !settings.BuilderPermissions.EffectiveRequireReviewBeforePR() {
+		return true
+	}
+	if h.reviewLoopStore == nil {
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_POLICY_UNAVAILABLE", "review policy is not configured")
+		return false
+	}
+	loops, err := h.reviewLoopStore.ListLoopsBySession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_POLICY_CHECK_FAILED", "failed to check review status", err)
+		return false
+	}
+	for _, loop := range loops {
+		if loop.Status == models.ReviewLoopStatusClean && loop.LatestCheckpointKey != nil && *loop.LatestCheckpointKey == snapshotKey {
+			return true
+		}
+	}
+	writeError(w, r, http.StatusConflict, "REVIEW_REQUIRED_BEFORE_PR", "Builders must run Review for the current snapshot before publishing pull request changes")
+	return false
+}
+
 // CreatePR handles POST /sessions/{id}/pr — enqueues a job that pushes the
 // session's snapshot to GitHub and opens a pull request. The session must
 // still have a snapshot and must not already have an associated PR. While a
@@ -1557,6 +1587,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 				orgSettings = parsed
 			}
 		}
+	}
+
+	if !h.requireBuilderReviewForCurrentSnapshot(w, r, orgSettings, orgID, sessionID, *session.SnapshotKey) {
+		return
 	}
 
 	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
@@ -1804,6 +1838,10 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 				orgSettings = parsed
 			}
 		}
+	}
+
+	if !h.requireBuilderReviewForCurrentSnapshot(w, r, orgSettings, orgID, sessionID, *session.SnapshotKey) {
+		return
 	}
 
 	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
