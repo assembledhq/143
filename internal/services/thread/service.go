@@ -115,6 +115,7 @@ type ThreadCanceller interface {
 type MessageStore interface {
 	Create(ctx context.Context, msg *models.SessionMessage) error
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
 // LogStore defines the log DB operations needed by the thread service.
@@ -190,6 +191,11 @@ type SendMessageResult struct {
 	ResolvedComments   []models.SessionReviewComment
 	AnsweredQuestion   *models.SessionQuestion
 	AnsweredHumanInput *models.HumanInputRequest
+}
+
+type MessageWindowResult struct {
+	Window       db.SessionMessageWindow
+	ThreadStatus models.ThreadStatus
 }
 
 // Service handles thread business logic.
@@ -1107,6 +1113,25 @@ func (s *Service) GetMessages(ctx context.Context, orgID, sessionID, threadID uu
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
 	return messages, nil
+}
+
+// GetMessageWindow returns a bottom-first message window for a thread,
+// validating it belongs to the given session before querying messages.
+func (s *Service) GetMessageWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (MessageWindowResult, error) {
+	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return MessageWindowResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return MessageWindowResult{}, err
+	}
+
+	window, err := s.messageStore.ListWindowByThread(ctx, orgID, threadID, opts)
+	if err != nil {
+		return MessageWindowResult{}, fmt.Errorf("list message window: %w", err)
+	}
+	return MessageWindowResult{Window: window, ThreadStatus: thread.Status}, nil
 }
 
 // GetLogs returns logs for a thread, validating it belongs to the given session.
