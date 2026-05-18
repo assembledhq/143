@@ -4740,7 +4740,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {canManageSession && canUseNativeReviewLoop ? (
+          {canManageSession && canUseNativeReviewLoop && !hasPR ? (
             <Card className="border-border/60">
               <CardContent className="p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -4750,9 +4750,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                         <ClipboardList className="h-4 w-4" />
                       </div>
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground">Review this work</p>
+                        <p className="text-sm font-medium text-foreground">Review work</p>
                         <p className="text-xs text-muted-foreground">
-                          Run the current agent&apos;s review loop in this sandbox before shipping.
+                          Review and fix in a loop before creating a PR.
                         </p>
                       </div>
                     </div>
@@ -4771,7 +4771,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       ) : (
                         <ClipboardList className="h-3.5 w-3.5" />
                       )}
-                      Review this work
+                      Review
                     </Button>
                   </DisabledTooltip>
                 </div>
@@ -4790,6 +4790,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
                 onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
+                reviewAction={canManageSession && canUseNativeReviewLoop ? {
+                  disabled: reviewActionDisabled,
+                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+                  title: reviewActionDisabledReason,
+                  onClick: () => setReviewSetupOpen(true),
+                } : undefined}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
                   disabled: pushActionDisabled,
@@ -5185,7 +5191,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       <Dialog open={reviewSetupOpen} onOpenChange={setReviewSetupOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Review this work</DialogTitle>
+            <DialogTitle>Review</DialogTitle>
             <DialogDescription>
               Run the selected agent&apos;s native review loop in this session&apos;s sandbox. The loop opens a dedicated review tab and keeps changes on the same branch.
             </DialogDescription>
