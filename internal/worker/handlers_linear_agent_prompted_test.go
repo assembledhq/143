@@ -193,6 +193,59 @@ func TestResolvePromptedCommentBodyPrefersWebhookAgentActivityBody(t *testing.T)
 	require.Equal(t, "Please add regression coverage.", body, "prompted handler should use Linear's agentActivity.body verbatim")
 }
 
+// TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure pins
+// the running-session append's transactional semantics: if the COMMIT
+// itself fails (e.g. the connection dropped between INSERT and the
+// commit packet), the deferred Rollback must run so the session_messages
+// insert doesn't get stuck in an indeterminate pending state on the
+// connection. Without rollback, a subsequent reuse of the connection
+// would either inherit the open transaction or surface a confusing
+// "current transaction is aborted" error far from the cause.
+func TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	commitErr := errors.New("commit dropped connection")
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
+			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 7))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 8, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(99), now))
+	mock.ExpectCommit().WillReturnError(commitErr)
+	mock.ExpectRollback()
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Sessions:        db.NewSessionStore(mock),
+			SessionMessages: db.NewSessionMessageStore(mock),
+		},
+		Logger: zerolog.Nop(),
+	}
+	err = appendPromptedMessageToRunningSession(
+		context.Background(),
+		deps,
+		orgID,
+		db.SessionMessageAppendState{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 7},
+		linearAgentEventPayload{LinearAgentSessionID: "as_committed_fail"},
+		"please retry",
+		zerolog.Nop(),
+	)
+	require.Error(t, err, "a failed COMMIT must surface the error to the caller so the worker retries")
+	require.ErrorIs(t, err, commitErr, "the underlying commit error should be wrapped, not swallowed")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"the deferred Rollback must fire when committed=false, even on commit failure")
+}
+
 func TestPromptedRunningSessionAppendsUnderSessionLockWithoutContinuationJob(t *testing.T) {
 	t.Parallel()
 

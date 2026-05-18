@@ -106,11 +106,13 @@ func expectMappingMiss(t *testing.T, mock pgxmock.PgxPoolIface) {
 func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	t.Parallel()
 
-	t.Run("label override wins over everything else", func(t *testing.T) {
+	t.Run("label override wins over everything else when enabled", func(t *testing.T) {
 		t.Parallel()
 		rig := newResolverRig(t)
 		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled"}
 		rig.repos.byFullName["org/labelled"] = labelRepo
+		allow := true
+		rig.settings.settings = models.LinearAgentSettings{AllowLabelRepoOverride: &allow}
 
 		// No mock expectation: the label-override branch must short-circuit
 		// before any DB query so we never hit the mappings store.
@@ -125,6 +127,30 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 		require.Equal(t, "label_override", got.Source)
 		require.NoError(t, rig.mock.ExpectationsWereMet(),
 			"label override must not hit the mappings store")
+	})
+
+	t.Run("label override is ignored when the org has not opted in", func(t *testing.T) {
+		t.Parallel()
+		rig := newResolverRig(t)
+		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled"}
+		rig.repos.byFullName["org/labelled"] = labelRepo
+		// rig.settings.settings is the zero value — AllowLabelRepoOverride
+		// defaults to false. The label should be ignored entirely and the
+		// resolver should fall through to the team-default mapping.
+		mappingRepoID := uuid.New()
+		expectMappingHit(t, rig.mock, rig.orgID, mappingRepoID, nil, "")
+
+		got, err := rig.resolver.Resolve(context.Background(), AgentRepoResolveInput{
+			OrgID:           rig.orgID,
+			LinearTeamID:    "team_X",
+			LinearProjectID: "proj_Y",
+			Labels:          []string{"repo:org/labelled"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, mappingRepoID, got.RepositoryID,
+			"label override must not redirect work when AllowLabelRepoOverride is false")
+		require.Equal(t, "team_default_mapping", got.Source)
+		require.NoError(t, rig.mock.ExpectationsWereMet())
 	})
 
 	t.Run("falls through to team+project mapping when label is absent", func(t *testing.T) {

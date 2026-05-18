@@ -97,15 +97,23 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 		return AgentRepoResolveResult{}, errors.New("linear_team_id is required")
 	}
 
-	// 1. Label override. Cheap to check first when we already have the
-	// label list in memory; saves the team-mapping query for issues whose
-	// authors explicitly asked for a non-default repo.
-	if r.repos != nil {
-		if repo, ok := r.resolveLabelOverride(ctx, in); ok {
-			return AgentRepoResolveResult{
-				RepositoryID: repo.ID,
-				Source:       "label_override",
-			}, nil
+	// 1. Label override. Gated behind LinearAgentSettings.AllowLabelRepoOverride
+	// (default off): without the flag, any Linear contributor with
+	// label-write access could redirect work to any repo the org owns,
+	// bypassing the admin-controlled linear_team_repo_mappings. Orgs
+	// whose Linear membership equals their 143 admin set can opt in.
+	if r.repos != nil && r.settings != nil && len(in.Labels) > 0 {
+		settings, err := r.settings.LoadAgentSettings(ctx, in.OrgID)
+		if err != nil {
+			return AgentRepoResolveResult{}, fmt.Errorf("load agent settings: %w", err)
+		}
+		if settings.EffectiveAllowLabelRepoOverride() {
+			if repo, ok := r.resolveLabelOverride(ctx, in); ok {
+				return AgentRepoResolveResult{
+					RepositoryID: repo.ID,
+					Source:       "label_override",
+				}, nil
+			}
 		}
 	}
 
