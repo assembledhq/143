@@ -816,6 +816,38 @@ func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.U
 	return err
 }
 
+func (s *SessionStore) RequestCancel(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `
+		INSERT INTO session_cancel_requests (org_id, session_id, requested_at, delivered_at)
+		VALUES (@org_id, @session_id, now(), NULL)
+		ON CONFLICT (org_id, session_id)
+		DO UPDATE SET requested_at = now(), delivered_at = NULL`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	)
+	if err != nil {
+		return fmt.Errorf("request session cancel: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session cancel request not recorded")
+	}
+	return nil
+}
+
+func (s *SessionStore) ConsumeCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_cancel_requests
+		SET delivered_at = now()
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND delivered_at IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	)
+	if err != nil {
+		return false, fmt.Errorf("consume session cancel request: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	query := `
 		UPDATE sessions

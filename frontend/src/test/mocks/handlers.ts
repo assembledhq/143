@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -205,6 +205,67 @@ export const mockPMStatus: PMStatus = {
   total_delegated: 0,
 };
 
+export const mockAutopilotQueue: AutopilotQueueResponse = {
+  data: [
+    {
+      id: 'issue-1',
+      rank: 1,
+      source: { type: 'sentry', key: 'SENTRY-123' },
+      title: 'TypeError: Cannot read properties of undefined',
+      repo: { id: 'repo-1', name: 'example/repo' },
+      issue_status: 'triaged',
+      customer_impact: { label: 'High', count: 23 },
+      implementation_ease: 'High',
+      low_hanging_fruit: {
+        label: 'Very high',
+        reasons: ['high customer impact', 'straightforward implementation', 'recent activity'],
+        cluster_size: 2,
+      },
+      display_run_state: 'running',
+      latest_session: {
+        id: 'session-abcdef12-3456-7890',
+        title: 'Fix TypeError',
+        updated_at: '2026-02-17T07:05:30Z',
+      },
+      latest_agent_run: {
+        id: 'session-abcdef12-3456-7890',
+        status: 'running',
+        trigger_mode: 'auto',
+        started_at: '2026-02-17T07:00:00Z',
+      },
+      available_action: 'view_run',
+    },
+    {
+      id: 'issue-2',
+      rank: 2,
+      source: { type: 'linear', key: 'VIR-101' },
+      title: 'Missing retry copy in payment flow',
+      repo: { id: 'repo-1', name: 'example/repo' },
+      issue_status: 'open',
+      customer_impact: { label: 'Medium', count: 5 },
+      implementation_ease: 'High',
+      low_hanging_fruit: {
+        label: 'High',
+        reasons: ['straightforward implementation', 'eligible for automation'],
+        cluster_size: 1,
+      },
+      display_run_state: 'not_started',
+      available_action: 'start_run',
+    },
+  ],
+  meta: {
+    summary: {
+      top_issue_id: 'issue-1',
+      autorunnable_count: 1,
+      needs_review_count: 0,
+      open_pr_count: 0,
+      active_run_count: 1,
+      ranked_issue_count: 2,
+      analyzed_at: '2026-02-17T07:05:30Z',
+    },
+  },
+};
+
 export const mockMembers: User[] = [
   {
     id: 'user-1',
@@ -253,6 +314,19 @@ export const handlers = [
       data: mockIssues,
       meta: {},
     } satisfies ListResponse<Issue>);
+  }),
+
+  http.get('/api/v1/autopilot/queue', () => {
+    return HttpResponse.json(mockAutopilotQueue);
+  }),
+
+  http.get('/api/v1/projects/proposals/summary', () => {
+    return HttpResponse.json({
+      data: {
+        pending_count: 0,
+        latest: [],
+      },
+    });
   }),
 
   http.get('/api/v1/sessions', () => {
@@ -380,6 +454,31 @@ export const handlers = [
       data: [] as SessionThread[],
       meta: {},
     } satisfies ListResponse<SessionThread>);
+  }),
+
+  http.get('/api/v1/sessions/:id/review-loops', () => {
+    return HttpResponse.json({
+      data: [] as SessionReviewLoop[],
+      meta: {},
+    } satisfies ListResponse<SessionReviewLoop>);
+  }),
+
+  http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+    const body = await request.json() as { agent_type?: string; max_passes?: number };
+    return HttpResponse.json({
+      data: {
+        id: 'review-loop-1',
+        org_id: 'org-1',
+        session_id: params.id as string,
+        status: 'running',
+        source: 'manual',
+        agent_type: body.agent_type || 'codex',
+        max_passes: body.max_passes ?? 2,
+        completed_passes: 0,
+        review_required: false,
+        started_at: '2026-02-17T07:12:00Z',
+      },
+    } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
   }),
 
   http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
@@ -543,6 +642,18 @@ export const handlers = [
 
   http.get('/api/v1/sessions/:id/questions', () => {
     return HttpResponse.json({ data: [], meta: {} });
+  }),
+
+  http.get('/api/v1/sessions/:id/human-input-requests', () => {
+    return HttpResponse.json({ data: [], meta: {} });
+  }),
+
+  http.post('/api/v1/sessions/:id/human-input-requests/:requestId/answer', () => {
+    return HttpResponse.json({ data: null });
+  }),
+
+  http.post('/api/v1/sessions/:id/human-input-requests/:requestId/cancel', () => {
+    return HttpResponse.json({ data: null });
   }),
 
   http.post('/api/v1/issues/:id/fix', () => {

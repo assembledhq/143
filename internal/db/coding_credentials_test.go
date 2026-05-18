@@ -16,7 +16,7 @@ import (
 )
 
 var codingCredentialTestColumns = []string{
-	"id", "org_id", "user_id", "provider", "label", "config", "priority", "status", "created_by", "last_verified_at", "created_at", "updated_at",
+	"id", "org_id", "user_id", "provider", "label", "config", "priority", "status", "created_by", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message", "created_at", "updated_at",
 }
 
 func encryptedCodingConfig(t *testing.T, store *CodingCredentialStore, cfg models.ProviderConfig) []byte {
@@ -42,9 +42,24 @@ func codingCredentialRow(t *testing.T, store *CodingCredentialStore, orgID uuid.
 		status,
 		nil,
 		nil,
+		nil,
+		nil,
+		nil,
 		now,
 		now,
 	}
+}
+
+func codingCredentialRowWithRateLimit(t *testing.T, store *CodingCredentialStore, orgID uuid.UUID, userID *uuid.UUID, id uuid.UUID, provider models.ProviderName, cfg models.ProviderConfig, priority int, rateLimitedUntil time.Time) []any {
+	t.Helper()
+
+	row := codingCredentialRow(t, store, orgID, userID, id, provider, cfg, priority, models.CodingCredentialStatusActive)
+	observedAt := rateLimitedUntil.Add(-time.Minute)
+	message := "try again later"
+	row[10] = &rateLimitedUntil
+	row[11] = &observedAt
+	row[12] = &message
+	return row
 }
 
 func addCodingCredentialRow(rows *pgxmock.Rows, values []any) *pgxmock.Rows {
@@ -593,6 +608,137 @@ func TestCodingCredentialStorePickRunnableMulti_MergesProvidersByScopeBeforeOrgF
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodingCredentialStorePickRunnableMulti_SkipsPersistedRateLimitedProviderTwin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		providers        []models.ProviderName
+		personalProvider models.ProviderName
+		personalConfig   models.ProviderConfig
+		orgProvider      models.ProviderName
+		orgConfig        models.ProviderConfig
+	}{
+		{
+			name:             "codex subscription falls back to org openai api key",
+			providers:        []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription},
+			personalProvider: models.ProviderOpenAISubscription,
+			personalConfig:   models.OpenAISubscriptionConfig{AccessToken: "personal-token", RefreshToken: "personal-refresh", ExpiresAt: time.Now().Add(time.Hour)},
+			orgProvider:      models.ProviderOpenAI,
+			orgConfig:        models.OpenAIConfig{APIKey: "sk-openai-org"},
+		},
+		{
+			name:             "claude subscription falls back to org anthropic api key",
+			providers:        []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription},
+			personalProvider: models.ProviderAnthropicSubscription,
+			personalConfig:   models.AnthropicSubscriptionConfig{AccessToken: "personal-token", RefreshToken: "personal-refresh", ExpiresAt: time.Now().Add(time.Hour)},
+			orgProvider:      models.ProviderAnthropic,
+			orgConfig:        models.AnthropicConfig{APIKey: "sk-ant-org"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, mock := newMockCodingCredentialStore(t)
+			defer mock.Close()
+
+			now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+			store.SetClock(func() time.Time { return now })
+			orgID := uuid.New()
+			userID := uuid.New()
+			personalID := uuid.New()
+			orgIDCred := uuid.New()
+			scope := models.Scope{OrgID: orgID, UserID: &userID}
+
+			personalRows := pgxmock.NewRows(codingCredentialTestColumns)
+			personalRows = addCodingCredentialRow(personalRows,
+				codingCredentialRowWithRateLimit(t, store, orgID, &userID, personalID, tt.personalProvider, tt.personalConfig, 1, now.Add(time.Hour)),
+			)
+			orgRows := pgxmock.NewRows(codingCredentialTestColumns)
+			orgRows = addCodingCredentialRow(orgRows,
+				codingCredentialRow(t, store, orgID, nil, orgIDCred, tt.orgProvider, tt.orgConfig, 1, models.CodingCredentialStatusActive),
+			)
+
+			mock.ExpectQuery(`FROM coding_credentials`).
+				WithArgs(codingAnyArgs(3)...).
+				WillReturnRows(personalRows)
+			mock.ExpectQuery(`FROM coding_credentials`).
+				WithArgs(codingAnyArgs(2)...).
+				WillReturnRows(orgRows)
+
+			resolved, err := store.ListResolvableMulti(context.Background(), orgID, &userID, tt.providers)
+			require.NoError(t, err, "ListResolvableMulti should return rate-limited rows for visibility")
+			require.Equal(t, personalID, resolved[tt.personalProvider][0].ID, "resolver should keep the rate-limited personal row visible")
+
+			picked, err := store.PickRunnableMulti(context.Background(), scope, tt.providers)
+			require.NoError(t, err, "PickRunnableMulti should skip persisted rate-limited credentials")
+			require.Equal(t, orgIDCred, picked.ID, "PickRunnableMulti should fall back to the org credential")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestCodingCredentialStorePickRunnable_PersistedRateLimitExpiry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		rateLimitedUntil  time.Time
+		expectedPickedID  string
+		expectedErrIsShed bool
+	}{
+		{
+			name:             "expired rate limit is runnable",
+			rateLimitedUntil: time.Date(2026, 5, 13, 11, 59, 0, 0, time.UTC),
+			expectedPickedID: "first",
+		},
+		{
+			name:              "future rate limit skips to next priority",
+			rateLimitedUntil:  time.Date(2026, 5, 13, 12, 30, 0, 0, time.UTC),
+			expectedPickedID:  "second",
+			expectedErrIsShed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, mock := newMockCodingCredentialStore(t)
+			defer mock.Close()
+
+			now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+			store.SetClock(func() time.Time { return now })
+			orgID := uuid.New()
+			firstID := uuid.New()
+			secondID := uuid.New()
+			scope := models.Scope{OrgID: orgID}
+
+			rows := pgxmock.NewRows(codingCredentialTestColumns)
+			rows = addCodingCredentialRow(rows,
+				codingCredentialRowWithRateLimit(t, store, orgID, nil, firstID, models.ProviderGemini, models.GeminiConfig{APIKey: "gemini-first"}, 1, tt.rateLimitedUntil),
+			)
+			rows = addCodingCredentialRow(rows,
+				codingCredentialRow(t, store, orgID, nil, secondID, models.ProviderGemini, models.GeminiConfig{APIKey: "gemini-second"}, 2, models.CodingCredentialStatusActive),
+			)
+
+			mock.ExpectQuery(`FROM coding_credentials`).
+				WithArgs(codingAnyArgs(2)...).
+				WillReturnRows(rows)
+
+			picked, err := store.PickRunnable(context.Background(), scope, models.ProviderGemini)
+			require.NoError(t, err, "PickRunnable should return an available credential")
+			expected := map[string]uuid.UUID{"first": firstID, "second": secondID}[tt.expectedPickedID]
+			require.Equal(t, expected, picked.ID, "PickRunnable should account for persisted rate-limit expiry")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestCodingCredentialStoreOrgScopeBranches(t *testing.T) {
 	t.Parallel()
 
@@ -737,6 +883,35 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			},
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
 				return store.UpdateStatus(ctx, scope, id, models.CodingCredentialStatusInvalid)
+			},
+		},
+		{
+			name: "mark rate limited",
+			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
+				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET rate_limited_until = @until`).
+					WithArgs(codingAnyArgs(6)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectCommit()
+			},
+			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
+				return store.MarkRateLimitedForScope(ctx, scope, id, models.CodingCredentialRateLimit{
+					Until:   time.Now().Add(time.Hour),
+					Message: "try again later",
+				})
+			},
+		},
+		{
+			name: "mark auth rejected",
+			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
+				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
+					WithArgs(codingAnyArgs(4)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectCommit()
+			},
+			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
+				return store.MarkAuthRejectedForScope(ctx, scope, id)
 			},
 		},
 		{

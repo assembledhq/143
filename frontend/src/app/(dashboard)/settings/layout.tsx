@@ -87,5 +87,12 @@ export default function SettingsLayout({
 
   if (waitForRole || restricted) return null;
 
-  return <>{children}</>;
+  return (
+    <div
+      data-slot="settings-layout-padding-scope"
+      className="[&_[data-slot=page-container]]:pb-24 md:[&_[data-slot=page-container]]:pb-20"
+    >
+      {children}
+    </div>
+  );
 }

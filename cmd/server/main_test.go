@@ -221,6 +221,21 @@ func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testin
 	require.Less(t, lastFeatureFlagGate, lastFuncStart, "LinearAgentDeps must be wired even when LINEAR_AGENT_ENABLED=false so queued jobs drain")
 }
 
+func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup preflight regression test")
+
+	body := string(src)
+	preflight := strings.Index(body, "sandboxauth.ValidateSocketDirForStartup")
+	construct := strings.Index(body, "sandboxauth.NewServer")
+	require.NotEqual(t, -1, preflight, "worker startup should preflight the sandbox auth socket dir")
+	require.NotEqual(t, -1, construct, "worker startup should still construct the sandbox auth server")
+	require.Less(t, preflight, construct, "startup preflight must run before constructing the socket server so bad workers fail before claiming jobs")
+	require.Contains(t, body, `cfg.Env == "production"`, "the sandbox auth preflight should be production-scoped so local dev can opt into the legacy fallback path")
+}
+
 func TestMainPassesConfiguredNodeIDToWorkers(t *testing.T) {
 	t.Parallel()
 

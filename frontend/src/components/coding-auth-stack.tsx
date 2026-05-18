@@ -49,6 +49,17 @@ function statusBadgeClass(status: CodingAuth["status"]) {
   }
 }
 
+function rateLimitNote(row: CodingAuth) {
+  if (row.status !== "rate_limited") return null;
+  if (row.rate_limited_until) {
+    return `Available again ${new Date(row.rate_limited_until).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    })}`;
+  }
+  return row.rate_limit_message ?? null;
+}
+
 export function CodingAuthStack({
   rows,
   selectedId,
@@ -113,10 +124,11 @@ export function CodingAuthStack({
                 <dd className="text-foreground">{agentLabel(row.agent)}</dd>
               </div>
             </dl>
-            {row.usage_note ? (
+            {(row.usage_note || rateLimitNote(row)) ? (
               <div className="space-y-1">
                 <div className="text-xs font-medium text-muted-foreground">Notes</div>
-                <div className="text-xs text-muted-foreground">{row.usage_note}</div>
+                {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
+                {rateLimitNote(row) ? <div className="text-xs text-muted-foreground">{rateLimitNote(row)}</div> : null}
               </div>
             ) : null}
             <div className="flex items-center gap-1">
@@ -234,6 +246,7 @@ export function CodingAuthStack({
                         {row.label}
                       </Button>
                       {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
+                      {rateLimitNote(row) ? <div className="text-xs text-muted-foreground">{rateLimitNote(row)}</div> : null}
                     </div>
                   </TableCell>
                   <TableCell>

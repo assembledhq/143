@@ -39,6 +39,7 @@ const (
 	ProviderLinear                ProviderName = "linear"
 	ProviderSlack                 ProviderName = "slack"
 	ProviderNotion                ProviderName = "notion"
+	ProviderCircleCI              ProviderName = "circleci"
 )
 
 // AllProviders is the canonical list of credential providers.
@@ -48,6 +49,7 @@ var AllProviders = []ProviderName{
 	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
+	ProviderCircleCI,
 }
 
 // LLMProviders is the subset of providers that serve LLM completions.
@@ -276,6 +278,13 @@ type NotionConfig struct {
 	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
+// CircleCIConfig stores a CircleCI personal API token plus the VCS-prefixed
+// project slug (e.g. "gh/org/repo") used for all flaky-test queries.
+type CircleCIConfig struct {
+	AuthToken   string `json:"auth_token"` // #nosec G117 -- JSON config field
+	ProjectSlug string `json:"project_slug"`
+}
+
 type OpenAIChatGPTConfig struct {
 	AccessToken  string    `json:"access_token"`       // #nosec G117 -- JSON config field
 	RefreshToken string    `json:"refresh_token"`      // #nosec G117 -- JSON config field
@@ -335,6 +344,7 @@ func (c GitHubAppUserConfig) Provider() ProviderName { return ProviderGitHubAppU
 func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAuth }
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
+func (c CircleCIConfig) Provider() ProviderName      { return ProviderCircleCI }
 func (c SlackConfig) Provider() ProviderName         { return ProviderSlack }
 func (c NotionConfig) Provider() ProviderName        { return ProviderNotion }
 func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
@@ -499,6 +509,16 @@ func (c NotionConfig) Validate() error {
 	return nil
 }
 
+func (c CircleCIConfig) Validate() error {
+	if c.AuthToken == "" {
+		return errors.New("auth_token is required")
+	}
+	if c.ProjectSlug == "" {
+		return errors.New("project_slug is required (e.g. gh/org/repo)")
+	}
+	return nil
+}
+
 func (c OpenAIChatGPTConfig) Validate() error {
 	if c.AccessToken == "" {
 		return errors.New("access_token is required")
@@ -623,6 +643,14 @@ func (c NotionConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c CircleCIConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderCircleCI,
+		Configured: true,
+		MaskedKey:  MaskKey(c.AuthToken),
+	}
+}
+
 func (c OpenAIChatGPTConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:    ProviderOpenAIChatGPT,
@@ -735,6 +763,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg NotionConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse notion config: %w", err)
+		}
+		return cfg, nil
+	case ProviderCircleCI:
+		var cfg CircleCIConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse circleci config: %w", err)
 		}
 		return cfg, nil
 	default:
@@ -874,22 +908,24 @@ func (s CodingAuthStatus) Validate() error {
 }
 
 type CodingAuth struct {
-	ID             uuid.UUID        `json:"id"`
-	OrgID          uuid.UUID        `json:"org_id"`
-	Priority       int              `json:"priority"`
-	Agent          AgentType        `json:"agent"`
-	AuthType       CodingAuthType   `json:"auth_type"`
-	Label          string           `json:"label"`
-	Scope          string           `json:"scope"`
-	Provider       ProviderName     `json:"provider"`
-	Status         CodingAuthStatus `json:"status"`
-	IsDefault      bool             `json:"is_default"`
-	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
-	LastUsedAt     *time.Time       `json:"last_used_at,omitempty"`
-	UsageNote      string           `json:"usage_note,omitempty"`
-	CreatedBy      *uuid.UUID       `json:"created_by,omitempty"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	ID               uuid.UUID        `json:"id"`
+	OrgID            uuid.UUID        `json:"org_id"`
+	Priority         int              `json:"priority"`
+	Agent            AgentType        `json:"agent"`
+	AuthType         CodingAuthType   `json:"auth_type"`
+	Label            string           `json:"label"`
+	Scope            string           `json:"scope"`
+	Provider         ProviderName     `json:"provider"`
+	Status           CodingAuthStatus `json:"status"`
+	IsDefault        bool             `json:"is_default"`
+	LastVerifiedAt   *time.Time       `json:"last_verified_at,omitempty"`
+	RateLimitedUntil *time.Time       `json:"rate_limited_until,omitempty"`
+	RateLimitMessage *string          `json:"rate_limit_message,omitempty"`
+	LastUsedAt       *time.Time       `json:"last_used_at,omitempty"`
+	UsageNote        string           `json:"usage_note,omitempty"`
+	CreatedBy        *uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
 type CreateCodingAuthInput struct {

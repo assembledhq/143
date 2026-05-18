@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Pause, Loader2 } from "lucide-react";
+import { Play, Pause, Loader2, Minus, Plus } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,6 +43,7 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
 const AutomationStatsCard = dynamic(
@@ -61,10 +62,17 @@ type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
   (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
 
-function SettingsTab({ automation, canManage }: { automation: Automation; canManage: boolean }) {
+function SettingsTab({
+  automation,
+  canManage,
+}: {
+  automation: Automation;
+  canManage: boolean;
+}) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(automation.name);
   const [goal, setGoal] = useState(automation.goal);
+  const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
   const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
@@ -85,6 +93,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(automation.pre_pr_review_loops ?? 0);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
 
   const { data: settingsResponse } = useQuery({
@@ -96,6 +105,14 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
   const effectiveAgentType = model
     ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
     : automation.agent_type ?? defaultAgentType;
+  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  let prePRReviewDescription = "Off for agents without native review support.";
+  if (supportsNativeReviewLoop) {
+    prePRReviewDescription = effectivePrePRReviewLoops === 0
+      ? "Off"
+      : "Runs the coding agent's review/fix loop before opening a PR.";
+  }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const goalLength = automationGoalLengthState(goal);
@@ -105,6 +122,8 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
       api.automations.update(automation.id, {
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
@@ -112,6 +131,7 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
         timezone,
         model: model ?? "",
         identity_scope: identityScope,
+        pre_pr_review_loops: effectivePrePRReviewLoops,
         reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
@@ -122,6 +142,14 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+      <div className="space-y-1.5">
+        <Label>Emoji</Label>
+        <AutomationEmojiPicker
+          value={iconValue}
+          onChange={setIconValue}
+          className="w-full sm:w-64"
+        />
+      </div>
       <div className="space-y-1.5">
         <Label htmlFor="name">Name</Label>
         <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
@@ -288,6 +316,48 @@ function SettingsTab({ automation, canManage }: { automation: Automation; canMan
           contentClassName="w-[var(--radix-popover-trigger-width)]"
         />
       </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Decrease review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+            disabled={!canManage || !supportsNativeReviewLoop}
+          >
+            <Minus className="h-4 w-4" />
+          </Button>
+          <Input
+            id="pre-pr-review-loops"
+            aria-label="Review passes"
+            type="number"
+            min={0}
+            max={5}
+            value={effectivePrePRReviewLoops}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+            }}
+            disabled={!canManage || !supportsNativeReviewLoop}
+            className="w-20 text-center"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Increase review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+            disabled={!canManage || !supportsNativeReviewLoop}
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {prePRReviewDescription}
+        </p>
+      </div>
       {canManage && (
         <div className="flex items-center gap-3 pt-2">
           <Button
@@ -359,6 +429,41 @@ export default function AutomationDetailPage() {
     onSuccess: () => router.push("/automations"),
   });
 
+  const iconMutation = useMutation({
+    mutationFn: (iconValue: string) =>
+      api.automations.update(automationId, {
+        icon_type: "emoji",
+        icon_value: iconValue,
+      }),
+    onMutate: async (iconValue: string) => {
+      await queryClient.cancelQueries({ queryKey: ["automation", automationId] });
+      const previous = queryClient.getQueryData<typeof data>(["automation", automationId]);
+      queryClient.setQueryData<typeof data>(["automation", automationId], (current) => {
+        if (!current?.data) return current;
+        return {
+          ...current,
+          data: {
+            ...current.data,
+            icon_type: "emoji",
+            icon_value: iconValue,
+          },
+        };
+      });
+      return { previous };
+    },
+    onError: (_err, _iconValue, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["automation", automationId], context.previous);
+      }
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["automation", automationId], updated);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["automation", automationId] });
+    },
+  });
+
   if (isLoading) {
     return (
       <PageContainer size="default">
@@ -405,6 +510,7 @@ export default function AutomationDetailPage() {
     pauseMutation.isError ? "Failed to pause automation." :
     resumeMutation.isError ? "Failed to resume automation." :
     runNowMutation.isError ? "Failed to trigger run." :
+    iconMutation.isError ? "Failed to update automation emoji." :
     deleteMutation.isError ? "Failed to delete automation." :
     null;
 
@@ -413,7 +519,27 @@ export default function AutomationDetailPage() {
       <div className="space-y-6">
         <MobileBackButton to="/automations" label="Back to automations" />
         <PageHeader
-          title={automation.name}
+          title={
+            <span className="inline-flex min-w-0 items-center gap-3">
+              {canManage ? (
+                <AutomationEmojiPicker
+                  value={automation.icon_value || "⚙️"}
+                  onChange={(iconValue) => iconMutation.mutate(iconValue)}
+                  trigger="icon"
+                  triggerLabel="Change automation emoji"
+                  disabled={iconMutation.isPending}
+                />
+              ) : (
+                <span
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                  aria-label={`Automation icon for ${automation.name}`}
+                >
+                  {automation.icon_value || "⚙️"}
+                </span>
+              )}
+              <span className="min-w-0 truncate">{automation.name}</span>
+            </span>
+          }
           description={headerDescription}
           action={canManage ? (
             <div className="flex items-center gap-2">

@@ -89,7 +89,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		return fmt.Errorf("get session: %w", err)
 	}
 
-	acq := r.acquireSandbox(ctx, payload.OrgID, &session)
+	acq := r.acquireSandbox(ctx, payload.OrgID, &session, payload.Config)
 	if acq.Err != nil {
 		r.logger.Warn().Err(acq.Err).
 			Str("session_id", payload.SessionID.String()).
@@ -218,7 +218,7 @@ func (r *StartRunner) resolveSandboxWorkDir(ctx context.Context, session *models
 	return defaults.HomeDir + "/" + slug
 }
 
-func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) acquireSandboxResult {
+func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := r.resolveSandboxWorkDir(ctx, session)
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == string(models.SandboxStateRunning) {
@@ -257,6 +257,7 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
+	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
 	winningID, freshErr := r.sessions.PeekContainerID(ctx, orgID, session.ID)
 	switch {
