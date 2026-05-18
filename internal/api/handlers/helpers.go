@@ -66,6 +66,22 @@ func clampListLimit(requested, defaultLimit, maxLimit int) int {
 	return requested
 }
 
+func parsePositiveInt(raw string) (int, error) {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("value must be a positive integer")
+	}
+	return n, nil
+}
+
+func parsePositiveInt64(raw string) (int64, error) {
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("value must be a positive integer")
+	}
+	return n, nil
+}
+
 func parseUUIDList(raw string) ([]uuid.UUID, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, fmt.Errorf("no valid UUIDs provided")

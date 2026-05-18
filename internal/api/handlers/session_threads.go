@@ -30,6 +30,7 @@ type ThreadService interface {
 	SendMessage(ctx context.Context, input thread.SendMessageInput) (*thread.SendMessageResult, error)
 	EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	GetMessageWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (thread.MessageWindowResult, error)
 	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
 	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
@@ -530,6 +531,53 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	query := r.URL.Query()
+	if query.Has("position") || query.Has("before") || query.Has("limit") {
+		opts := db.SessionMessageWindowOptions{Limit: db.DefaultSessionMessageWindowLimit}
+		if before := strings.TrimSpace(query.Get("before")); before != "" {
+			beforeID, err := parsePositiveInt64(before)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid before cursor")
+				return
+			}
+			opts.BeforeID = beforeID
+		}
+		if limitRaw := strings.TrimSpace(query.Get("limit")); limitRaw != "" {
+			limit, err := parsePositiveInt(limitRaw)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "invalid limit")
+				return
+			}
+			opts.Limit = limit
+		}
+		position := strings.TrimSpace(query.Get("position"))
+		if position != "" && position != "latest" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_POSITION", "position must be latest")
+			return
+		}
+
+		result, err := h.svc.GetMessageWindow(r.Context(), orgID, sessionID, threadID, opts)
+		if err != nil {
+			if errors.Is(err, thread.ErrThreadNotFound) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list thread messages", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, models.ThreadMessageWindowResponse{
+			Data: result.Window.Messages,
+			Meta: models.ThreadMessageWindowMeta{
+				NextOlderCursor:          result.Window.NextOlderCursor,
+				HasOlder:                 result.Window.HasOlder,
+				LatestAssistantMessageID: result.Window.LatestAssistantMessageID,
+				LiveEdgeMessageID:        result.Window.LiveEdgeMessageID,
+				ThreadStatus:             string(result.ThreadStatus),
+			},
+		})
 		return
 	}
 

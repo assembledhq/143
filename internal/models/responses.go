@@ -37,3 +37,28 @@ type ErrorDetail struct {
 type PaginationMeta struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 }
+
+// ThreadMessageWindowMeta contains cursor and anchor metadata for bottom-first
+// thread transcript loading.
+type ThreadMessageWindowMeta struct {
+	NextOlderCursor          string `json:"next_older_cursor,omitempty"`
+	HasOlder                 bool   `json:"has_older"`
+	LatestAssistantMessageID int64  `json:"latest_assistant_message_id,omitempty"`
+	LiveEdgeMessageID        int64  `json:"live_edge_message_id,omitempty"`
+	ThreadStatus             string `json:"thread_status"`
+}
+
+// ThreadMessageWindowResponse is the envelope for a cursor-loaded thread
+// message window.
+type ThreadMessageWindowResponse struct {
+	Data []SessionMessage        `json:"data"`
+	Meta ThreadMessageWindowMeta `json:"meta"`
+}
+
+func (r ThreadMessageWindowResponse) MarshalJSON() ([]byte, error) {
+	type response ThreadMessageWindowResponse
+	if r.Data == nil {
+		r.Data = []SessionMessage{}
+	}
+	return json.Marshal(response(r))
+}

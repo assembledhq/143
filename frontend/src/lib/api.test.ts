@@ -185,6 +185,38 @@ describe('api client', () => {
       expect(result.data.status).toBe('running');
     });
 
+    it('fetches a thread message window with cursor params', async () => {
+      let capturedUrl: string | undefined;
+      const mockWindow = {
+        data: [{ id: 21, role: 'assistant', content: 'latest' }],
+        meta: {
+          next_older_cursor: '21',
+          has_older: true,
+          latest_assistant_message_id: 21,
+          live_edge_message_id: 21,
+          thread_status: 'idle',
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json(mockWindow);
+        }),
+      );
+
+      const result = await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
+        before: '30',
+        limit: 25,
+      });
+
+      expect(result).toEqual(mockWindow);
+      expect(capturedUrl).toBeDefined();
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('before')).toBe('30');
+      expect(url.searchParams.get('limit')).toBe('25');
+    });
+
     it('answers question with backend contract field', async () => {
       let capturedBody: unknown;
 

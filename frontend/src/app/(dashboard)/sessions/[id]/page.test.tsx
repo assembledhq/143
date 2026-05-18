@@ -6,7 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { api } from '@/lib/api';
-import type { Issue, PullRequest, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Issue, PullRequest, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse, ThreadMessageWindowResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -2185,6 +2185,209 @@ describe('SessionDetailPage', () => {
 
     await waitFor(() => {
       expect(getChatScroller(container).scrollTop).toBe(410);
+    });
+  });
+
+  it('loads a threaded session from the latest message window and prepends older messages', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-window-pagination',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-window',
+          session_id: 'session-thread-window-pagination',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 2,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+    const requestedUrls: string[] = [];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request, params }) => {
+        requestedUrls.push(request.url);
+        const url = new URL(request.url);
+        if (url.searchParams.get('before') === '3') {
+          return HttpResponse.json({
+            data: [
+              {
+                id: 1,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'user',
+                content: 'Older user prompt',
+                created_at: '2026-02-17T07:01:00Z',
+              },
+              {
+                id: 2,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'assistant',
+                content: 'Older assistant reply',
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            meta: { has_older: false, thread_status: 'idle' },
+          } satisfies ThreadMessageWindowResponse);
+        }
+        return HttpResponse.json({
+          data: [
+            {
+              id: 3,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 2,
+              role: 'assistant',
+              content: 'Latest assistant reply',
+              created_at: '2026-02-17T07:03:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {
+            next_older_cursor: '3',
+            has_older: true,
+            latest_assistant_message_id: 3,
+            live_edge_message_id: 3,
+            thread_status: 'idle',
+          },
+        } satisfies ThreadMessageWindowResponse);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+
+    await screen.findByText('Latest assistant reply');
+    const firstRequest = new URL(requestedUrls[0]);
+    expect(firstRequest.searchParams.get('position')).toBe('latest');
+    expect(firstRequest.searchParams.get('limit')).toBe('60');
+
+    await user.click(screen.getByRole('button', { name: /Load older/i }));
+
+    const olderPrompt = await screen.findByText('Older user prompt');
+    const latestReply = screen.getByText('Latest assistant reply');
+    expect(olderPrompt.compareDocumentPosition(latestReply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(requestedUrls.some((url) => new URL(url).searchParams.get('before') === '3')).toBe(true);
+  });
+
+  it('loads older thread pages before restoring a saved scroll position outside the latest window', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-window-saved-scroll',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-window-scroll',
+          session_id: 'session-thread-window-saved-scroll',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 2,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+    const requestedUrls: string[] = [];
+    let transcriptScrollHeight = 500;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => transcriptScrollHeight);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+    window.localStorage.setItem(
+      `session-scroll-position:org-1:user-1:${threadSession.id}:thread-window-scroll`,
+      JSON.stringify({ version: 1, scrollTop: 700 }),
+    );
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request, params }) => {
+        requestedUrls.push(request.url);
+        const url = new URL(request.url);
+        if (url.searchParams.get('before') === '3') {
+          transcriptScrollHeight = 1000;
+          return HttpResponse.json({
+            data: [
+              {
+                id: 1,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'user',
+                content: 'Older saved-scroll prompt',
+                created_at: '2026-02-17T07:01:00Z',
+              },
+              {
+                id: 2,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'assistant',
+                content: 'Older saved-scroll reply',
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            meta: { has_older: false, thread_status: 'idle' },
+          } satisfies ThreadMessageWindowResponse);
+        }
+        return HttpResponse.json({
+          data: [
+            {
+              id: 3,
+              session_id: threadSession.id,
+              org_id: 'org-1',
+              thread_id: params.threadId as string,
+              turn_number: 2,
+              role: 'assistant',
+              content: 'Latest saved-scroll reply',
+              created_at: '2026-02-17T07:03:00Z',
+            },
+          ] as SessionMessage[],
+          meta: {
+            next_older_cursor: '3',
+            has_older: true,
+            latest_assistant_message_id: 3,
+            live_edge_message_id: 3,
+            thread_status: 'idle',
+          },
+        } satisfies ThreadMessageWindowResponse);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+
+    await screen.findByText('Older saved-scroll prompt');
+    await waitFor(() => {
+      expect(requestedUrls.some((url) => new URL(url).searchParams.get('before') === '3')).toBe(true);
+      expect(getChatScroller(container).scrollTop).toBe(700);
     });
   });
 
