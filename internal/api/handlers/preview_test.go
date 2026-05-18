@@ -928,7 +928,7 @@ var sessionRowColumns = []string{
 	"target_branch", "working_branch",
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -971,6 +971,9 @@ func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *st
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  "idle",
 		"pr_push_error":                  (*string)(nil),
+		"branch_creation_state":          "idle",
+		"branch_creation_error":          (*string)(nil),
+		"branch_url":                     (*string)(nil),
 		"has_unpushed_changes":           false,
 		"linear_private":                 false,
 		"linear_state_sync_disabled":     false,

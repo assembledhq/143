@@ -810,6 +810,26 @@ describe('api client', () => {
     });
   });
 
+  describe('sessions - createBranch', () => {
+    it('creates a branch and returns queued status', async () => {
+      let capturedUrl: string | undefined;
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/sessions/:id/branch', async ({ request }) => {
+          capturedUrl = request.url;
+          capturedBody = await request.json();
+          return HttpResponse.json({ status: 'queued' }, { status: 202 });
+        }),
+      );
+
+      const result = await api.sessions.createBranch('session-abc', { authorMode: 'user', resumeToken: 'resume-123' });
+      expect(result.status).toBe('queued');
+      expect(capturedUrl).toContain('/api/v1/sessions/session-abc/branch');
+      expect(capturedBody).toEqual({ author_mode: 'user', resume_token: 'resume-123' });
+    });
+  });
+
   describe('issues - triggerFix', () => {
     it('triggers fix for an issue', async () => {
       let capturedBody: unknown;
