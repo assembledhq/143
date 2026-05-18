@@ -138,8 +138,9 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uu
 }
 
 type mockMessageStore struct {
-	createFn       func(ctx context.Context, msg *models.SessionMessage) error
-	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	createFn             func(ctx context.Context, msg *models.SessionMessage) error
+	listByThreadFn       func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	listWindowByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
 func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
@@ -154,6 +155,13 @@ func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uui
 		return m.listByThreadFn(ctx, orgID, threadID)
 	}
 	return nil, nil
+}
+
+func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+	if m.listWindowByThreadFn != nil {
+		return m.listWindowByThreadFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionMessageWindow{}, nil
 }
 
 type mockLogStore struct {
@@ -2427,6 +2435,89 @@ func TestService_GetMessages(t *testing.T) {
 			}
 			require.NoError(t, err, "should not return an error")
 			require.Len(t, messages, tt.expectLen, "should return expected number of messages")
+		})
+	}
+}
+
+func TestService_GetMessageWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+		expected  MessageWindowResult
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+					require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped by org")
+					require.Equal(t, threadID, gotThreadID, "thread lookup should use requested thread")
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted}, nil
+				}
+				deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+					require.Equal(t, orgID, gotOrgID, "message window should be scoped by org")
+					require.Equal(t, threadID, gotThreadID, "message window should use requested thread")
+					require.Equal(t, int64(44), opts.BeforeID, "message window should pass cursor options")
+					return db.SessionMessageWindow{
+						Messages:                 []models.SessionMessage{{ID: 43}},
+						NextOlderCursor:          "43",
+						HasOlder:                 true,
+						LatestAssistantMessageID: 43,
+						LiveEdgeMessageID:        43,
+					}, nil
+				}
+			},
+			expected: MessageWindowResult{
+				Window: db.SessionMessageWindow{
+					Messages:                 []models.SessionMessage{{ID: 43}},
+					NextOlderCursor:          "43",
+					HasOlder:                 true,
+					LatestAssistantMessageID: 43,
+					LiveEdgeMessageID:        43,
+				},
+				ThreadStatus: models.ThreadStatusCompleted,
+			},
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "session mismatch",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{BeforeID: 44, Limit: 10})
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			require.NoError(t, err, "message window should not return an error")
+			require.Equal(t, tt.expected, result, "message window should return expected data and thread status")
 		})
 	}
 }

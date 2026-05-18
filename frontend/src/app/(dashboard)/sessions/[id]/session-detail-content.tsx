@@ -1,10 +1,10 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowDown,
@@ -117,7 +117,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -1849,6 +1849,7 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
+const THREAD_MESSAGE_WINDOW_LIMIT = 60;
 // Sliding window for the SSE log overlay buffer. The persisted logs are
 // fetched separately via the timeline query; streamedLogs only holds the
 // not-yet-persisted overlay that bridges the gap between an SSE push and the
@@ -1867,6 +1868,25 @@ function normalizeTranscriptContent(content: string): string {
     .map((line) => line.replace(/[ \t\r]+$/g, ""))
     .join("\n")
     .replace(/\n+$/g, "");
+}
+
+export function flattenThreadMessageWindows(
+  pages: ThreadMessageWindowResponse[] | undefined,
+): SessionMessage[] {
+  return pages?.slice().reverse().flatMap((page) => page.data ?? []) ?? [];
+}
+
+export function filterThreadLogsForLoadedMessages(
+  logs: SessionLog[],
+  messages: SessionMessage[],
+): SessionLog[] {
+  if (messages.length === 0) return [];
+  const loadedTurns = new Set(messages.map((message) => message.turn_number));
+  return logs.filter((log) => loadedTurns.has(log.turn_number));
+}
+
+function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
+  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
 }
 
 function SessionTimelineSkeleton() {
@@ -1946,6 +1966,7 @@ function ChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
+  const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
@@ -1966,12 +1987,25 @@ function ChatPanel({
     refetchInterval: isActive && !activeThreadId ? 3000 : false,
   });
 
-  const threadMessagesQuery = useQuery({
-    queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
-    queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
+  const threadMessagesQuery = useInfiniteQuery({
+    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages", "window"],
+    queryFn: ({ pageParam }) =>
+      api.sessions.getThreadMessageWindow(
+        sessionId,
+        activeThreadId!,
+        pageParam
+          ? { before: pageParam as string, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+          : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+      ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
     enabled: !!activeThreadId,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
+
+  const threadMessages = useMemo(() => {
+    return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
+  }, [threadMessagesQuery.data?.pages]);
 
   const threadLogsQuery = useQuery({
     queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
@@ -2064,9 +2098,13 @@ function ChatPanel({
       const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
         .filter((request) => request.thread_id === activeThreadId)
         .map((request) => ({ kind: "human_input" as const, data: request }));
-      return sortTimelineEntries([...buildTimeline(
-        mergePendingMessages(threadMessagesQuery.data?.data ?? [], optimisticForCurrentView),
+      const loadedThreadLogs = filterThreadLogsForLoadedMessages(
         threadLogsQuery.data?.data ?? [],
+        threadMessages,
+      );
+      return sortTimelineEntries([...buildTimeline(
+        mergePendingMessages(threadMessages, optimisticForCurrentView),
+        loadedThreadLogs,
       ), ...threadHumanInputEntries]);
     }
     const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
@@ -2088,7 +2126,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
+  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
@@ -2246,6 +2284,27 @@ function ChatPanel({
       el.scrollTop = 0;
     }
   }, []);
+
+  const loadOlderThreadMessages = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) {
+      olderMessagesPrependSnapshotRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
+    void threadMessagesQuery.fetchNextPage();
+  }, [threadMessagesQuery]);
+
+  useLayoutEffect(() => {
+    const snapshot = olderMessagesPrependSnapshotRef.current;
+    const el = scrollRef.current;
+    if (!snapshot || !el || threadMessagesQuery.isFetchingNextPage) {
+      return;
+    }
+    olderMessagesPrependSnapshotRef.current = null;
+    el.scrollTop = snapshot.scrollTop + (el.scrollHeight - snapshot.scrollHeight);
+  }, [threadMessages.length, threadMessagesQuery.isFetchingNextPage]);
 
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
@@ -2459,6 +2518,16 @@ function ChatPanel({
     });
 
     if (anchor.kind === "saved_position") {
+      const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      if (
+        activeThreadId &&
+        threadMessagesQuery.hasNextPage &&
+        !threadMessagesQuery.isFetchingNextPage &&
+        anchor.scrollTop > maxScrollTop
+      ) {
+        void threadMessagesQuery.fetchNextPage();
+        return;
+      }
       el.scrollTop = anchor.scrollTop;
       syncScrollState(el);
       initialAnchorAppliedRef.current = true;
@@ -2477,7 +2546,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2515,6 +2584,24 @@ function ChatPanel({
           <SessionTimelineSkeleton />
         ) : (
           <>
+            {activeThreadId && threadMessagesQuery.hasNextPage ? (
+              <div className="flex justify-center pb-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadOlderThreadMessages}
+                  disabled={threadMessagesQuery.isFetchingNextPage}
+                >
+                  {threadMessagesQuery.isFetchingNextPage ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                  Load older
+                </Button>
+              </div>
+            ) : null}
             {showFreshThreadShell ? <FreshThreadShell /> : null}
             <ChatTimeline
               entries={timelineEntries}
@@ -3833,17 +3920,36 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: ({ response, resolvedIDs }, vars, context) => {
       setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
       if (vars.activeThreadId) {
-        queryClient.setQueryData<ListResponse<SessionMessage>>(
-          queryKeys.sessions.threadMessages(id, vars.activeThreadId),
+        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
+          threadMessageWindowQueryKey(id, vars.activeThreadId),
           (previous) => {
-            const existing = previous?.data ?? [];
+            const pages = previous?.pages ?? [];
+            const firstPage = pages[0] ?? {
+              data: [],
+              meta: {
+                has_older: false,
+                thread_status: activeThread?.status ?? session?.status ?? "idle",
+              },
+            };
+            const existing = firstPage.data ?? [];
             const responseKey = messageReconciliationKey(response.data);
             const withoutDuplicate = existing.filter((message) =>
               message.id !== response.data.id && messageReconciliationKey(message) !== responseKey
             );
             return {
-              data: [...withoutDuplicate, response.data],
-              meta: previous?.meta ?? {},
+              pages: [
+                {
+                  ...firstPage,
+                  data: [...withoutDuplicate, response.data],
+                  meta: {
+                    ...firstPage.meta,
+                    live_edge_message_id: response.data.id,
+                    thread_status: activeThread?.status ?? firstPage.meta.thread_status,
+                  },
+                },
+                ...pages.slice(1),
+              ],
+              pageParams: previous?.pageParams ?? [undefined],
             };
           },
         );

@@ -48,6 +48,19 @@ export interface UserSettings {
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
 }
 
+export interface ThreadMessageWindowMeta {
+  next_older_cursor?: string;
+  has_older: boolean;
+  latest_assistant_message_id?: number;
+  live_edge_message_id?: number;
+  thread_status: string;
+}
+
+export interface ThreadMessageWindowResponse {
+  data: SessionMessage[];
+  meta: ThreadMessageWindowMeta;
+}
+
 export type UserSettingsUpdateRequest = UserSettings;
 
 export interface AuthProviders {
