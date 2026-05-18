@@ -2650,12 +2650,16 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const tabRail = await screen.findByLabelText('Session detail tabs');
+    const headerBar = screen.getByTestId('session-detail-header-bar');
     const actions = screen.getByLabelText('Session detail actions');
 
-	expect(tabRail).toHaveClass('overflow-x-auto');
-	expect(tabRail).toHaveClass('scrollbar-hide');
-	expect(tabRail).toHaveClass('min-w-0');
-	expect(actions).toHaveClass('shrink-0');
+    expect(headerBar).toHaveClass('items-center');
+    expect(tabRail).toHaveClass('h-full');
+    expect(tabRail).toHaveClass('items-center');
+    expect(tabRail).toHaveClass('overflow-x-auto');
+    expect(tabRail).toHaveClass('scrollbar-hide');
+    expect(tabRail).toHaveClass('min-w-0');
+    expect(actions).toHaveClass('shrink-0');
     expect(within(actions).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
   });
 
@@ -4590,7 +4594,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('reserves bottom space for the active Changes underline when the file count badge is shown', async () => {
+  it('keeps the active Changes underline inside the fixed header height when the file count badge is shown', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
@@ -4601,7 +4605,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByLabelText('Session detail tabs')).toHaveClass('pb-1');
+    expect(screen.getByLabelText('Session detail tabs')).toHaveClass('h-full');
   });
 
   it('does not show file count badge on Changes tab when session has no diff', async () => {
