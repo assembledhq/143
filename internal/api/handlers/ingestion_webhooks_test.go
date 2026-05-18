@@ -895,7 +895,7 @@ func TestIngestionWebhook_HandleLinear_UsesDocumentedSignatureHeader(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestIngestionWebhook_HandleLinear_RejectsStaleWebhookTimestamp(t *testing.T) {
+func TestIngestionWebhook_HandleLinear_AcceptsDelayedSignedWebhookRetry(t *testing.T) {
 	t.Parallel()
 
 	secret := "linear-webhook-secret"
@@ -925,6 +925,30 @@ func TestIngestionWebhook_HandleLinear_RejectsStaleWebhookTimestamp(t *testing.T
 			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
 		)
+	mock.ExpectQuery("INSERT INTO webhook_deliveries").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE webhook_deliveries").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
 	req.Header.Set("Linear-Signature", signBody(secret, []byte(body)))
@@ -932,9 +956,9 @@ func TestIngestionWebhook_HandleLinear_RejectsStaleWebhookTimestamp(t *testing.T
 
 	handler.HandleLinear(w, req)
 
-	require.Equal(t, http.StatusUnauthorized, w.Code, "stale signed Linear webhook payloads should be rejected before delivery creation")
-	require.Contains(t, w.Body.String(), "UNAUTHORIZED", "response should identify the signature/freshness failure")
-	require.NoError(t, mock.ExpectationsWereMet(), "stale webhook should not write a delivery row")
+	require.Equal(t, http.StatusOK, w.Code, "delayed signed Linear retries should pass signature verification")
+	require.Contains(t, w.Body.String(), "processed", "delayed signed Linear retry should reach normal delivery processing")
+	require.NoError(t, mock.ExpectationsWereMet(), "delayed webhook should be recorded and processed normally")
 }
 
 // TestIngestionWebhook_GlobalLinearSecretFallback pins the SaaS-deployment
