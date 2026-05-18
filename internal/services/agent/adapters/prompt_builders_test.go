@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -771,6 +772,71 @@ func TestExtractStackTrace(t *testing.T) {
 			for _, s := range tt.want {
 				require.Contains(t, result, s)
 			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// composeFreshExecPrompt
+// ---------------------------------------------------------------------------
+
+func TestComposeFreshExecPrompt_PlainPromptKeepsSystemFirst(t *testing.T) {
+	t.Parallel()
+
+	got := composeFreshExecPrompt("system context", "fix the failing test")
+	require.Equal(t, "system context\n\n---\n\nfix the failing test", got)
+}
+
+func TestComposeFreshExecPrompt_SlashCommandMovesUserFirst(t *testing.T) {
+	t.Parallel()
+
+	user := "/review the current workspace diff\n\nFix nits when they are local."
+	got := composeFreshExecPrompt("system context", user)
+	require.True(t, strings.HasPrefix(got, "/review "), "slash command must be at position 0 so the CLI dispatches its native handler")
+	require.Contains(t, got, "system context", "system prompt should still reach the model")
+	require.Equal(t, user+"\n\n---\n\nsystem context", got)
+}
+
+func TestComposeFreshExecPrompt_SlashCommandWithEmptySystemPromptReturnsUserOnly(t *testing.T) {
+	t.Parallel()
+
+	got := composeFreshExecPrompt("   \n\t", "/review go")
+	require.Equal(t, "/review go", got, "empty system prompts should not leave a trailing separator")
+}
+
+func TestComposeFreshExecPrompt_LeadingWhitespaceBeforeSlashStillFlips(t *testing.T) {
+	t.Parallel()
+
+	got := composeFreshExecPrompt("system context", "   /review go")
+	require.True(t, strings.HasPrefix(got, "   /review go"), "leading whitespace should still count as a slash-command opener")
+}
+
+func TestUserPromptStartsWithSlashCommand(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain text", "fix the bug", false},
+		{"slash with args", "/review the diff", true},
+		{"slash with newline", "/review\nfix nits", true},
+		{"slash only", "/review", true},
+		{"slash then non-identifier", "/foo!bar", false},
+		{"slash with hyphen", "/code-review now", true},
+		{"slash with colon namespace", "/plugin:review go", true},
+		{"lone slash", "/", false},
+		{"middle of line", "see /review later", false},
+		{"empty", "", false},
+		{"only whitespace", "   \n\t", false},
+		{"leading whitespace then slash", "  \t/review go", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, userPromptStartsWithSlashCommand(tc.in))
 		})
 	}
 }
