@@ -274,6 +274,62 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('lets the review loop use a coding agent different from the main session agent', async () => {
+    const user = userEvent.setup();
+    let postedBody: { agent_type?: string; max_passes: number } | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            agent_type: 'codex',
+            snapshot_key: 'snapshot-manual-review',
+            sandbox_state: 'snapshotted',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+      http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+        postedBody = await request.json() as { agent_type?: string; max_passes: number };
+        return HttpResponse.json({
+          data: {
+            id: 'review-loop-selected-agent',
+            org_id: 'org-1',
+            session_id: params.id as string,
+            status: 'running',
+            source: 'manual',
+            agent_type: postedBody.agent_type ?? 'codex',
+            max_passes: postedBody.max_passes,
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          },
+        } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Review this work' }));
+
+    expect(screen.queryByText('2 is the standard pass')).not.toBeInTheDocument();
+
+    await user.click(await screen.findByRole('combobox', { name: 'Review coding agent' }));
+    await user.click(await screen.findByRole('option', { name: 'Claude Code' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+
+    await waitFor(() => {
+      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2 });
+    });
+  });
+
   it('opens the review loop in its returned agent tab', async () => {
     const user = userEvent.setup();
     const existingThread: SessionThread = {

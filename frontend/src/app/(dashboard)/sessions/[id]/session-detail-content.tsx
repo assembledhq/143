@@ -2622,6 +2622,11 @@ const SESSION_HEADER_HEIGHT_CLASSNAME = "h-14";
 const TRANSCRIPT_STEP_PX = 72;
 const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
+const REVIEW_AGENT_KEYS = ["codex", "claude_code"] as const;
+
+function getDefaultReviewAgentType(sessionAgentType?: string): string {
+  return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";
+}
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -2653,6 +2658,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
   const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
   const [reviewPasses, setReviewPasses] = useState(2);
+  const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -3333,7 +3339,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (id) {
       api.sessions.recordView(id).then(() => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      }).catch(() => {});
+      }).catch((err) => {
+        console.error("failed to record session view", err);
+      });
     }
   }, [id, queryClient]);
 
@@ -3345,7 +3353,20 @@ export function SessionDetailContent({ id }: { id: string }) {
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
   const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
-  const canUseNativeReviewLoop = session?.agent_type === "codex" || session?.agent_type === "claude_code";
+  const canUseNativeReviewLoop = !!session && session.agent_type !== "pm_agent";
+  const sessionID = session?.id;
+  const sessionAgentType = session?.agent_type;
+  const reviewAgentOptions = useMemo(
+    () => REVIEW_AGENT_KEYS.map((agentType) => AGENTS_BY_KEY[agentType]).filter(Boolean),
+    [],
+  );
+
+  useEffect(() => {
+    if (!sessionAgentType) {
+      return;
+    }
+    setReviewAgentType(getDefaultReviewAgentType(sessionAgentType));
+  }, [sessionID, sessionAgentType]);
 
   const { data: reviewLoopsData } = useQuery({
     queryKey: queryKeys.sessions.reviewLoops(id),
@@ -3420,8 +3441,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const startReviewLoopMutation = useMutation({
     mutationFn: () =>
       api.sessions.startReviewLoop(id, {
-        agent_type: session?.agent_type,
-        model: session?.model_override,
+        agent_type: reviewAgentType,
+        model: session?.agent_type === reviewAgentType ? session?.model_override : undefined,
         max_passes: reviewPasses,
       }),
     onSuccess: (response) => {
@@ -4752,7 +4773,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-foreground">Review this work</p>
                         <p className="text-xs text-muted-foreground">
-                          Run the current agent&apos;s review loop in this sandbox before shipping.
+                          Run a native agent review loop in this sandbox before shipping.
                         </p>
                       </div>
                     </div>
@@ -5187,29 +5208,53 @@ export function SessionDetailContent({ id }: { id: string }) {
           <DialogHeader>
             <DialogTitle>Review this work</DialogTitle>
             <DialogDescription>
-              Run the selected agent&apos;s native review loop in this session&apos;s sandbox. The loop opens a dedicated review tab and keeps changes on the same branch.
+              Run a selected agent&apos;s native review loop in this session&apos;s sandbox. The loop opens a dedicated review tab and keeps changes on the same branch.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <div className="rounded-lg border border-border bg-muted/30 p-3">
-              <div className="flex items-start gap-3">
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground">
-                  <ClipboardList className="h-4 w-4" />
-                </div>
-                <div className="min-w-0 space-y-1">
-                  <p className="text-sm font-medium text-foreground">
-                    {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Reviews the current working tree, fixes findings, and stops early if the follow-up pass is clean.
-                  </p>
+            <div className="space-y-2">
+              <Label htmlFor="review-agent-type">Coding agent</Label>
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground">
+                    <ClipboardList className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <Select
+                      value={reviewAgentType}
+                      onValueChange={setReviewAgentType}
+                      disabled={startReviewLoopMutation.isPending}
+                    >
+                      <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="h-8 w-full">
+                        <SelectValue placeholder="Select coding agent" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {reviewAgentOptions.map((agent) => (
+                          <SelectItem key={agent.key} value={agent.key}>
+                            {agent.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Reviews the current working tree, fixes findings, and stops early if the follow-up pass is clean.
+                    </p>
+                    {session.agent_type === reviewAgentType ? (
+                      <p className="text-xs text-muted-foreground">
+                        This is the same agent used by the main session.
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Separate from the main session&apos;s {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} agent.
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
                 <Label htmlFor="review-pass-count">Review passes</Label>
-                <span className="text-xs text-muted-foreground">2 is the standard pass</span>
               </div>
               <div className="flex items-center gap-2">
                 <Button
