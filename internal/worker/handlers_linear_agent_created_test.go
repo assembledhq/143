@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,6 +126,111 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 		require.Contains(t, err.Error(), "attach session", "error should identify the bridge attach step")
 		require.NoError(t, mock.ExpectationsWereMet(), "failed attach should roll back the uncommitted session rows")
 	})
+}
+
+// TestReconcileLinearAgentCreatedNoPrimaryIssueOnlyReenqueuesRunAgent covers
+// the retry-recovery hot path of handleLinearAgentCreated: when a re-delivered
+// job finds a bridge row that already has session_id attached but the session
+// was created without a primary issue link, reconcile must skip the
+// FetchIssue + provider-state branch and only re-enqueue run_agent. Without
+// this guarantee, transient writer failures between AttachSession and
+// run_agent enqueue could leave the Linear AgentSession stuck mid-flight on
+// a permanent retry.
+func TestReconcileLinearAgentCreatedNoPrimaryIssueOnlyReenqueuesRunAgent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	dedupe := db.RunAgentDedupeKey(sessionID)
+
+	// reconcile's first GetByID — session has no primary issue id so the
+	// provider-state branch must be skipped.
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+
+	// enqueueRunAgentForLinearAgent re-fetches the session before enqueueing.
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+
+	// run_agent enqueue is idempotent (ON CONFLICT DO NOTHING dedupes on
+	// (queue, dedupe_key)); this row simulates the happy-path insert.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "agent", "run_agent", pgxmock.AnyArg(), 5, &dedupe).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Sessions: db.NewSessionStore(mock),
+			Jobs:     db.NewJobStore(mock),
+		},
+		// ClientForOrg / ProviderState intentionally nil — the no-primary-
+		// issue branch must not call FetchIssue or writeAgentProviderState.
+	}
+	row := &db.LinearAgentSession{
+		OrgID:                orgID,
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "iss_1",
+	}
+	err = reconcileLinearAgentCreated(context.Background(), deps, row, sessionID, linearAgentEventPayload{
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "iss_1",
+	}, zerolog.Nop())
+	require.NoError(t, err, "reconcile with no primary issue should succeed by only re-enqueueing run_agent")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"reconcile must not touch FetchIssue, the SessionIssueLinks store, or the LinearProviderStateStore on the no-primary-issue branch")
+}
+
+// TestReconcileLinearAgentCreatedRejectsZeroValueSession pins the guardrail
+// that protects against a future SessionStore schema change silently
+// returning a zero-value row. The session_id is the worker's only handle
+// on the 143 session; a zero-value scan would silently route the
+// reconcile through the "no primary issue" branch without ever loading
+// the real row.
+func TestReconcileLinearAgentCreatedRejectsZeroValueSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	// Return a session row whose id column is the zero uuid. The
+	// guardrail at the top of reconcileLinearAgentCreated must refuse
+	// this rather than proceed with the rest of the pipeline.
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
+			AddRow(workerSessionRow(uuid.Nil, uuid.Nil, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Sessions: db.NewSessionStore(mock),
+			Jobs:     db.NewJobStore(mock),
+		},
+	}
+	row := &db.LinearAgentSession{
+		OrgID:                orgID,
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "iss_1",
+	}
+	err = reconcileLinearAgentCreated(context.Background(), deps, row, sessionID, linearAgentEventPayload{
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "iss_1",
+	}, zerolog.Nop())
+	require.Error(t, err, "zero-value session scan must surface as an error, not silently fall through to the no-primary-issue branch")
+	require.Contains(t, err.Error(), "zero-value", "error should identify the zero-value guardrail")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestHandleLinearAgentCreatedReemitsBootstrapBeforeIssueFetch(t *testing.T) {

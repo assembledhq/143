@@ -224,7 +224,7 @@ func (s *IntegrationStore) SetLinearWorkspaceID(ctx context.Context, orgID, inte
 // has one webhook URL for every workspace it's installed in, so the
 // handler can't rely on a per-install URL parameter for routing. The
 // partial UNIQUE index `idx_integrations_linear_workspace` (see migration
-// 000124) makes this an O(log n) probe and enforces a one-workspace-per-app
+// 000133) makes this an O(log n) probe and enforces a one-workspace-per-app
 // invariant — two active 143 integrations can never share a Linear
 // workspace id, so the lookup is unambiguous by construction.
 //

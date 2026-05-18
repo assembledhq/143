@@ -410,6 +410,26 @@ type LinearAgentSettings struct {
 	// Keyed by Linear team key (e.g. "ACS"). Missing key → inherit
 	// org-level Enabled. nil entry → inherit. Non-nil entry → respect.
 	PerTeamEnabled map[string]*bool `json:"per_team_enabled,omitempty"`
+	// AllowLabelRepoOverride lets any Linear member with label-write access
+	// redirect an AgentSession to a different repo via a
+	// `repo:<full-name>` label on the issue. Opt-in (default false) because
+	// it weakens the org's "Linear team → repo" routing guarantees:
+	// without this flag, repo selection follows the configured
+	// linear_team_repo_mappings (admin-controlled) and the org default;
+	// with it, any Linear contributor who can apply labels can route work
+	// to any repo the org owns. Orgs whose Linear membership equals their
+	// 143 admin set can safely enable it.
+	AllowLabelRepoOverride *bool `json:"allow_label_repo_override,omitempty"`
+}
+
+// EffectiveAllowLabelRepoOverride resolves the org-level
+// allow-label-repo-override flag, applying the design default (false —
+// opt-in) when no explicit value was set.
+func (s LinearAgentSettings) EffectiveAllowLabelRepoOverride() bool {
+	if s.AllowLabelRepoOverride == nil {
+		return false
+	}
+	return *s.AllowLabelRepoOverride
 }
 
 // EffectiveEnabled resolves the org-level Enabled flag, applying the design

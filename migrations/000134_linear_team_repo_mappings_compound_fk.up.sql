@@ -1,6 +1,6 @@
 -- Tighten cross-org safety on linear_team_repo_mappings.repository_id.
 --
--- The original migration 000123 declared
+-- The original migration 000132 declared
 --   repository_id uuid NOT NULL REFERENCES repositories(id) ON DELETE CASCADE
 -- which lets a future code path that bypasses LinearTeamRepoMappingStore
 -- associate a repository from org A with a mapping row in org B. The store

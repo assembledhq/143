@@ -87,6 +87,8 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 
 	orgID := uuid.New()
 	integrationID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
 	jobs := &fakeJobs{}
 	enabled := true
 	d := &LinearAgentDispatcher{
@@ -102,6 +104,27 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 	mock.ExpectQuery("SELECT id, org_id").
 		WithArgs(orgID, "as_racing").
 		WillReturnError(pgx.ErrNoRows)
+	// After the lookup miss the dispatcher persists a synthetic row via
+	// UpsertOnCreated so downstream activity-log writes have a real
+	// agent_session_row_id to bind to. The late-arriving `created`
+	// re-upserts idempotently on the (org_id, linear_agent_session_id)
+	// UNIQUE so this insert is safe.
+	mock.ExpectQuery("INSERT INTO linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at", "inserted",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_racing",
+			"iss_1", "",
+			"", "",
+			nil, "pending", &now,
+			now, now, true,
+		))
 
 	body := []byte(`{"type":"AgentSessionEvent","action":"prompted","payload":{"agentSession":{"id":"as_racing","issueId":"iss_1","commentId":"comment_1","issue":{"id":"iss_1","teamId":"team_1","projectId":"project_1"}},"agentActivity":{"body":"Please add regression coverage."}}}`)
 	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body, nil)
@@ -113,7 +136,8 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 	require.Equal(t, "prompted", payload["action"], "worker payload should identify prompted action")
 	require.Equal(t, "as_racing", payload["linear_agent_session_id"], "worker payload should carry the Linear AgentSession id for retry lookup")
 	require.Equal(t, "Please add regression coverage.", payload["linear_prompt_body"], "worker payload should carry Linear's prompted agentActivity.body")
-	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should only attempt the row lookup before enqueueing the retry job")
+	require.Equal(t, rowID.String(), payload["agent_session_row_id"], "worker payload should carry the persisted synthetic row id rather than a zero uuid")
+	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should look up, then upsert a synthetic row before enqueueing the retry job")
 }
 
 func TestLinearAgentDispatcher_EnqueueFailureReturnsRetryableStatus(t *testing.T) {
@@ -213,6 +237,46 @@ func TestLinearAgentDispatcher_PerTeamEnableOverrideCanPassOrgDisabledGate(t *te
 	require.Equal(t, "agent_dispatched", res.Status, "a true per-team override should pass the coarse dispatcher gate")
 	require.Len(t, jobs.calls, 1, "dispatcher should enqueue the created worker job so the worker can apply team-key gating")
 	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert the AgentSession row")
+}
+
+// TestLinearAgentDispatcher_SettingsLoaderErrorSurfacesAsRetryable pins the
+// dispatcher behavior on a transient settings-loader failure: surface the
+// error via DispatchResult.Err so the handler 500s and Linear redelivers,
+// rather than silently returning "feature_off" and dropping the event.
+func TestLinearAgentDispatcher_SettingsLoaderErrorSurfacesAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	jobs := &fakeJobs{}
+	loaderErr := errors.New("connection refused")
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{}, loaderErr
+		},
+		featureEnabled: true,
+	}
+
+	body := []byte(`{"type":"AgentSessionEvent","action":"created","payload":{"agentSession":{"id":"as_1","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body, nil)
+
+	require.Equal(t, "retryable_error", res.Status,
+		"transient settings-loader failure must not be silently treated as feature_off")
+	require.Error(t, res.Err,
+		"settings-loader failure must propagate via DispatchResult.Err so the handler 500s and Linear redelivers")
+	require.ErrorIs(t, res.Err, loaderErr,
+		"the underlying loader error should be wrapped, not swallowed")
+	require.Empty(t, jobs.calls,
+		"no worker job should be enqueued when settings could not be resolved")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"dispatcher must short-circuit before touching the AgentSession row when settings cannot be loaded")
 }
 
 func TestLinearAgentDispatcher_UsesParsedEnvelopeWhenProvided(t *testing.T) {
