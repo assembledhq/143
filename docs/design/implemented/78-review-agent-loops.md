@@ -97,17 +97,17 @@ reviewer/fixer lanes.
 
 ### Manual session entry point
 
-Session detail exposes `Review this work` in the Overview readiness area rather
-than in the persistent header action cluster. It belongs with publish readiness
-controls because the user is asking, "is this ready to ship?", but it remains a
-secondary action so `Create PR` can stay the single primary shipping action.
+Session detail exposes a `Review` action in the Overview publish-readiness area
+rather than in the persistent header action cluster. Before a PR exists, the
+action appears in a compact review card. After a PR exists, it moves into the PR
+health action row next to `Merge`, `Fix tests`, and related PR actions.
 
-Clicking `Review this work` opens a focused setup dialog with one real decision:
+Clicking `Review` opens a focused setup dialog with one real decision:
 how many back-and-forth passes to allow. The dialog is used on mobile and desktop
 so the setup controls do not depend on a popover inside the mobile details sheet.
 
 ```text
-Review this work
+Review
 
 Agent
 Claude Code
