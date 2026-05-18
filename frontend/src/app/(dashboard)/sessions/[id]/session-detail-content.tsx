@@ -1018,6 +1018,7 @@ function SessionComposer({
   const [showLinearInput, setShowLinearInput] = useState(false);
   const [linearInput, setLinearInput] = useState("");
   const [linearInputError, setLinearInputError] = useState<string | null>(null);
+  const [isDragActive, setIsDragActive] = useState(false);
 
   // Focus the Linear input the render after it mounts. Using a layout
   // effect (rather than the previous requestAnimationFrame inside the menu
@@ -1328,6 +1329,65 @@ function SessionComposer({
     });
   }
 
+  function isFileDrag(event: React.DragEvent<HTMLElement>) {
+    const types = Array.from(event.dataTransfer.types ?? []);
+    return types.includes("Files");
+  }
+
+  function resetDragState() {
+    setIsDragActive(false);
+  }
+
+  function handleDragEnter(event: React.DragEvent<HTMLDivElement>) {
+    if (!canSendMessage || !isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    setIsDragActive(true);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!canSendMessage || !isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsDragActive(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    if (!canSendMessage || !isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    const nextTarget = event.relatedTarget ?? (event.nativeEvent as DragEvent).relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    resetDragState();
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!canSendMessage || !isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files ?? []);
+    resetDragState();
+    if (files.length === 0) {
+      return;
+    }
+    await onPasteFiles(files);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+    });
+  }
+
   const firstError = uploadError || sendError;
   const errorMessage = typeof firstError === "string"
     ? firstError
@@ -1461,7 +1521,16 @@ function SessionComposer({
         <div
           ref={composerInputSurfaceRef}
           data-testid="session-composer-input-surface"
-          className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}
+          data-drag-active={isDragActive ? "true" : "false"}
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={cn(
+            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
+            isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
+          )}
         >
           {openComments.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">

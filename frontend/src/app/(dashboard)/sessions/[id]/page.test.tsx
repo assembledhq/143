@@ -6075,6 +6075,59 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByRole('button', { name: 'Preview pasted-follow-up.png' })).toBeInTheDocument();
   });
 
+  it('uploads an image dropped onto the follow-up input surface and shows it in the attachment strip', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const uploadSpy = vi.spyOn(api.uploads, 'upload').mockResolvedValue({
+      url: 'https://example.com/dropped-follow-up.png',
+      file_name: 'dropped-follow-up.png',
+      content_type: 'image/png',
+    });
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    const inputSurface = screen.getByTestId('session-composer-input-surface');
+    const file = new File(['image-bytes'], 'dropped-follow-up.png', { type: 'image/png' });
+
+    fireEvent.dragEnter(inputSurface, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+        types: ['Files'],
+      },
+    });
+
+    expect(inputSurface).toHaveAttribute('data-drag-active', 'true');
+
+    fireEvent.drop(inputSurface, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+        types: ['Files'],
+      },
+    });
+
+    await waitFor(() => {
+      expect(uploadSpy).toHaveBeenCalledWith(file);
+    });
+    expect(await screen.findByRole('button', { name: 'Preview dropped-follow-up.png' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(textarea).toHaveFocus();
+    });
+  });
+
   it('adds an image URL from the continue-session dropdown and shows it in the attachment strip', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
