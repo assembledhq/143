@@ -125,7 +125,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -296,6 +296,11 @@ export function getPendingEditableThreadUpdate(
 
 export function getInitialComposerSelectedModel(thread: SessionThread): string {
   return thread.model_override ?? "";
+}
+
+export function hasCleanReviewLoopForSnapshot(loops: SessionReviewLoop[] | undefined, snapshotKey: string | undefined): boolean {
+  if (!snapshotKey) return false;
+  return (loops ?? []).some((loop) => loop.status === "clean" && loop.latest_checkpoint_key === snapshotKey);
 }
 
 function reviewLoopThreadLabel(agentType: string): string {
@@ -2746,7 +2751,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
   const { user, isLoading: isAuthLoading } = useAuth();
   const canListTeamMembers = user?.role === "admin" || user?.role === "member";
-  const canShipPR = canListTeamMembers;
+  const canShipPR = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
+  const canManagePR = user?.role === "admin" || user?.role === "member";
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -3491,10 +3497,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const canCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
-  const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
   const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canUseNativeReviewLoop = !!session && session.agent_type !== "pm_agent";
   const sessionID = session?.id;
@@ -3516,7 +3520,19 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.sessions.listReviewLoops(id),
     enabled: !!session,
   });
+  const { data: orgSettingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+    enabled: user?.role === "builder",
+  });
+  const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
+  const hasCleanReviewLoop = hasCleanReviewLoopForSnapshot(reviewLoopsData?.data, session?.snapshot_key);
+  const builderRequiresReviewBeforePR = user?.role === "builder" && (orgSettings.builder_permissions?.require_review_before_pr ?? true);
+  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || hasCleanReviewLoop;
+  const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
+  const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
+  const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
   const reviewUnavailableReason = reviewLoopRunning
@@ -3725,7 +3741,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // effect re-runs when these dependencies flip, so the replay still
       // happens — just on the next tick when the session is actually ready.
       const pushAvailable = hasPR && prStatus === "open" && !!session?.has_unpushed_changes;
-      if (!pushAvailable || !hasSnapshot || isRunning) return;
+      if (!pushAvailable || !hasSnapshot || isRunning || !builderReviewAllowsPR) return;
       resumeAttemptRef.current = resumePRParam;
       pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
       return;
@@ -3739,7 +3755,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createBranchMutation, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
+  }, [builderReviewAllowsPR, canCreatePR, createBranchMutation, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const diffStats = useMemo(() => {
     const stats = session?.diff_stats ?? sessionDiffPayload?.diff_stats;
@@ -4670,10 +4686,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: canShipPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: canShipPR && !!prHealth?.can_fix_tests && pendingPRAction === null,
-      canResolveConflicts: canShipPR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
-      canMerge: canShipPR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      canPush: canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: canManagePR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
@@ -4728,6 +4744,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
     canShipPR && (
+      canAttemptCreatePR ||
       canCreatePR ||
       showExpiredPRAction ||
       queueingPR ||
@@ -4762,6 +4779,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionLabel = "Finalizing PR…";
     prActionSpinning = true;
     prActionDisabled = true;
+  } else if (canAttemptCreatePR && !builderReviewAllowsPR) {
+    prActionDisabled = true;
+    prActionTitle = "Run Review successfully before creating a PR";
   } else if (prState === "failed") {
     prActionLabel = "Retry";
     prActionTitle = session.pr_creation_error || "PR creation failed";
@@ -4801,8 +4821,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = canShipPR && pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = canShipPR && pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  const canPushChanges = canShipPR && builderReviewAllowsPR && pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = canShipPR && pushAvailable && (canPushChanges || !builderReviewAllowsPR || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
   let pushActionLabel = "Push changes";
   let pushActionSpinning = false;
   let pushActionDisabled = false;
@@ -4829,6 +4849,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   } else if (ghBlocked) {
     pushActionDisabled = true;
     pushActionTitle = "Connect your GitHub account to push changes";
+  } else if (pushAvailable && !builderReviewAllowsPR) {
+    pushActionDisabled = true;
+    pushActionTitle = "Run Review successfully before pushing changes";
   } else if (isRunning) {
     pushActionDisabled = true;
     pushActionTitle = "Wait for the session to finish before pushing";

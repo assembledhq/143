@@ -249,6 +249,7 @@ type OrgSettings struct {
 	PRAuthorship               PRAuthorship         `json:"pr_authorship,omitempty"`
 	PRDraftDefault             bool                 `json:"pr_draft_default,omitempty"`
 	AutoArchiveOnPRClose       bool                 `json:"auto_archive_on_pr_close,omitempty"`
+	BuilderPermissions         BuilderPermissions   `json:"builder_permissions,omitempty"`
 
 	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
 	// as the soft runtime budget for run_agent and continue_session jobs.
@@ -262,6 +263,20 @@ type OrgSettings struct {
 	// adopt visibility (attachment + rolling comment) before they are ready
 	// for state automation. See design 62 §"Per-org configuration UI".
 	LinearAutomation LinearAutomationSettings `json:"linear_automation,omitempty"`
+}
+
+// BuilderPermissions controls the narrower builder role's access to
+// publishing actions. Pointer fields preserve absent-vs-explicit-false.
+type BuilderPermissions struct {
+	RequireReviewBeforePR *bool `json:"require_review_before_pr,omitempty"`
+}
+
+// EffectiveRequireReviewBeforePR applies the default builder guardrail.
+func (p BuilderPermissions) EffectiveRequireReviewBeforePR() bool {
+	if p.RequireReviewBeforePR == nil {
+		return true
+	}
+	return *p.RequireReviewBeforePR
 }
 
 // LinearAutomationSettings captures org-level defaults plus per-team
