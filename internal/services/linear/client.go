@@ -6,12 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
+
+// linearResponseBodyLimit caps how much of a Linear GraphQL response body
+// we will read. Linear's documented payload sizes for these queries are
+// well under 1 MiB; capping at 10 MiB defends against a misbehaving (or
+// compromised) endpoint exhausting worker memory while staying well above
+// any plausible legitimate response.
+const linearResponseBodyLimit = 10 * 1024 * 1024
 
 // graphQLClient is a small Linear GraphQL client that owns the API surface
 // the linker service needs. We deliberately keep this separate from
@@ -1014,7 +1022,7 @@ func (c *graphQLClient) do(ctx context.Context, query string, variables map[stri
 	}
 
 	var raw json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, linearResponseBodyLimit)).Decode(&raw); err != nil {
 		return fmt.Errorf("decode linear response: %w", err)
 	}
 	var errCheck struct {

@@ -81,6 +81,7 @@ func (s *LinearAgentActivityLogStore) Reserve(ctx context.Context, orgID, agentS
 		VALUES (@org_id, @agent_session_row_id, @idem_key, @activity_type)
 		ON CONFLICT (agent_session_row_id, idem_key) DO UPDATE
 		SET idem_key = EXCLUDED.idem_key  -- no-op so RETURNING fires
+		WHERE linear_agent_activity_log.org_id = EXCLUDED.org_id
 		RETURNING id, (xmax = 0) AS inserted`,
 		pgx.NamedArgs{
 			"org_id":               orgID,
@@ -88,6 +89,14 @@ func (s *LinearAgentActivityLogStore) Reserve(ctx context.Context, orgID, agentS
 			"idem_key":             idemKey,
 			"activity_type":        string(activityType),
 		}).Scan(&rowID, &inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The conflicting row's org_id didn't match the caller's — a
+		// buggy caller is trying to reserve against another org's
+		// agent_session_row_id. FK to linear_agent_sessions(id) already
+		// makes this nearly impossible, but defense in depth: refuse
+		// loudly rather than silently update someone else's row.
+		return ReserveResult{}, fmt.Errorf("reserve linear_agent_activity_log: cross-org collision on (agent_session_row_id=%s, idem_key=%s)", agentSessionRowID, idemKey)
+	}
 	if err != nil {
 		return ReserveResult{}, fmt.Errorf("reserve linear_agent_activity_log: %w", err)
 	}

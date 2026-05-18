@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -179,11 +180,14 @@ func NewLinearAgentDispatcher(cfg LinearAgentDispatcherConfig) *LinearAgentDispa
 //     ceiling is anchored on this emit). The worker still picks up the
 //     enqueued job, so user-visible state will recover, but the operator
 //     should be alerted on this outcome.
-//   - "feature_off"                       — global kill switch / org opt-out / unknown event
+//   - "feature_off"                       — global kill switch / org opt-out
 //   - "ignored"                           — recognized but non-actionable (e.g. action not
 //     yet supported in this phase)
 //   - "enqueue_failed"                    — webhook delivery saved but worker enqueue
 //     failed; Linear will retry the delivery
+//   - "retryable_error"                   — transient failure (DB hiccup, schema drift
+//     after HMAC verify, unknown action). Sets Err so the handler 500s and Linear
+//     redelivers, giving us a chance to recover after a fix deploys.
 type DispatchResult struct {
 	Status               string
 	AgentSessionRowID    uuid.UUID
@@ -254,20 +258,31 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		// is sending malformed payloads. Both warrant operator
 		// attention, not a quiet "ignored". The signature already
 		// authenticated the sender, so the body should be well-formed.
+		// Surface as 500 so Linear redelivers — once we deploy a
+		// forward-compat fix the retry will succeed.
 		d.logger.Error().Err(err).
 			Str("integration_id", integration.ID.String()).
 			Int("body_bytes", len(body)).
-			Msg("agent dispatcher: HMAC verified but body failed to parse as AgentSessionEvent envelope")
-		return DispatchResult{Status: "ignored"}
+			Msg("agent dispatcher: HMAC verified but body failed to parse; requesting Linear redelivery")
+		return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("parse agent event envelope: %w", err)}
 	}
 
 	action = linearAgentEventAction(env.Action)
 	if action != linearAgentActionCreated && action != linearAgentActionPrompted {
-		// Linear may add new actions in the future. Both `created` and
-		// `prompted` are handled below; anything else logs and skips.
-		return DispatchResult{Status: "ignored"}
+		// Linear may add new actions in the future. Surface as 500 so
+		// Linear redelivers — once we add support, the retry succeeds.
+		// Silently 200-ack'ing here permanently drops every event of a
+		// new action type until Linear's retry budget expires.
+		d.logger.Warn().
+			Str("integration_id", integration.ID.String()).
+			Str("action", env.Action).
+			Msg("agent dispatcher: unrecognized action; requesting Linear redelivery")
+		return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("unrecognized agent event action: %q", env.Action)}
 	}
 	if env.Payload.AgentSession.ID == "" || env.Payload.AgentSession.IssueID == "" {
+		// Missing required IDs is a contract violation, not transient.
+		// Don't retry — Linear sending the same malformed payload again
+		// won't help. Operator must investigate.
 		d.logger.Warn().
 			Str("integration_id", integration.ID.String()).
 			Msg("agent event missing agentSession.id or issueId; ignoring")
@@ -298,10 +313,13 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	if d.settingsLoader != nil {
 		settings, err := d.settingsLoader(ctx, integration.OrgID)
 		if err != nil {
-			d.logger.Warn().Err(err).
+			// Transient DB hiccup. Surface as 500 so Linear retries — we
+			// must not silently drop an event for an org that actually has
+			// the feature enabled.
+			d.logger.Error().Err(err).
 				Str("org_id", integration.OrgID.String()).
-				Msg("failed to load agent settings; ignoring event")
-			return DispatchResult{Status: "feature_off"}
+				Msg("failed to load agent settings; requesting Linear redelivery")
+			return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("load agent settings: %w", err)}
 		}
 		if !settings.EffectiveEnabled() && !hasEnabledTeamOverride(settings) {
 			d.logger.Debug().
@@ -333,39 +351,44 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		if err != nil {
 			d.logger.Error().Err(err).
 				Str("agent_session_id", env.Payload.AgentSession.ID).
-				Msg("failed to upsert linear_agent_sessions; ignoring event")
-			return DispatchResult{Status: "ignored"}
+				Msg("failed to upsert linear_agent_sessions; requesting Linear redelivery")
+			return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("upsert linear_agent_sessions: %w", err)}
 		}
 	} else {
-		// 1b. Prompted event: lookup-only. The corresponding `created`
-		// usually created the row + 143 session. If we don't have a row,
-		// this `prompted` is racing the `created` (Linear can deliver out
-		// of order under recovery). Still enqueue the worker job; it will
-		// retry until the created path records and attaches the session.
+		// 1b. Prompted event: lookup the existing row. The corresponding
+		// `created` usually created the row + 143 session. If we don't
+		// have one, this `prompted` is racing the `created` (Linear can
+		// deliver out of order under recovery). Persist a synthetic row
+		// now via UpsertOnCreated so the worker — and any downstream
+		// activity-log writes that key on agent_session_row_id — have a
+		// real UUID to bind to. The late-arriving `created` re-upserts
+		// idempotently on the (org_id, linear_agent_session_id) UNIQUE.
 		row, err = d.agentSessions.Lookup(ctx, integration.OrgID, env.Payload.AgentSession.ID)
 		if err != nil {
 			if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
 				d.logger.Warn().
 					Str("agent_session_id", env.Payload.AgentSession.ID).
-					Msg("prompted event arrived before created; enqueueing retryable worker job")
-				// Synthetic in-memory row carries no DB id (uuid.Nil). The
-				// prompted worker (handlers_linear_agent_prompted.go) re-
-				// looks-up the row by LinearAgentSessionID rather than by
-				// row.ID, so the nil id propagated into the job payload
-				// below is intentionally never read on this branch. Do
-				// not thread row.ID through new prompted-path code without
-				// first persisting the row here.
-				row = &db.LinearAgentSession{
-					OrgID:                integration.OrgID,
-					IntegrationID:        integration.ID,
-					LinearAgentSessionID: env.Payload.AgentSession.ID,
-					LinearIssueID:        env.Payload.AgentSession.IssueID,
+					Msg("prompted event arrived before created; persisting synthetic row")
+				row, _, err = d.agentSessions.UpsertOnCreated(ctx, integration.OrgID, db.UpsertOnCreatedInput{
+					OrgID:                 integration.OrgID,
+					IntegrationID:         integration.ID,
+					LinearAgentSessionID:  env.Payload.AgentSession.ID,
+					LinearIssueID:         env.Payload.AgentSession.IssueID,
+					LinearIssueIdentifier: env.Payload.AgentSession.Issue.Identifier,
+					LinearAppUserID:       env.AppUserID,
+					LinearCreatorUserID:   env.Payload.AgentSession.Creator.ID,
+				})
+				if err != nil {
+					d.logger.Error().Err(err).
+						Str("agent_session_id", env.Payload.AgentSession.ID).
+						Msg("failed to persist synthetic linear_agent_sessions row; requesting Linear redelivery")
+					return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("persist synthetic linear_agent_sessions: %w", err)}
 				}
 			} else {
 				d.logger.Error().Err(err).
 					Str("agent_session_id", env.Payload.AgentSession.ID).
-					Msg("failed to lookup linear_agent_sessions; ignoring prompted event")
-				return DispatchResult{Status: "ignored"}
+					Msg("failed to lookup linear_agent_sessions; requesting Linear redelivery")
+				return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("lookup linear_agent_sessions: %w", err)}
 			}
 		}
 	}
@@ -446,13 +469,9 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			Msg("agent event payload missing optional issue context; worker will derive from FetchIssue")
 	}
 	jobPayload := map[string]any{
-		"action":         string(action),
-		"org_id":         integration.OrgID.String(),
-		"integration_id": integration.ID.String(),
-		// agent_session_row_id is uuid.Nil on the prompted-before-created
-		// branch (see comment in the lookup block above). Worker handlers
-		// must keep re-looking-up by linear_agent_session_id, never by
-		// this id, so the nil value stays inert.
+		"action":                  string(action),
+		"org_id":                  integration.OrgID.String(),
+		"integration_id":          integration.ID.String(),
 		"agent_session_row_id":    row.ID.String(),
 		"linear_agent_session_id": row.LinearAgentSessionID,
 		"linear_issue_id":         env.Payload.AgentSession.IssueID,
