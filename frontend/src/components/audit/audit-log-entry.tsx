@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AuditLog, User } from "@/lib/types";
 import { formatTimeAgo } from "@/lib/utils";
+import { formatAuditDetailValue } from "@/lib/audit-details";
 import { Button } from "@/components/ui/button";
 
 /** Human-readable labels for audit actions. */
@@ -41,7 +42,7 @@ const actionLabels: Record<string, string> = {
   "pm.decision_made": "PM decision made",
   "settings.updated": "updated settings",
   "team.member_invited": "invited team member",
-  "team.member_role_changed": "changed member role",
+  "team.member_role_changed": "changed user role",
   "team.member_removed": "removed team member",
   "team.invitation_revoked": "revoked invitation",
   "team.invitation_accepted": "accepted invitation",
@@ -128,7 +129,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
                 <div key={key} className="flex gap-2">
                   <span className="font-medium text-muted-foreground min-w-[80px]">{key}:</span>
                   <span className="text-foreground break-all">
-                    {typeof value === "object" ? JSON.stringify(value) : String(value)}
+                    {formatAuditDetailValue(key, value)}
                   </span>
                 </div>
               ))}

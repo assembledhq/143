@@ -89,6 +89,7 @@ import {
 } from "@/lib/coding-agent-reasoning";
 import type {
   CodingAuth,
+  Integration,
   OrgSettings,
   Organization,
   Repository,
@@ -495,7 +496,7 @@ export function ManualSessionComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+  const { data: settingsResponse, isSuccess: settingsLoaded } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
@@ -503,7 +504,7 @@ export function ManualSessionComposer({
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgentType = settings?.default_agent_type ?? "codex";
 
-  const { data: reposResponse } = useQuery<ListResponse<Repository>>({
+  const { data: reposResponse, isSuccess: reposLoaded } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
@@ -523,19 +524,23 @@ export function ManualSessionComposer({
     }
   }, [userSelectedRepoId, reposResponse, repositories]);
 
-  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
+  const { data: resolvedCredsResponse, isSuccess: resolvedCredsLoaded } = useQuery<ListResponse<ResolvedCredential>>({
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),
   });
   const resolvedCredentials = useMemo(() => resolvedCredsResponse?.data ?? [], [resolvedCredsResponse]);
 
-  const { data: codexAuthResponse } = useQuery({
+  const { data: codexAuthResponse, isSuccess: codexAuthLoaded } = useQuery({
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
   });
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
+  const { data: codingAuthsResponse, isSuccess: codingAuthsLoaded } = useQuery<ListResponse<CodingAuth>>({
     queryKey: ["coding-auths"],
     queryFn: () => api.codingAuths.list(),
+  });
+  const { data: integrationsResponse, isSuccess: integrationsLoaded } = useQuery<ListResponse<Integration>>({
+    queryKey: queryKeys.integrations.all,
+    queryFn: () => api.integrations.list(),
   });
 
   // Auto-select: user's choice > last used repo > first repo.
@@ -616,6 +621,11 @@ export function ManualSessionComposer({
     [effectiveAgentType],
   );
   const hasAgentCredentials = isAgentAvailable(effectiveAgentType, resolvedCredentials, codexAuthStatus, codingAuths);
+  const agentCredentialStateLoaded = settingsLoaded && resolvedCredsLoaded && codexAuthLoaded && codingAuthsLoaded;
+  const shouldShowAgentKeyRequiredBanner = agentCredentialStateLoaded && !hasAgentCredentials;
+  const linearConnected = integrationsLoaded && (integrationsResponse?.data ?? []).some(
+    (integration) => integration.provider === "linear" && integration.status === "active",
+  );
 
   const handleRepoChange = useCallback((id: string) => {
     setUserSelectedRepoId(id);
@@ -1223,7 +1233,7 @@ export function ManualSessionComposer({
 
       {heroSlot}
 
-      {repositories.length === 0 && (
+      {reposLoaded && repositories.length === 0 && (
         <div className="shrink-0 px-0">
           <div className={cn("w-full mx-auto", innerClassName)}>
             <NoReposWarning />
@@ -1231,7 +1241,7 @@ export function ManualSessionComposer({
         </div>
       )}
 
-      {!hasAgentCredentials && (
+      {shouldShowAgentKeyRequiredBanner && (
         <div className="shrink-0 px-0">
           <div className={cn("w-full mx-auto", innerClassName)}>
             <AgentKeyRequiredBanner agentType={effectiveAgentType} />
@@ -1463,6 +1473,7 @@ export function ManualSessionComposer({
                         onUploadFiles={() => uploadInputRef.current?.click()}
                         onAddImageURL={() => setShowImageInput(true)}
                         onAddLinearIssue={() => setShowLinearInput(true)}
+                        showLinearIssue={linearConnected}
                       />
                       <Button
                         type="button"
@@ -1508,6 +1519,7 @@ export function ManualSessionComposer({
                       onUploadFiles={() => uploadInputRef.current?.click()}
                       onAddImageURL={() => setShowImageInput(true)}
                       onAddLinearIssue={() => setShowLinearInput(true)}
+                      showLinearIssue={linearConnected}
                     />
 
                     <ComposerSettingsControls
@@ -1546,7 +1558,7 @@ export function ManualSessionComposer({
                 <Input
                   ref={uploadInputRef}
                   type="file"
-                  accept="image/*,.pdf,.txt,.md,.json,.csv"
+                  accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
                   multiple
                   className="hidden"
                   onChange={onUploadChange}

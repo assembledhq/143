@@ -31,10 +31,12 @@ import (
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/version"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
+const prePRReviewRetryDelay = 5 * time.Second
 const failureCategoryStaleSandbox = "stale_sandbox"
 
 func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
@@ -282,8 +284,9 @@ type Stores struct {
 	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
-	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
-	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
+	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
+	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
+	ReviewLoops         *db.SessionReviewLoopStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 }
 
@@ -325,6 +328,10 @@ type Services struct {
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
+	ReviewLoops     interface {
+		OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error
+		Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+	}
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
 	// or run state transition so the eval-batch detail page can replace its
 	// 5s poll with a Redis-backed SSE. nil-safe: best-effort publish, the
@@ -1104,9 +1111,10 @@ func parseSlackTimestamp(ts string) time.Time {
 func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID           string `json:"session_id"`
+			OrgID               string `json:"org_id"`
+			ThreadID            string `json:"thread_id"`
+			HumanInputRequestID string `json:"human_input_request_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
@@ -1320,9 +1328,10 @@ func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID           string `json:"session_id"`
+			OrgID               string `json:"org_id"`
+			ThreadID            string `json:"thread_id"`
+			HumanInputRequestID string `json:"human_input_request_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -1354,6 +1363,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
 			Str("thread_id", input.ThreadID).
+			Str("human_input_request_id", input.HumanInputRequestID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
@@ -1364,6 +1374,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
+		var humanInputRequestID *uuid.UUID
+		if input.HumanInputRequestID != "" {
+			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
+			if parseErr != nil {
+				return fmt.Errorf("parse human input request ID: %w", parseErr)
+			}
+			humanInputRequestID = &parsedHumanInputRequestID
+		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
 		// confidence) onto the thread row. Stays nil when the orchestrator
@@ -1406,6 +1424,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
+					HumanInputRequestID:  humanInputRequestID,
 					ThreadID:             &threadIDLocal,
 					OnTurnComplete: func(result *agent.AgentResult) {
 						lastTurnResult = result
@@ -1416,6 +1435,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					},
 				}
 			}
+		}
+		if continueOpts == nil && humanInputRequestID != nil {
+			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
+		} else if continueOpts != nil && humanInputRequestID != nil {
+			continueOpts.HumanInputRequestID = humanInputRequestID
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
@@ -1539,6 +1563,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
 						Msg("failed to persist session thread turn result")
+				}
+				if services.ReviewLoops != nil {
+					if err := services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary); err != nil && !errors.Is(err, reviewloopsvc.ErrNoRunningReviewLoop) {
+						logger.Warn().Err(err).
+							Str("session_id", sessionID.String()).
+							Str("thread_id", threadID.String()).
+							Msg("failed to advance review loop after thread turn")
+					}
 				}
 			} else {
 				if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
@@ -1680,6 +1712,14 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				return fmt.Errorf("hydrate linked issues for open_pr: %w", err)
 			}
 			run.LinkedIssues = links
+		}
+
+		ready, err := ensureAutomationPrePRReview(ctx, stores, services, logger, run)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return nil
 		}
 
 		logger.Info().
@@ -1835,6 +1875,104 @@ func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.L
 		}
 		return nil
 	}
+}
+
+func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, run models.Session) (bool, error) {
+	if run.AutomationRunID == nil {
+		return true, nil
+	}
+	if stores == nil || stores.AutomationRuns == nil {
+		return true, nil
+	}
+	automationRun, err := stores.AutomationRuns.GetByRunID(ctx, run.OrgID, *run.AutomationRunID)
+	if err != nil {
+		return false, fmt.Errorf("fetch automation run for pre-pr review: %w", err)
+	}
+	passCount, err := automationPrePRReviewPasses(automationRun.ConfigSnapshot)
+	if err != nil {
+		return false, err
+	}
+	if passCount == 0 {
+		return true, nil
+	}
+	if stores.ReviewLoops == nil || services == nil || services.ReviewLoops == nil {
+		return false, fmt.Errorf("pre-pr review is enabled but review loop service is unavailable")
+	}
+	loop, err := stores.ReviewLoops.GetLatestLoopByAutomationRun(ctx, run.OrgID, *run.AutomationRunID)
+	if err == nil {
+		switch loop.Status {
+		case models.ReviewLoopStatusClean:
+			return true, nil
+		case models.ReviewLoopStatusRunning:
+			logger.Info().
+				Str("session_id", run.ID.String()).
+				Str("review_loop_id", loop.ID.String()).
+				Msg("open_pr waiting for pre-pr review loop")
+			retryAfter := prePRReviewRetryDelay
+			return false, &RetryableError{
+				Err:        fmt.Errorf("pre-pr review loop is still running"),
+				RetryAfter: &retryAfter,
+			}
+		case models.ReviewLoopStatusNeedsHumanDecision:
+			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review needs human decision."); stateErr != nil {
+				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
+			}
+			return false, nil
+		default:
+			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
+				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
+			}
+			return false, nil
+		}
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("fetch pre-pr review loop: %w", err)
+	}
+
+	_, err = services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
+		AgentType:       run.AgentType,
+		Model:           stringValue(run.ModelOverride),
+		MaxPasses:       passCount,
+		Source:          models.ReviewLoopSourceAutomation,
+		AutomationRunID: run.AutomationRunID,
+		StartedByUserID: run.TriggeredByUserID,
+		ReviewRequired:  true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("start pre-pr review loop: %w", err)
+	}
+	logger.Info().
+		Str("session_id", run.ID.String()).
+		Str("automation_run_id", run.AutomationRunID.String()).
+		Int("max_passes", passCount).
+		Msg("started pre-pr review loop")
+	return false, nil
+}
+
+func automationPrePRReviewPasses(config json.RawMessage) (int, error) {
+	if len(config) == 0 {
+		return 0, nil
+	}
+	var snapshot struct {
+		PrePRReviewLoops *int `json:"pre_pr_review_loops"`
+	}
+	if err := json.Unmarshal(config, &snapshot); err != nil {
+		return 0, fmt.Errorf("parse automation config snapshot for pre-pr review: %w", err)
+	}
+	if snapshot.PrePRReviewLoops == nil {
+		return 0, nil
+	}
+	if *snapshot.PrePRReviewLoops < 0 || *snapshot.PrePRReviewLoops > reviewloopsvc.MaxReviewPasses {
+		return 0, fmt.Errorf("pre_pr_review_loops must be between 0 and %d", reviewloopsvc.MaxReviewPasses)
+	}
+	return *snapshot.PrePRReviewLoops, nil
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // userFacingPRError collapses an internal error into a short string safe for

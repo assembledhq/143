@@ -367,6 +367,54 @@ export interface SessionThreadFileEvent {
   observed_at: string;
 }
 
+export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
+export type ReviewLoopSource = 'manual' | 'automation';
+export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
+export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
+
+export interface SessionReviewLoop {
+  id: string;
+  org_id: string;
+  session_id: string;
+  automation_run_id?: string;
+  thread_id?: string;
+  status: ReviewLoopStatus;
+  source: ReviewLoopSource;
+  agent_type: string;
+  max_passes: number;
+  completed_passes: number;
+  review_required: boolean;
+  bypassed_by_user_id?: string;
+  bypass_reason?: string;
+  loop_start_checkpoint_key?: string;
+  latest_checkpoint_key?: string;
+  latest_summary?: string;
+  started_by_user_id?: string;
+  started_at: string;
+  completed_at?: string;
+  passes?: SessionReviewLoopPass[];
+}
+
+export interface SessionReviewLoopPass {
+  id: string;
+  org_id: string;
+  loop_id: string;
+  session_id: string;
+  pass_index: number;
+  review_message_id?: number;
+  decision_message_id?: number;
+  fix_message_id?: number;
+  status: ReviewLoopPassStatus;
+  agent_decision?: ReviewLoopDecision;
+  review_output?: string;
+  fix_summary?: string;
+  review_started_at?: string;
+  review_completed_at?: string;
+  fix_started_at?: string;
+  fix_completed_at?: string;
+  summary?: string;
+}
+
 export interface ForkResult {
   job_id: string;
 }
@@ -400,12 +448,13 @@ export interface SessionLog {
 }
 
 export interface SessionTimelineEntry {
-  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message';
+  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message' | 'human_input';
   created_at: string;
   message?: SessionMessage;
   log?: SessionLog;
   tool_use?: SessionLog;
   tool_result?: SessionLog;
+  human_input_request?: HumanInputRequest;
   turn_number?: number;
 }
 
@@ -477,6 +526,49 @@ export interface SessionQuestion {
   answered_at: string | null;
   answered_by: string | null;
   created_at: string;
+}
+
+export type HumanInputRequestKind = "free_text" | "single_choice" | "multi_choice" | "tool_approval" | "action_choice";
+export type HumanInputRequestStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded";
+
+export interface HumanInputChoice {
+  id: string;
+  label: string;
+  description?: string;
+  preview?: string;
+  kind?: string;
+  destructive?: boolean;
+}
+
+export interface HumanInputRequest {
+  id: string;
+  org_id: string;
+  session_id: string;
+  thread_id?: string | null;
+  turn_number: number;
+  agent_type: string;
+  provider_request_id?: string | null;
+  request_kind: HumanInputRequestKind;
+  status: HumanInputRequestStatus;
+  title: string;
+  body: string;
+  context?: string | null;
+  blocks_phase?: string | null;
+  choices: HumanInputChoice[];
+  response_schema?: unknown;
+  provider_payload?: unknown;
+  answer_text?: string | null;
+  answer_payload?: unknown;
+  answered_by?: string | null;
+  answered_at?: string | null;
+  expires_at?: string | null;
+  created_at: string;
+}
+
+export interface HumanInputAnswerBody {
+  answer_text?: string;
+  selected_choice_ids?: string[];
+  answer_payload?: unknown;
 }
 
 export interface PullRequest {
@@ -1517,6 +1609,7 @@ export interface Automation {
   max_concurrent: number;
   base_branch: string;
   identity_scope: AutomationIdentityScope;
+  pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';

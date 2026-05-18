@@ -35,6 +35,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/preview"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
@@ -57,6 +58,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
@@ -203,6 +205,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
@@ -225,6 +228,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
+	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 
 	// Linear session-linking: detection, primary resolution + context
 	// snapshotting, attachment/comment writes, state-sync transitions —
@@ -306,6 +310,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// session-level handler maintains. Without this, question state
 	// diverges from the resumed run on the thread surface.
 	threadSvc.SetQuestionStore(sessionQuestionStore)
+	// Wire durable human-input requests so a free-text answer sent through a
+	// thread composer clears the pending request and passes its id into the
+	// resumed agent run.
+	threadSvc.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
@@ -313,6 +321,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// thread tab follow-up get the same fail-soft mid-session linking the
 	// legacy session surface already provides.
 	sessionThreadHandler.SetLinearLinker(linearService)
+	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
+		Sessions: sessionStore,
+		Threads:  threadSvc,
+	})
+	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -760,6 +773,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
 				r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 				r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
+				r.Get("/api/v1/sessions/{id}/human-input-requests", sessionHandler.ListHumanInputRequests)
 				r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
 				r.Get("/api/v1/sessions/{id}/timeline", sessionHandler.GetTimeline)
 				r.Get("/api/v1/sessions/{id}/threads", sessionThreadHandler.ListThreads)
@@ -767,6 +781,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
+				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
+				r.Get("/api/v1/sessions/{id}/review-loops/{loop_id}", reviewLoopHandler.Get)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -876,6 +892,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 				r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
+				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
+				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/cancel", sessionHandler.CancelHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
 				r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 				r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
@@ -890,6 +908,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
+				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
+				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)

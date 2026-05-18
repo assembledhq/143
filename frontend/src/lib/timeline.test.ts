@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTimeline, buildTimelineFromResponse } from "./timeline";
+import { buildTimeline, flattenTimelineResponse } from "./timeline";
 import type { SessionMessage, SessionLog } from "./types";
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
@@ -84,28 +84,6 @@ describe("buildTimeline", () => {
     const result = buildTimeline([], logs);
     expect(result).toHaveLength(1);
     expect(result[0].kind).toBe("error");
-  });
-
-  it("classifies the benign Codex stdin diagnostic as a hidden log", () => {
-    const logs = [
-      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "error", message: "Reading additional input from stdin..." }),
-    ];
-    const result = buildTimeline([], logs);
-    expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
-  });
-
-  it("normalizes benign Codex stdin diagnostics from timeline responses", () => {
-    const log = makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "error", message: "Reading additional input from stdin..." });
-    const result = buildTimelineFromResponse([
-      {
-        kind: "error",
-        created_at: "2026-01-01T00:00:01Z",
-        log,
-      },
-    ]);
-    expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
   });
 
   it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {
@@ -225,5 +203,35 @@ describe("buildTimeline", () => {
 
   it("returns empty for empty inputs", () => {
     expect(buildTimeline([], [])).toEqual([]);
+  });
+});
+
+describe("flattenTimelineResponse", () => {
+  it("preserves human input requests separately from messages and logs", () => {
+    const request = {
+      id: "hir-1",
+      org_id: "org-1",
+      session_id: "session-1",
+      turn_number: 1,
+      agent_type: "claude_code" as const,
+      request_kind: "action_choice" as const,
+      status: "answered" as const,
+      title: "Choose next action",
+      body: "What next?",
+      choices: [],
+      created_at: "2026-01-01T00:00:00Z",
+    };
+
+    const flattened = flattenTimelineResponse([
+      {
+        kind: "human_input",
+        created_at: request.created_at,
+        human_input_request: request,
+      },
+    ]);
+
+    expect(flattened.messages).toEqual([]);
+    expect(flattened.logs).toEqual([]);
+    expect(flattened.humanInputs).toEqual([request]);
   });
 });

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { ChevronDown, Loader2, Minus, Plus } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -84,6 +84,7 @@ export default function NewAutomationPage() {
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [model, setModel] = useState<string | undefined>(undefined);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(1);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
@@ -110,6 +111,14 @@ export default function NewAutomationPage() {
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
+  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  let prePRReviewDescription = "Off for agents without native review support.";
+  if (supportsNativeReviewLoop) {
+    prePRReviewDescription = effectivePrePRReviewLoops === 0
+      ? "Off"
+      : "Runs the coding agent's review/fix loop before opening a PR.";
+  }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
@@ -137,6 +146,7 @@ export default function NewAutomationPage() {
         timezone,
         model,
         identity_scope: identityScope,
+        pre_pr_review_loops: effectivePrePRReviewLoops,
         ...(showReasoningSelector && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
@@ -334,6 +344,49 @@ export default function NewAutomationPage() {
             </Select>
             <p className="text-xs text-muted-foreground">
               Choose whether this automation runs with organization credentials and opens PRs as 143-bot, or uses the creator&apos;s coding-agent preferences and GitHub identity.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Decrease review passes"
+                onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+                disabled={!supportsNativeReviewLoop}
+              >
+                <Minus className="h-4 w-4" />
+              </Button>
+              <Input
+                id="pre-pr-review-loops"
+                aria-label="Review passes"
+                type="number"
+                min={0}
+                max={5}
+                value={effectivePrePRReviewLoops}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+                }}
+                disabled={!supportsNativeReviewLoop}
+                className="w-20 text-center"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Increase review passes"
+                onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+                disabled={!supportsNativeReviewLoop}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {prePRReviewDescription}
             </p>
           </div>
 

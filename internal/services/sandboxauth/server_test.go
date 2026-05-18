@@ -282,6 +282,31 @@ func TestServer_ListenRejectsLooseDirPerms(t *testing.T) {
 	require.Contains(t, err.Error(), "insecure perms")
 }
 
+func TestValidateSocketDirForStartup(t *testing.T) {
+	t.Parallel()
+
+	t.Run("accepts provisioned socket dir", func(t *testing.T) {
+		t.Parallel()
+
+		dir := shortSocketDir(t)
+		err := ValidateSocketDirForStartup(dir)
+		require.NoError(t, err, "startup validation should accept a provisioned 0750 socket dir")
+	})
+
+	t.Run("rejects docker-created bind mount source", func(t *testing.T) {
+		t.Parallel()
+
+		dir, err := os.MkdirTemp("/tmp", "143a-docker-created-*")
+		require.NoError(t, err, "test should create a docker-like bind mount source")
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		require.NoError(t, os.Chmod(dir, 0o755), "test should mimic Docker's default bind source permissions")
+
+		err = ValidateSocketDirForStartup(dir)
+		require.Error(t, err, "startup validation should reject a world-traversable socket dir")
+		require.Contains(t, err.Error(), "insecure perms", "startup validation error should explain the bad permissions")
+	})
+}
+
 func TestServer_CloseRemovesSocketAndStopsAccepting(t *testing.T) {
 	t.Parallel()
 	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}

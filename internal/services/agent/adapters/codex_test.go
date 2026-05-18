@@ -2,10 +2,12 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -790,6 +792,60 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshExec(t
 	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
 }
 
+func TestCodexAdapter_Execute_ContinuationWithoutSessionIDPassesHumanInputAnswerInPromptFile(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "codex exec ") {
+			_, _ = stdout.Write([]byte(`{"type":"message","content":"continuing prior session"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	answerText := "Approve and run the focused tests."
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+	prompt := &agent.AgentPrompt{
+		SystemPrompt: "system",
+		UserPrompt:   "history-embedded user prompt",
+		UserMessage:  "Answered human input request.",
+		MaxTokens:    50_000,
+		Continuation: true,
+		HumanInputAnswer: &agent.HumanInputAnswer{
+			RequestID:         uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			ProviderRequestID: "toolu_01abc",
+			Kind:              models.HumanInputRequestKindToolApproval,
+			Status:            models.HumanInputRequestStatusAnswered,
+			AnswerText:        &answerText,
+			SelectedChoiceIDs: []string{"approve"},
+			AnswerPayload:     json.RawMessage(`{"decision":"approve"}`),
+		},
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+
+	require.NoError(t, err, "continuation should succeed when falling back to fresh exec")
+	require.NotNil(t, result, "continuation should return a result")
+	contents, exists := provider.Files["/home/sandbox/.143-prompt.md"]
+	require.True(t, exists, "fresh exec must write the system+user prompt to a file")
+	require.Contains(t, string(contents), "Human input answer", "prompt file should include the structured answer block")
+	require.Contains(t, string(contents), "toolu_01abc", "prompt file should include the provider request id")
+	require.Contains(t, string(contents), "selected_choice_ids", "prompt file should include selected choices")
+	require.Contains(t, string(contents), "approve", "prompt file should include the selected approval")
+}
+
 func TestCodexAdapter_ParseStreamLine_CapturesThreadStartedSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -809,6 +865,40 @@ func TestCodexAdapter_ParseStreamLine_CapturesThreadStartedSessionID(t *testing.
 	)
 
 	require.Equal(t, "019d049e-f7f8-7b71-bb08-e174ba50c73c", result.AgentSessionID, "thread.started should populate AgentSessionID for downstream resume")
+}
+
+func TestParseCodexStreamLine_NormalizesToolApprovalHumanInput(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 4)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+	lastAssistant := ""
+
+	parseCodexStreamLine(
+		[]byte(`{"type":"tool_approval","request_id":"codex-tool-1","title":"Approve command?","body":"Codex wants to run npm test.","choices":[{"id":"approve","label":"Approve","kind":"positive"},{"id":"edit_command","label":"Edit command","kind":"edit","command":"npm test"}],"response_schema":{"type":"object","required":["decision"],"properties":{"decision":{"type":"string"}}}}`),
+		result,
+		logCh,
+		&summaryParts,
+		lastByType,
+		&lastAssistant,
+	)
+	close(logCh)
+
+	logs := drain(logCh)
+	require.True(t, result.RequiresHumanInput, "Codex tool_approval events should pause the run for human input")
+	require.Len(t, logs, 1, "Codex tool_approval events should emit one human-input log")
+	require.Equal(t, "human_input", logs[0].Level, "Codex tool_approval events should use the normalized human-input log level")
+	require.Equal(t, "Codex wants to run npm test.", logs[0].Message, "Codex tool_approval body should become the user-visible request body")
+	require.Equal(t, string(models.AgentTypeCodex), logs[0].Metadata["provider"], "Codex human-input logs should preserve the provider")
+	require.Equal(t, string(models.HumanInputRequestKindToolApproval), logs[0].Metadata["request_kind"], "Codex tool_approval events should normalize the request kind")
+	require.NotNil(t, logs[0].HumanInput, "Codex tool_approval logs should include a durable request payload")
+	require.Equal(t, models.HumanInputRequestKindToolApproval, logs[0].HumanInput.Kind, "Codex tool_approval payload should use the tool approval kind")
+	require.Equal(t, "codex-tool-1", logs[0].HumanInput.ProviderRequestID, "Codex tool_approval payload should retain the provider request id")
+	require.Len(t, logs[0].HumanInput.Choices, 2, "Codex tool_approval payload should retain approval choices")
+	require.Equal(t, "edit-command", logs[0].HumanInput.Choices[1].ID, "Codex edit choices should be normalized into stable choice ids")
+	require.JSONEq(t, `{"type":"object","required":["decision"],"properties":{"decision":{"type":"string"}}}`, string(logs[0].HumanInput.ResponseSchema), "Codex tool_approval payload should retain the response schema")
 }
 
 func TestCodexAdapter_ResumeMode(t *testing.T) {
@@ -897,6 +987,85 @@ func TestCodexAdapter_Execute_ContinuationWithResumeSessionIDIncludesReasoningEf
 	contents, exists := provider.Files["/home/sandbox/.143-followup-prompt.md"]
 	require.True(t, exists, "continuation should write the follow-up prompt file")
 	require.Equal(t, "Please continue.", string(contents), "follow-up prompt file should contain the user message exactly")
+}
+
+func TestBuildCodexResumeMessage_IncludesStructuredHumanInputAnswer(t *testing.T) {
+	t.Parallel()
+
+	answerText := "Approve and run the focused tests."
+	message, err := buildCodexResumeMessage(&agent.AgentPrompt{
+		UserMessage: "Answered human input request.",
+		HumanInputAnswer: &agent.HumanInputAnswer{
+			RequestID:         uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			ProviderRequestID: "toolu_01abc",
+			Kind:              models.HumanInputRequestKindToolApproval,
+			Status:            models.HumanInputRequestStatusAnswered,
+			AnswerText:        &answerText,
+			SelectedChoiceIDs: []string{"approve"},
+			AnswerPayload:     json.RawMessage(`{"decision":"approve","edited_input":{"command":"go test ./..."}}`),
+		},
+	})
+
+	require.NoError(t, err, "Codex resume message should serialize a structured human input answer")
+	require.Contains(t, message, "Answered human input request.", "resume message should retain the user's visible answer text")
+	require.Contains(t, message, "Human input answer", "resume message should label the structured answer block")
+	require.Contains(t, message, `"provider_request_id":"toolu_01abc"`, "resume message should include the provider request id")
+	require.Contains(t, message, `"selected_choice_ids":["approve"]`, "resume message should include selected choices")
+	require.Contains(t, message, `"decision":"approve"`, "resume message should include structured answer payload")
+	require.Contains(t, message, `"command":"go test ./..."`, "resume message should include nested payload fields")
+}
+
+func TestCodexAdapter_Execute_ContinuationWithResumeSessionIDPassesHumanInputAnswer(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.Contains(cmd, "codex exec") {
+			_, _ = stdout.Write([]byte(`{"type":"message","content":"done"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	answerText := "Approve and run the focused tests."
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+	prompt := &agent.AgentPrompt{
+		UserMessage:     "Answered human input request.",
+		MaxTokens:       50_000,
+		Continuation:    true,
+		ResumeSessionID: "session-123",
+		HumanInputAnswer: &agent.HumanInputAnswer{
+			RequestID:         uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			ProviderRequestID: "toolu_01abc",
+			Kind:              models.HumanInputRequestKindToolApproval,
+			Status:            models.HumanInputRequestStatusAnswered,
+			AnswerText:        &answerText,
+			SelectedChoiceIDs: []string{"approve"},
+			AnswerPayload:     json.RawMessage(`{"decision":"approve"}`),
+		},
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+
+	require.NoError(t, err, "continuation with explicit session ID should succeed")
+	require.NotNil(t, result, "continuation should return a result")
+	require.Contains(t, provider.ExecCalls[0], " - < '/home/sandbox/.143-followup-prompt.md'", "resume command should feed the structured answer over stdin")
+	contents, exists := provider.Files["/home/sandbox/.143-followup-prompt.md"]
+	require.True(t, exists, "continuation should write the structured answer to the follow-up prompt file")
+	require.Contains(t, string(contents), "Human input answer", "resume prompt should include the structured answer block")
+	require.Contains(t, string(contents), "toolu_01abc", "resume prompt should include the provider request id")
+	require.Contains(t, string(contents), "selected_choice_ids", "resume prompt should include selected choices")
+	require.Contains(t, string(contents), "approve", "resume prompt should include the selected approval")
 }
 
 func TestIsDuplicateOutput(t *testing.T) {
@@ -1120,8 +1289,18 @@ func TestFilterCodexStderrLines(t *testing.T) {
 			expect: "",
 		},
 		{
+			name:   "removes benign closed stdin router diagnostic",
+			input:  "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open",
+			expect: "",
+		},
+		{
 			name:   "removes benign stdin diagnostic while preserving real stderr",
 			input:  "Reading additional input from stdin...\nreal error line",
+			expect: "real error line",
+		},
+		{
+			name:   "removes closed stdin router diagnostic while preserving real stderr",
+			input:  "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open\nreal error line",
 			expect: "real error line",
 		},
 		{
@@ -1142,6 +1321,30 @@ func TestFilterCodexStderrLines(t *testing.T) {
 			require.Equal(t, tt.expect, filterCodexStderrLines(tt.input), "codex stderr filtering should only remove known benign diagnostics")
 		})
 	}
+}
+
+func TestEmitCodexStderrLogs_FlagsBenignDiagnosticsHidden(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
+
+	filtered := emitCodexStderrLogs([]byte(input), logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, filtered, "benign diagnostic should not be returned as visible stderr")
+	require.Len(t, logs, 1, "benign diagnostic should be retained as a hidden log")
+	require.Equal(t, "debug", logs[0].Level, "hidden diagnostic should be emitted below user-visible error severity")
+	require.Equal(t, input, logs[0].Message, "hidden diagnostic should preserve the original message")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "hidden diagnostic should be marked hidden from the user")
+	require.Equal(t, "benign_runtime_diagnostic", logs[0].Metadata["diagnostic_class"], "hidden diagnostic should carry a reusable diagnostic class")
+	require.Equal(t, "codex", logs[0].Metadata["diagnostic_source"], "hidden diagnostic should identify its source")
+	require.Equal(t, "closed_stdin", logs[0].Metadata["diagnostic_kind"], "hidden diagnostic should identify the matched kind")
 }
 
 func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {

@@ -1319,31 +1319,66 @@ func (h *IntegrationHandler) githubInstallationLink(ctx context.Context, orgID u
 			return link, true
 		}
 	}
-	if installationID == 0 {
-		integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
-		if err != nil || len(integrations) == 0 {
-			return models.GitHubInstallationOrgLink{}, false
-		}
+
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	if err != nil || len(integrations) == 0 {
+		return models.GitHubInstallationOrgLink{}, false
+	}
+	for _, integration := range integrations {
 		var cfg struct {
 			InstallationID int64  `json:"installation_id"`
 			AccountLogin   string `json:"account_login"`
 		}
-		if integrations[0].Config == nil || json.Unmarshal(integrations[0].Config, &cfg) != nil || cfg.InstallationID == 0 {
-			return models.GitHubInstallationOrgLink{}, false
+		if integration.Config == nil || json.Unmarshal(integration.Config, &cfg) != nil || cfg.InstallationID == 0 {
+			continue
 		}
-		installationID = cfg.InstallationID
+		if installationID > 0 && cfg.InstallationID != installationID {
+			continue
+		}
+		if !h.githubInstallationAllowsConfigFallback(ctx, cfg.InstallationID) {
+			continue
+		}
 		if cfg.AccountLogin == "" {
 			cfg.AccountLogin = "unknown"
 		}
 		return models.GitHubInstallationOrgLink{
 			OrgID:          orgID,
-			IntegrationID:  &integrations[0].ID,
-			InstallationID: installationID,
+			IntegrationID:  &integration.ID,
+			InstallationID: cfg.InstallationID,
 			AccountLogin:   cfg.AccountLogin,
 			Status:         "active",
 		}, true
 	}
+
+	if h.repoStore != nil {
+		repoInstallationID, repoErr := h.repoStore.GetAnyInstallationIDByOrg(ctx, orgID)
+		if repoErr == nil && repoInstallationID > 0 && (installationID == 0 || repoInstallationID == installationID) {
+			accountLogin := "unknown"
+			return models.GitHubInstallationOrgLink{
+				OrgID:          orgID,
+				IntegrationID:  &integrations[0].ID,
+				InstallationID: repoInstallationID,
+				AccountLogin:   accountLogin,
+				Status:         "active",
+			}, true
+		}
+	}
+
 	return models.GitHubInstallationOrgLink{}, false
+}
+
+func (h *IntegrationHandler) githubInstallationAllowsConfigFallback(ctx context.Context, installationID int64) bool {
+	if h.githubInstallations == nil || installationID == 0 {
+		return true
+	}
+	installation, err := h.githubInstallations.GetByInstallationID(ctx, installationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return installation.Status == "" || installation.Status == "active"
 }
 
 func (h *IntegrationHandler) userIsAdminInOrg(ctx context.Context, userID, orgID uuid.UUID) bool {

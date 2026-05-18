@@ -14,6 +14,7 @@ import { useAnalyze } from "@/hooks/use-analyze";
 import { AutopilotSteeringSheet } from "./autopilot-steering-sheet";
 import { AutopilotDocumentsSheet } from "./autopilot-documents-sheet";
 import { AutopilotProposalCard } from "@/components/autopilot-proposal-card";
+import { SessionLinearBadge } from "@/components/session-linear-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -31,9 +32,11 @@ const SOURCE_OPTIONS = [
   { value: ALL_VALUE, label: "All sources" },
   { value: "linear", label: "Linear" },
   { value: "sentry", label: "Sentry" },
-  { value: "manual", label: "Internal" },
   { value: "pm_agent", label: "PM agent" },
 ];
+
+const linearIdentifierPattern = /^[A-Z][A-Z0-9_]{0,9}-[0-9]+$/;
+const linearTitleIdentifierPattern = /^([A-Z][A-Z0-9_]{0,9}-[0-9]+):/;
 
 const RUN_STATE_OPTIONS = [
   { value: ALL_VALUE, label: "Any run state" },
@@ -200,7 +203,7 @@ function SummaryStrip({ topIssue, summary }: { topIssue?: AutopilotQueueRow; sum
     {
       label: "Top opportunity",
       value: topIssue ? topIssue.title : "None",
-      detail: topIssue ? `${topIssue.low_hanging_fruit.label} · ${topIssue.source.key}` : "No ranked issues right now",
+      detail: topIssue ? `${topIssue.low_hanging_fruit.label} fit · ${sourceDisplayText(topIssue)}` : "No ranked issues right now",
       icon: CheckCircle2,
     },
     {
@@ -216,9 +219,9 @@ function SummaryStrip({ topIssue, summary }: { topIssue?: AutopilotQueueRow; sum
       icon: AlertCircle,
     },
     {
-      label: "PRs open",
-      value: String(summary?.open_pr_count ?? 0),
-      detail: `${summary?.active_run_count ?? 0} active runs`,
+      label: "Connected work",
+      value: String((summary?.active_run_count ?? 0) + (summary?.open_pr_count ?? 0)),
+      detail: `${summary?.active_run_count ?? 0} active runs · ${summary?.open_pr_count ?? 0} PRs`,
       icon: GitPullRequest,
     },
   ];
@@ -336,24 +339,24 @@ function QueueTable({
   return (
     <div className="space-y-3">
       <Card className="overflow-hidden border-border/70">
-        <Table>
+        <Table className="w-full min-w-[64rem] table-auto">
           <TableHeader>
             <TableRow>
               <TableHead className="w-14">Rank</TableHead>
-              <TableHead>Issue</TableHead>
-              <TableHead>Source</TableHead>
-              <TableHead>Customer impact</TableHead>
-              <TableHead>Ease</TableHead>
-              <TableHead>Low-hanging fruit</TableHead>
-              <TableHead>Run state</TableHead>
-              <TableHead className="text-right">Action</TableHead>
+              <TableHead className="w-[34%]">Issue</TableHead>
+              <TableHead className="w-24">Source</TableHead>
+              <TableHead className="w-32">Customer impact</TableHead>
+              <TableHead className="w-24">Ease</TableHead>
+              <TableHead className="w-28">Priority fit</TableHead>
+              <TableHead className="w-36">Run state</TableHead>
+              <TableHead className="w-28 text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((row) => (
               <TableRow key={row.id}>
                 <TableCell className="font-medium text-muted-foreground">#{row.rank}</TableCell>
-                <TableCell className="min-w-[260px] whitespace-normal">
+                <TableCell className="whitespace-normal">
                   <div className="font-medium text-foreground">{row.title}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{row.repo?.name ?? "No repo"}</span>
@@ -362,8 +365,12 @@ function QueueTable({
                   </div>
                 </TableCell>
                 <TableCell><SourceBadge row={row} /></TableCell>
-                <TableCell>{row.customer_impact.label} · {row.customer_impact.count}</TableCell>
-                <TableCell>{row.implementation_ease}</TableCell>
+                <TableCell>
+                  <MetricBadge label={row.customer_impact.label} detail={String(row.customer_impact.count)} />
+                </TableCell>
+                <TableCell>
+                  <MetricBadge label={row.implementation_ease} />
+                </TableCell>
                 <TableCell>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -393,7 +400,21 @@ function QueueTable({
 }
 
 function SourceBadge({ row }: { row: AutopilotQueueRow }) {
-  return <Badge variant="outline" className="capitalize">{sourceLabel(row.source.type)} · {row.source.key}</Badge>;
+  if (row.source.type === "linear") {
+    return <SessionLinearBadge label={linearIdentifierForRow(row)} />;
+  }
+
+  const sourceText = sourceDisplayText(row);
+  return <Badge variant="outline" className="capitalize">{sourceText}</Badge>;
+}
+
+function MetricBadge({ label, detail }: { label: string; detail?: string }) {
+  return (
+    <Badge variant={metricBadgeVariant(label)}>
+      <span>{label}</span>
+      {detail ? <span className="text-muted-foreground">{detail}</span> : null}
+    </Badge>
+  );
 }
 
 function RunState({ row }: { row: AutopilotQueueRow }) {
@@ -502,6 +523,23 @@ function sourceLabel(source: string) {
   return source;
 }
 
+function sourceDisplayText(row: AutopilotQueueRow) {
+  if (row.source.type === "linear") return linearIdentifierForRow(row);
+  if (row.source.type === "manual") return "Internal";
+  return row.source.key ? `${sourceLabel(row.source.type)} · ${shortSourceKey(row.source.key)}` : sourceLabel(row.source.type);
+}
+
+function linearIdentifierForRow(row: AutopilotQueueRow) {
+  const key = row.source.key.trim();
+  if (linearIdentifierPattern.test(key)) return key;
+  return row.title.match(linearTitleIdentifierPattern)?.[1] ?? "Linear";
+}
+
+function shortSourceKey(key: string) {
+  if (key.length <= 18) return key;
+  return key.slice(0, 12);
+}
+
 function runStateVariant(state: AutopilotRunState): "default" | "secondary" | "outline" | "destructive" | "success" {
   if (state === "running" || state === "queued") return "default";
   if (state === "awaiting_input" || state === "needs_review") return "secondary";
@@ -512,6 +550,12 @@ function runStateVariant(state: AutopilotRunState): "default" | "secondary" | "o
 
 function fruitBadgeVariant(label: string): "default" | "secondary" | "outline" | "success" {
   if (label === "Very high") return "default";
+  if (label === "High") return "success";
+  if (label === "Medium") return "secondary";
+  return "outline";
+}
+
+function metricBadgeVariant(label: string): "default" | "secondary" | "outline" | "success" {
   if (label === "High") return "success";
   if (label === "Medium") return "secondary";
   return "outline";

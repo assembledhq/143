@@ -18,8 +18,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# Install runtime deps + sops/age for encrypted secrets decryption at boot
-RUN apt-get update && apt-get install -y ca-certificates wget && rm -rf /var/lib/apt/lists/* \
+# Install runtime deps + sops/age for encrypted secrets decryption at boot.
+# libheif-examples provides heif-convert for server-side iPhone HEIC upload
+# normalization before attachments are handed to coding agents.
+RUN apt-get update && apt-get install -y ca-certificates wget libheif-examples && rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
     && wget -qO /usr/local/bin/sops "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.${ARCH}" \
     && chmod +x /usr/local/bin/sops \

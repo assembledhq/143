@@ -35,6 +35,8 @@ const (
 	AuditActionSessionStatusChanged        AuditAction = "session.status_changed"
 	AuditActionSessionQuestionCreated      AuditAction = "session.question.created"
 	AuditActionSessionQuestionAnswered     AuditAction = "session.question.answered"
+	AuditActionSessionHumanInputAnswered   AuditAction = "session.human_input.answered"
+	AuditActionSessionHumanInputCancelled  AuditAction = "session.human_input.cancelled"
 	AuditActionSessionResumedLocally       AuditAction = "session.resumed_locally"
 	AuditActionSessionReviewCommentCreated AuditAction = "session.review_comment.created"
 	AuditActionSessionReviewCommentUpdated AuditAction = "session.review_comment.updated"
@@ -122,7 +124,9 @@ func (a AuditAction) Validate() error {
 	switch a {
 	case AuditActionSessionCreated, AuditActionSessionStarted, AuditActionSessionCompleted,
 		AuditActionSessionFailed, AuditActionSessionCancelled, AuditActionSessionStatusChanged,
-		AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered, AuditActionSessionResumedLocally,
+		AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered,
+		AuditActionSessionHumanInputAnswered, AuditActionSessionHumanInputCancelled,
+		AuditActionSessionResumedLocally,
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
 		AuditActionSessionPRRequested, AuditActionSessionBranchRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived,

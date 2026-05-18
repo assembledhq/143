@@ -143,7 +143,12 @@ func (s *InvitationStore) ListPendingForUser(ctx context.Context, userID uuid.UU
 
 // ListPendingByOrg returns all pending invitations for the org.
 func (s *InvitationStore) ListPendingByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Invitation, error) {
-	query := fmt.Sprintf(`SELECT %s FROM invitations WHERE org_id = @org_id AND status = 'pending' ORDER BY created_at DESC`, invitationSelectColumns)
+	query := `SELECT id, org_id, email, github_username, acceptance_method, role, invited_by, token,
+		CASE WHEN status = 'pending' AND expires_at <= now() THEN 'expired' ELSE status END AS status,
+		expires_at, created_at, accepted_at
+		FROM invitations
+		WHERE org_id = @org_id AND status = 'pending'
+		ORDER BY created_at DESC`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return nil, fmt.Errorf("query invitations: %w", err)
@@ -151,9 +156,13 @@ func (s *InvitationStore) ListPendingByOrg(ctx context.Context, orgID uuid.UUID)
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Invitation])
 }
 
-// ListPendingByOrgWithInviter returns pending invitations with the inviter's name via JOIN.
+// ListPendingByOrgWithInviter returns unresolved invitations with the inviter's
+// name via JOIN. Expired invitations remain status='pending' in storage so they
+// can still be revoked, but this projects them as status='expired' for admin UI.
 func (s *InvitationStore) ListPendingByOrgWithInviter(ctx context.Context, orgID uuid.UUID) ([]models.InvitationWithInviter, error) {
-	query := `SELECT i.id, i.org_id, i.email, i.github_username, i.acceptance_method, i.role, i.invited_by, i.token, i.status, i.expires_at, i.created_at, i.accepted_at,
+	query := `SELECT i.id, i.org_id, i.email, i.github_username, i.acceptance_method, i.role, i.invited_by, i.token,
+		CASE WHEN i.status = 'pending' AND i.expires_at <= now() THEN 'expired' ELSE i.status END AS status,
+		i.expires_at, i.created_at, i.accepted_at,
 		COALESCE(u.name, '') AS inviter_name
 		FROM invitations i
 		LEFT JOIN users u ON u.id = i.invited_by

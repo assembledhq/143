@@ -952,6 +952,9 @@ func writeFileTarTarget(sb *agent.Sandbox, cleanPath, fallbackRelPath string) (s
 		}
 	}
 	if bestRoot == "" {
+		if strings.HasPrefix(cleanPath, "/") {
+			return path.Dir(cleanPath), path.Base(cleanPath)
+		}
 		return "/", fallbackRelPath
 	}
 	return bestRoot, strings.TrimPrefix(cleanPath, bestRoot+"/")

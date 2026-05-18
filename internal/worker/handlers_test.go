@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -2196,6 +2197,113 @@ func TestCreateBranchHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	automationRunID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-pre-review"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	for i, col := range workerSessionColumns {
+		if col == "automation_run_id" {
+			sessionRow[i] = &automationRunID
+			break
+		}
+	}
+	configSnapshot := json.RawMessage(`{"pre_pr_review_loops":1}`)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", configSnapshot,
+			models.AutomationRunStatusCompleted, nil, nil, now, now,
+		))
+	mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()))
+
+	reviews := &stubWorkerReviewLoops{}
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				t.Fatal("PR creation should wait until pre-PR review is clean")
+				return nil, nil
+			},
+		},
+		ReviewLoops: reviews,
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr should start the review loop and stop without retry")
+	require.Len(t, reviews.starts, 1, "open_pr should start exactly one automation review loop")
+	require.Equal(t, models.ReviewLoopSourceAutomation, reviews.starts[0].req.Source, "review loop should be marked automation-owned")
+	require.Equal(t, 1, reviews.starts[0].req.MaxPasses, "review loop should use the snapshotted automation pass count")
+	require.NotNil(t, reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
+	require.Equal(t, automationRunID, *reviews.starts[0].req.AutomationRunID, "review loop should retain the automation run id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	automationRunID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	now := time.Now()
+	configSnapshot := json.RawMessage(`{"pre_pr_review_loops":1}`)
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", configSnapshot,
+			models.AutomationRunStatusCompleted, nil, nil, now, now,
+		))
+	mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
+			loopID, orgID, sessionID, &automationRunID, &threadID,
+			models.ReviewLoopStatusRunning, models.ReviewLoopSourceAutomation, models.AgentTypeCodex,
+			1, 0, true, nil, nil, nil, nil, nil, nil, now, nil,
+		))
+
+	run := models.Session{
+		ID:              sessionID,
+		OrgID:           orgID,
+		AutomationRunID: &automationRunID,
+	}
+	ok, err := ensureAutomationPrePRReview(context.Background(), stores, &Services{ReviewLoops: &stubWorkerReviewLoops{}}, zerolog.Nop(), run)
+
+	require.False(t, ok, "pre-PR review should not allow PR creation while the loop is running")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "existing running pre-PR review should defer open_pr for a retry")
+	require.NotNil(t, retryable.RetryAfter, "running pre-PR review retry should use a bounded delay")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
 	t.Parallel()
 
@@ -2660,11 +2768,39 @@ func automationRowColumns() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope",
+		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
 	}
+}
+
+func workerReviewLoopColumns() []string {
+	return []string{
+		"id", "org_id", "session_id", "automation_run_id", "thread_id",
+		"status", "source", "agent_type", "max_passes", "completed_passes", "review_required",
+		"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
+		"latest_summary", "started_by_user_id", "started_at", "completed_at",
+	}
+}
+
+type stubWorkerReviewLoops struct {
+	starts []stubWorkerReviewLoopStart
+}
+
+type stubWorkerReviewLoopStart struct {
+	orgID     uuid.UUID
+	sessionID uuid.UUID
+	req       reviewloopsvc.StartReviewLoopRequest
+}
+
+func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+
+func (s *stubWorkerReviewLoops) Start(_ context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error) {
+	s.starts = append(s.starts, stubWorkerReviewLoopStart{orgID: orgID, sessionID: sessionID, req: req})
+	return &models.SessionReviewLoop{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, Status: models.ReviewLoopStatusRunning}, nil
 }
 
 func TestAutomationRunHandler_HappyPath(t *testing.T) {
@@ -2707,7 +2843,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
+			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
 			50, now, now, nil,
@@ -2799,7 +2935,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
 			50, now, now, nil,
@@ -2935,7 +3071,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, false, nil, nil, nil,
 			50, now, now, nil,
@@ -2989,7 +3125,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
 			50, now, now, nil,
@@ -3062,7 +3198,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &clickerID, nil, nil,
 			50, now, now, nil,
@@ -3141,7 +3277,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
 			50, now, now, nil,
@@ -3212,7 +3348,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
 			50, now, now, nil,

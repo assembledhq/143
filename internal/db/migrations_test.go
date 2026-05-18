@@ -44,6 +44,23 @@ func TestMigrationsDeclareSessionsModelUsedColumn(t *testing.T) {
 	require.Fail(t, "schema must add sessions.model_used because SessionStore.UpdateResult writes it")
 }
 
+func TestMigrationsAllowBuilderRole(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000130_builder_role_constraints.up.sql")
+	require.NoError(t, err, "test should read builder role migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "chk_users_role CHECK (role IN ('admin', 'member', 'builder', 'viewer')) NOT VALID",
+		"users role constraint should allow seeded builder users")
+	require.Contains(t, sql, "VALIDATE CONSTRAINT chk_users_role",
+		"users role constraint should validate separately to reduce lock pressure")
+	require.Contains(t, sql, "organization_memberships_role_check CHECK (role IN ('admin', 'member', 'builder', 'viewer')) NOT VALID",
+		"membership role constraint should allow seeded builder memberships")
+	require.Contains(t, sql, "VALIDATE CONSTRAINT organization_memberships_role_check",
+		"membership role constraint should validate separately to reduce lock pressure")
+}
+
 // TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker locks the
 // step-3 INSERT to write `team_default_origin_user_id = uc.user_id`. The
 // down migration's orphan check and the dual-write mirror's cleanup both
@@ -141,6 +158,21 @@ func TestAutomationsGoalLengthExpandMigrationRaisesConstraint(t *testing.T) {
 		"up migration should replace the old goal-length check rather than stack another one")
 	require.Contains(t, upSQL, "char_length(goal) BETWEEN 1 AND 64000",
 		"up migration should raise the automation goal cap to 64000 characters")
+}
+
+func TestReviewLoopMigrationDoesNotReferenceSessionMessagesByIDOnly(t *testing.T) {
+	t.Parallel()
+
+	files, err := filepath.Glob("../../migrations/*_review_agent_loops.up.sql")
+	require.NoError(t, err, "test should list review loop migrations")
+	require.Len(t, files, 1, "test should find exactly one review loop migration")
+
+	body, err := os.ReadFile(files[0])
+	require.NoError(t, err, "test should read the review loop migration")
+
+	sql := string(body)
+	require.NotContains(t, sql, "REFERENCES session_messages(id)",
+		"session_messages is partitioned with primary key (id, created_at), so review loop message pointers must not FK to id alone")
 }
 
 func TestGitHubInstallationClaimsMigrationDeduplicatesInstallationsBeforeUpsert(t *testing.T) {

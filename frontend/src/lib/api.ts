@@ -95,8 +95,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return parseSuccessBody<T>(res);
 }
 
-function get<T>(path: string): Promise<T> {
-  return request<T>(path);
+function get<T>(path: string, options?: RequestInit): Promise<T> {
+  return request<T>(path, options);
 }
 
 function post<T>(path: string, body?: unknown): Promise<T> {
@@ -339,7 +339,10 @@ export const api = {
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
-    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(`/api/v1/sessions/${id}/diff`),
+    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(
+      `/api/v1/sessions/${id}/diff`,
+      { cache: 'no-store' },
+    ),
     update: (id: string, body: { title: string }) =>
       patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
@@ -364,6 +367,17 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
+    getHumanInputRequests: (sessionId: string, params?: { status?: string; threadId?: string | null }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.threadId) searchParams.set('thread_id', params.threadId);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests${qs ? `?${qs}` : ''}`);
+    },
+    answerHumanInputRequest: (sessionId: string, requestId: string, body: import('./types').HumanInputAnswerBody) =>
+      post<import('./types').SingleResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests/${requestId}/answer`, body),
+    cancelHumanInputRequest: (sessionId: string, requestId: string) =>
+      post<import('./types').SingleResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests/${requestId}/cancel`, {}),
     createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string; linear_private?: boolean; linear_state_sync_disabled?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
@@ -434,6 +448,14 @@ export const api = {
     },
     listReviewComments: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
+    listReviewLoops: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`),
+    startReviewLoop: (sessionId: string, body: { agent_type?: string; model?: string; max_passes: number }) =>
+      post<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`, body),
+    getReviewLoop: (sessionId: string, loopId: string) =>
+      get<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}`),
+    cancelReviewLoop: (sessionId: string, loopId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}/cancel`, {}),
     createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
       post<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`, body),
     updateReviewComment: (sessionId: string, commentId: string, body: { body?: string; resolved?: boolean }) =>

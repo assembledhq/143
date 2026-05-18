@@ -1170,15 +1170,16 @@ func (s *PRService) pushSessionBranch(
 		}
 	}()
 
+	commitMsgPath := pushCommitMsgPath(sandbox.HomeDir)
 	// Commit message goes to a file so multi-line / hostile content can't
 	// leak through argv. Token goes via the helper socket — no token files,
 	// no askpass shell stub.
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushCommitMsgPath, []byte(commitMsg)); err != nil {
+	if err := s.sandboxProvider.WriteFile(ctx, sandbox, commitMsgPath, []byte(commitMsg)); err != nil {
 		return nil, fmt.Errorf("write commit message to sandbox: %w", err)
 	}
 
 	pushURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
-	script := buildPushScript(sandbox.WorkDir, authorName, authorEmail, branchName, pushURL)
+	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, pushURL)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
@@ -1308,10 +1309,19 @@ func (s *PRService) captureSandboxSnapshot(ctx context.Context, sandbox *agent.S
 	return path, size, nil
 }
 
-// pushCommitMsgPath is the in-sandbox file the script reads `git commit -F`
-// from. Under /tmp so it's auto-cleaned on sandbox destroy; the trap inside
-// the script also removes it explicitly on exit for defense in depth.
-const pushCommitMsgPath = "/tmp/143-pr-commit-msg"
+// pushCommitMsgFilename is the in-sandbox file the script reads with
+// `git commit -F`. Keep it under HomeDir rather than /tmp: /tmp is a hardened
+// tmpfs in runsc sandboxes, and tar-based file injection must not rely on
+// mutating /tmp metadata.
+const pushCommitMsgFilename = ".143-pr-commit-msg"
+
+func pushCommitMsgPath(homeDir string) string {
+	root := strings.TrimRight(strings.TrimSpace(homeDir), "/")
+	if root == "" {
+		root = "/home/sandbox"
+	}
+	return root + "/" + pushCommitMsgFilename
+}
 
 // pushExitNoChanges is the sentinel exit code the push script uses when the
 // restored working tree has no uncommitted changes AND no commits ahead of
@@ -1375,10 +1385,10 @@ echo "%[8]s$(git rev-parse HEAD)"
 // Every %s interpolation is passed through shellQuote, which correctly
 // handles embedded single quotes (via the `'\”` trick) — so any UTF-8
 // string is safe to interpolate.
-func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL string) string {
+func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, pushURL string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
-		shellQuote(pushCommitMsgPath),
+		shellQuote(commitMsgPath),
 		shellQuote(workDir),
 		shellQuote(authorName),
 		shellQuote(authorEmail),

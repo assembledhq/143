@@ -44,9 +44,11 @@ import (
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
 	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
@@ -414,6 +416,7 @@ func main() {
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		}
 
@@ -1017,7 +1020,9 @@ func buildServices(
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -1038,6 +1043,15 @@ func buildServices(
 	identityResolver.SetIntegrations(integrationStore)
 	var sandboxAuthServer *sandboxauth.Server
 	if cfg.SandboxAuthSocketDir != "" {
+		if cfg.Env == "production" {
+			if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
+				logger.Error().
+					Err(err).
+					Str("socket_dir", cfg.SandboxAuthSocketDir).
+					Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+				return nil
+			}
+		}
 		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
 		logger.Info().
 			Str("socket_dir", cfg.SandboxAuthSocketDir).
@@ -1050,43 +1064,44 @@ func buildServices(
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          sandboxProvider,
-		Adapters:          agentAdapters,
-		Env:               agentEnv,
-		Sessions:          sessionStore,
-		SessionLogs:       sessionLogStore,
-		SessionQuestions:  sessionQuestionStore,
-		SessionMessages:   sessionMessageStore,
-		SessionThreads:    sessionThreadStore,
-		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
-		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
-		DecisionLog:       pmDecisionLogStore,
-		ProjectTasks:      projectTaskUpdater,
-		AutomationRuns:    automationRunUpdater,
-		Issues:            issueStore,
-		Repositories:      repoStore,
-		Orgs:              orgStore,
-		Jobs:              jobStore,
-		GitHub:            ghSvc,
-		CodexAuth:         codexAuthSvc,
-		ClaudeCodeAuth:    claudeCodeAuthSvc,
-		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
-		CodingCredentials: codingCredentialStore,
-		Snapshots:         snapshotStore,
-		Uploads:           uploadStore,
-		FileReader:        fileReader,
-		MentionIndexes:    mentionIndexCache,
-		UsageTracker:      usageTracker,
-		SandboxCapacity:   sandboxCapacity,
-		Cancels:           cancelRegistry,
-		ThreadCancels:     threadCancelRegistry,
-		OrgSettingsCache:  orgSettingsCache,
-		IdentityResolver:  identityResolver,
-		SandboxAuth:       sandboxAuthServer,
-		Users:             userStore,
-		NodeID:            cfg.NodeID,
-		Logger:            logger,
+		Provider:           sandboxProvider,
+		Adapters:           agentAdapters,
+		Env:                agentEnv,
+		Sessions:           sessionStore,
+		SessionLogs:        sessionLogStore,
+		SessionQuestions:   sessionQuestionStore,
+		HumanInputRequests: sessionHumanInputStore,
+		SessionMessages:    sessionMessageStore,
+		SessionThreads:     sessionThreadStore,
+		SessionIssueLinks:  db.NewSessionIssueLinkStore(pool),
+		IssueSnapshots:     db.NewSessionTurnIssueSnapshotStore(pool),
+		DecisionLog:        pmDecisionLogStore,
+		ProjectTasks:       projectTaskUpdater,
+		AutomationRuns:     automationRunUpdater,
+		Issues:             issueStore,
+		Repositories:       repoStore,
+		Orgs:               orgStore,
+		Jobs:               jobStore,
+		GitHub:             ghSvc,
+		CodexAuth:          codexAuthSvc,
+		ClaudeCodeAuth:     claudeCodeAuthSvc,
+		Credentials:        credentialStore,
+		UserCredentials:    userCredentialStore,
+		CodingCredentials:  codingCredentialStore,
+		Snapshots:          snapshotStore,
+		Uploads:            uploadStore,
+		FileReader:         fileReader,
+		MentionIndexes:     mentionIndexCache,
+		UsageTracker:       usageTracker,
+		SandboxCapacity:    sandboxCapacity,
+		Cancels:            cancelRegistry,
+		ThreadCancels:      threadCancelRegistry,
+		OrgSettingsCache:   orgSettingsCache,
+		IdentityResolver:   identityResolver,
+		SandboxAuth:        sandboxAuthServer,
+		Users:              userStore,
+		NodeID:             cfg.NodeID,
+		Logger:             logger,
 	})
 
 	// PR service.
@@ -1140,6 +1155,21 @@ func buildServices(
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
+	threadSvc := threadservice.NewService(
+		sessionThreadStore,
+		sessionStore,
+		sessionMessageStore,
+		sessionLogStore,
+		jobStore,
+		logger,
+	)
+	reviewLoopSvc := reviewloopservice.NewService(
+		reviewLoopStore,
+		reviewloopservice.RuntimeAdapter{
+			Sessions: sessionStore,
+			Threads:  threadSvc,
+		},
+	)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
@@ -1235,6 +1265,7 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
 	}

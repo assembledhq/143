@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/jobctx"
@@ -33,6 +34,7 @@ import (
 
 const (
 	defaultMaxConcurrent = 10
+	planModePrefix       = "[PLAN_MODE]\n"
 )
 
 // ErrConcurrencyLimit is returned when an org has reached its maximum
@@ -345,6 +347,14 @@ type SessionLogStore interface {
 // SessionQuestionStore defines the question persistence operations.
 type SessionQuestionStore interface {
 	Create(ctx context.Context, q *models.SessionQuestion) error
+	AnswerLatestPendingBySessionAndQuestion(ctx context.Context, orgID, sessionID uuid.UUID, questionText, answerText string, answeredBy uuid.UUID) (models.SessionQuestion, error)
+}
+
+type SessionHumanInputRequestStore interface {
+	Create(ctx context.Context, req *models.HumanInputRequest) error
+	GetByID(ctx context.Context, orgID, sessionID, id uuid.UUID) (models.HumanInputRequest, error)
+	AnswerLatestPendingFreeTextBySession(ctx context.Context, orgID, sessionID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error)
+	AnswerLatestPendingFreeTextByThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.HumanInputRequest, error)
 }
 
 // SessionMessageStore defines the message persistence operations for multi-turn sessions.
@@ -449,42 +459,43 @@ type AutomationRunUpdater interface {
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
-	provider          SandboxProvider
-	adapters          map[models.AgentType]AgentAdapter
-	sessions          SessionStore
-	agentRunLogs      SessionLogStore
-	agentRunQuestions SessionQuestionStore
-	sessionMessages   SessionMessageStore
-	sessionThreads    SessionThreadStore
-	sessionIssueLinks SessionIssueLinkStore
-	issueSnapshots    SessionIssueSnapshotStore
-	decisionLog       DecisionLogStore
-	projectTasks      ProjectTaskUpdater   // can be nil
-	automationRuns    AutomationRunUpdater // can be nil
-	issues            IssueStore
-	repositories      RepositoryStore
-	orgs              OrgStore
-	jobs              JobStore
-	github            GitHubTokenProvider
-	claudeCodeAuth    ClaudeCodeAuthProvider // can be nil
-	credentials       CredentialProvider     // can be nil — disables integration-skills doc generation
-	memory            MemoryService          // can be nil
-	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	uploads           storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
-	fileReader        sandbox.FileReader     // can be nil — disables proactive mention-index warmup
-	mentionIndexes    *workspace.MentionIndexCache
-	usageTracker      UsageRecorder        // can be nil — billing tracking disabled if nil
-	sandboxCapacity   *SandboxCapacityGate // can be nil — live local sandbox admission disabled
-	env               *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver  *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth       SandboxAuthServer    // can be nil — paired with identityResolver
-	users             UserLookup           // can be nil — needed for App-token Co-authored-by trailer
-	logger            zerolog.Logger
-	maxConcurrent     int
-	cancels           *CancelRegistry
-	threadCancels     *ThreadCancelRegistry // optional — enables per-tab SIGINT
-	nodeID            string
-	isDraining        func() bool
+	provider           SandboxProvider
+	adapters           map[models.AgentType]AgentAdapter
+	sessions           SessionStore
+	agentRunLogs       SessionLogStore
+	agentRunQuestions  SessionQuestionStore
+	humanInputRequests SessionHumanInputRequestStore
+	sessionMessages    SessionMessageStore
+	sessionThreads     SessionThreadStore
+	sessionIssueLinks  SessionIssueLinkStore
+	issueSnapshots     SessionIssueSnapshotStore
+	decisionLog        DecisionLogStore
+	projectTasks       ProjectTaskUpdater   // can be nil
+	automationRuns     AutomationRunUpdater // can be nil
+	issues             IssueStore
+	repositories       RepositoryStore
+	orgs               OrgStore
+	jobs               JobStore
+	github             GitHubTokenProvider
+	claudeCodeAuth     ClaudeCodeAuthProvider // can be nil
+	credentials        CredentialProvider     // can be nil — disables integration-skills doc generation
+	memory             MemoryService          // can be nil
+	snapshots          storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	uploads            storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
+	fileReader         sandbox.FileReader     // can be nil — disables proactive mention-index warmup
+	mentionIndexes     *workspace.MentionIndexCache
+	usageTracker       UsageRecorder        // can be nil — billing tracking disabled if nil
+	sandboxCapacity    *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	env                *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver   *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth        SandboxAuthServer    // can be nil — paired with identityResolver
+	users              UserLookup           // can be nil — needed for App-token Co-authored-by trailer
+	logger             zerolog.Logger
+	maxConcurrent      int
+	cancels            *CancelRegistry
+	threadCancels      *ThreadCancelRegistry // optional — enables per-tab SIGINT
+	nodeID             string
+	isDraining         func() bool
 }
 
 // CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
@@ -635,6 +646,7 @@ type ContinueSessionOptions struct {
 	ModelOverride        *string
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
+	HumanInputRequestID  *uuid.UUID
 
 	// ThreadID, when set, identifies the agent tab this turn belongs to.
 	// The orchestrator passes it to the thread cancel registry so a
@@ -655,38 +667,39 @@ type ContinueSessionOptions struct {
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
-	Provider          SandboxProvider
-	Adapters          map[models.AgentType]AgentAdapter
-	Sessions          SessionStore
-	SessionLogs       SessionLogStore
-	SessionQuestions  SessionQuestionStore
-	SessionMessages   SessionMessageStore
-	SessionThreads    SessionThreadStore
-	SessionIssueLinks SessionIssueLinkStore
-	IssueSnapshots    SessionIssueSnapshotStore
-	DecisionLog       DecisionLogStore
-	ProjectTasks      ProjectTaskUpdater   // optional — updates project tasks on run completion
-	AutomationRuns    AutomationRunUpdater // optional — updates automation_runs on session completion
-	Issues            IssueStore
-	Repositories      RepositoryStore
-	Orgs              OrgStore
-	Jobs              JobStore
-	GitHub            GitHubTokenProvider
-	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
-	ClaudeCodeAuth    ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
-	Credentials       CredentialProvider
-	Memory            MemoryService            // optional — injects learned memories into agent prompts
-	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team credential resolution
-	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
-	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
-	Uploads           storage.UploadStore      // optional — resolves session uploads into sandbox files
-	FileReader        sandbox.FileReader       // optional — enables proactive mention-index warmup
-	MentionIndexes    *workspace.MentionIndexCache
-	UsageTracker      UsageRecorder         // optional — enables billing observability
-	SandboxCapacity   *SandboxCapacityGate  // optional — gates new local sandbox creation
-	Cancels           *CancelRegistry       // optional — enables session cancellation from API
-	ThreadCancels     *ThreadCancelRegistry // optional — enables per-tab cancellation from API
-	OrgSettingsCache  *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
+	Provider           SandboxProvider
+	Adapters           map[models.AgentType]AgentAdapter
+	Sessions           SessionStore
+	SessionLogs        SessionLogStore
+	SessionQuestions   SessionQuestionStore
+	HumanInputRequests SessionHumanInputRequestStore
+	SessionMessages    SessionMessageStore
+	SessionThreads     SessionThreadStore
+	SessionIssueLinks  SessionIssueLinkStore
+	IssueSnapshots     SessionIssueSnapshotStore
+	DecisionLog        DecisionLogStore
+	ProjectTasks       ProjectTaskUpdater   // optional — updates project tasks on run completion
+	AutomationRuns     AutomationRunUpdater // optional — updates automation_runs on session completion
+	Issues             IssueStore
+	Repositories       RepositoryStore
+	Orgs               OrgStore
+	Jobs               JobStore
+	GitHub             GitHubTokenProvider
+	CodexAuth          CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
+	ClaudeCodeAuth     ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
+	Credentials        CredentialProvider
+	Memory             MemoryService            // optional — injects learned memories into agent prompts
+	UserCredentials    UserCredentialProvider   // optional — enables legacy personal/team credential resolution
+	CodingCredentials  CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
+	Snapshots          storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
+	FileReader         sandbox.FileReader       // optional — enables proactive mention-index warmup
+	MentionIndexes     *workspace.MentionIndexCache
+	UsageTracker       UsageRecorder         // optional — enables billing observability
+	SandboxCapacity    *SandboxCapacityGate  // optional — gates new local sandbox creation
+	Cancels            *CancelRegistry       // optional — enables session cancellation from API
+	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
+	OrgSettingsCache   *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -741,42 +754,43 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	}
 
 	return &Orchestrator{
-		provider:          cfg.Provider,
-		adapters:          cfg.Adapters,
-		sessions:          cfg.Sessions,
-		agentRunLogs:      cfg.SessionLogs,
-		agentRunQuestions: cfg.SessionQuestions,
-		sessionMessages:   cfg.SessionMessages,
-		sessionThreads:    cfg.SessionThreads,
-		sessionIssueLinks: cfg.SessionIssueLinks,
-		issueSnapshots:    cfg.IssueSnapshots,
-		decisionLog:       cfg.DecisionLog,
-		projectTasks:      cfg.ProjectTasks,
-		automationRuns:    cfg.AutomationRuns,
-		issues:            cfg.Issues,
-		repositories:      cfg.Repositories,
-		orgs:              cfg.Orgs,
-		jobs:              cfg.Jobs,
-		github:            cfg.GitHub,
-		claudeCodeAuth:    cfg.ClaudeCodeAuth,
-		credentials:       cfg.Credentials,
-		memory:            cfg.Memory,
-		snapshots:         cfg.Snapshots,
-		uploads:           cfg.Uploads,
-		fileReader:        cfg.FileReader,
-		mentionIndexes:    cfg.MentionIndexes,
-		usageTracker:      cfg.UsageTracker,
-		sandboxCapacity:   cfg.SandboxCapacity,
-		env:               env,
-		identityResolver:  cfg.IdentityResolver,
-		sandboxAuth:       cfg.SandboxAuth,
-		users:             cfg.Users,
-		cancels:           cfg.Cancels,
-		threadCancels:     cfg.ThreadCancels,
-		logger:            cfg.Logger,
-		maxConcurrent:     maxConcurrent,
-		nodeID:            cfg.NodeID,
-		isDraining:        cfg.IsDraining,
+		provider:           cfg.Provider,
+		adapters:           cfg.Adapters,
+		sessions:           cfg.Sessions,
+		agentRunLogs:       cfg.SessionLogs,
+		agentRunQuestions:  cfg.SessionQuestions,
+		humanInputRequests: cfg.HumanInputRequests,
+		sessionMessages:    cfg.SessionMessages,
+		sessionThreads:     cfg.SessionThreads,
+		sessionIssueLinks:  cfg.SessionIssueLinks,
+		issueSnapshots:     cfg.IssueSnapshots,
+		decisionLog:        cfg.DecisionLog,
+		projectTasks:       cfg.ProjectTasks,
+		automationRuns:     cfg.AutomationRuns,
+		issues:             cfg.Issues,
+		repositories:       cfg.Repositories,
+		orgs:               cfg.Orgs,
+		jobs:               cfg.Jobs,
+		github:             cfg.GitHub,
+		claudeCodeAuth:     cfg.ClaudeCodeAuth,
+		credentials:        cfg.Credentials,
+		memory:             cfg.Memory,
+		snapshots:          cfg.Snapshots,
+		uploads:            cfg.Uploads,
+		fileReader:         cfg.FileReader,
+		mentionIndexes:     cfg.MentionIndexes,
+		usageTracker:       cfg.UsageTracker,
+		sandboxCapacity:    cfg.SandboxCapacity,
+		env:                env,
+		identityResolver:   cfg.IdentityResolver,
+		sandboxAuth:        cfg.SandboxAuth,
+		users:              cfg.Users,
+		cancels:            cfg.Cancels,
+		threadCancels:      cfg.ThreadCancels,
+		logger:             cfg.Logger,
+		maxConcurrent:      maxConcurrent,
+		nodeID:             cfg.NodeID,
+		isDraining:         cfg.IsDraining,
 	}
 }
 
@@ -2270,7 +2284,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, run.AgentType, primaryThreadID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -2368,6 +2382,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 		logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReason))
+		})
+		return nil
+	}
+	if result != nil && result.RequiresHumanInput {
+		log.Info().Msg("agent requested human input, snapshotting and pausing session")
+		if err := o.handleHumanInputPause(ctx, run, sandbox, result, run.CurrentTurn+1, primaryThreadID, log); err != nil {
+			logAgentRunFailed(log, run, err, "failed", runStartedAt, func(event *zerolog.Event) {
+				event.Str("status", string(models.SessionStatusFailed))
+			})
+			return err
+		}
+		logAgentRunFinished(log, run, "awaiting_input", runStartedAt, func(event *zerolog.Event) {
+			event.Str("status", string(models.SessionStatusAwaitingInput))
 		})
 		return nil
 	}
@@ -2555,6 +2582,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		executionSession.AgentSessionID = opts.ThreadAgentSessionID
 		session = &executionSession
 	}
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil && (session.PrimaryThreadID == nil || *session.PrimaryThreadID == uuid.Nil) {
+		threadID := *opts.ThreadID
+		session.PrimaryThreadID = &threadID
+	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
 	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
@@ -2646,7 +2677,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// plan-mode detection — earlier queued messages contribute only their
 	// text content. When only a single user message is unprocessed, this
 	// reduces to the legacy single-message behavior.
-	const planModePrefix = "[PLAN_MODE]\n"
 	pendingMsgs := unprocessedUserMessagesThrough(messages, threadID, latestMsg.ID)
 	planMode := strings.HasPrefix(latestMsg.Content, planModePrefix)
 	var userMessage string
@@ -2680,6 +2710,24 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
 		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
+	}
+
+	var humanInputAnswer *HumanInputAnswer
+	if opts != nil && opts.HumanInputRequestID != nil {
+		if o.humanInputRequests == nil {
+			o.failRun(ctx, session, "human input request store is not configured")
+			return fmt.Errorf("human input request store is not configured")
+		}
+		request, err := o.humanInputRequests.GetByID(ctx, session.OrgID, session.ID, *opts.HumanInputRequestID)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("fetch human input answer: %s", err))
+			return fmt.Errorf("fetch human input answer: %w", err)
+		}
+		if request.Status != models.HumanInputRequestStatusAnswered && request.Status != models.HumanInputRequestStatusCancelled {
+			o.failRun(ctx, session, fmt.Sprintf("human input request is %s", request.Status))
+			return fmt.Errorf("human input request is %s", request.Status)
+		}
+		humanInputAnswer = humanInputAnswerFromRequest(request)
 	}
 
 	turnNumber := session.CurrentTurn + 1
@@ -3473,6 +3521,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		basePrompt.RevisionContext = revisionContext
 		prompt = basePrompt
 	}
+	prompt.HumanInputAnswer = humanInputAnswer
 	prompt.UsageHint.BillingMode = authBillingMode
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint)
 	if authState != nil && authState.source != "" {
@@ -3487,7 +3536,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, threadID, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -3601,6 +3650,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
 		return nil
 	}
+	if result != nil && result.RequiresHumanInput {
+		log.Info().Msg("agent requested human input during continue, snapshotting and pausing session")
+		if err := o.handleHumanInputPause(ctx, session, sandbox, result, turnNumber, threadID, log); err != nil {
+			return err
+		}
+		return nil
+	}
 
 	// 7. Create assistant message with result summary.
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
@@ -3686,8 +3742,9 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
 		return
 	}
-	hasQueued := false
-	for _, m := range messages {
+	var queued *models.SessionMessage
+	for i := range messages {
+		m := messages[i]
 		if m.Role != models.MessageRoleUser || m.ID <= processed.ID {
 			continue
 		}
@@ -3702,10 +3759,10 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 		} else if m.ThreadID != nil {
 			continue
 		}
-		hasQueued = true
+		queued = &messages[i]
 		break
 	}
-	if !hasQueued {
+	if queued == nil {
 		return
 	}
 
@@ -3735,10 +3792,43 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if threadID != nil {
 		payload["thread_id"] = threadID.String()
 	}
+	if requestID := o.answerQueuedHumanInputRequest(ctx, session, queued, threadID, log); requestID != nil {
+		payload["human_input_request_id"] = requestID.String()
+	}
 	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
 	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 	}
+}
+
+func (o *Orchestrator) answerQueuedHumanInputRequest(ctx context.Context, session *models.Session, queued *models.SessionMessage, threadID *uuid.UUID, log zerolog.Logger) *uuid.UUID {
+	if o.humanInputRequests == nil || queued == nil || queued.UserID == nil {
+		return nil
+	}
+
+	answerText := strings.TrimPrefix(queued.Content, planModePrefix)
+	var (
+		request models.HumanInputRequest
+		err     error
+	)
+	if threadID != nil {
+		request, err = o.humanInputRequests.AnswerLatestPendingFreeTextByThread(ctx, session.OrgID, session.ID, *threadID, answerText, *queued.UserID)
+	} else {
+		request, err = o.humanInputRequests.AnswerLatestPendingFreeTextBySession(ctx, session.OrgID, session.ID, answerText, *queued.UserID)
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		log.Warn().Err(err).Msg("failed to answer pending human-input request during queue drain")
+		return nil
+	}
+	if o.agentRunQuestions != nil && legacyQuestionCompatible(request.Kind) {
+		if _, qerr := o.agentRunQuestions.AnswerLatestPendingBySessionAndQuestion(ctx, session.OrgID, session.ID, request.Body, answerText, *queued.UserID); qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
+			log.Warn().Err(qerr).Msg("failed to answer compatibility question during queue drain")
+		}
+	}
+	return &request.ID
 }
 
 // drainAcceptableStatus returns true for session states that can absorb
@@ -4191,14 +4281,33 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 }
 
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
-// It also detects question-level log entries and creates SessionQuestion records.
-func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, threadID *uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
+// It also normalizes structured or legacy human-input prompts into durable pause records.
+func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, threadID *uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
 	for entry := range logCh {
 		if tracker != nil {
 			if progressType, strength, ok := runtimeProgressFromLog(entry); ok {
 				tracker.Record(progressType, strength, entry.Timestamp)
 			}
 		}
+		effectiveThreadID := threadID
+		if effectiveThreadID == nil {
+			effectiveThreadID = entry.ThreadID
+		}
+
+		var humanInputRecord *models.HumanInputRequest
+		if entry.HumanInput != nil {
+			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, effectiveThreadID, turnNumber, entry.HumanInput)
+		} else if entry.Level == "question" {
+			req := humanInputRequestFromQuestionLog(entry)
+			entry.HumanInput = &req
+			entry.Level = "human_input"
+			entry.Message = req.Body
+			humanInputRecord = o.handleHumanInputRequest(ctx, runID, orgID, agentType, effectiveThreadID, turnNumber, &req)
+		}
+		if humanInputRecord != nil {
+			annotateHumanInputLogMetadata(&entry, humanInputRecord)
+		}
+
 		var metadata json.RawMessage
 		if entry.Metadata != nil {
 			var err error
@@ -4207,11 +4316,6 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, t
 				o.logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to marshal log entry metadata")
 				metadata = nil
 			}
-		}
-
-		effectiveThreadID := threadID
-		if effectiveThreadID == nil {
-			effectiveThreadID = entry.ThreadID
 		}
 
 		log := &models.SessionLog{
@@ -4226,52 +4330,266 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, t
 		if err := o.agentRunLogs.Create(ctx, log); err != nil {
 			o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to persist log entry")
 		}
-
-		// Detect question-level entries.
-		if entry.Level == "question" {
-			o.handleQuestion(ctx, runID, orgID, entry)
-		}
 	}
 }
 
-// handleQuestion creates an SessionQuestion and updates the run status to awaiting_input.
-func (o *Orchestrator) handleQuestion(ctx context.Context, runID, orgID uuid.UUID, entry LogEntry) {
-	q := &models.SessionQuestion{
-		SessionID:    runID,
-		OrgID:        orgID,
-		QuestionText: entry.Message,
-		Status:       "pending",
+func (o *Orchestrator) handleHumanInputRequest(
+	ctx context.Context,
+	sessionID, orgID uuid.UUID,
+	agentType models.AgentType,
+	threadID *uuid.UUID,
+	turnNumber int,
+	req *HumanInputRequest,
+) *models.HumanInputRequest {
+	if req == nil {
+		return nil
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = "Agent needs input"
+	}
+	body := strings.TrimSpace(req.Body)
+	if body == "" {
+		body = "The agent is waiting for human input."
 	}
 
-	// Extract structured question fields from metadata if present.
-	if opts, ok := entry.Metadata["options"]; ok {
-		if optSlice, ok := opts.([]interface{}); ok {
-			for _, opt := range optSlice {
-				if s, ok := opt.(string); ok {
-					q.Options = append(q.Options, s)
-				}
+	var created *models.HumanInputRequest
+	if o.humanInputRequests != nil {
+		var providerRequestID *string
+		if strings.TrimSpace(req.ProviderRequestID) != "" {
+			value := strings.TrimSpace(req.ProviderRequestID)
+			providerRequestID = &value
+		}
+		record := &models.HumanInputRequest{
+			OrgID:             orgID,
+			SessionID:         sessionID,
+			ThreadID:          threadID,
+			TurnNumber:        turnNumber,
+			AgentType:         agentType,
+			ProviderRequestID: providerRequestID,
+			Kind:              req.Kind,
+			Status:            models.HumanInputRequestStatusPending,
+			Title:             title,
+			Body:              body,
+			Context:           req.Context,
+			BlocksPhase:       req.BlocksPhase,
+			Choices:           req.Choices,
+			ResponseSchema:    req.ResponseSchema,
+			ProviderPayload:   req.ProviderPayload,
+		}
+		if record.Kind == "" {
+			record.Kind = models.HumanInputRequestKindFreeText
+		}
+		if err := o.humanInputRequests.Create(ctx, record); err != nil {
+			o.logger.Error().Err(err).Str("session_id", sessionID.String()).Msg("failed to create human input request")
+		} else {
+			created = record
+		}
+	}
+
+	if o.agentRunQuestions != nil && legacyQuestionCompatible(req.Kind) {
+		q := &models.SessionQuestion{
+			SessionID:    sessionID,
+			OrgID:        orgID,
+			QuestionText: body,
+			Status:       "pending",
+			Context:      req.Context,
+			BlocksPhase:  req.BlocksPhase,
+		}
+		for _, choice := range req.Choices {
+			if choice.Label != "" {
+				q.Options = append(q.Options, choice.Label)
 			}
 		}
-	}
-	if ctxVal, ok := entry.Metadata["context"]; ok {
-		if s, ok := ctxVal.(string); ok {
-			q.Context = &s
-		}
-	}
-	if phase, ok := entry.Metadata["blocks_phase"]; ok {
-		if s, ok := phase.(string); ok {
-			q.BlocksPhase = &s
+		if err := o.agentRunQuestions.Create(ctx, q); err != nil {
+			o.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to create compatibility session question")
 		}
 	}
 
-	if err := o.agentRunQuestions.Create(ctx, q); err != nil {
-		o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to create agent run question")
+	return created
+}
+
+func humanInputRequestFromQuestionLog(entry LogEntry) HumanInputRequest {
+	body := strings.TrimSpace(entry.Message)
+	if body == "" {
+		body = "The agent is waiting for human input."
+	}
+	title := metadataString(entry.Metadata, "title", "header")
+	if title == "" {
+		title = "Agent needs input"
+	}
+	var contextText *string
+	if context := metadataString(entry.Metadata, "context"); context != "" {
+		contextText = &context
+	}
+	var blocksPhase *string
+	if phase := metadataString(entry.Metadata, "blocks_phase", "phase"); phase != "" {
+		blocksPhase = &phase
+	}
+	choices := metadataChoices(entry.Metadata)
+	var providerPayload json.RawMessage
+	if entry.Metadata != nil {
+		if raw, err := json.Marshal(entry.Metadata); err == nil {
+			providerPayload = raw
+		}
+	}
+	return HumanInputRequest{
+		ProviderRequestID: metadataString(entry.Metadata, "provider_request_id", "request_id", "id"),
+		Kind:              models.HumanInputRequestKindFreeText,
+		Title:             title,
+		Body:              body,
+		Context:           contextText,
+		BlocksPhase:       blocksPhase,
+		Choices:           choices,
+		ProviderPayload:   providerPayload,
+	}
+}
+
+func annotateHumanInputLogMetadata(entry *LogEntry, req *models.HumanInputRequest) {
+	if entry == nil || req == nil {
 		return
 	}
-
-	if err := o.sessions.UpdateStatus(ctx, orgID, runID, "awaiting_input"); err != nil {
-		o.logger.Error().Err(err).Str("run_id", runID.String()).Msg("failed to update run status to awaiting_input")
+	if entry.Metadata == nil {
+		entry.Metadata = map[string]interface{}{}
 	}
+	entry.Metadata["event"] = "session_human_input.created"
+	entry.Metadata["human_input_request_id"] = req.ID.String()
+	entry.Metadata["request_kind"] = string(req.Kind)
+	entry.Metadata["status"] = string(req.Status)
+	entry.Metadata["title"] = req.Title
+	if req.ProviderRequestID != nil {
+		entry.Metadata["provider_request_id"] = *req.ProviderRequestID
+	}
+}
+
+func metadataString(metadata map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+func metadataChoices(metadata map[string]interface{}) []models.HumanInputChoice {
+	value, ok := metadata["options"]
+	if !ok {
+		value, ok = metadata["choices"]
+	}
+	if !ok {
+		return nil
+	}
+	var raw []interface{}
+	switch typed := value.(type) {
+	case []interface{}:
+		raw = typed
+	case []string:
+		raw = make([]interface{}, 0, len(typed))
+		for _, option := range typed {
+			raw = append(raw, option)
+		}
+	default:
+		return nil
+	}
+	seen := map[string]int{}
+	choices := make([]models.HumanInputChoice, 0, len(raw))
+	for _, option := range raw {
+		var label string
+		var description string
+		switch typed := option.(type) {
+		case string:
+			label = strings.TrimSpace(typed)
+		case map[string]interface{}:
+			label = firstMetadataOptionString(typed, "label", "title", "name", "value", "id")
+			description = firstMetadataOptionString(typed, "description", "detail", "subtitle")
+		}
+		if label == "" {
+			continue
+		}
+		id := humanInputChoiceID(label)
+		if id == "" {
+			id = "choice"
+		}
+		if seen[id] > 0 {
+			seen[id]++
+			id = fmt.Sprintf("%s-%d", id, seen[id])
+		} else {
+			seen[id] = 1
+		}
+		choices = append(choices, models.HumanInputChoice{
+			ID:          id,
+			Label:       label,
+			Description: description,
+		})
+	}
+	return choices
+}
+
+func firstMetadataOptionString(option map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := option[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func humanInputChoiceID(label string) string {
+	label = strings.ToLower(strings.TrimSpace(label))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range label {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func legacyQuestionCompatible(kind models.HumanInputRequestKind) bool {
+	switch kind {
+	case "", models.HumanInputRequestKindFreeText, models.HumanInputRequestKindSingleChoice, models.HumanInputRequestKindMultiChoice:
+		return true
+	default:
+		return false
+	}
+}
+
+func humanInputAnswerFromRequest(req models.HumanInputRequest) *HumanInputAnswer {
+	answer := &HumanInputAnswer{
+		RequestID:     req.ID,
+		Kind:          req.Kind,
+		Status:        req.Status,
+		AnswerText:    req.AnswerText,
+		AnswerPayload: req.AnswerPayload,
+		Choices:       req.Choices,
+	}
+	if req.ProviderRequestID != nil {
+		answer.ProviderRequestID = *req.ProviderRequestID
+	}
+	var payload struct {
+		SelectedChoiceIDs []string        `json:"selected_choice_ids"`
+		AnswerPayload     json.RawMessage `json:"answer_payload"`
+	}
+	if len(req.AnswerPayload) > 0 && json.Unmarshal(req.AnswerPayload, &payload) == nil {
+		answer.SelectedChoiceIDs = payload.SelectedChoiceIDs
+		if len(payload.AnswerPayload) > 0 {
+			answer.AnswerPayload = payload.AnswerPayload
+		}
+	} else if req.Status == models.HumanInputRequestStatusCancelled {
+		answer.AnswerPayload = json.RawMessage(`{"decision":"deny","cancelled":true}`)
+	}
+	return answer
 }
 
 // failRun marks a run as failed and records the error.
@@ -5079,6 +5397,81 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 	}
 }
 
+func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, threadID *uuid.UUID, log zerolog.Logger) error {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	agentSessionID := ""
+	if result != nil && result.AgentSessionID != "" {
+		agentSessionID = result.AgentSessionID
+	} else if session.AgentSessionID != nil {
+		agentSessionID = *session.AgentSessionID
+	}
+
+	// Human-input deferral is an intentional pause, even when the provider
+	// reports it with a non-zero process exit. Snapshot directly instead of
+	// using the success-path guard, or a valid deferred prompt can become
+	// non-resumable after worker/container loss.
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, result)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Msg("failed to snapshot session while awaiting human input")
+		err := fmt.Errorf("human input checkpoint snapshot: %w", snapshotErr)
+		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
+	}
+	if snapshotKey == "" {
+		err := errors.New("human input checkpoint snapshot was not persisted")
+		log.Warn().Msg(err.Error())
+		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
+	}
+
+	checkpointedAt := time.Now().UTC()
+	published, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonNone)
+	if err != nil {
+		wrappedErr := fmt.Errorf("human input checkpoint metadata: %w", err)
+		log.Warn().Err(wrappedErr).Msg("failed to publish human-input checkpoint metadata")
+		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+	}
+	if !published {
+		err := errors.New("human input checkpoint metadata was rejected")
+		log.Warn().Msg(err.Error())
+		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
+	}
+	if err := o.sessions.UpdateSnapshotInfo(bgCtx, session.OrgID, session.ID, agentSessionID, snapshotKey); err != nil {
+		wrappedErr := fmt.Errorf("human input snapshot metadata: %w", err)
+		log.Warn().Err(wrappedErr).Msg("failed to persist human-input snapshot metadata")
+		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+	}
+
+	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusAwaitingInput)); err != nil {
+		log.Warn().Err(err).Msg("failed to mark session awaiting human input")
+		wrappedErr := fmt.Errorf("human input awaiting status: %w", err)
+		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+	}
+	if threadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateStatus(bgCtx, session.OrgID, *threadID, models.ThreadStatusAwaitingInput); err != nil {
+			log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to mark thread awaiting human input")
+		}
+	}
+	log.Info().Int("turn", turnNumber).Bool("snapshot", snapshotKey != "").Msg("session paused for human input")
+	return nil
+}
+
+func (o *Orchestrator) failHumanInputPause(ctx context.Context, session *models.Session, threadID *uuid.UUID, err error, log zerolog.Logger) error {
+	o.failRun(ctx, session, err.Error())
+	failedThreadID := threadID
+	if failedThreadID == nil || *failedThreadID == uuid.Nil {
+		failedThreadID = session.PrimaryThreadID
+	}
+	if o.sessionThreads != nil && failedThreadID != nil && *failedThreadID != uuid.Nil {
+		result := &models.SessionResult{Error: strPtr(err.Error())}
+		if threadErr := o.sessionThreads.UpdateResult(ctx, session.OrgID, *failedThreadID, models.ThreadStatusFailed, result); threadErr != nil {
+			log.Warn().Err(threadErr).Str("thread_id", failedThreadID.String()).Msg("failed to mark thread failed after human-input pause failure")
+		}
+	}
+	return err
+}
+
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the
 // "normal completion" paths (RunAgent / ContinueSession success branches)
 // need: skip the snapshot when result.ExitCode != 0. That's the signal that
@@ -5593,7 +5986,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, sessionID, orgID, threadID, turnNumber, retryLogCh, nil)
+		o.streamLogs(ctx, sessionID, orgID, agentType, threadID, turnNumber, retryLogCh, nil)
 	}()
 
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
@@ -5646,7 +6039,7 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, threadID, turnNumber, retryLogCh, nil)
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, turnNumber, retryLogCh, nil)
 	}()
 	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)

@@ -202,7 +202,15 @@ describe("PreviewPanel component", () => {
   });
 
   it('shows idle state when phase is "stopped"', async () => {
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 60_000).toISOString();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "stopped",
+        created_at: startedAt,
+        stopped_at: stoppedAt,
+      }),
+    );
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -212,6 +220,8 @@ describe("PreviewPanel component", () => {
 
     // Should also render the status badge
     expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.getByText(/Started 5m ago/)).toBeInTheDocument();
+    expect(screen.getByText(/Stopped 1m ago/)).toBeInTheDocument();
   });
 
   it("treats async start success as startup in progress and resumes polling", async () => {
@@ -572,15 +582,28 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
+    const startupLogRegion = screen.getByLabelText("Preview startup error logs");
+    expect(startupLogRegion).toHaveTextContent(summary);
+    expect(startupLogRegion).toHaveClass("line-clamp-6");
+    expect(startupLogRegion).toHaveClass("overflow-y-hidden");
+    expect(startupLogRegion).not.toHaveClass("overflow-auto");
+
     await user.click(screen.getByRole("button", { name: "Show full error logs" }));
 
-    expect(
-      await screen.findByText(/duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(startupLogRegion).toHaveTextContent(
+        /duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/,
+      );
+    });
+    expect(startupLogRegion).not.toHaveClass("line-clamp-6");
+    expect(startupLogRegion).toHaveClass("sm:max-h-[min(56vh,28rem)]");
+    expect(startupLogRegion).toHaveClass("overflow-y-hidden");
+    expect(startupLogRegion).not.toHaveClass("overflow-auto");
+    expect(screen.getByRole("button", { name: "Show summary" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1");
   });
 
-  it("shows Failed badge when phase is failed", async () => {
+  it("does not show a standalone Failed badge when failure diagnostics are visible", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "failed", error: "err" }),
     );
@@ -588,8 +611,9 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
   });
 
   /* ---------- Query error state ---------- */
@@ -697,7 +721,7 @@ describe("PreviewPanel component", () => {
     expect(badge.className).toContain("text-emerald-600");
   });
 
-  it("applies destructive color class for failed phase badge", async () => {
+  it("applies destructive color class to failed diagnostics", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "failed", error: "err" }),
     );
@@ -705,11 +729,11 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
-    const badge = screen.getByText("Failed").closest("[class]")!;
-    expect(badge.className).toContain("text-destructive");
+    const heading = screen.getByText("Preview failed to start").closest("[class]")!;
+    expect(heading.className).toContain("text-destructive");
   });
 
   it("uses one primary starting label in the startup canvas", async () => {

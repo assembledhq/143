@@ -76,6 +76,65 @@ func (a *CodexAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
 	return codexRuntimeProfile
 }
 
+type codexHumanInputAnswer struct {
+	RequestID         string                         `json:"request_id"`
+	ProviderRequestID string                         `json:"provider_request_id,omitempty"`
+	Kind              models.HumanInputRequestKind   `json:"kind"`
+	Status            models.HumanInputRequestStatus `json:"status"`
+	AnswerText        *string                        `json:"answer_text,omitempty"`
+	SelectedChoiceIDs []string                       `json:"selected_choice_ids,omitempty"`
+	AnswerPayload     json.RawMessage                `json:"answer_payload,omitempty"`
+	Choices           []models.HumanInputChoice      `json:"choices,omitempty"`
+}
+
+func buildCodexResumeMessage(prompt *agent.AgentPrompt) (string, error) {
+	if prompt == nil {
+		return "", fmt.Errorf("agent prompt is required")
+	}
+	return appendCodexHumanInputAnswer(prompt.UserMessage, prompt.HumanInputAnswer)
+}
+
+func buildCodexPromptContent(prompt *agent.AgentPrompt) (string, error) {
+	if prompt == nil {
+		return "", fmt.Errorf("agent prompt is required")
+	}
+	userPrompt, err := appendCodexHumanInputAnswer(prompt.UserPrompt, prompt.HumanInputAnswer)
+	if err != nil {
+		return "", err
+	}
+	return composeFreshExecPrompt(prompt.SystemPrompt, userPrompt), nil
+}
+
+func appendCodexHumanInputAnswer(message string, answer *agent.HumanInputAnswer) (string, error) {
+	if answer == nil {
+		return message, nil
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Answered human input request."
+	}
+
+	payload := codexHumanInputAnswer{
+		RequestID:         answer.RequestID.String(),
+		ProviderRequestID: answer.ProviderRequestID,
+		Kind:              answer.Kind,
+		Status:            answer.Status,
+		AnswerText:        answer.AnswerText,
+		SelectedChoiceIDs: answer.SelectedChoiceIDs,
+		AnswerPayload:     answer.AnswerPayload,
+		Choices:           answer.Choices,
+	}
+	answerJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal Codex human input answer: %w", err)
+	}
+
+	return fmt.Sprintf(
+		"%s\n\nHuman input answer:\n```json\n%s\n```\n\nUse the structured answer above to continue the blocked request. If the status is cancelled, stop the blocked action and explain what was cancelled.",
+		message,
+		answerJSON,
+	), nil
+}
+
 // Execute runs the Codex CLI inside the sandbox and streams output.
 func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	provider := agent.SandboxProviderFromContext(ctx)
@@ -98,8 +157,12 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		// event. We avoid `codex exec resume --last` because `--last` reads
 		// whichever rollout file is newest in ~/.codex/sessions, which is
 		// non-deterministic when stale entries are present.
+		resumeMessage, err := buildCodexResumeMessage(prompt)
+		if err != nil {
+			return nil, err
+		}
 		promptPath := fmt.Sprintf("%s/.143-followup-prompt.md", sandbox.HomeDir)
-		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(prompt.UserMessage)); err != nil {
+		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(resumeMessage)); err != nil {
 			return nil, fmt.Errorf("write follow-up prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
@@ -113,7 +176,10 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		// continuation turns when the session ID was never captured (the
 		// orchestrator embeds the prior conversation history into UserPrompt
 		// in that case so the agent has the full context).
-		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptContent, err := buildCodexPromptContent(prompt)
+		if err != nil {
+			return nil, err
+		}
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
@@ -160,14 +226,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// Filter refresh-token errors once and reuse the result.
 	var filteredStderr string
 	if len(stderr) > 0 {
-		filteredStderr = filterCodexStderrLines(string(stderr))
-		if filteredStderr != "" {
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   filteredStderr,
-			}
-		}
+		filteredStderr = emitCodexStderrLogs(stderr, logCh)
 	}
 
 	if exitCode != 0 {
@@ -366,6 +425,25 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			Timestamp: time.Now(),
 			Level:     "error",
 			Message:   msg,
+		}
+
+	case "human_input_request", "human_input", "question", "approval_request", "tool_approval", "action_choice":
+		req, ok := normalizeGenericHumanInputEvent(line, models.AgentTypeCodex)
+		if !ok {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   string(line),
+			}
+			return
+		}
+		result.RequiresHumanInput = true
+		logCh <- agent.LogEntry{
+			Timestamp:  time.Now(),
+			Level:      "human_input",
+			Message:    req.Body,
+			Metadata:   map[string]interface{}{"provider": string(models.AgentTypeCodex), "request_kind": string(req.Kind), "title": req.Title},
+			HumanInput: &req,
 		}
 
 	case "usage", "result":
@@ -642,8 +720,64 @@ func filterCodexStderrLines(stderr string) string {
 	return strings.Join(kept, "\n")
 }
 
+func emitCodexStderrLogs(stderr []byte, logCh chan<- agent.LogEntry) string {
+	lines := strings.Split(string(stderr), "\n")
+	var kept []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if isRefreshTokenError(line) {
+			continue
+		}
+		if isBenignCodexDiagnostic(line) {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   line,
+				Metadata:  codexHiddenDiagnosticMetadata(codexDiagnosticKind(line)),
+			}
+			continue
+		}
+		kept = append(kept, line)
+	}
+	filtered := strings.Join(kept, "\n")
+	if filtered != "" {
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   filtered,
+		}
+	}
+	return filtered
+}
+
 func isBenignCodexDiagnostic(msg string) bool {
-	return strings.TrimSpace(msg) == "Reading additional input from stdin..."
+	trimmed := strings.TrimSpace(msg)
+	return trimmed == "Reading additional input from stdin..." ||
+		(strings.Contains(trimmed, "codex_core::tools::router:") &&
+			strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session"))
+}
+
+func codexDiagnosticKind(msg string) string {
+	trimmed := strings.TrimSpace(msg)
+	if strings.Contains(trimmed, "codex_core::tools::router:") &&
+		strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session") {
+		return "closed_stdin"
+	}
+	if trimmed == "Reading additional input from stdin..." {
+		return "stdin_notice"
+	}
+	return "unknown"
+}
+
+func codexHiddenDiagnosticMetadata(kind string) map[string]interface{} {
+	return map[string]interface{}{
+		"visibility":        "hidden",
+		"diagnostic_class":  "benign_runtime_diagnostic",
+		"diagnostic_source": "codex",
+		"diagnostic_kind":   kind,
+	}
 }
 
 // shellEscapeCodex escapes single quotes for use inside a single-quoted shell

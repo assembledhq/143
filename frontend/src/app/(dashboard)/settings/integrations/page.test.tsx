@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
+import { renderWithProviders, screen, waitFor, within, userEvent } from "@/test/test-utils";
 import IntegrationsPage from "./page";
 
 const {
@@ -123,5 +123,16 @@ describe("IntegrationsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub account" }));
     expect(githubConnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders repository claiming controls inside the GitHub integration card", async () => {
+    renderWithProviders(<IntegrationsPage />);
+
+    await screen.findByText("acme/api");
+
+    const githubCard = screen.getByText("GitHub").closest("[data-testid='integration-card']");
+    expect(githubCard).not.toBeNull();
+    expect(within(githubCard as HTMLElement).getByText("acme/api")).toBeInTheDocument();
+    expect(screen.queryByText("GitHub repositories")).not.toBeInTheDocument();
   });
 });
