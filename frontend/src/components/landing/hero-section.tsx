@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { ArrowRight, ChevronDown, Github } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import HeroCanvas, { DARK, LIGHT } from "./hero-canvas";
+import { landingTypography as type } from "./landing-typography";
 
 export { DARK, LIGHT };
 
@@ -13,59 +15,105 @@ interface HeroSectionProps {
 export default function HeroSection({ isDark }: HeroSectionProps) {
   return (
     <div
-      className="relative h-screen"
+      className="relative min-h-screen"
       style={{ background: isDark ? DARK.bg : "#FAFAFB" }}
     >
       <HeroCanvas isDark={isDark} />
+      <div
+        className="pointer-events-none absolute inset-0 z-[1]"
+        style={{
+          background: isDark
+            ? "radial-gradient(circle at center, rgba(8,8,15,0.9) 0%, rgba(8,8,15,0.78) 36%, rgba(8,8,15,0.24) 68%, transparent 100%)"
+            : "radial-gradient(circle at center, rgba(250,250,251,0.94) 0%, rgba(250,250,251,0.84) 36%, rgba(250,250,251,0.24) 68%, transparent 100%)",
+        }}
+      />
 
       {/* Top nav */}
-      <div className="relative z-10 flex items-center justify-end px-6 sm:px-10 pt-6 sm:pt-8 pointer-events-auto">
-        <Button
-          asChild
-          variant="outline"
-          className={`rounded-full px-5 py-2 text-sm font-medium transition-all ${
-            isDark
-              ? "border-white/20 text-white/60 hover:text-white hover:border-white/40 bg-transparent"
-              : "border-slate-400/40 text-slate-600 hover:text-slate-900 hover:border-slate-500 bg-transparent"
-          }`}
+      <div className="relative z-10 flex items-center justify-between px-6 pt-6 pointer-events-auto sm:px-10 sm:pt-8">
+        <Link
+          href="/"
+          className={`${type.navBrand} ${isDark ? "text-white/85" : "text-slate-900"}`}
         >
-          <Link href="/login">Sign In</Link>
-        </Button>
+          143
+        </Link>
+
+        <div className="flex items-center gap-4">
+          <Button
+            asChild
+            variant="ghost"
+            className={`hidden ${type.button} sm:inline-flex ${
+              isDark
+                ? "text-white/60 hover:bg-white/5 hover:text-white"
+                : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
+            }`}
+          >
+            <Link href="/login">Sign in</Link>
+          </Button>
+          <Button
+            asChild
+            className={`${type.button} rounded-full transition-all ${
+              isDark
+                ? "bg-white text-[#08080f] hover:bg-white/90"
+                : "bg-slate-900 text-white hover:bg-slate-800"
+            }`}
+          >
+            <Link href="/login?tab=signup">
+              Start
+              <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
+            </Link>
+          </Button>
+        </div>
       </div>
 
-      {/* Bottom-left hero */}
-      <div className="relative z-10 flex min-h-[calc(100vh-80px)] flex-col justify-end px-6 sm:px-10 pb-12 sm:pb-16 select-none">
-        <div className="max-w-xl space-y-5">
+      {/* Center hero */}
+      <div className="relative z-10 flex min-h-[calc(100vh-80px)] flex-col items-center justify-center px-6 py-16 text-left select-none sm:px-10">
+        <div className="mx-auto max-w-3xl space-y-6">
           <h1
-            className={`text-[2.75rem] sm:text-[3.5rem] md:text-6xl font-light leading-[1.1] tracking-tight ${
+            className={`max-w-3xl ${type.heroTitle} ${
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            Open-source coding agents,
-            <br />
-            built for teams
+            Shared coding agent automations, not private prompts
           </h1>
 
           <p
-            className={`max-w-md text-sm leading-relaxed ${isDark ? "text-white/45" : "text-slate-600"}`}
+            className={`max-w-2xl ${type.heroBody} ${isDark ? "text-white/52" : "text-slate-600"}`}
           >
-            Pick any coding agent. Run it in the cloud. Your whole team
-            sees what shipped and why.
+            Run Codex and Claude Code in an open-source cloud with shared
+            context, previews, review loops, and automations.
           </p>
 
-          <div className="pt-2 pointer-events-auto">
+          <div className="flex flex-wrap gap-4 pt-1 pointer-events-auto">
             <Button
               asChild
-              className={`rounded-full px-6 py-2.5 text-sm font-medium transition-all ${
+              className={`${type.button} rounded-full transition-all ${
                 isDark
                   ? "bg-white text-[#08080f] hover:bg-white/90"
                   : "bg-slate-900 text-white hover:bg-slate-800"
               }`}
             >
               <Link href="/login?tab=signup">
-                Get Started
-                <span className="ml-2">&rsaquo;</span>
+                Get started
+                <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
               </Link>
+            </Button>
+            <Button
+              asChild
+              variant="outline"
+              className={`${type.button} rounded-md shadow-sm ${
+                isDark
+                  ? "border-white/15 bg-white/[0.04] text-white/80 hover:border-white/35 hover:bg-white/[0.08] hover:text-white"
+                  : "border-slate-300 bg-white text-slate-900 hover:border-slate-500 hover:bg-slate-50"
+              }`}
+            >
+              <a
+                href="https://github.com/assembledhq/143"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Github className="mr-2 size-3.5" aria-hidden="true" />
+                View source code
+              </a>
             </Button>
           </div>
         </div>
@@ -76,18 +124,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
         <div
           className={`animate-bounce ${isDark ? "text-white/30" : "text-slate-400"}`}
         >
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
+          <ChevronDown className="size-6" aria-hidden="true" />
         </div>
       </div>
     </div>
