@@ -285,14 +285,17 @@ the loop must still be explicit about how to handle nits. The product rule is:
 The review-loop prompt tells the agent:
 
 ```text
-Fix nits when they are local, low-risk, and in files already touched by this
-change. Do not expand the scope of the diff just to satisfy subjective style
-preferences. If a nit is broad, risky, or unrelated to the current change,
+Fix nits when they are local, low-risk, and relevant to the current change. Use
+your judgment: if the change makes stale or outdated adjacent code obsolete,
+remove or adjust it even when that code was not directly modified by the
+original diff. Do not expand the scope of the diff just to satisfy subjective
+style preferences. If a nit is broad, risky, or unrelated to the current change,
 leave it for later and mention it in your summary.
 ```
 
-This keeps the default loop useful for polish without turning every review into
-an unbounded cleanup pass. It is not exposed as a setup option in v1.
+This keeps the default loop useful for polish and stale-code cleanup without
+turning every review into an unbounded cleanup pass. It is not exposed as a
+setup option in v1.
 
 The only structured decision the platform needs is whether the loop should
 continue. That decision should come from the coding agent, not from a generic
@@ -303,8 +306,9 @@ decision:
 
 ```text
 Based on your latest review, are there remaining issues you should fix in this
-sandbox before this work is considered clean? Apply the nit policy above when
-deciding whether remaining nits require another fix pass. Answer with one of:
+sandbox before this work is considered clean? Apply the nit policy above and use
+your coding judgment when deciding whether remaining nits require another fix
+pass. Answer with one of:
 
 - REVIEW_CLEAN
 - NEEDS_FIX_PASS
