@@ -38,11 +38,17 @@ const (
 	ProviderDocker = "docker"
 )
 
-// ErrPreviewCapacity is returned by StartPreview when a concurrency cap
-// (per-user, per-org, or per-worker) would be exceeded. Handlers should
-// translate this to HTTP 503 with a friendly "try again later" message
-// rather than a 422.
-var ErrPreviewCapacity = errors.New("preview capacity reached")
+const (
+	// PreviewCapacityCode is the stable API error code for preview capacity
+	// failures.
+	PreviewCapacityCode = "PREVIEW_CAPACITY_REACHED"
+	// PreviewCapacityMessage is the user-facing message for transient preview
+	// capacity failures. Keep lower-level live/reserved counts in logs.
+	PreviewCapacityMessage = "Preview capacity is full. Try again shortly; if this keeps happening, stop another active preview or session and retry."
+	// PreviewCapacityRetryExhaustedMessage is persisted when the durable
+	// start_preview job gives up after retrying capacity admission.
+	PreviewCapacityRetryExhaustedMessage = "Preview capacity stayed full while retrying. Stop another active preview or session, then retry the preview."
+)
 
 // =============================================================================
 // Manager
