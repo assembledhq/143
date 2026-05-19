@@ -174,7 +174,6 @@ func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {
 		{"StopPreview", h.StopPreview},
 		{"RestartPreview", h.RestartPreview},
 		{"MintBootstrapToken", h.MintBootstrapToken},
-		{"ExtendTTL", h.ExtendTTL},
 	}
 
 	for _, tt := range handlers {
@@ -2298,11 +2297,11 @@ func TestPreviewHandler_StopPreview_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPreviewHandler_ExtendTTL_Success(t *testing.T) {
+func TestPreviewHandler_SetLifetime_Success(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "pgxmock pool should be created")
 	defer mock.Close()
 
 	h := newPreviewHandlerWithMock(mock)
@@ -2312,7 +2311,6 @@ func TestPreviewHandler_ExtendTTL_Success(t *testing.T) {
 	previewID := uuid.New()
 	now := time.Now()
 
-	// getActivePreview
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2320,7 +2318,6 @@ func TestPreviewHandler_ExtendTTL_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// ExtendTTL calls GetPreviewInstance.
 	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2328,18 +2325,62 @@ func TestPreviewHandler_ExtendTTL_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// ExtendTTL calls UpdatePreviewExpiry.
 	mock.ExpectExec("UPDATE preview_instances SET expires_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	req := httptest.NewRequest(http.MethodPost, "/preview/extend", nil)
+	req := httptest.NewRequest(http.MethodPatch, "/preview/lifetime", strings.NewReader(`{"duration_seconds":300}`))
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
 	w := httptest.NewRecorder()
 
-	h.ExtendTTL(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-	require.NoError(t, mock.ExpectationsWereMet())
+	h.SetLifetime(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "SetLifetime should return OK")
+	require.Contains(t, w.Body.String(), `"status":"updated"`, "SetLifetime response should confirm the update")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewHandler_SetLifetime_RejectsLongDuration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodPatch, "/preview/lifetime", strings.NewReader(`{"duration_seconds":3600}`))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.SetLifetime(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "SetLifetime should reject durations above the per-adjustment cap")
+	require.Contains(t, w.Body.String(), "duration_seconds must be between", "SetLifetime should explain the accepted bounds")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid durations should not query the database")
+}
+
+func TestPreviewHandler_SetLifetime_RejectsShortDuration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodPatch, "/preview/lifetime", strings.NewReader(`{"duration_seconds":30}`))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.SetLifetime(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "SetLifetime should reject durations below the minimum")
+	require.Contains(t, w.Body.String(), "duration_seconds must be between", "SetLifetime should explain the accepted bounds")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid durations should not query the database")
 }
 
 func TestPreviewHandler_GetLogs_Success(t *testing.T) {
