@@ -174,6 +174,83 @@ func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
 	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
 }
 
+func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
+	t.Parallel()
+
+	dbCompose, err := os.ReadFile("../docker-compose.db.yml")
+	require.NoError(t, err, "test should read db compose file")
+	dbComposeText := string(dbCompose)
+	require.Contains(t, dbComposeText, "${DB_BIND_IP:?", "db compose should require an explicit primary private bind IP instead of defaulting Postgres to the public interface")
+	require.NotContains(t, dbComposeText, "DB_TAILSCALE_BIND_IP", "db compose should not make Postgres startup depend on a Tailscale interface address")
+	require.NotContains(t, dbComposeText, "0.0.0.0:5432:5432", "db compose must not expose Postgres on every interface when cross-region workers use an overlay network")
+
+	pgHBA, err := os.ReadFile("../deploy/postgres/pg_hba.conf")
+	require.NoError(t, err, "test should read pg_hba.conf")
+	require.Contains(t, string(pgHBA), "100.64.0.0/10", "Postgres should allow Tailscale tailnet clients after Tailscale ACLs have admitted the nodes")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db provisioning should fail loudly until the operator chooses the primary private bind address")
+	require.Contains(t, provisionText, "DB_BIND_IP=%s", "db provisioning should write DB_BIND_IP into /opt/143/.env for compose interpolation")
+	require.Contains(t, provisionText, `TS_ADVERTISE_ROUTES:=${DB_BIND_IP}/32`, "db Tailscale enrollment should derive the advertised DB route from DB_BIND_IP instead of requiring a second production secret")
+	require.NotContains(t, provisionText, "TS_DB_ADVERTISE_ROUTES", "db provisioning should not require a separate DB route secret that can drift from DB_BIND_IP")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the primary private bind address")
+	require.Contains(t, deployText, "DB_BIND_IP=%s", "db deploy should preserve DB_BIND_IP in /opt/143/.env for compose interpolation")
+}
+
+func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
+	t.Parallel()
+
+	installScript, err := os.ReadFile("../deploy/scripts/install-tailscale.sh")
+	require.NoError(t, err, "install-tailscale.sh should exist as the shared Tailscale host setup helper")
+	installText := string(installScript)
+	require.Contains(t, installText, "TS_AUTH_KEY", "Tailscale install helper should use an auth key for non-interactive server enrollment")
+	require.Contains(t, installText, "--advertise-tags", "Tailscale install helper should support tagged production nodes for ACLs")
+	require.Contains(t, installText, "--advertise-routes", "Tailscale install helper should support private subnet route advertisement for cross-region DB access")
+	require.Contains(t, installText, "net.ipv4.ip_forward", "Tailscale install helper should enable forwarding when a node advertises subnet routes")
+	require.Contains(t, installText, "--accept-routes=true", "Tailscale install helper should let remote workers accept advertised DB routes")
+	require.Contains(t, installText, "--accept-dns=false", "Tailscale install helper should not let tailnet DNS rewrite host resolver state")
+	require.Contains(t, installText, "tailscale ip -4", "Tailscale install helper should print the assigned IPv4 address for provisioning")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "install-tailscale.sh", "provisioning should run the shared Tailscale setup helper when TS_AUTH_KEY is provided")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_APP", "provisioning should support role-specific app Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_DB", "provisioning should support role-specific db Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_WORKER", "provisioning should support role-specific worker Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_WORKER_HOSTS", "provisioning should use a host list to choose which workers join Tailscale")
+	require.Contains(t, provisionText, "TS_ACCEPT_ROUTES", "provisioning should pass route acceptance through to Tailscale enrollment")
+	require.NotContains(t, provisionText, "TS_WORKER_ACCEPT_ROUTES", "mapped Tailscale workers should always accept advertised private routes without a separate production knob")
+	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE:=tailscale", "worker provisioning should derive Tailscale address discovery from the worker host list")
+	require.Contains(t, provisionText, "tailscale ip -4", "worker provisioning should be able to discover the worker's Tailscale IPv4 address")
+	require.Contains(t, provisionText, "100.64.0.0/10", "worker provisioning comments/errors should make the Tailscale address range explicit")
+	require.Contains(t, provisionText, "--tailscale-only", "provisioning should support enrolling already-provisioned hosts in Tailscale without reprovisioning containers or volumes")
+	require.Contains(t, provisionText, "Tailscale enrollment applied", "Tailscale-only enrollment should finish before the normal running-container reprovision guard")
+	tailscaleOnlyIndex := strings.Index(provisionText, `if [ "$MODE" = "--tailscale-only" ]`)
+	runningGuardIndex := strings.Index(provisionText, "# Check if already provisioned")
+	require.NotEqual(t, -1, tailscaleOnlyIndex, "provisioning should have a Tailscale-only mode branch")
+	require.NotEqual(t, -1, runningGuardIndex, "provisioning should still have the normal running-container guard")
+	require.Less(t, tailscaleOnlyIndex, runningGuardIndex, "Tailscale-only enrollment should bypass the running-container guard that blocks normal provisioning")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	makefileText := string(makefile)
+	require.Contains(t, makefileText, "tailscale-enroll:", "Makefile should expose a non-destructive Tailscale enrollment target for existing app/db nodes")
+	require.NotContains(t, makefileText, "TS_DB_ADVERTISE_ROUTES", "Makefile should document DB_BIND_IP as the single source for the advertised DB route")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read worker cloud-init template")
+	cloudInitText := string(cloudInit)
+	require.NotContains(t, cloudInitText, "TS_AUTH_KEY", "worker Tailscale enrollment should stay in provision.sh so it can use the production host map")
+	require.NotContains(t, cloudInitText, "tailscale up", "worker cloud-init should not duplicate the Tailscale enrollment path")
+}
+
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {
 	t.Parallel()
 
