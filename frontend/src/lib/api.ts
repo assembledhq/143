@@ -499,10 +499,11 @@ export const api = {
           .then(r => r.data),
       stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
       restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),
+      setLifetime: (sessionId: string, body: { duration_seconds: number }) =>
+        patch(`/api/v1/sessions/${sessionId}/preview/lifetime`, body),
       bootstrap: (sessionId: string) =>
         post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/sessions/${sessionId}/preview/bootstrap`)
           .then(r => r.data),
-      extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
           .then(r => r.data ?? []),
