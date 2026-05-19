@@ -6,6 +6,8 @@
 
 It’s an open-source platform that connects customer pain directly to code fixes.
 
+The public homepage positions 143 as shared coding-agent infrastructure for engineering teams: one team-visible workspace for context, integrations, cloud agent execution, previews, review loops, audit logs, and usage analytics. The landing page uses a small shared type scale for product copy so hero, section, feature, body, button, and footer text stay visually consistent. See [implemented/81-homepage-positioning-refresh.md](implemented/81-homepage-positioning-refresh.md).
+
 The system aggregates issues from support, Sentry, and Linear, prioritizes them by real business impact, runs a coding agent to generate a fix, opens a PR, and measures the customer impact after deploy. Repository-native CI/CD remains the source of truth for build, test, and deploy validation.
 
 # Overall flow
