@@ -1023,25 +1023,74 @@ func (h *PreviewHandler) GetSnapshots(w http.ResponseWriter, r *http.Request) {
 }
 
 // =============================================================================
-// POST /api/v1/sessions/{id}/preview/extend — Extend preview TTL
+// PATCH /api/v1/sessions/{id}/preview/lifetime — Set preview lifetime
 // =============================================================================
 
-func (h *PreviewHandler) ExtendTTL(w http.ResponseWriter, r *http.Request) {
+type setPreviewLifetimeRequest struct {
+	DurationSeconds int64 `json:"duration_seconds"`
+}
+
+func (h *PreviewHandler) SetLifetime(w http.ResponseWriter, r *http.Request) {
 	if !h.requireManager(w, r) {
 		return
 	}
+
+	var body setPreviewLifetimeRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
+		return
+	}
+
+	minSeconds := int64(preview.MinLifetimeTTL.Seconds())
+	maxSeconds := int64(preview.DefaultHardTTL.Seconds())
+	if body.DurationSeconds < minSeconds || body.DurationSeconds > maxSeconds {
+		writeError(w, r, http.StatusBadRequest, "INVALID_DURATION",
+			fmt.Sprintf("duration_seconds must be between %d and %d", minSeconds, maxSeconds))
+		return
+	}
+
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
 		return
 	}
 
-	if err := h.manager.ExtendTTL(r.Context(), orgID, instance.ID); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "EXTEND_TTL_FAILED", "failed to extend TTL", err)
+	previousExpiry := instance.ExpiresAt
+	newExpiry, err := h.manager.SetLifetime(r.Context(), orgID, instance.ID, time.Duration(body.DurationSeconds)*time.Second)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SET_PREVIEW_LIFETIME_FAILED", "failed to set preview lifetime", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "extended"}})
+	resourceID := instance.SessionID.String()
+	details, err := json.Marshal(map[string]any{
+		"preview_id":          instance.ID.String(),
+		"previous_expires_at": previousExpiry,
+		"new_expires_at":      newExpiry,
+		"duration_seconds":    body.DurationSeconds,
+		"direction":           previewLifetimeDirection(previousExpiry, newExpiry),
+	})
+	if err != nil {
+		h.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to marshal preview lifetime audit details")
+		details = json.RawMessage(`{}`)
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPreviewLifetimeSet, models.AuditResourceSession, &resourceID, &instance.SessionID, nil, details)
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]any]{Data: map[string]any{
+		"status":     "updated",
+		"expires_at": newExpiry,
+	}})
+}
+
+func previewLifetimeDirection(previous, next time.Time) string {
+	switch {
+	case next.After(previous):
+		return "extended"
+	case next.Before(previous):
+		return "shortened"
+	default:
+		return "unchanged"
+	}
 }
 
 // =============================================================================
