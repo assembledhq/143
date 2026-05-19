@@ -2785,7 +2785,8 @@ func workerReviewLoopColumns() []string {
 }
 
 type stubWorkerReviewLoops struct {
-	starts []stubWorkerReviewLoopStart
+	starts   []stubWorkerReviewLoopStart
+	failures []stubWorkerReviewLoopFailure
 }
 
 type stubWorkerReviewLoopStart struct {
@@ -2794,7 +2795,18 @@ type stubWorkerReviewLoopStart struct {
 	req       reviewloopsvc.StartReviewLoopRequest
 }
 
+type stubWorkerReviewLoopFailure struct {
+	orgID    uuid.UUID
+	threadID uuid.UUID
+	summary  string
+}
+
 func (s *stubWorkerReviewLoops) OnThreadTurnComplete(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+
+func (s *stubWorkerReviewLoops) OnThreadTurnFailed(_ context.Context, orgID, threadID uuid.UUID, summary string) error {
+	s.failures = append(s.failures, stubWorkerReviewLoopFailure{orgID: orgID, threadID: threadID, summary: summary})
 	return nil
 }
 
@@ -5089,6 +5101,55 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	err := handler(context.Background(), "continue_session", payload)
 	require.ErrorIs(t, err, continuationErr, "continue_session should preserve the orchestrator failure")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_MarksReviewLoopFailedOnContinuationFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	continuationErr := errors.New("coding agent exited with an error")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	reviews := &stubWorkerReviewLoops{}
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass thread execution options to the orchestrator")
+			return continuationErr
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch, ReviewLoops: reviews}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	require.ErrorIs(t, err, continuationErr, "continue_session should preserve the orchestrator failure")
+	require.Len(t, reviews.failures, 1, "review loop service should be notified about the failed review-thread turn")
+	require.Equal(t, orgID, reviews.failures[0].orgID, "review-loop failure should be org scoped")
+	require.Equal(t, threadID, reviews.failures[0].threadID, "review-loop failure should target the failed thread")
+	require.Equal(t, continuationErr.Error(), reviews.failures[0].summary, "review-loop failure should preserve the agent error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

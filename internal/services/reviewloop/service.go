@@ -272,6 +272,17 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 	}
 }
 
+func (s *Service) OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error {
+	loop, err := s.store.GetRunningLoopByThread(ctx, orgID, threadID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNoRunningReviewLoop
+		}
+		return err
+	}
+	return s.failLoop(ctx, orgID, loop, strings.TrimSpace(summary))
+}
+
 func (s *Service) failLoop(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, summary string) error {
 	if loop.AutomationRunID != nil {
 		return s.store.MarkLoopFailedAndEnqueueOpenPR(ctx, orgID, loop.ID, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
