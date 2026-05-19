@@ -430,7 +430,7 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
 
 # Step 2a: Cap docker container log files (max-size/max-file in
 # /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
@@ -552,77 +552,7 @@ PULL_APP
       set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
-      # Ensure the shared sandbox bridge exists with a pinned subnet.
-      #
-      # The subnet is hard-coded to 172.30.0.0/24 so sandbox-dns can be
-      # given the stable static IP 172.30.0.2 in docker-compose.worker.yml,
-      # which /etc/143/sandbox-resolv.conf below points at. Without a pinned
-      # subnet Docker auto-assigns from its default pool and the static IP
-      # mapping breaks.
-      #
-      # Leave Docker's bridge ICC setting at its default. On some Docker /
-      # gVisor combinations, disabling bridge ICC blocks sandbox traffic to
-      # the sandbox-dns sidecar before DOCKER-USER can carve it out, which
-      # breaks all agent DNS resolution.
-      # docker inspect returns "" on a missing network (with exit 1 swallowed
-      # by `|| true`) and the subnet string on an existing one. Distinguishing
-      # the two via a single call keeps us from spawning two `su - deploy`
-      # login shells per provision.
-      EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
-      if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
-      elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
-        echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
-        echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
-        echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
-        echo "    2. docker network rm 143-sandbox" >&2
-        echo "    3. Re-run provision-worker for this host." >&2
-        echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
-        exit 1
-      fi
-      # Install iptables-persistent so the egress block survives reboots.
-      apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
-      # Apply sandbox egress firewall. Script is idempotent and reads the
-      # network's current subnet, so safe to re-run on every provision.
-      if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
-        /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
-      fi
-      # Provision /etc/143/sandbox-resolv.conf via the shared writer so the
-      # provisioning path and routine deploys agree byte-for-byte on its
-      # contents. See deploy/scripts/sandbox-resolv-conf.sh for the full
-      # rationale (gVisor + Docker embedded DNS + sandbox-dns sidecar). The
-      # file was scp'd to /opt/143 in Step 2 and runs as root here.
-      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
-      # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
-      # credential sockets. The worker container bind-mounts this path
-      # in (see docker-compose.worker.yml); the orchestrator running as
-      # appuser uid 1000 opens one Unix-domain socket per session here,
-      # and the docker daemon bind-mounts the per-session subdir into
-      # the sandbox container at /run/143-auth/. SANDBOX_AUTH_SOCKET_DIR
-      # points the server at this path.
-      #
-      # /run is tmpfs on systemd hosts (and /var/run is a symlink to it),
-      # so the directory disappears on every reboot. We register it with
-      # systemd-tmpfiles so it's recreated at boot — and via --create
-      # below, immediately on first provision. Mode 0750 satisfies the
-      # orchestrator's startup assertion (assertParentDirPerms in
-      # internal/services/sandboxauth/server.go); owner 1000:1000 matches
-      # the worker container's appuser so MkdirAll on per-session subdirs
-      # succeeds.
-      cat > /etc/tmpfiles.d/143-sandbox-auth.conf <<'TMPFILES'
-d /var/run/143 0755 root root -
-d /var/run/143/sandbox-auth 0750 1000 1000 -
-TMPFILES
-      systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
-      # Belt-and-suspenders: if the directory already existed (e.g. Docker
-      # auto-created the bind-mount source as root:root 0755 before this
-      # provision step ran, or an older provision left it 0755), tmpfiles
-      # --create's adjustment isn't always reliable across systemd
-      # versions. Force the desired ownership and mode explicitly so the
-      # orchestrator's assertParentDirPerms check passes on first boot.
-      mkdir -p /var/run/143/sandbox-auth
-      chown 1000:1000 /var/run/143/sandbox-auth
-      chmod 0750 /var/run/143/sandbox-auth
+      /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox
 PULL_WORKER
     ;;
   db|logging|redis)

@@ -66,6 +66,7 @@ import {
   syncReferencesWithMessage,
 } from "@/lib/session-composer-mentions";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
+import { useFileDropzone } from "@/hooks/use-file-dropzone";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/session-draft";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -89,6 +90,7 @@ import {
 } from "@/lib/coding-agent-reasoning";
 import type {
   CodingAuth,
+  Integration,
   OrgSettings,
   Organization,
   Repository,
@@ -336,8 +338,6 @@ export function ManualSessionComposer({
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
   const [pickerPosition, setPickerPosition] = useState<ComposerPickerPosition | null>(null);
-  const [isDragActive, setIsDragActive] = useState(false);
-  const [dragMessage, setDragMessage] = useState<string | null>(null);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   // Gates the persist effect until after hydration so we never overwrite a
   // stored draft with the component's initial (empty) state on first mount.
@@ -345,7 +345,6 @@ export function ManualSessionComposer({
   // so dependent effects don't stall.
   const [draftHydrated, setDraftHydrated] = useState(!enableDrafts);
   const previousRepoIdRef = useRef<string>("");
-  const dragDepthRef = useRef(0);
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessionsSafe();
   const isMobile = useMediaQuery("(max-width: 767px)");
@@ -495,7 +494,7 @@ export function ManualSessionComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+  const { data: settingsResponse, isSuccess: settingsLoaded } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
@@ -503,7 +502,7 @@ export function ManualSessionComposer({
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgentType = settings?.default_agent_type ?? "codex";
 
-  const { data: reposResponse } = useQuery<ListResponse<Repository>>({
+  const { data: reposResponse, isSuccess: reposLoaded } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
@@ -523,19 +522,23 @@ export function ManualSessionComposer({
     }
   }, [userSelectedRepoId, reposResponse, repositories]);
 
-  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
+  const { data: resolvedCredsResponse, isSuccess: resolvedCredsLoaded } = useQuery<ListResponse<ResolvedCredential>>({
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),
   });
   const resolvedCredentials = useMemo(() => resolvedCredsResponse?.data ?? [], [resolvedCredsResponse]);
 
-  const { data: codexAuthResponse } = useQuery({
+  const { data: codexAuthResponse, isSuccess: codexAuthLoaded } = useQuery({
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
   });
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
+  const { data: codingAuthsResponse, isSuccess: codingAuthsLoaded } = useQuery<ListResponse<CodingAuth>>({
     queryKey: ["coding-auths"],
     queryFn: () => api.codingAuths.list(),
+  });
+  const { data: integrationsResponse, isSuccess: integrationsLoaded } = useQuery<ListResponse<Integration>>({
+    queryKey: queryKeys.integrations.all,
+    queryFn: () => api.integrations.list(),
   });
 
   // Auto-select: user's choice > last used repo > first repo.
@@ -616,6 +619,11 @@ export function ManualSessionComposer({
     [effectiveAgentType],
   );
   const hasAgentCredentials = isAgentAvailable(effectiveAgentType, resolvedCredentials, codexAuthStatus, codingAuths);
+  const agentCredentialStateLoaded = settingsLoaded && resolvedCredsLoaded && codexAuthLoaded && codingAuthsLoaded;
+  const shouldShowAgentKeyRequiredBanner = agentCredentialStateLoaded && !hasAgentCredentials;
+  const linearConnected = integrationsLoaded && (integrationsResponse?.data ?? []).some(
+    (integration) => integration.provider === "linear" && integration.status === "active",
+  );
 
   const handleRepoChange = useCallback((id: string) => {
     setUserSelectedRepoId(id);
@@ -964,11 +972,6 @@ export function ManualSessionComposer({
     event.target.value = "";
   }
 
-  function isFileDrag(event: React.DragEvent<HTMLElement>) {
-    const types = Array.from(event.dataTransfer.types ?? []);
-    return types.includes("Files");
-  }
-
   function summarizeDraggedFiles(files: File[]) {
     if (files.length === 0) {
       return "Drop images to attach";
@@ -980,64 +983,15 @@ export function ManualSessionComposer({
     return "Drop files to attach";
   }
 
-  function resetDragState() {
-    dragDepthRef.current = 0;
-    setIsDragActive(false);
-    setDragMessage(null);
-  }
-
-  function handleDragEnter(event: React.DragEvent<HTMLDivElement>) {
-    if (!isFileDrag(event)) {
-      return;
-    }
-    event.preventDefault();
-    dragDepthRef.current += 1;
-    setIsDragActive(true);
-    const files = Array.from(event.dataTransfer.files ?? []);
-    setDragMessage(summarizeDraggedFiles(files));
-  }
-
-  function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
-    if (!isFileDrag(event)) {
-      return;
-    }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    const files = Array.from(event.dataTransfer.files ?? []);
-    setDragMessage(summarizeDraggedFiles(files));
-    setIsDragActive(true);
-  }
-
-  function handleDragLeave(event: React.DragEvent<HTMLDivElement>) {
-    if (!isFileDrag(event)) {
-      return;
-    }
-    event.preventDefault();
-    if (event.target !== event.currentTarget) {
-      return;
-    }
-    const nextTarget = event.relatedTarget ?? (event.nativeEvent as DragEvent).relatedTarget;
-    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
-      return;
-    }
-    resetDragState();
-  }
-
-  async function handleDrop(event: React.DragEvent<HTMLDivElement>) {
-    if (!isFileDrag(event)) {
-      return;
-    }
-    event.preventDefault();
-    const files = Array.from(event.dataTransfer.files ?? []);
-    resetDragState();
-    if (files.length === 0) {
-      return;
-    }
-    await uploadFiles(files);
-    requestAnimationFrame(() => {
-      messageInputRef.current?.focus();
-    });
-  }
+  const fileDropzone = useFileDropzone({
+    onFilesDropped: uploadFiles,
+    getDragMessage: summarizeDraggedFiles,
+    onAfterDrop: () => {
+      requestAnimationFrame(() => {
+        messageInputRef.current?.focus();
+      });
+    },
+  });
 
   async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
     const files = getClipboardFiles(event.clipboardData);
@@ -1195,15 +1149,11 @@ export function ManualSessionComposer({
         "relative flex flex-col rounded-[2rem] border border-transparent transition-all duration-200 ease-out",
         "before:pointer-events-none before:absolute before:inset-0 before:rounded-[inherit] before:border before:border-dashed before:opacity-0 before:transition-opacity before:duration-200",
         "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.08),transparent_58%)] after:opacity-0 after:transition-opacity after:duration-200",
-        isDragActive && "border-primary/20 bg-primary/5 shadow-[0_20px_70px_-40px_rgba(59,130,246,0.45)] before:opacity-100 before:border-primary/40 after:opacity-100",
+        fileDropzone.isDragActive && "border-primary/20 bg-primary/5 shadow-[0_20px_70px_-40px_rgba(59,130,246,0.45)] before:opacity-100 before:border-primary/40 after:opacity-100",
         className,
       )}
       data-testid={dataTestId}
-      data-drag-active={isDragActive ? "true" : "false"}
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      {...fileDropzone.dropzoneProps}
     >
       {showDropIndicator && (
         <div className="pointer-events-none absolute inset-x-6 top-6 flex justify-center">
@@ -1211,19 +1161,19 @@ export function ManualSessionComposer({
             aria-live="polite"
             className={cn(
               "inline-flex min-h-8 items-center rounded-full border px-3 py-1 text-xs font-medium tracking-[0.02em] text-muted-foreground transition-all duration-200",
-              isDragActive
+              fileDropzone.isDragActive
                 ? "translate-y-0 border-primary/30 bg-background/90 text-foreground opacity-100 shadow-sm"
                 : "translate-y-1 border-transparent bg-transparent opacity-0",
             )}
           >
-            {dragMessage ?? "Drop images to attach"}
+            {fileDropzone.dragMessage ?? "Drop images to attach"}
           </div>
         </div>
       )}
 
       {heroSlot}
 
-      {repositories.length === 0 && (
+      {reposLoaded && repositories.length === 0 && (
         <div className="shrink-0 px-0">
           <div className={cn("w-full mx-auto", innerClassName)}>
             <NoReposWarning />
@@ -1231,7 +1181,7 @@ export function ManualSessionComposer({
         </div>
       )}
 
-      {!hasAgentCredentials && (
+      {shouldShowAgentKeyRequiredBanner && (
         <div className="shrink-0 px-0">
           <div className={cn("w-full mx-auto", innerClassName)}>
             <AgentKeyRequiredBanner agentType={effectiveAgentType} />
@@ -1267,7 +1217,7 @@ export function ManualSessionComposer({
             ref={composerCardRef}
             className={cn(
               "w-full rounded-2xl border-border/60 bg-card shadow-lg transition-all duration-200 ease-out dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]",
-              isDragActive && "-translate-y-0.5 border-primary/25 shadow-[0_24px_70px_-45px_rgba(59,130,246,0.55)]",
+              fileDropzone.isDragActive && "-translate-y-0.5 border-primary/25 shadow-[0_24px_70px_-45px_rgba(59,130,246,0.55)]",
               cardClassName,
             )}
             data-testid="manual-session-composer"
@@ -1463,6 +1413,7 @@ export function ManualSessionComposer({
                         onUploadFiles={() => uploadInputRef.current?.click()}
                         onAddImageURL={() => setShowImageInput(true)}
                         onAddLinearIssue={() => setShowLinearInput(true)}
+                        showLinearIssue={linearConnected}
                       />
                       <Button
                         type="button"
@@ -1508,6 +1459,7 @@ export function ManualSessionComposer({
                       onUploadFiles={() => uploadInputRef.current?.click()}
                       onAddImageURL={() => setShowImageInput(true)}
                       onAddLinearIssue={() => setShowLinearInput(true)}
+                      showLinearIssue={linearConnected}
                     />
 
                     <ComposerSettingsControls
@@ -1546,7 +1498,7 @@ export function ManualSessionComposer({
                 <Input
                   ref={uploadInputRef}
                   type="file"
-                  accept="image/*,.pdf,.txt,.md,.json,.csv"
+                  accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
                   multiple
                   className="hidden"
                   onChange={onUploadChange}

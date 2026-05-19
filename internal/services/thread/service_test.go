@@ -2,6 +2,7 @@ package thread
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -137,8 +138,9 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uu
 }
 
 type mockMessageStore struct {
-	createFn       func(ctx context.Context, msg *models.SessionMessage) error
-	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	createFn             func(ctx context.Context, msg *models.SessionMessage) error
+	listByThreadFn       func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	listWindowByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
 func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
@@ -153,6 +155,13 @@ func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uui
 		return m.listByThreadFn(ctx, orgID, threadID)
 	}
 	return nil, nil
+}
+
+func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+	if m.listWindowByThreadFn != nil {
+		return m.listWindowByThreadFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionMessageWindow{}, nil
 }
 
 type mockLogStore struct {
@@ -207,6 +216,27 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 	}
 	svc := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, zerolog.Nop())
 	return svc, deps
+}
+
+var threadHumanInputRequestColumns = []string{
+	"id", "org_id", "session_id", "thread_id", "turn_number", "agent_type",
+	"provider_request_id", "request_kind", "status", "title", "body",
+	"context", "blocks_phase", "choices", "response_schema", "provider_payload",
+	"answer_text", "answer_payload", "answered_by", "answered_at", "expires_at", "created_at",
+}
+
+func threadHumanInputRequestRow(id, orgID, sessionID, threadID, userID uuid.UUID, answer string, now time.Time) []any {
+	return []any{
+		id, orgID, sessionID, &threadID, 3, models.AgentTypeClaudeCode,
+		humanInputTestStringPtr("toolu_thread"), models.HumanInputRequestKindFreeText,
+		models.HumanInputRequestStatusAnswered, "Claude needs input", "What should Claude do?",
+		(*string)(nil), (*string)(nil), []byte("[]"), json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
+		&answer, json.RawMessage(`{"answer_text":"` + answer + `"}`), &userID, &now, (*time.Time)(nil), now,
+	}
+}
+
+func humanInputTestStringPtr(s string) *string {
+	return &s
 }
 
 func TestService_CreateThread(t *testing.T) {
@@ -1106,6 +1136,39 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "success with continuation dedupe override",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				UserID:    &userID,
+				Message:   "internal follow-up",
+				ContinuationDedupeKeyOverride: func() *string {
+					key := "continue_session_review_loop:loop:pass:decision"
+					return &key
+				}(),
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 43
+					msg.CreatedAt = time.Now()
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
+					require.Equal(t, "agent", queue, "thread messages should use the agent queue")
+					require.Equal(t, "continue_session", jobType, "thread messages should reuse the continue-session worker")
+					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
+					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should still be included for worker attribution")
+					require.NotNil(t, dedupeKey, "override enqueue should carry a dedupe key")
+					require.Equal(t, "continue_session_review_loop:loop:pass:decision", *dedupeKey, "internal follow-up should use the caller-provided dedupe key")
+					return uuid.New(), nil
+				}
+			},
+		},
+		{
 			name: "claims parent session before creating thread message",
 			input: SendMessageInput{
 				SessionID: sessionID,
@@ -1701,6 +1764,121 @@ func TestService_SendMessage(t *testing.T) {
 	}
 }
 
+func TestService_SendMessage_AnswersThreadHumanInputRequest(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+	requestID := uuid.New()
+	now := time.Now()
+	answerText := "Use the existing implementation"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(31), now))
+	mock.ExpectQuery("UPDATE session_human_input_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(threadHumanInputRequestColumns).
+			AddRow(threadHumanInputRequestRow(requestID, orgID, sessionID, threadID, userID, answerText, now)...))
+	mock.ExpectCommit()
+
+	svc, deps := newTestService(t)
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("no rows")
+	}
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusAwaitingInput}, nil
+	}
+	deps.threadStore.claimForResumeFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusRunning}, nil
+	}
+	deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		return models.Session{}, fmt.Errorf("no rows")
+	}
+	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusAwaitingInput), CurrentTurn: 5}, nil
+	}
+	deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 5}, nil
+	}
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, "agent", opts.Queue, "thread human-input resume should use the agent queue")
+		require.Equal(t, "continue_session", opts.JobType, "thread human-input resume should enqueue continue_session")
+		require.NotNil(t, opts.DedupeKey, "thread human-input resume should use a dedupe key")
+		require.Equal(t, db.ContinueSessionDedupeKey(threadID), *opts.DedupeKey, "thread human-input resume should dedupe by thread")
+		payload, ok := opts.Payload.(map[string]string)
+		require.True(t, ok, "thread human-input resume payload should be string keyed")
+		require.Equal(t, sessionID.String(), payload["session_id"], "thread human-input resume should carry session id")
+		require.Equal(t, threadID.String(), payload["thread_id"], "thread human-input resume should carry thread id")
+		require.Equal(t, requestID.String(), payload["human_input_request_id"], "thread human-input resume should carry answered request id")
+		return uuid.New(), nil
+	}
+	svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
+	svc.SetHumanInputRequestStore(db.NewSessionHumanInputRequestStore(mock))
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		UserID:    &userID,
+		Message:   answerText,
+	})
+	require.NoError(t, err, "thread composer should answer pending free-text human input")
+	require.NotNil(t, result, "thread composer should return a result")
+	require.NotNil(t, result.AnsweredHumanInput, "thread composer should return the answered human input request")
+	require.Equal(t, requestID, result.AnsweredHumanInput.ID, "thread composer should report the answered human input request")
+	require.Equal(t, models.HumanInputRequestStatusAnswered, result.AnsweredHumanInput.Status, "thread composer should mark the human input request answered")
+	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
+}
+
+func TestService_QueueMessageWaitingForSlot_DoesNotAnswerHumanInputRequest(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+	svc, deps := newTestService(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 4,
+			Status:      models.ThreadStatusAwaitingInput,
+		}, nil
+	}
+	var created *models.SessionMessage
+	deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+		created = msg
+		return nil
+	}
+	svc.SetHumanInputRequestStore(db.NewSessionHumanInputRequestStore(nil))
+
+	result, err := svc.queueMessageWaitingForSlot(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		UserID:    &userID,
+		Message:   "Use the existing implementation",
+	})
+
+	require.NoError(t, err, "queued awaiting_input messages should not need a human-input transaction")
+	require.NotNil(t, result, "queue path should return a result")
+	require.Nil(t, result.AnsweredHumanInput, "queue path should not mark human input answered before a resume job can carry the request id")
+	require.NotNil(t, created, "queue path should still create the user message")
+	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "queue path should increment pending message count")
+}
+
 // TestService_SendMessage_ResumesAcrossAllResumableStatuses pins the
 // invariant that the resumable-status set is the source of truth for
 // "thread accepts a follow-up message via ClaimForResumeInSession". A
@@ -2290,6 +2468,89 @@ func TestService_GetMessages(t *testing.T) {
 			}
 			require.NoError(t, err, "should not return an error")
 			require.Len(t, messages, tt.expectLen, "should return expected number of messages")
+		})
+	}
+}
+
+func TestService_GetMessageWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+		expected  MessageWindowResult
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+					require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped by org")
+					require.Equal(t, threadID, gotThreadID, "thread lookup should use requested thread")
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted}, nil
+				}
+				deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+					require.Equal(t, orgID, gotOrgID, "message window should be scoped by org")
+					require.Equal(t, threadID, gotThreadID, "message window should use requested thread")
+					require.Equal(t, int64(44), opts.BeforeID, "message window should pass cursor options")
+					return db.SessionMessageWindow{
+						Messages:                 []models.SessionMessage{{ID: 43}},
+						NextOlderCursor:          "43",
+						HasOlder:                 true,
+						LatestAssistantMessageID: 43,
+						LiveEdgeMessageID:        43,
+					}, nil
+				}
+			},
+			expected: MessageWindowResult{
+				Window: db.SessionMessageWindow{
+					Messages:                 []models.SessionMessage{{ID: 43}},
+					NextOlderCursor:          "43",
+					HasOlder:                 true,
+					LatestAssistantMessageID: 43,
+					LiveEdgeMessageID:        43,
+				},
+				ThreadStatus: models.ThreadStatusCompleted,
+			},
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "session mismatch",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{BeforeID: 44, Limit: 10})
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			require.NoError(t, err, "message window should not return an error")
+			require.Equal(t, tt.expected, result, "message window should return expected data and thread status")
 		})
 	}
 }

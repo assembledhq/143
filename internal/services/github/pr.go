@@ -435,6 +435,12 @@ type CreatePRParams struct {
 	AuthorMode string `json:"author_mode,omitempty"`
 }
 
+type CreateBranchResult struct {
+	Name    string
+	URL     string
+	HeadSHA string
+}
+
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
 // session's sandbox snapshot, committing any uncommitted changes, pushing to
 // a new remote branch, and opening a pull request against the repo's default
@@ -695,6 +701,102 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+// CreateBranch pushes the session snapshot to the same remote branch that
+// CreatePR would use, but deliberately skips opening or storing a PullRequest
+// row. A later CreatePR call can still open a PR from the same branch.
+func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, params ...CreatePRParams) (*CreateBranchResult, error) {
+	if s.sandboxProvider == nil || s.snapshots == nil {
+		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return nil, ErrSnapshotNotCaptured
+	}
+	if run.RepositoryID == nil {
+		return nil, fmt.Errorf("session %s has no repository", run.ID)
+	}
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if err == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("CreateBranch: failed to look up issue, proceeding without it")
+		}
+	}
+	issue = issueWithLinearHumanKey(issue, run.LinkedIssues)
+
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *run.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get repository: %w", err)
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if s.orgs != nil {
+		if org, orgErr := s.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+	}
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token: %w", err)
+	}
+
+	branchName := formatBranchName(run, issue)
+	commitMsg := formatCommitMessage(run, issue)
+	authorName, authorEmail := identity.CommitIdentity(resolution)
+	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
+		if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				commitMsg += "\n\n" + trailer
+			}
+		}
+	}
+
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if pushed != nil && pushed.CapturedSnapshotPath != "" {
+			_ = os.Remove(pushed.CapturedSnapshotPath)
+		}
+	}()
+
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after branch creation")
+	}
+	if pushed.CapturedSnapshotErr != nil {
+		s.logger.Warn().
+			Err(pushed.CapturedSnapshotErr).
+			Str("session_id", run.ID.String()).
+			Msg("post-branch sandbox snapshot capture failed; resume will see stale state")
+	} else if pushed.CapturedSnapshotPath != "" {
+		newSnapshotKey := fmt.Sprintf("snapshots/%s/%s/post-branch.tar.zst", run.OrgID, run.ID)
+		if setErr := s.sessions.SetPendingSnapshotKey(ctx, run.OrgID, run.ID, newSnapshotKey); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
+		} else {
+			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
+			pushed.CapturedSnapshotPath = ""
+		}
+	}
+
+	return &CreateBranchResult{
+		Name:    branchName,
+		URL:     fmt.Sprintf("https://github.com/%s/tree/%s", repo.FullName, url.PathEscape(branchName)),
+		HeadSHA: pushed.HeadSHA,
+	}, nil
 }
 
 // ErrNoPullRequest is returned by PushChangesToPR when the session has no
@@ -1068,15 +1170,16 @@ func (s *PRService) pushSessionBranch(
 		}
 	}()
 
+	commitMsgPath := pushCommitMsgPath(sandbox.HomeDir)
 	// Commit message goes to a file so multi-line / hostile content can't
 	// leak through argv. Token goes via the helper socket — no token files,
 	// no askpass shell stub.
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushCommitMsgPath, []byte(commitMsg)); err != nil {
+	if err := s.sandboxProvider.WriteFile(ctx, sandbox, commitMsgPath, []byte(commitMsg)); err != nil {
 		return nil, fmt.Errorf("write commit message to sandbox: %w", err)
 	}
 
 	pushURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
-	script := buildPushScript(sandbox.WorkDir, authorName, authorEmail, branchName, pushURL)
+	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, pushURL)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
@@ -1206,10 +1309,19 @@ func (s *PRService) captureSandboxSnapshot(ctx context.Context, sandbox *agent.S
 	return path, size, nil
 }
 
-// pushCommitMsgPath is the in-sandbox file the script reads `git commit -F`
-// from. Under /tmp so it's auto-cleaned on sandbox destroy; the trap inside
-// the script also removes it explicitly on exit for defense in depth.
-const pushCommitMsgPath = "/tmp/143-pr-commit-msg"
+// pushCommitMsgFilename is the in-sandbox file the script reads with
+// `git commit -F`. Keep it under HomeDir rather than /tmp: /tmp is a hardened
+// tmpfs in runsc sandboxes, and tar-based file injection must not rely on
+// mutating /tmp metadata.
+const pushCommitMsgFilename = ".143-pr-commit-msg"
+
+func pushCommitMsgPath(homeDir string) string {
+	root := strings.TrimRight(strings.TrimSpace(homeDir), "/")
+	if root == "" {
+		root = "/home/sandbox"
+	}
+	return root + "/" + pushCommitMsgFilename
+}
 
 // pushExitNoChanges is the sentinel exit code the push script uses when the
 // restored working tree has no uncommitted changes AND no commits ahead of
@@ -1273,10 +1385,10 @@ echo "%[8]s$(git rev-parse HEAD)"
 // Every %s interpolation is passed through shellQuote, which correctly
 // handles embedded single quotes (via the `'\”` trick) — so any UTF-8
 // string is safe to interpolate.
-func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL string) string {
+func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, pushURL string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
-		shellQuote(pushCommitMsgPath),
+		shellQuote(commitMsgPath),
 		shellQuote(workDir),
 		shellQuote(authorName),
 		shellQuote(authorEmail),
@@ -1324,9 +1436,10 @@ func shellQuote(s string) string {
 
 // PullRequestEvent represents a GitHub pull_request webhook event.
 type PullRequestEvent struct {
-	Action string `json:"action"`
-	Number int    `json:"number"`
-	PR     struct {
+	Action     string     `json:"action"`
+	Number     int        `json:"number"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	PR         struct {
 		Merged         bool   `json:"merged"`
 		HTMLURL        string `json:"html_url"`
 		MergedAt       string `json:"merged_at"`
@@ -1336,13 +1449,14 @@ type PullRequestEvent struct {
 		} `json:"head"`
 	} `json:"pull_request"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
 
 // HandlePullRequestEvent processes pull_request webhook events.
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
-	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.Number)
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
 	if err != nil {
 		// Not a 143-generated PR — ignore.
 		return nil
@@ -1364,6 +1478,13 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return nil
+}
+
+func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.UUID, repo string, number int) (models.PullRequest, error) {
+	if ownerOrgID != nil {
+		return s.pullRequests.GetByOrgRepoAndNumber(ctx, *ownerOrgID, repo, number)
+	}
+	return s.pullRequests.GetByRepoAndNumber(ctx, repo, number)
 }
 
 // applyClosedPRTransition flips a PR's status to merged/closed and runs the
@@ -1591,8 +1712,9 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 
 // PullRequestReviewEvent represents a GitHub pull_request_review webhook event.
 type PullRequestReviewEvent struct {
-	Action string `json:"action"`
-	Review struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Review     struct {
 		ID    int64  `json:"id"`
 		State string `json:"state"`
 		Body  string `json:"body"`
@@ -1604,6 +1726,7 @@ type PullRequestReviewEvent struct {
 		Number int `json:"number"`
 	} `json:"pull_request"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -1614,7 +1737,7 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		return nil
 	}
 
-	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.PullRequest.Number)
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
 		// Not a 143-generated PR — ignore.
 		return nil
@@ -1667,8 +1790,9 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 
 // PullRequestReviewCommentEvent represents a GitHub pull_request_review_comment webhook event.
 type PullRequestReviewCommentEvent struct {
-	Action  string `json:"action"`
-	Comment struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Comment    struct {
 		ID       int64  `json:"id"`
 		Body     string `json:"body"`
 		Path     string `json:"path"`
@@ -1681,6 +1805,7 @@ type PullRequestReviewCommentEvent struct {
 		Number int `json:"number"`
 	} `json:"pull_request"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -1692,7 +1817,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		return nil
 	}
 
-	pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, event.PullRequest.Number)
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
 		// Not a 143-generated PR — ignore.
 		return nil
@@ -2937,7 +3062,8 @@ func buildLabels(issue *models.Issue) []string {
 
 // CheckSuiteEvent represents a GitHub check_suite webhook payload.
 type CheckSuiteEvent struct {
-	Action     string `json:"action"`
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
 	CheckSuite struct {
 		Conclusion   *string `json:"conclusion"`
 		HeadBranch   string  `json:"head_branch"`
@@ -2946,6 +3072,7 @@ type CheckSuiteEvent struct {
 		} `json:"pull_requests"`
 	} `json:"check_suite"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -2957,7 +3084,7 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 	}
 
 	for _, prRef := range event.CheckSuite.PullRequests {
-		pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, prRef.Number)
+		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}
@@ -2981,13 +3108,15 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 
 // CheckRunEvent represents a GitHub check_run webhook payload.
 type CheckRunEvent struct {
-	Action   string `json:"action"`
-	CheckRun struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	CheckRun   struct {
 		PullRequests []struct {
 			Number int `json:"number"`
 		} `json:"pull_requests"`
 	} `json:"check_run"`
 	Repository struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -2999,7 +3128,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 	}
 
 	for _, prRef := range event.CheckRun.PullRequests {
-		pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, prRef.Number)
+		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}

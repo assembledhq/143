@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 )
 
 const defaultExtensionQueueAgeThreshold = 2 * time.Minute
+const runtimeStopPersistenceTimeout = 2 * time.Second
 
 type runtimeConfig struct {
 	SoftBudget               time.Duration
@@ -93,6 +95,8 @@ type runtimeProgressTracker struct {
 	lastStrength     models.RuntimeProgressStrength
 	lastStrongAt     time.Time
 	lastPersistedAt  time.Time
+	activeToolAt     time.Time
+	activeTools      map[string]time.Time
 }
 
 func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
@@ -104,7 +108,7 @@ func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
 	}
 }
 
-func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) {
+func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time, toolID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if observedAt.IsZero() {
@@ -116,12 +120,36 @@ func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType,
 	if strength == models.RuntimeProgressStrengthStrong {
 		t.lastStrongAt = observedAt
 	}
+	switch progressType {
+	case models.RuntimeProgressTypeToolUse:
+		if toolID != "" {
+			if t.activeTools == nil {
+				t.activeTools = make(map[string]time.Time)
+			}
+			t.activeTools[toolID] = observedAt
+		} else if t.activeToolAt.IsZero() {
+			t.activeToolAt = observedAt
+		}
+	case models.RuntimeProgressTypeToolResult, models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressTypeCheckpoint:
+		if toolID != "" && t.activeTools != nil {
+			delete(t.activeTools, toolID)
+		} else {
+			t.activeToolAt = time.Time{}
+			clear(t.activeTools)
+		}
+	}
 }
 
 func (t *runtimeProgressTracker) Snapshot() (time.Time, time.Time, models.RuntimeProgressType, models.RuntimeProgressStrength) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.lastProgressAt, t.lastStrongAt, t.lastProgressType, t.lastStrength
+}
+
+func (t *runtimeProgressTracker) ToolActive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.activeToolAt.IsZero() || len(t.activeTools) > 0
 }
 
 func (t *runtimeProgressTracker) ShouldPersist() bool {
@@ -137,24 +165,75 @@ func (t *runtimeProgressTracker) ShouldPersist() bool {
 	return false
 }
 
-func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, bool) {
+func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, string, bool) {
 	switch entry.Level {
 	case "tool_use":
-		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
+		if isTerminalCommandExecution(entry.Metadata) {
+			return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, commandExecutionItemIDFromMetadata(entry.Metadata), true
+		}
+		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, commandExecutionItemIDFromMetadata(entry.Metadata), true
 	case "question":
-		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, true
+		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, "", true
 	case "output":
 		if entry.Metadata != nil {
 			if typ, ok := entry.Metadata["type"].(string); ok && typ == "tool_result" {
-				return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, true
+				return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, commandExecutionItemIDFromMetadata(entry.Metadata), true
 			}
 		}
-		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, "", true
 	case "debug":
-		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, true
+		if itemID, ok := commandExecutionStartItemID(entry.Message); ok {
+			return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, itemID, true
+		}
+		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, "", true
 	default:
-		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, false
+		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, "", false
 	}
+}
+
+func commandExecutionItemIDFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	itemID, _ := metadata["item_id"].(string)
+	return itemID
+}
+
+func isTerminalCommandExecution(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	tool, _ := metadata["tool"].(string)
+	if tool != "command_execution" {
+		return false
+	}
+	status, _ := metadata["status"].(string)
+	switch status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func commandExecutionStartItemID(message string) (string, bool) {
+	if message == "" {
+		return "", false
+	}
+	var event struct {
+		Type string `json:"type"`
+		Item struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(message), &event); err != nil {
+		return "", false
+	}
+	if event.Type != "item.started" || event.Item.Type != "command_execution" {
+		return "", false
+	}
+	return event.Item.ID, true
 }
 
 type runtimeController struct {
@@ -240,10 +319,28 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 	if c.cancels != nil {
 		c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow)
 	}
+	runtimeReason := stopReasonToRuntime(reason)
+	if runtimeReason != models.RuntimeStopReasonNone {
+		stopAfter := time.Now().UTC().Add(c.cfg.GracefulShutdownWindow + c.cfg.CheckpointFinalizeWindow + defaultRuntimeStallAge)
+		persistCtx, cancel := context.WithTimeout(context.Background(), runtimeStopPersistenceTimeout)
+		defer cancel()
+		if err := c.sessions.MarkRuntimeStopRequested(persistCtx, c.orgID, c.sessionID, runtimeReason, stopAfter); err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str("session_id", c.sessionID.String()).
+				Str("stop_reason", string(runtimeReason)).
+				Msg("failed to persist runtime stop request")
+		}
+	}
+	c.logger.Info().
+		Str("session_id", c.sessionID.String()).
+		Str("stop_reason", string(runtimeReason)).
+		Msg("runtime stop requested")
 }
 
 func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 	lastProgressAt, lastStrongAt, progressType, progressStrength := c.tracker.Snapshot()
+	toolActive := c.tracker.ToolActive()
 	if !lastProgressAt.IsZero() && c.tracker.ShouldPersist() {
 		if err := c.sessions.RecordRuntimeProgress(ctx, c.orgID, c.sessionID, progressType, progressStrength, lastProgressAt); err != nil {
 			c.logger.Debug().Err(err).Msg("failed to persist runtime progress")
@@ -259,7 +356,7 @@ func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 		return
 	}
 
-	if c.cfg.NoProgressTimeout > 0 && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) >= c.cfg.NoProgressTimeout {
+	if c.cfg.NoProgressTimeout > 0 && !toolActive && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) >= c.cfg.NoProgressTimeout {
 		c.RequestStop(StopReasonNoProgress)
 		return
 	}
@@ -281,6 +378,12 @@ func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 }
 
 func (c *runtimeController) shouldExtend(ctx context.Context, now, lastStrongAt time.Time) bool {
+	if lastStrongAt.IsZero() {
+		return false
+	}
+	if now.Sub(lastStrongAt) > c.cfg.ExtensionIncrement {
+		return false
+	}
 	if c.isDraining != nil && c.isDraining() {
 		return false
 	}
@@ -296,10 +399,7 @@ func (c *runtimeController) shouldExtend(ctx context.Context, now, lastStrongAt 
 			return false
 		}
 	}
-	if lastStrongAt.IsZero() {
-		return false
-	}
-	return now.Sub(lastStrongAt) <= c.cfg.ExtensionIncrement
+	return true
 }
 
 func (c *runtimeController) tryExtend(ctx context.Context, expectedSoftDeadline time.Time) bool {

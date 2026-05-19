@@ -3,6 +3,8 @@
 import RadarCanvas from "./radar-canvas";
 import { useInView } from "@/hooks/use-in-view";
 import { useScrollProgress } from "@/hooks/use-scroll-progress";
+import { platformLayers } from "./landing-copy";
+import { landingTypography as type } from "./landing-typography";
 
 interface HowItWorksSectionProps {
   isDark: boolean;
@@ -42,13 +44,13 @@ const terminalLines = [
   {
     prefix: "AGENT",
     prefixColor: "text-yellow-400",
-    text: "claude-code spinning up in cloud sandbox",
+    text: "codex spinning up in org cloud sandbox",
     threshold: 0.15,
   },
   {
     prefix: "EXEC",
     prefixColor: "text-orange-400",
-    text: "running: fix null ref in auth flow",
+    text: "running: reproduce Sentry issue with team context",
     threshold: 0.3,
   },
   {
@@ -60,27 +62,27 @@ const terminalLines = [
   {
     prefix: "PASS",
     prefixColor: "text-green-400",
-    text: "CI 47/47 · PR #342 ready for review",
+    text: "review loop passed · PR #342 ready",
     threshold: 0.6,
   },
 ];
 
 const projectTasks = [
-  { task: "Baseline: p95 latency 420ms", baseStatus: "done" as const },
-  { task: "Iteration 1: optimize DB queries → 380ms", baseStatus: "done" as const },
+  { task: "Linear issue linked to repo context", baseStatus: "done" as const },
+  { task: "Sentry trace attached to agent prompt", baseStatus: "done" as const },
   {
-    task: "Iteration 2: add response caching → 310ms",
+    task: "Iteration 1: agent opens fix and preview",
     baseStatus: "active" as const,
     completeAt: 0.2,
   },
   {
-    task: "Iteration 3: reduce serialization → 265ms",
+    task: "Iteration 2: reviewer feedback applied",
     baseStatus: "pending" as const,
     activateAt: 0.2,
     completeAt: 0.4,
   },
   {
-    task: "Target: p95 latency < 250ms",
+    task: "Builder-safe PR ready for engineer review",
     baseStatus: "pending" as const,
     activateAt: 0.4,
     completeAt: 0.6,
@@ -101,6 +103,38 @@ function FadeInStep({ children }: { children: React.ReactNode }) {
       }}
     >
       {children}
+    </div>
+  );
+}
+
+function AnimatedBulletList({
+  items,
+  isDark,
+}: {
+  items: readonly string[];
+  isDark: boolean;
+}) {
+  const { ref, inView } = useInView({ threshold: 0.55 });
+
+  return (
+    <div ref={ref}>
+      <ul className="grid gap-2 pt-2">
+        {items.map((item, index) => (
+          <li
+            key={item}
+            className={`text-xs font-mono transition-all duration-500 ${
+              isDark ? "text-white/35" : "text-slate-500"
+            }`}
+            style={{
+              opacity: inView ? 1 : 0,
+              transform: inView ? "translateY(0)" : "translateY(12px)",
+              transitionDelay: `${index * 90}ms`,
+            }}
+          >
+            · {item}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -152,7 +186,7 @@ function TerminalContent({ progress }: { progress: number }) {
       >
         <span>{">"}</span>
         <span>
-          done · team notified · PR visible to all
+          done · team notified · audit event written
           <span className="animate-pulse">_</span>
         </span>
       </div>
@@ -195,7 +229,7 @@ function ProjectsContent({
               isDark ? "text-white/80" : "text-slate-800"
             }`}
           >
-            Loop: reduce API latency
+            Loop: ship a guarded fix
           </span>
           <span
             className={`text-xs font-mono ${
@@ -435,8 +469,97 @@ function DispatchContent({
             isDark ? "text-white/20" : "text-slate-400"
           }`}
         >
-          2 PRs shipped today &middot; next cycle in 1h 42m
+          2 PRs shipped today &middot; 4 automations active
         </p>
+      </div>
+    </>
+  );
+}
+
+function PreviewContent({ isDark }: { isDark: boolean }) {
+  return (
+    <>
+      <div
+        className={`flex items-center gap-1.5 border-b px-4 py-3 ${
+          isDark ? "border-white/[0.06]" : "border-slate-200"
+        }`}
+      >
+        <div className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
+        <div className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" />
+        <div className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
+        <span
+          className={`ml-3 truncate text-xs font-mono ${
+            isDark ? "text-white/35" : "text-slate-500"
+          }`}
+        >
+          preview-342.143.dev
+        </span>
+        <span
+          className={`ml-auto rounded-full px-2 py-0.5 text-xs font-mono ${
+            isDark
+              ? "bg-green-400/10 text-green-300/80"
+              : "bg-green-50 text-green-700"
+          }`}
+        >
+          Ready
+        </span>
+      </div>
+
+      <div className="p-5">
+        <div
+          className={`overflow-hidden rounded-md border ${
+            isDark ? "border-white/10 bg-white/[0.03]" : "border-slate-200 bg-slate-50"
+          }`}
+        >
+          <div
+            className={`border-b px-4 py-3 ${
+              isDark ? "border-white/10" : "border-slate-200"
+            }`}
+          >
+            <div
+              className={`h-3 w-36 rounded-full ${
+                isDark ? "bg-white/18" : "bg-slate-300"
+              }`}
+            />
+          </div>
+          <div className="grid gap-3 p-4">
+            <div
+              className={`h-20 rounded ${
+                isDark ? "bg-blue-300/12" : "bg-blue-100"
+              }`}
+            />
+            <div className="grid grid-cols-3 gap-3">
+              {[0, 1, 2].map((item) => (
+                <div
+                  key={item}
+                  className={`h-12 rounded ${
+                    isDark ? "bg-white/[0.06]" : "bg-white"
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-2">
+          {["Cloud app started", "Preview link shared", "Browser check passed"].map(
+            (item) => (
+              <div
+                key={item}
+                className={`flex items-center justify-between rounded-md border px-3 py-2 text-xs font-mono ${
+                  isDark
+                    ? "border-white/10 text-white/45"
+                    : "border-slate-200 text-slate-500"
+                }`}
+              >
+                <span>{item}</span>
+                <span className={isDark ? "text-green-300/70" : "text-green-700"}>
+                  OK
+                </span>
+              </div>
+            ),
+          )}
+        </div>
       </div>
     </>
   );
@@ -447,6 +570,8 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
   const label = isDark ? "text-white/25" : "text-slate-400";
   const heading = isDark ? "text-white" : "text-slate-900";
   const body = isDark ? "text-white/45" : "text-slate-600";
+  const [contextLayer, executionLayer, controlLayer, previewLayer] =
+    platformLayers;
 
   const { ref: termRef, progress: termProgress } = useScrollProgress();
   const { ref: projRef, progress: projProgress } = useScrollProgress();
@@ -454,58 +579,64 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
 
   return (
     <section
+      id="how-it-works"
       className="relative py-32 sm:py-40 px-6 sm:px-10 overflow-hidden"
       style={{ background: isDark ? "#0a0a12" : "#f2f5f9" }}
     >
-      {/* Ambient glow orbs */}
-      <div
-        className="absolute top-[15%] -left-[10%] w-[500px] h-[500px] rounded-full pointer-events-none"
-        style={{
-          background: isDark
-            ? "radial-gradient(circle, rgba(34,197,94,0.06) 0%, transparent 70%)"
-            : "radial-gradient(circle, rgba(34,197,94,0.08) 0%, transparent 70%)",
-        }}
-      />
-      <div
-        className="absolute top-[45%] -right-[10%] w-[600px] h-[600px] rounded-full pointer-events-none"
-        style={{
-          background: isDark
-            ? "radial-gradient(circle, rgba(59,130,246,0.05) 0%, transparent 70%)"
-            : "radial-gradient(circle, rgba(59,130,246,0.06) 0%, transparent 70%)",
-        }}
-      />
-      <div
-        className="absolute bottom-[10%] -left-[5%] w-[400px] h-[400px] rounded-full pointer-events-none"
-        style={{
-          background: isDark
-            ? "radial-gradient(circle, rgba(168,85,247,0.04) 0%, transparent 70%)"
-            : "radial-gradient(circle, rgba(168,85,247,0.05) 0%, transparent 70%)",
-        }}
-      />
+      <div className="absolute inset-0 pointer-events-none">
+        <div
+          className={`absolute inset-x-0 top-0 h-px ${
+            isDark ? "bg-white/10" : "bg-slate-300/80"
+          }`}
+        />
+        <div
+          className={`absolute left-1/2 top-0 h-full w-px ${
+            isDark ? "bg-white/[0.04]" : "bg-slate-300/50"
+          }`}
+        />
+      </div>
 
-      <div className="relative mx-auto max-w-5xl space-y-40 sm:space-y-52">
+      <div className="relative mx-auto max-w-5xl space-y-32 sm:space-y-44">
+        <div className="grid gap-8 lg:grid-cols-[0.35fr_0.65fr] lg:items-end">
+          <p className={`${type.eyebrow} ${label}`}>
+            01 Why this matters
+          </p>
+          <div className="space-y-5">
+            <h2
+              className={`max-w-3xl ${type.sectionTitle} ${heading}`}
+            >
+              Individual coding agents create scattered work. Teams need one
+              place to run, review, and schedule it.
+            </h2>
+            <p className={`max-w-2xl ${type.body} ${body}`}>
+              143 turns private prompts, local runs, and one-off fixes into a
+              shared system with context, previews, review loops, and history
+              the whole team can trust.
+            </p>
+          </div>
+        </div>
+
         {/* ── Step 01: Built for Teams ── text LEFT, radar RIGHT */}
         <FadeInStep>
           <div className="flex flex-col md:flex-row items-center gap-12 md:gap-20">
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-wider uppercase ${label}`}
+                className={`${type.eyebrow} ${label}`}
               >
-                Step 01
+                {contextLayer.step} {contextLayer.kicker}
               </p>
               <h2
-                className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
+                className={`${type.featureTitle} ${heading}`}
               >
-                Built for teams,
-                <br />
-                not solo devs
+                {contextLayer.heading}
               </h2>
-              <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                By default, every automation, prompt, and agent run is visible
-                to your whole team. Non-engineers can write prompts, kick off
-                runs, and contribute code &mdash; and the team sees exactly
-                what was asked for and what was produced.
+              <p className={`${type.body} max-w-sm ${body}`}>
+                {contextLayer.body}
               </p>
+              <AnimatedBulletList
+                items={contextLayer.components}
+                isDark={isDark}
+              />
             </div>
             <div className="md:w-1/2 w-full max-w-[400px] md:max-w-none relative">
               {/* Glow behind radar */}
@@ -532,24 +663,22 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           >
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-wider uppercase ${label}`}
+                className={`${type.eyebrow} ${label}`}
               >
-                Step 02
+                {executionLayer.step} {executionLayer.kicker}
               </p>
               <h2
-                className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
+                className={`${type.featureTitle} ${heading}`}
               >
-                Your agents,
-                <br />
-                running in the cloud
+                {executionLayer.heading}
               </h2>
-              <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                The big labs are constantly one-upping each other. With 143,
-                there&rsquo;s no vendor lock-in &mdash; use Claude Code, Codex,
-                or whatever comes next. When a better model drops, swap it in.
-                Everything runs in sandboxed cloud containers with preview
-                environments.
+              <p className={`${type.body} max-w-sm ${body}`}>
+                {executionLayer.body}
               </p>
+              <AnimatedBulletList
+                items={executionLayer.components}
+                isDark={isDark}
+              />
             </div>
             <div className="md:w-1/2 relative">
               {/* Glow behind terminal */}
@@ -563,7 +692,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               />
               {/* Terminal window */}
               <div
-                className="relative rounded-xl overflow-hidden shadow-2xl"
+                className="relative overflow-hidden rounded-lg shadow-2xl"
                 style={{
                   background: isDark ? "#111119" : "#1e1e2e",
                   boxShadow: isDark
@@ -594,23 +723,22 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           >
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-wider uppercase ${label}`}
+                className={`${type.eyebrow} ${label}`}
               >
-                Step 03
+                {controlLayer.step} {controlLayer.kicker}
               </p>
               <h2
-                className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
+                className={`${type.featureTitle} ${heading}`}
               >
-                Loops: define an eval,
-                <br />
-                let agents improve it
+                {controlLayer.heading}
               </h2>
-              <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Want better latency? Define a benchmark. 143 runs your coding
-                agent in a loop &mdash; each iteration measures against the eval
-                and hill-climbs toward the target. Works for test coverage,
-                bundle size, error rates, or anything measurable.
+              <p className={`${type.body} max-w-sm ${body}`}>
+                {controlLayer.body}
               </p>
+              <AnimatedBulletList
+                items={controlLayer.components}
+                isDark={isDark}
+              />
             </div>
             <div className="md:w-1/2 relative">
               {/* Glow behind app window */}
@@ -624,7 +752,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               />
               {/* App window */}
               <div
-                className="relative rounded-xl overflow-hidden shadow-2xl"
+                className="relative overflow-hidden rounded-lg shadow-2xl"
                 style={{
                   background: isDark ? "#111119" : "#ffffff",
                   boxShadow: isDark
@@ -661,7 +789,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                       isDark ? "text-white/20" : "text-slate-400"
                     }`}
                   >
-                    eval: p95 latency &lt; 250ms &middot; 3 iterations complete
+                    review loop: context, preview, tests, fix pass
                   </p>
                 </div>
               </div>
@@ -669,29 +797,73 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           </div>
         </FadeInStep>
 
-        {/* ── Step 04: Full Transparency ── dashboard LEFT, text RIGHT (flipped) */}
+        {/* ── Step 04: Cloud Previews ── preview LEFT, text RIGHT (flipped) */}
+        <FadeInStep>
+          <div className="flex flex-col md:flex-row-reverse items-center gap-12 md:gap-20">
+            <div className="md:w-1/2 space-y-4">
+              <p
+                className={`${type.eyebrow} ${label}`}
+              >
+                {previewLayer.step} {previewLayer.kicker}
+              </p>
+              <h2
+                className={`${type.featureTitle} ${heading}`}
+              >
+                {previewLayer.heading}
+              </h2>
+              <p className={`${type.body} max-w-sm ${body}`}>
+                {previewLayer.body}
+              </p>
+              <AnimatedBulletList
+                items={previewLayer.components}
+                isDark={isDark}
+              />
+            </div>
+            <div className="md:w-1/2 relative">
+              <div
+                className="absolute inset-0 -m-6 rounded-full pointer-events-none"
+                style={{
+                  background: isDark
+                    ? "radial-gradient(circle, rgba(34,197,94,0.05) 0%, transparent 60%)"
+                    : "radial-gradient(circle, rgba(34,197,94,0.07) 0%, transparent 60%)",
+                }}
+              />
+              <div
+                className="relative overflow-hidden rounded-lg shadow-2xl"
+                style={{
+                  background: isDark ? "#111119" : "#ffffff",
+                  boxShadow: isDark
+                    ? "0 25px 50px -12px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05)"
+                    : "0 25px 50px -12px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.08)",
+                }}
+              >
+                <PreviewContent isDark={isDark} />
+              </div>
+            </div>
+          </div>
+        </FadeInStep>
+
+        {/* ── Step 06: Workspace ── text LEFT, dashboard RIGHT */}
         <FadeInStep>
           <div
             ref={dispRef}
-            className="flex flex-col md:flex-row-reverse items-center gap-12 md:gap-20"
+            className="flex flex-col md:flex-row items-center gap-12 md:gap-20"
           >
             <div className="md:w-1/2 space-y-4">
               <p
-                className={`text-xs font-mono tracking-wider uppercase ${label}`}
+                className={`${type.eyebrow} ${label}`}
               >
-                Step 04
+                06 Workspace
               </p>
               <h2
-                className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
+                className={`${type.featureTitle} ${heading}`}
               >
-                Full visibility
-                <br />
-                across the team
+                See every run in one workspace.
               </h2>
-              <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                By default, every agent run, prompt, and automation is shared
-                with the team &mdash; all in one place. No more wondering
-                what other engineers are working on or duplicating effort.
+              <p className={`${type.body} max-w-sm ${body}`}>
+                Sessions, autopilot jobs, previews, PR state, usage, and audit
+                logs stay visible to the team. Engineers keep full control;
+                builders get scoped workflows with review safeguards.
               </p>
             </div>
             <div className="md:w-1/2 relative">
@@ -706,7 +878,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               />
               {/* Dashboard window */}
               <div
-                className="relative rounded-xl overflow-hidden shadow-2xl"
+                className="relative overflow-hidden rounded-lg shadow-2xl"
                 style={{
                   background: isDark ? "#111119" : "#ffffff",
                   boxShadow: isDark

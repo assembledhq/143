@@ -1,0 +1,3 @@
+/review the current workspace diff. If you find issues, report them in your normal review format.
+
+Fix nits when they are local, low-risk, and relevant to the current change. Use your judgment: if the change makes stale or outdated adjacent code obsolete, remove or adjust it even when that code was not directly modified by the original diff. Do not expand the scope of the diff just to satisfy subjective style preferences. If a nit is broad, risky, or unrelated to the current change, leave it for later and mention it in your summary.

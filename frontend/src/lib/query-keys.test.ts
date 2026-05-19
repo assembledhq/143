@@ -45,6 +45,10 @@ describe("queryKeys", () => {
       expect(queryKeys.sessions.threadLogs("s-1", "t-1")).toEqual(["session", "s-1", "thread", "t-1", "logs"]);
     });
 
+    it("reviewLoops includes session id", () => {
+      expect(queryKeys.sessions.reviewLoops("s-1")).toEqual(["session", "s-1", "review-loops"]);
+    });
+
     it("detail keys are distinct from list keys", () => {
       const list = queryKeys.sessions.list("s-1");
       const detail = queryKeys.sessions.detail("s-1");

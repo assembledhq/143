@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -24,24 +23,24 @@ func TestLinearStateEventStore_Insert(t *testing.T) {
 		{
 			name: "inserts event",
 			setup: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectExec("INSERT INTO session_issue_link_state_events").
+				mock.ExpectExec("INSERT INTO session_issue_link_state_events[\\s\\S]+ON CONFLICT \\(session_id, issue_id, event_kind\\) DO NOTHING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 			},
 		},
 		{
-			name: "maps unique violation",
+			name: "maps duplicate no-op without aborting transaction",
 			setup: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectExec("INSERT INTO session_issue_link_state_events").
+				mock.ExpectExec("INSERT INTO session_issue_link_state_events[\\s\\S]+ON CONFLICT \\(session_id, issue_id, event_kind\\) DO NOTHING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnError(&pgconn.PgError{Code: "23505"})
+					WillReturnResult(pgxmock.NewResult("INSERT", 0))
 			},
 			expectedErr: ErrLinearStateEventExists,
 		},
 		{
 			name: "wraps insert errors",
 			setup: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectExec("INSERT INTO session_issue_link_state_events").
+				mock.ExpectExec("INSERT INTO session_issue_link_state_events[\\s\\S]+ON CONFLICT \\(session_id, issue_id, event_kind\\) DO NOTHING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(errors.New("db unavailable"))
 			},

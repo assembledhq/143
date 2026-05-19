@@ -78,6 +78,7 @@ type AgentInput struct {
 	Manual             bool
 	PromptStyle        PromptStyle
 	UserMessage        string
+	Attachments        []AgentAttachment
 	RepoURL            string
 	RepoBranch         string
 	References         []models.SessionInputReference
@@ -92,6 +93,18 @@ type AgentInput struct {
 	PMContextJSON      string                // serialized PM context for PM agent runs
 	IntegrationSkills  string                // auto-generated CLI skills doc for integration tools
 	ContextLimits      *models.ContextLimits // org-specific token limits (nil = use defaults)
+}
+
+// AgentAttachment describes a user-uploaded attachment after the server has
+// attempted to make it available to the sandbox. LocalPath is set when the
+// file was copied successfully; Error is set when the attachment should be
+// surfaced to the agent as unavailable.
+type AgentAttachment struct {
+	OriginalURL  string
+	LocalPath    string
+	ContentType  string
+	Error        string
+	MessageIndex int
 }
 
 // PMTaskContext carries the PM agent's analysis into the coding agent's prompt.
@@ -261,6 +274,11 @@ type AgentPrompt struct {
 	// PreparePrompt is bypassed on continuation turns, so adapters that need
 	// repair-specific context read it from here. Nil for ordinary turns.
 	RevisionContext *RevisionContext
+	// HumanInputAnswer carries a normalized answer to a provider-native
+	// deferred request. Adapters with native resume hooks can translate this
+	// back into provider-specific callback payloads instead of treating the
+	// answer as plain follow-up text only.
+	HumanInputAnswer *HumanInputAnswer
 }
 
 // AgentResult is the outcome of an agent execution.
@@ -274,6 +292,30 @@ type AgentResult struct {
 	ConfidenceReasoning string
 	RiskFactors         []string
 	AgentSessionID      string // agent's internal session ID, used for --resume on subsequent turns
+	RequiresHumanInput  bool
+}
+
+type HumanInputRequest struct {
+	ProviderRequestID string
+	Kind              models.HumanInputRequestKind
+	Title             string
+	Body              string
+	Context           *string
+	BlocksPhase       *string
+	Choices           []models.HumanInputChoice
+	ResponseSchema    json.RawMessage
+	ProviderPayload   json.RawMessage
+}
+
+type HumanInputAnswer struct {
+	RequestID         uuid.UUID
+	ProviderRequestID string
+	Kind              models.HumanInputRequestKind
+	Status            models.HumanInputRequestStatus
+	AnswerText        *string
+	SelectedChoiceIDs []string
+	AnswerPayload     json.RawMessage
+	Choices           []models.HumanInputChoice
 }
 
 // TokenUsage tracks LLM token consumption and cost for an agent run.
@@ -340,11 +382,12 @@ type TokenUsageHint struct {
 
 // LogEntry represents a single log line emitted during agent execution.
 type LogEntry struct {
-	Timestamp time.Time              `json:"timestamp"`
-	Level     string                 `json:"level"` // info, debug, error, tool_use, output, question
-	Message   string                 `json:"message"`
-	ThreadID  *uuid.UUID             `json:"thread_id,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Level      string                 `json:"level"` // info, debug, error, tool_use, output, question
+	Message    string                 `json:"message"`
+	ThreadID   *uuid.UUID             `json:"thread_id,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	HumanInput *HumanInputRequest     `json:"human_input,omitempty"`
 }
 
 // SandboxProvider abstracts sandbox lifecycle management.
@@ -536,6 +579,20 @@ const SandboxMetadataBaseCommitSHA = "base_commit_sha"
 // inflate the diff with target-branch changes. Falls back to the immutable
 // base_commit_sha when missing or when the merge-base resolution fails.
 const SandboxMetadataTargetBranch = "target_branch"
+
+// SandboxMetadataClaudeCodePermissionMode is the sandbox.Metadata key used by
+// Claude Code auth setup to tell the adapter which CLI permission mode is
+// compatible with the selected credential path, CLI version, and model.
+const SandboxMetadataClaudeCodePermissionMode = "claude_code_permission_mode"
+
+// SandboxMetadataClaudeCodeVersion is the sandbox.Metadata key used to cache
+// the parsed `claude --version` result for capability checks.
+const SandboxMetadataClaudeCodeVersion = "claude_code_version"
+
+const (
+	ClaudeCodePermissionModeAuto        = "auto"
+	ClaudeCodePermissionModeAcceptEdits = "acceptEdits"
+)
 
 // SandboxConnectionInfo holds provider-specific connection details for local resume.
 type SandboxConnectionInfo struct {

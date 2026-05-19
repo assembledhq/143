@@ -40,8 +40,9 @@ const (
 type prAuthAction string
 
 const (
-	prAuthActionCreatePR    prAuthAction = "create_pr"
-	prAuthActionPushChanges prAuthAction = "push_changes"
+	prAuthActionCreatePR     prAuthAction = "create_pr"
+	prAuthActionCreateBranch prAuthAction = "create_branch"
+	prAuthActionPushChanges  prAuthAction = "push_changes"
 )
 
 type prAuthResumeClaims struct {

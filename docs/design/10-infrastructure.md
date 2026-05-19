@@ -233,7 +233,7 @@ This image is used by the Docker sandbox provider. It runs under **gVisor** (`ru
 Fleet deploys attempt to keep host hardening in place as they roll services:
 
 - Docker `json-file` log rotation is installed through `deploy/scripts/install-log-rotation.sh`, which merges the desired `log-driver` and `log-opts` into `/etc/docker/daemon.json` and restarts Docker only when the file changes.
-- The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access.
+- The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access. Worker cloud-init installs the same grant on first boot, because those hosts can start successfully from user-data before any operator runs SSH provisioning.
 - Existing hosts that predate a sudoers entry are repaired through `deploy/scripts/repair-deploy-sudoers.sh` when root SSH is available.
 - If a routine deploy cannot repair sudoers from CI, Docker log-rotation update failure is warning-only. The service rollout continues, and operators can run `make repair-deploy-sudoers ROLE=<role> HOST=<host>` later from a machine with root SSH access.
 

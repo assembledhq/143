@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -2058,6 +2059,40 @@ func TestDockerHandle_Kill_ShimSendsSIGKILL(t *testing.T) {
 		"Kill on a shim handle must exec-send SIGKILL to the pidfile-tracked child, not just close the connection")
 }
 
+func TestDockerHandle_LogsInteractiveLifecycle(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-logged"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, logger)
+	sb := &agent.Sandbox{ID: "container-logged", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox", SessionID: "session-logged", OrgID: "org-logged"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err, "interactive command should start")
+	require.NoError(t, h.Kill(context.Background()), "kill should force-stop the handle")
+
+	got := logs.String()
+	require.Contains(t, got, "started interactive command in sandbox", "start log should identify the interactive exec")
+	require.Contains(t, got, "force-stopping interactive command", "kill log should identify force-stop escalation")
+	require.Contains(t, got, "exec-logged", "logs should include the Docker exec id")
+	require.Contains(t, got, "container-logged", "logs should include the container id")
+	require.Contains(t, got, "session-logged", "logs should include the session id")
+}
+
 func TestDockerProvider_ConnectionInfo(t *testing.T) {
 	t.Parallel()
 
@@ -2389,26 +2424,95 @@ func TestDockerProvider_ShellInjection(t *testing.T) {
 		require.NotContains(t, shellCmd, "cat /workspace/foo;", "bare semicolon should not appear outside quotes")
 	})
 
-	t.Run("WriteFile escapes malicious path", func(t *testing.T) {
+	t.Run("WriteFile streams tar without shell interpolation", func(t *testing.T) {
 		t.Parallel()
 
 		var capturedCmd []string
+		conn := newCapturingConn()
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = config.Cmd
 			return container.ExecCreateResponse{ID: "exec-inject"}, nil
 		}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
 			return container.ExecInspect{ExitCode: 0}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
-		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 
-		_ = p.WriteFile(context.Background(), sb, "/workspace/$(rm -rf /)", []byte("data"))
+		err := p.WriteFile(context.Background(), sb, "/home/sandbox/.143/attachments/turn-1/$(touch pwned).txt", []byte("data"))
+		require.NoError(t, err, "WriteFile should stream the tar payload successfully")
 
-		shellCmd := capturedCmd[2]
-		require.Contains(t, shellCmd, "'/workspace/$(rm -rf /)'", "path with command substitution should be single-quoted")
+		require.Equal(t, []string{"tar", "xf", "-", "-C", "/home/sandbox"}, capturedCmd, "WriteFile should exec tar directly without a shell")
+
+		tr := tar.NewReader(bytes.NewReader(conn.Captured()))
+		var foundFile bool
+		for {
+			hdr, readErr := tr.Next()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			require.NoError(t, readErr, "tar payload should be readable")
+			require.NotEqual(t, "home/", hdr.Name, "tar payload should not rewrite the root-owned /home directory")
+			require.NotEqual(t, "home/sandbox/", hdr.Name, "tar payload should not rewrite the existing sandbox home directory")
+			if hdr.Name != ".143/attachments/turn-1/$(touch pwned).txt" {
+				continue
+			}
+			foundFile = true
+			body, readErr := io.ReadAll(tr)
+			require.NoError(t, readErr, "tar file body should be readable")
+			require.Equal(t, []byte("data"), body, "tar payload should contain the requested file bytes")
+		}
+		require.True(t, foundFile, "tar payload should preserve the literal destination path")
+	})
+
+	t.Run("WriteFile to tmp does not rewrite tmp directory metadata", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+		conn := newCapturingConn()
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-tmp-write"}, nil
+		}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+		err := p.WriteFile(context.Background(), sb, "/tmp/143-pr-commit-msg", []byte("commit message"))
+		require.NoError(t, err, "WriteFile should support existing absolute directories such as /tmp")
+		require.Equal(t, []string{"tar", "xf", "-", "-C", "/tmp"}, capturedCmd, "WriteFile should extract directly into /tmp instead of rewriting /tmp metadata")
+
+		tr := tar.NewReader(bytes.NewReader(conn.Captured()))
+		var foundFile bool
+		for {
+			hdr, readErr := tr.Next()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			require.NoError(t, readErr, "tar payload should be readable")
+			require.NotEqual(t, "tmp/", hdr.Name, "tar payload must not include the existing /tmp directory")
+			require.NotEqual(t, "tmp/143-pr-commit-msg", hdr.Name, "tar payload must be relative to /tmp, not rooted at /")
+			if hdr.Name != "143-pr-commit-msg" {
+				continue
+			}
+			foundFile = true
+			body, readErr := io.ReadAll(tr)
+			require.NoError(t, readErr, "tar file body should be readable")
+			require.Equal(t, []byte("commit message"), body, "tar payload should contain the requested file bytes")
+		}
+		require.True(t, foundFile, "tar payload should contain the tmp target file")
 	})
 }
 

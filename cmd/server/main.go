@@ -12,7 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -42,9 +46,11 @@ import (
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
 	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
@@ -412,6 +418,7 @@ func main() {
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		}
 
@@ -467,6 +474,22 @@ func main() {
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
 
+		if sandboxCapacity != nil && services.SandboxGC != nil {
+			sandboxCapacity.SetPressureCleaner(services.SandboxGC)
+		}
+
+		// Run a Docker-first startup cleanup before workers accept jobs. Any
+		// DB-unreferenced sandbox already present on this host cannot belong to
+		// an in-flight turn in this process, so it should not consume local
+		// admission capacity through the normal GC grace window.
+		if services.SandboxGC != nil {
+			startupGCCtx, startupGCCancel := context.WithTimeout(ctx, 2*time.Minute)
+			if gcErr := services.SandboxGC.ReapStartup(startupGCCtx, time.Now()); gcErr != nil {
+				logger.Warn().Err(gcErr).Msg("startup: Docker-first sandbox cleanup failed; pressure cleanup and periodic GC will retry")
+			}
+			startupGCCancel()
+		}
+
 		// Reconcile containers that leaked when the last server exited mid-turn
 		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
 		// sees clean state. Best-effort: errors are logged, not fatal.
@@ -505,6 +528,16 @@ func main() {
 				}
 				rehydrateCancel()
 			}
+		}
+
+		// Plumb stores into LinearAgentDeps now that the Stores struct is
+		// fully constructed. buildServices runs before stores is built, so
+		// the deps struct it produces leaves Stores nil; setting it here
+		// closes the loop without forcing buildServices to take stores as
+		// an argument (which would entangle two otherwise-independent
+		// build phases).
+		if services.LinearAgentDeps != nil {
+			services.LinearAgentDeps.Stores = stores
 		}
 
 		processWorkers = startProcessWorkers(
@@ -1015,7 +1048,9 @@ func buildServices(
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -1036,6 +1071,15 @@ func buildServices(
 	identityResolver.SetIntegrations(integrationStore)
 	var sandboxAuthServer *sandboxauth.Server
 	if cfg.SandboxAuthSocketDir != "" {
+		if cfg.Env == "production" {
+			if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
+				logger.Error().
+					Err(err).
+					Str("socket_dir", cfg.SandboxAuthSocketDir).
+					Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+				return nil
+			}
+		}
 		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
 		logger.Info().
 			Str("socket_dir", cfg.SandboxAuthSocketDir).
@@ -1045,43 +1089,47 @@ func buildServices(
 			Msg("sandbox auth: SANDBOX_AUTH_SOCKET_DIR is empty; per-session credential socket disabled — sandbox `git push` will require GITHUB_TOKEN env fallback")
 	}
 
+	uploadStore := buildUploadStore(context.Background(), cfg, logger)
+
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          sandboxProvider,
-		Adapters:          agentAdapters,
-		Env:               agentEnv,
-		Sessions:          sessionStore,
-		SessionLogs:       sessionLogStore,
-		SessionQuestions:  sessionQuestionStore,
-		SessionMessages:   sessionMessageStore,
-		SessionThreads:    sessionThreadStore,
-		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
-		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
-		DecisionLog:       pmDecisionLogStore,
-		ProjectTasks:      projectTaskUpdater,
-		AutomationRuns:    automationRunUpdater,
-		Issues:            issueStore,
-		Repositories:      repoStore,
-		Orgs:              orgStore,
-		Jobs:              jobStore,
-		GitHub:            ghSvc,
-		CodexAuth:         codexAuthSvc,
-		ClaudeCodeAuth:    claudeCodeAuthSvc,
-		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
-		CodingCredentials: codingCredentialStore,
-		Snapshots:         snapshotStore,
-		FileReader:        fileReader,
-		MentionIndexes:    mentionIndexCache,
-		UsageTracker:      usageTracker,
-		SandboxCapacity:   sandboxCapacity,
-		Cancels:           cancelRegistry,
-		ThreadCancels:     threadCancelRegistry,
-		OrgSettingsCache:  orgSettingsCache,
-		IdentityResolver:  identityResolver,
-		SandboxAuth:       sandboxAuthServer,
-		Users:             userStore,
-		NodeID:            cfg.NodeID,
-		Logger:            logger,
+		Provider:           sandboxProvider,
+		Adapters:           agentAdapters,
+		Env:                agentEnv,
+		Sessions:           sessionStore,
+		SessionLogs:        sessionLogStore,
+		SessionQuestions:   sessionQuestionStore,
+		HumanInputRequests: sessionHumanInputStore,
+		SessionMessages:    sessionMessageStore,
+		SessionThreads:     sessionThreadStore,
+		SessionIssueLinks:  db.NewSessionIssueLinkStore(pool),
+		IssueSnapshots:     db.NewSessionTurnIssueSnapshotStore(pool),
+		DecisionLog:        pmDecisionLogStore,
+		ProjectTasks:       projectTaskUpdater,
+		AutomationRuns:     automationRunUpdater,
+		Issues:             issueStore,
+		Repositories:       repoStore,
+		Orgs:               orgStore,
+		Jobs:               jobStore,
+		GitHub:             ghSvc,
+		CodexAuth:          codexAuthSvc,
+		ClaudeCodeAuth:     claudeCodeAuthSvc,
+		Credentials:        credentialStore,
+		UserCredentials:    userCredentialStore,
+		CodingCredentials:  codingCredentialStore,
+		Snapshots:          snapshotStore,
+		Uploads:            uploadStore,
+		FileReader:         fileReader,
+		MentionIndexes:     mentionIndexCache,
+		UsageTracker:       usageTracker,
+		SandboxCapacity:    sandboxCapacity,
+		Cancels:            cancelRegistry,
+		ThreadCancels:      threadCancelRegistry,
+		OrgSettingsCache:   orgSettingsCache,
+		IdentityResolver:   identityResolver,
+		SandboxAuth:        sandboxAuthServer,
+		Users:              userStore,
+		NodeID:             cfg.NodeID,
+		Logger:             logger,
 	})
 
 	// PR service.
@@ -1135,6 +1183,21 @@ func buildServices(
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
+	threadSvc := threadservice.NewService(
+		sessionThreadStore,
+		sessionStore,
+		sessionMessageStore,
+		sessionLogStore,
+		jobStore,
+		logger,
+	)
+	reviewLoopSvc := reviewloopservice.NewService(
+		reviewLoopStore,
+		reviewloopservice.RuntimeAdapter{
+			Sessions: sessionStore,
+			Threads:  threadSvc,
+		},
+	)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
@@ -1158,6 +1221,15 @@ func buildServices(
 	// post-link milestones (PR open / PR merged / etc.). Constructed via
 	// the shared Build helper so the API server (router.go) and the worker
 	// (here) wire the service identically.
+	//
+	// Inbound-agent metrics shared between Service.HandleAgentMilestone
+	// and (in MODE=all) the API router's dispatcher. Failure to register
+	// the OTel instruments is non-fatal — nil-safe RecordX helpers
+	// degrade to no-ops.
+	workerLinearAgentMetrics, mErr := metrics.NewLinearAgentMetrics()
+	if mErr != nil {
+		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
 		Logger:             logger,
@@ -1174,7 +1246,8 @@ func buildServices(
 			ClientID:     cfg.LinearOAuthClientID,
 			ClientSecret: cfg.LinearOAuthClientSecret,
 		},
-		AppBaseURL: cfg.FrontendURL,
+		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: workerLinearAgentMetrics,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 	// Wire the linear service into the agent env so sandbox-bound
@@ -1221,6 +1294,8 @@ func buildServices(
 		PR:              prService,
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,
+		ProjectTasks:    projectTaskUpdater,
+		AutomationRuns:  automationRunUpdater,
 		Prioritization:  prioritizationSvc,
 		PM:              pmSvc,
 		SlackSummarizer: slackSummarizer,
@@ -1228,8 +1303,41 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
+	}
+
+	// Linear inbound-agent worker wiring. The process-wide
+	// LINEAR_AGENT_ENABLED flag gates the webhook dispatcher, not the
+	// worker handler: disabling the flag must stop new inbound events while
+	// still allowing already-enqueued linear_agent_event jobs to drain.
+	if linearService != nil {
+		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+		repoResolver := linear.NewAgentRepoResolver(
+			db.NewLinearTeamRepoMappingStore(pool),
+			linearAgentSettingsView,
+			repoStore,
+		)
+		svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps{
+			Stores:         nil, // populated below in BuildStores
+			Linear:         linearService,
+			RepoResolver:   repoResolver,
+			ProviderState:  db.NewLinearProviderStateStore(pool),
+			SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
+			OrgSettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+				org, err := orgStore.GetByID(ctx, orgID)
+				if err != nil {
+					return models.OrgSettings{}, err
+				}
+				return models.ParseOrgSettings(org.Settings)
+			},
+			ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+				return linearService.ClientForOrg(ctx, orgID)
+			},
+			Metrics: workerLinearAgentMetrics,
+			Logger:  logger,
+		}
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the
@@ -1239,6 +1347,19 @@ func buildServices(
 		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
 	}
 	return svc
+}
+
+func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Logger) storage.UploadStore {
+	if cfg.UploadS3Bucket == "" {
+		return storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.UploadS3Region))
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
+		return storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured for worker attachment reads")
+	return storage.NewS3UploadStore(s3.NewFromConfig(awsCfg), cfg.UploadS3Bucket, cfg.UploadS3Prefix)
 }
 
 func wireWorkerPRService(

@@ -18,12 +18,15 @@ export const queryKeys = {
     timeline: (id: string) => ["session", id, "timeline"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
+    humanInputRequests: (id: string, status?: string | null, threadId?: string | null) =>
+      ["session", id, "human-input-requests", status ?? null, threadId ?? null] as const,
     composerFiles: (id: string, query: string) => ["session", id, "composer", "files", query] as const,
     threads: (id: string) => ["session", id, "threads"] as const,
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
+    reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
   },
   repositories: {
     all: ["repositories"] as const,
@@ -52,6 +55,7 @@ export const queryKeys = {
   },
   integrations: {
     all: ["integrations"] as const,
+    githubRepositories: (installationId?: number | null) => ["integrations", "github", "repositories", installationId ?? null] as const,
     slackChannels: ["slack-channels"] as const,
   },
   autopilot: {

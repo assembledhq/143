@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
+import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -456,6 +456,31 @@ export const handlers = [
     } satisfies ListResponse<SessionThread>);
   }),
 
+  http.get('/api/v1/sessions/:id/review-loops', () => {
+    return HttpResponse.json({
+      data: [] as SessionReviewLoop[],
+      meta: {},
+    } satisfies ListResponse<SessionReviewLoop>);
+  }),
+
+  http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+    const body = await request.json() as { agent_type?: string; max_passes?: number };
+    return HttpResponse.json({
+      data: {
+        id: 'review-loop-1',
+        org_id: 'org-1',
+        session_id: params.id as string,
+        status: 'running',
+        source: 'manual',
+        agent_type: body.agent_type || 'codex',
+        max_passes: body.max_passes ?? 2,
+        completed_passes: 0,
+        review_required: false,
+        started_at: '2026-02-17T07:12:00Z',
+      },
+    } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+  }),
+
   http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
     const body = await request.json() as { label?: string; agent_type?: string; model?: string };
     return HttpResponse.json({
@@ -617,6 +642,18 @@ export const handlers = [
 
   http.get('/api/v1/sessions/:id/questions', () => {
     return HttpResponse.json({ data: [], meta: {} });
+  }),
+
+  http.get('/api/v1/sessions/:id/human-input-requests', () => {
+    return HttpResponse.json({ data: [], meta: {} });
+  }),
+
+  http.post('/api/v1/sessions/:id/human-input-requests/:requestId/answer', () => {
+    return HttpResponse.json({ data: null });
+  }),
+
+  http.post('/api/v1/sessions/:id/human-input-requests/:requestId/cancel', () => {
+    return HttpResponse.json({ data: null });
   }),
 
   http.post('/api/v1/issues/:id/fix', () => {

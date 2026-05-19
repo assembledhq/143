@@ -30,6 +30,7 @@ type ThreadService interface {
 	SendMessage(ctx context.Context, input thread.SendMessageInput) (*thread.SendMessageResult, error)
 	EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	GetMessageWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (thread.MessageWindowResult, error)
 	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
 	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
@@ -141,6 +142,39 @@ func emitThreadAnsweredQuestionAudit(
 		details["blocks_phase"] = *question.BlocksPhase
 	}
 	emitUserAuditWithSession(emitter, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, &sessionID, nil, marshalAuditDetails(logger, details))
+}
+
+// emitThreadAnsweredHumanInputAudit records a SessionHumanInputAnswered audit
+// when a thread composer answer clears a pending free-text human-input
+// request. This mirrors the session-level send path so audit consumers see
+// the same event whether the user answered through the dialog or the composer.
+func emitThreadAnsweredHumanInputAudit(
+	emitter *db.AuditEmitter,
+	logger zerolog.Logger,
+	r *http.Request,
+	sessionID uuid.UUID,
+	request models.HumanInputRequest,
+	userID uuid.UUID,
+	answerLength int,
+) {
+	requestIDStr := request.ID.String()
+	details := map[string]any{
+		"request_id":    request.ID.String(),
+		"session_id":    request.SessionID.String(),
+		"request_kind":  string(request.Kind),
+		"status":        string(request.Status),
+		"answer_length": answerLength,
+		"answered_by":   userID.String(),
+		"choice_count":  len(request.Choices),
+		"auto_answered": true,
+	}
+	if request.ThreadID != nil {
+		details["thread_id"] = request.ThreadID.String()
+	}
+	if request.BlocksPhase != nil {
+		details["blocks_phase"] = *request.BlocksPhase
+	}
+	emitUserAuditWithSession(emitter, r, models.AuditActionSessionHumanInputAnswered, models.AuditResourceSession, &requestIDStr, &sessionID, nil, marshalAuditDetails(logger, details))
 }
 
 // CreateThread handles POST /sessions/{id}/threads — adds a new agent thread
@@ -466,6 +500,9 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	if result.AnsweredQuestion != nil && userID != nil {
 		emitThreadAnsweredQuestionAudit(h.audit, h.logger, r, sessionID, *result.AnsweredQuestion, *userID, len(body.Message))
 	}
+	if result.AnsweredHumanInput != nil && userID != nil {
+		emitThreadAnsweredHumanInputAudit(h.audit, h.logger, r, sessionID, *result.AnsweredHumanInput, *userID, len(body.Message))
+	}
 
 	// Audit one row per resolved comment after the tx commits — same shape
 	// as session-level SendMessage so audit consumers see consistent
@@ -494,6 +531,53 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	query := r.URL.Query()
+	if query.Has("position") || query.Has("before") || query.Has("limit") {
+		opts := db.SessionMessageWindowOptions{Limit: db.DefaultSessionMessageWindowLimit}
+		if before := strings.TrimSpace(query.Get("before")); before != "" {
+			beforeID, err := parsePositiveInt64(before)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid before cursor")
+				return
+			}
+			opts.BeforeID = beforeID
+		}
+		if limitRaw := strings.TrimSpace(query.Get("limit")); limitRaw != "" {
+			limit, err := parsePositiveInt(limitRaw)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "invalid limit")
+				return
+			}
+			opts.Limit = limit
+		}
+		position := strings.TrimSpace(query.Get("position"))
+		if position != "" && position != "latest" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_POSITION", "position must be latest")
+			return
+		}
+
+		result, err := h.svc.GetMessageWindow(r.Context(), orgID, sessionID, threadID, opts)
+		if err != nil {
+			if errors.Is(err, thread.ErrThreadNotFound) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list thread messages", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, models.ThreadMessageWindowResponse{
+			Data: result.Window.Messages,
+			Meta: models.ThreadMessageWindowMeta{
+				NextOlderCursor:          result.Window.NextOlderCursor,
+				HasOlder:                 result.Window.HasOlder,
+				LatestAssistantMessageID: result.Window.LatestAssistantMessageID,
+				LiveEdgeMessageID:        result.Window.LiveEdgeMessageID,
+				ThreadStatus:             string(result.ThreadStatus),
+			},
+		})
 		return
 	}
 

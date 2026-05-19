@@ -66,3 +66,33 @@ func TestIntegrationStatusValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubRepositoryClaimStatusValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   GitHubRepositoryClaimStatus
+		wantErr bool
+	}{
+		{name: "valid unclaimed", value: GitHubRepositoryClaimStatusUnclaimed},
+		{name: "valid owned by current org", value: GitHubRepositoryClaimStatusOwnedByCurrentOrg},
+		{name: "valid owned by other org", value: GitHubRepositoryClaimStatusOwnedByOtherOrg},
+		{name: "valid disconnected in current org", value: GitHubRepositoryClaimStatusDisconnectedInCurrentOrg},
+		{name: "invalid empty", value: GitHubRepositoryClaimStatus(""), wantErr: true},
+		{name: "invalid unknown", value: GitHubRepositoryClaimStatus("claimed"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.value.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should return error for invalid GitHub repository claim status")
+				return
+			}
+			require.NoError(t, err, "Validate should succeed for valid GitHub repository claim status")
+		})
+	}
+}

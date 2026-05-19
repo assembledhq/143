@@ -45,6 +45,88 @@ func TestSessionStore_RecordRuntimeProgress(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_MarkRuntimeStopRequested(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		execErr      error
+		expectErr    bool
+		queryPattern string
+	}{
+		{
+			name:         "records stop reason on running session",
+			queryPattern: `UPDATE sessions\s+SET runtime_stop_reason = CASE`,
+		},
+		{
+			name:         "wraps exec errors",
+			execErr:      errors.New("write failed"),
+			expectErr:    true,
+			queryPattern: `runtime_stop_reason = CASE`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			expect := mock.ExpectExec(tt.queryPattern).
+				WithArgs(
+					pgxmock.AnyArg(),
+					pgxmock.AnyArg(),
+					pgxmock.AnyArg(),
+					pgxmock.AnyArg(),
+				)
+			if tt.execErr != nil {
+				expect.WillReturnError(tt.execErr)
+			} else {
+				expect.WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			err = store.MarkRuntimeStopRequested(
+				context.Background(),
+				uuid.New(),
+				uuid.New(),
+				models.RuntimeStopReasonNoProgress,
+				time.Now().UTC().Add(5*time.Minute),
+			)
+			if tt.expectErr {
+				require.Error(t, err, "MarkRuntimeStopRequested should wrap database errors")
+			} else {
+				require.NoError(t, err, "MarkRuntimeStopRequested should persist the requested stop reason")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ListRuntimeControlStalledSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`runtime_graceful_stop_at < @stop_after_before`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListRuntimeControlStalledSessions(
+		context.Background(),
+		time.Now().UTC().Add(-2*time.Minute),
+		time.Now().UTC().Add(-2*time.Minute),
+	)
+	require.NoError(t, err, "ListRuntimeControlStalledSessions should query stalled runtime rows")
+	require.Empty(t, sessions, "empty result set should return no sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_GrantRuntimeExtension(t *testing.T) {
 	t.Parallel()
 
@@ -247,6 +329,68 @@ func TestSessionStore_PublishCheckpoint(t *testing.T) {
 				require.NoError(t, err, "PublishCheckpoint should not return an error")
 				require.Equal(t, tt.expectOK, ok, "PublishCheckpoint should report whether the write succeeded")
 			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_RequestCancelAndConsumeCancelRequest(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	tests := []struct {
+		name          string
+		run           func(context.Context, *SessionStore) (bool, error)
+		expectQuery   string
+		rowsAffected  int64
+		expectPending bool
+	}{
+		{
+			name: "request upserts pending cancel intent",
+			run: func(ctx context.Context, store *SessionStore) (bool, error) {
+				return false, store.RequestCancel(ctx, orgID, sessionID)
+			},
+			expectQuery:  `INSERT INTO session_cancel_requests`,
+			rowsAffected: 1,
+		},
+		{
+			name: "consume returns true for pending cancel intent",
+			run: func(ctx context.Context, store *SessionStore) (bool, error) {
+				return store.ConsumeCancelRequest(ctx, orgID, sessionID)
+			},
+			expectQuery:   `UPDATE session_cancel_requests`,
+			rowsAffected:  1,
+			expectPending: true,
+		},
+		{
+			name: "consume returns false when no pending cancel intent exists",
+			run: func(ctx context.Context, store *SessionStore) (bool, error) {
+				return store.ConsumeCancelRequest(ctx, orgID, sessionID)
+			},
+			expectQuery:   `UPDATE session_cancel_requests`,
+			rowsAffected:  0,
+			expectPending: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			mock.ExpectExec(tt.expectQuery).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			pending, err := tt.run(context.Background(), NewSessionStore(mock))
+
+			require.NoError(t, err, "cancel request store operation should succeed")
+			require.Equal(t, tt.expectPending, pending, "consume should report whether a pending request was claimed")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

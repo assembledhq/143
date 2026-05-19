@@ -105,6 +105,30 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 message queued");
   });
 
+  it("keeps the single-agent tooltip trigger scoped to the visible tab label", () => {
+    const thread = makeThread({ label: "Main" });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    const trigger = screen.getByRole("group", { name: "Codex Idle" });
+
+    expect(trigger).not.toHaveClass("flex-1");
+    expect(trigger.parentElement).toHaveClass("flex-1");
+  });
+
   it("keeps the full tab strip once a second tab exists", () => {
     const threads = [
       makeThread({ id: "thread-1", label: "Main tab" }),
@@ -143,6 +167,9 @@ describe("AgentTabStrip", () => {
     expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
     expect(activeTab).toHaveClass("data-[state=active]:bg-transparent");
+    expect(activeTab).toHaveClass("after:bg-[image:var(--gradient-primary)]");
+    expect(activeTab).toHaveClass("group-data-[variant=line]/tabs-list:data-[state=active]:after:opacity-100");
+    expect(activeTab).not.toHaveClass("after:bg-none");
     expect(screen.getByRole("tab", { name: /review/i })).not.toHaveTextContent(/Completed/i);
     expect(screen.getByRole("button", { name: "Close Main tab" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close Review tab" })).toBeInTheDocument();

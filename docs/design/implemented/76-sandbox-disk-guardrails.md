@@ -20,6 +20,12 @@ Worker deploys can run detached during drain-and-rollover. In that path, the pru
 
 Docker volumes are not pruned by default because they may contain stateful preview infrastructure. Worker volume pruning requires `DEPLOY_DOCKER_VOLUME_PRUNE=1`.
 
+## Startup and Pressure Cleanup
+
+Before worker loops begin claiming jobs, the worker runs a Docker-first sandbox GC pass. Any managed sandbox container already present on the host but absent from `sessions.container_id` is destroyed immediately rather than waiting for the normal unreferenced grace period. A DB-unreferenced container that predates the current worker process cannot belong to an in-flight turn in that process, so it should not consume admission capacity.
+
+When local sandbox admission finds `live + reserved >= WORKER_MAX_ACTIVE_SANDBOXES`, the capacity gate runs one best-effort pressure GC pass and then recounts before returning `sandbox capacity reached`. This pressure pass uses a short unreferenced-container grace (`2m` by default), a short admission-path timeout (`5s` by default), and a small destroy-attempt cap (`2` by default) so Docker-only leaks can clear within the job retry window without letting one admission attempt spend unbounded time cleaning the host. If the pass fails or capacity remains full, admission still fails closed.
+
 ## Sandbox Labels
 
 Every Docker sandbox created by `DockerProvider` carries the worker capacity labels used by the container setup:

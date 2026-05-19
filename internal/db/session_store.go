@@ -144,7 +144,7 @@ const sessionSelectColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -171,7 +171,7 @@ const sessionListColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -194,7 +194,7 @@ const sessionAPIDetailColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -443,6 +443,69 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	return session, nil
 }
 
+// SessionMessageAppendState is the small slice of a session needed to append
+// an inbound message without claiming a new turn. It intentionally avoids the
+// full sessionSelectColumns payload because running-session fast paths only
+// need status and turn numbering.
+type SessionMessageAppendState struct {
+	ID          uuid.UUID `db:"id"`
+	OrgID       uuid.UUID `db:"org_id"`
+	Status      string    `db:"status"`
+	CurrentTurn int       `db:"current_turn"`
+}
+
+// GetMessageAppendState returns the current status and turn number for a
+// session, scoped to org. Used by follow-up-message paths after a claim loses
+// a race to an already-running turn: the caller can append the message to the
+// running session without enqueueing a duplicate continuation.
+func (s *SessionStore) GetMessageAppendState(ctx context.Context, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
+	return scanMessageAppendStateFromRow(s.db.QueryRow(ctx, sessionMessageAppendStateQuery(false), pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}))
+}
+
+// LockMessageAppendState is the SELECT ... FOR UPDATE variant of
+// GetMessageAppendState. The caller MUST already hold a transaction (passed
+// as tx) — the row lock is released on tx.Commit / tx.Rollback. Used by the
+// Linear agent prompted handler to read-and-pin status atomically before
+// inserting a queued user message under a still-running turn, so the
+// finisher's drain doesn't race the insert.
+//
+// Keeping the SQL co-located with the rest of the session queries (rather
+// than inlined in the worker package) means a future rename of `deleted_at`
+// or `status` rebuilds in one place.
+func (s *SessionStore) LockMessageAppendState(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
+	if tx == nil {
+		return SessionMessageAppendState{}, fmt.Errorf("LockMessageAppendState requires a non-nil tx")
+	}
+	return scanMessageAppendStateFromRow(tx.QueryRow(ctx, sessionMessageAppendStateQuery(true), pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}))
+}
+
+func sessionMessageAppendStateQuery(forUpdate bool) string {
+	const base = `
+		SELECT id, org_id, status, current_turn
+		FROM sessions
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL`
+	if forUpdate {
+		return base + "\n\t\tFOR UPDATE"
+	}
+	return base
+}
+
+func scanMessageAppendStateFromRow(row pgx.Row) (SessionMessageAppendState, error) {
+	var state SessionMessageAppendState
+	if err := row.Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn); err != nil {
+		return SessionMessageAppendState{}, err
+	}
+	return state, nil
+}
+
 func (s *SessionStore) GetAPIDetailByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
 	query := `
 		SELECT ` + sessionAPIDetailColumns + `
@@ -511,6 +574,26 @@ func (s *SessionStore) GetDiffByID(ctx context.Context, orgID, sessionID uuid.UU
 }
 
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session create transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := createSessionRows(ctx, tx, run); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit session create transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionStore) CreateInTx(ctx context.Context, tx pgx.Tx, run *models.Session) error {
+	return createSessionRows(ctx, tx, run)
+}
+
+func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.Origin == "" {
 		run.Origin = models.SessionOriginIssueTrigger
 	}
@@ -520,13 +603,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	if run.ValidationPolicy == "" {
 		run.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
 	}
-
-	tx, err := s.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin session create transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	if run.LinearPrepareState == "" {
 		run.LinearPrepareState = models.LinearPrepareStateNone
 	}
@@ -576,7 +652,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"linear_prepare_state":       run.LinearPrepareState,
 	}
 
-	row := tx.QueryRow(ctx, query, args)
+	row := q.QueryRow(ctx, query, args)
 	if err := row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt); err != nil {
 		return err
 	}
@@ -587,7 +663,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	// "every session row implies at least one thread row" cannot be violated
 	// by a partial failure between session insert and thread insert.
 	var primaryThreadID uuid.UUID
-	if err := tx.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		INSERT INTO session_threads (
 			session_id, org_id, agent_type, model_override, label, status
 		)
@@ -606,7 +682,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	run.PrimaryThreadID = &primaryThreadID
 
 	if run.PrimaryIssueID != nil {
-		if _, err := tx.Exec(ctx, `
+		if _, err := q.Exec(ctx, `
 			INSERT INTO session_issue_links (org_id, session_id, issue_id, role, position, added_by_user_id)
 			VALUES (@org_id, @session_id, @issue_id, 'primary', 0, @added_by_user_id)
 			ON CONFLICT (session_id, issue_id) DO NOTHING
@@ -618,9 +694,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		}); err != nil {
 			return fmt.Errorf("insert session issue link: %w", err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit session create transaction: %w", err)
 	}
 	return nil
 }
@@ -743,6 +816,38 @@ func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.U
 	return err
 }
 
+func (s *SessionStore) RequestCancel(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `
+		INSERT INTO session_cancel_requests (org_id, session_id, requested_at, delivered_at)
+		VALUES (@org_id, @session_id, now(), NULL)
+		ON CONFLICT (org_id, session_id)
+		DO UPDATE SET requested_at = now(), delivered_at = NULL`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	)
+	if err != nil {
+		return fmt.Errorf("request session cancel: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session cancel request not recorded")
+	}
+	return nil
+}
+
+func (s *SessionStore) ConsumeCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_cancel_requests
+		SET delivered_at = now()
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND delivered_at IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	)
+	if err != nil {
+		return false, fmt.Errorf("consume session cancel request: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	query := `
 		UPDATE sessions
@@ -759,6 +864,75 @@ func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, session
 		"runtime_last_progress_strength": string(strength),
 	})
 	return err
+}
+
+func (s *SessionStore) MarkRuntimeStopRequested(ctx context.Context, orgID, sessionID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time) error {
+	query := `
+		UPDATE sessions
+		SET runtime_stop_reason = CASE
+		        WHEN runtime_stop_reason = '' OR @runtime_stop_reason = 'user_cancel' THEN @runtime_stop_reason
+		        ELSE runtime_stop_reason
+		    END,
+		    runtime_graceful_stop_at = CASE
+		        WHEN runtime_graceful_stop_at IS NULL OR @runtime_stop_reason = 'user_cancel' THEN @runtime_stop_after
+		        ELSE runtime_graceful_stop_at
+		    END
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		  AND status = 'running'`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                  sessionID,
+		"org_id":              orgID,
+		"runtime_stop_reason": string(reason),
+		"runtime_stop_after":  stopAfter.UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("mark runtime stop requested: %w", err)
+	}
+	return nil
+}
+
+// ListRuntimeControlStalledSessions returns running sessions whose runtime
+// controller should already have stopped or requested stop handling. This is a
+// narrower watchdog than ListStaleRunningSessions: it only targets rows whose
+// own runtime budget has already expired or whose persisted stop-after deadline
+// has passed.
+// lint:allow-no-orgid reason="cross-org reaper scan for stalled runtime control"
+func (s *SessionStore) ListRuntimeControlStalledSessions(ctx context.Context, deadlineBefore, stopAfterBefore time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionListColumns + `
+		FROM sessions
+		WHERE status = 'running'
+		  AND deleted_at IS NULL
+		  AND (
+		    (
+		      runtime_stop_reason <> ''
+		      AND runtime_graceful_stop_at IS NOT NULL
+		      AND runtime_graceful_stop_at < @stop_after_before
+		    )
+		    OR (
+		      runtime_stop_reason = ''
+		      AND runtime_soft_deadline_at IS NOT NULL
+		      AND runtime_soft_deadline_at < @deadline_before
+		    )
+		  )
+		ORDER BY COALESCE(runtime_graceful_stop_at, runtime_soft_deadline_at) ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"deadline_before":   deadlineBefore,
+		"stop_after_before": stopAfterBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query runtime-control stalled sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, fmt.Errorf("collect runtime-control stalled sessions: %w", err)
+	}
+	return sessions, nil
 }
 
 func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error) {
@@ -1395,6 +1569,8 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    -- guard relies on this column being authoritative).
 		    pr_push_state = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_state ELSE 'idle' END,
 		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
+		    branch_creation_state = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_state ELSE 'idle' END,
+		    branch_creation_error = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_error ELSE NULL END,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
@@ -1738,6 +1914,70 @@ func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID u
 		"org_id": orgID,
 		"state":  string(state),
 		"err":    errArg,
+	})
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
+}
+
+// TryMarkBranchCreationQueued atomically starts a branch-only publish.
+func (s *SessionStore) TryMarkBranchCreationQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	query := `UPDATE sessions
+		SET branch_creation_state = 'queued', branch_creation_error = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND branch_creation_state NOT IN ('queued', 'pushing')
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return false, err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return true, nil
+}
+
+// UpdateBranchCreationState transitions branch_creation_state and stores the
+// branch URL only on success.
+func (s *SessionStore) UpdateBranchCreationState(ctx context.Context, orgID, sessionID uuid.UUID, state models.BranchCreationState, errMsg string, branchURL *string) error {
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	var errArg any
+	if state == models.BranchCreationStateFailed && errMsg != "" {
+		errArg = errMsg
+	}
+	query := `UPDATE sessions
+		SET branch_creation_state = @state,
+		    branch_creation_error = @err,
+		    branch_url = CASE WHEN @branch_url::text IS NULL THEN branch_url ELSE @branch_url::text END
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":         sessionID,
+		"org_id":     orgID,
+		"state":      string(state),
+		"err":        errArg,
+		"branch_url": branchURL,
 	})
 	if err != nil {
 		return err

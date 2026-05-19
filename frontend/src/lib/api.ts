@@ -95,8 +95,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return parseSuccessBody<T>(res);
 }
 
-function get<T>(path: string): Promise<T> {
-  return request<T>(path);
+function get<T>(path: string, options?: RequestInit): Promise<T> {
+  return request<T>(path, options);
 }
 
 function post<T>(path: string, body?: unknown): Promise<T> {
@@ -339,7 +339,10 @@ export const api = {
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
-    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(`/api/v1/sessions/${id}/diff`),
+    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(
+      `/api/v1/sessions/${id}/diff`,
+      { cache: 'no-store' },
+    ),
     update: (id: string, body: { title: string }) =>
       patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
@@ -351,6 +354,11 @@ export const api = {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
       } : undefined),
+    createBranch: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/branch`, options ? {
+        ...(options.authorMode ? { author_mode: options.authorMode } : {}),
+        ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
+      } : undefined),
     pushChangesToPR: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr/push`, options ? {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
@@ -359,6 +367,17 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
+    getHumanInputRequests: (sessionId: string, params?: { status?: string; threadId?: string | null }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.threadId) searchParams.set('thread_id', params.threadId);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests${qs ? `?${qs}` : ''}`);
+    },
+    answerHumanInputRequest: (sessionId: string, requestId: string, body: import('./types').HumanInputAnswerBody) =>
+      post<import('./types').SingleResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests/${requestId}/answer`, body),
+    cancelHumanInputRequest: (sessionId: string, requestId: string) =>
+      post<import('./types').SingleResponse<import('./types').HumanInputRequest>>(`/api/v1/sessions/${sessionId}/human-input-requests/${requestId}/cancel`, {}),
     createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string; linear_private?: boolean; linear_state_sync_disabled?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
@@ -421,6 +440,14 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
+    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest'; before?: string; limit?: number } = { position: 'latest' }) => {
+      const searchParams = new URLSearchParams();
+      if (params.position) searchParams.set('position', params.position);
+      if (params.before) searchParams.set('before', params.before);
+      if (params.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
+    },
     getThreadLogs: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
     listThreadFileEvents: (sessionId: string, since?: string) => {
@@ -429,6 +456,14 @@ export const api = {
     },
     listReviewComments: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
+    listReviewLoops: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`),
+    startReviewLoop: (sessionId: string, body: { agent_type?: string; model?: string; max_passes: number }) =>
+      post<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`, body),
+    getReviewLoop: (sessionId: string, loopId: string) =>
+      get<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}`),
+    cancelReviewLoop: (sessionId: string, loopId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}/cancel`, {}),
     createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
       post<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`, body),
     updateReviewComment: (sessionId: string, commentId: string, body: { body?: string; resolved?: boolean }) =>
@@ -464,12 +499,16 @@ export const api = {
           .then(r => r.data),
       stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
       restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),
+      setLifetime: (sessionId: string, body: { duration_seconds: number }) =>
+        patch(`/api/v1/sessions/${sessionId}/preview/lifetime`, body),
       bootstrap: (sessionId: string) =>
         post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/sessions/${sessionId}/preview/bootstrap`)
           .then(r => r.data),
-      extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
+          .then(r => r.data ?? []),
+      logs: (sessionId: string) =>
+        get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs`)
           .then(r => r.data ?? []),
       console: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
@@ -606,7 +645,19 @@ export const api = {
         project_slug: projectSlug,
       }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
-    syncGitHub: () => post<{ data: { repos_synced: number; errors: number } }>('/api/v1/integrations/github/sync'),
+    syncGitHub: () => post<{ data: { repos_synced: number; repos_seen?: number; errors: number } }>('/api/v1/integrations/github/sync'),
+    listGitHubRepositories: (installationId?: number) => {
+      const qs = installationId ? `?installation_id=${encodeURIComponent(String(installationId))}` : '';
+      return get<import('./types').ListResponse<import('./types').GitHubRepositoryClaimCandidate>>(
+        `/api/v1/integrations/github/repositories${qs}`,
+      );
+    },
+    claimGitHubRepositories: (installationId: number, githubIds: number[], allowTransfer = false) =>
+      post<{ data: { claimed: number } }>('/api/v1/integrations/github/repositories/claim', {
+        installation_id: installationId,
+        github_ids: githubIds,
+        allow_transfer: allowTransfer,
+      }),
   },
   codexAuth: {
     // `scope` defaults to "org" on the server; pass "personal" to write the
@@ -718,7 +769,7 @@ export const api = {
     removeMember: (id: string) => del<void>(`/api/v1/team/members/${id}`),
     listInvitations: () =>
       get<import('./types').ListResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations'),
-    createInvitation: (body: { email?: string; github_username?: string; role: string }) =>
+    createInvitation: (body: { email?: string; github_username?: string; acceptance_method?: 'email' | 'github' | 'either'; role: string }) =>
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
     githubInviteStatus: () =>

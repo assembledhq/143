@@ -153,81 +153,83 @@ export function AgentTabStrip({
       <TooltipProvider delayDuration={150}>
         <div className="shrink-0 border-b border-border bg-background px-3 py-2">
           <div className="flex min-w-0 items-center gap-2 min-h-9">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  tabIndex={0}
-                  role="group"
-                  aria-label={`${agentLabel} ${statusLabel}`}
-                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                >
-                  {showUnreadDot ? (
-                    <span
-                      className={cn(
-                        "h-2 w-2 shrink-0 rounded-full bg-primary",
-                        activeThread.status === "running" && !isCancelling && "animate-pulse",
-                      )}
-                      aria-hidden
-                    />
-                  ) : (
-                    <span className="h-2 w-2 shrink-0" aria-hidden />
-                  )}
-                  <span className="truncate text-xs font-medium text-foreground">{activeThread.label}</span>
-                  {isCancelling && (
-                    <Loader2
-                      className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
-                      aria-label="Cancelling"
-                    />
-                  )}
-                  {queued > 0 && (
-                    <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
-                      {queued}
-                    </Badge>
-                  )}
-                  {needsAttention && (
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-                      aria-label="Needs attention"
-                    />
-                  )}
-                  {overlap.length > 0 && (
-                    <AlertTriangle
-                      className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
-                      aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
-                    />
-                  )}
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" className="max-w-sm text-xs">
-                <div className="space-y-1">
-                  <div className="font-medium">
-                    {agentLabel}
-                    <span className="font-normal text-muted-foreground"> — {activeThread.label}</span>
-                  </div>
-                  <div className="text-muted-foreground">
-                    {statusLabel}
-                    {queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}
-                  </div>
-                  {overlap.length > 0 && (
-                    <div className="pt-1">
-                      <div className="font-medium text-amber-700 dark:text-amber-400">
-                        Overlap with another tab:
-                      </div>
-                      <ul className="text-muted-foreground">
-                        {overlap.slice(0, 5).map((path) => (
-                          <li key={path} className="truncate">
-                            {path}
-                          </li>
-                        ))}
-                        {overlap.length > 5 && (
-                          <li className="text-muted-foreground/80">…and {overlap.length - 5} more</li>
+            <div className="flex min-w-0 flex-1 items-center">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    tabIndex={0}
+                    role="group"
+                    aria-label={`${agentLabel} ${statusLabel}`}
+                    className="inline-flex max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  >
+                    {showUnreadDot ? (
+                      <span
+                        className={cn(
+                          "h-2 w-2 shrink-0 rounded-full bg-primary",
+                          activeThread.status === "running" && !isCancelling && "animate-pulse",
                         )}
-                      </ul>
+                        aria-hidden
+                      />
+                    ) : (
+                      <span className="h-2 w-2 shrink-0" aria-hidden />
+                    )}
+                    <span className="truncate text-xs font-medium text-foreground">{activeThread.label}</span>
+                    {isCancelling && (
+                      <Loader2
+                        className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
+                        aria-label="Cancelling"
+                      />
+                    )}
+                    {queued > 0 && (
+                      <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
+                        {queued}
+                      </Badge>
+                    )}
+                    {needsAttention && (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                        aria-label="Needs attention"
+                      />
+                    )}
+                    {overlap.length > 0 && (
+                      <AlertTriangle
+                        className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                        aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
+                      />
+                    )}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-sm text-xs">
+                  <div className="space-y-1">
+                    <div className="font-medium">
+                      {agentLabel}
+                      <span className="font-normal text-muted-foreground"> — {activeThread.label}</span>
                     </div>
-                  )}
-                </div>
-              </TooltipContent>
-            </Tooltip>
+                    <div className="text-muted-foreground">
+                      {statusLabel}
+                      {queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}
+                    </div>
+                    {overlap.length > 0 && (
+                      <div className="pt-1">
+                        <div className="font-medium text-amber-700 dark:text-amber-400">
+                          Overlap with another tab:
+                        </div>
+                        <ul className="text-muted-foreground">
+                          {overlap.slice(0, 5).map((path) => (
+                            <li key={path} className="truncate">
+                              {path}
+                            </li>
+                          ))}
+                          {overlap.length > 5 && (
+                            <li className="text-muted-foreground/80">…and {overlap.length - 5} more</li>
+                          )}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </div>
 
             <ThreadActionsMenu
               threads={tabs}
@@ -288,7 +290,6 @@ export function AgentTabStrip({
                             disabled={isNonInteractive}
                             className={cn(
                               "h-7 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
-                              "after:bg-primary after:bg-none data-[state=active]:after:opacity-100",
                               showArchiveButton && "pr-8",
                               tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
                               isNonInteractive && "cursor-default opacity-60",

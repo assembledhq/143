@@ -31,10 +31,158 @@ import (
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/version"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
+const previewCapacityRetryDelay = 5 * time.Second
+const prePRReviewRetryDelay = 5 * time.Second
+const failureCategoryStaleSandbox = "stale_sandbox"
+
+func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+		explanation := "The worker found a stale sandbox container reference from an earlier interrupted attempt and cleared it, but the job dead-lettered before a fresh attempt could start."
+		nextSteps := []string{
+			"Retry the session to start with a clean sandbox",
+			"Check worker and sandbox logs if this repeats across sessions",
+		}
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after stale sandbox cleanup")
+		}
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after stale sandbox cleanup dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, failureCategoryStaleSandbox, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist stale sandbox failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := failureCategoryStaleSandbox
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after stale sandbox cleanup dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, session.OrgID, session.ID, "failed", 0)
+		}
+	})
+}
+
+func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped because sandbox capacity stayed full until the retry window expired."
+		explanation := "The worker could not acquire local sandbox capacity before the job retry window expired. This can happen during deploys or when other sessions are holding all sandbox slots."
+		nextSteps := []string{
+			"Retry the session when sandbox capacity is available",
+			"Cancel sessions that are no longer needed to free up capacity",
+		}
+		failedSession := session
+		failureCategory := agent.FailureCategorySandboxCapacity
+		failedSession.Status = string(models.SessionStatusFailed)
+		failedSession.Error = &errMsg
+		failedSession.FailureExplanation = &explanation
+		failedSession.FailureCategory = &failureCategory
+		failedSession.FailureNextSteps = nextSteps
+		failedSession.FailureRetryAdvised = true
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after sandbox capacity retries")
+		}
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after sandbox capacity dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, agent.FailureCategorySandboxCapacity, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist sandbox capacity failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := agent.FailureCategorySandboxCapacity
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after sandbox capacity dead-letter")
+			}
+		}
+		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
+			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update project task after sandbox capacity dead-letter")
+			}
+		}
+		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
+			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update automation run after sandbox capacity dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
+		}
+	})
+}
 
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
@@ -66,7 +214,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
+		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
+		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
@@ -92,6 +242,17 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("link_linear_issue_mid_session", newLinkLinearIssueMidSessionHandler(services.Linear, logger))
 		w.Register("refresh_linear_team_keys", newRefreshLinearTeamKeysHandler(services.Linear, logger))
 		w.Register("linear_milestone", newLinearMilestoneHandler(stores, services.Linear, logger))
+		// linear_agent_event handler — wires the inbound agent path
+		// (assign / @-mention triggers a 143 session). Returns nil when
+		// the agent stores aren't wired or required services are missing,
+		// in which case the registration is a silent no-op (the
+		// dispatcher won't even produce these jobs without the same
+		// stores being wired upstream).
+		if services.LinearAgentDeps != nil {
+			if h := newLinearAgentEventHandler(*services.LinearAgentDeps); h != nil {
+				w.Register("linear_agent_event", h)
+			}
+		}
 	}
 	if stores.EvalRuns != nil && stores.EvalTasks != nil {
 		w.Register("run_eval", newRunEvalHandler(stores, services, logger))
@@ -135,8 +296,9 @@ type Stores struct {
 	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
-	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
-	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
+	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
+	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
+	ReviewLoops         *db.SessionReviewLoopStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 }
 
@@ -148,6 +310,7 @@ type MemoryReinforcer interface {
 
 type prCreator interface {
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
@@ -166,6 +329,8 @@ type Services struct {
 	PR              prCreator
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
+	ProjectTasks    agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns  agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
 	PM              pmService
@@ -175,6 +340,16 @@ type Services struct {
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
+	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
+	// triggers a 143 session). It is intentionally independent of the
+	// dispatcher kill switch so queued linear_agent_event jobs continue to
+	// drain when LINEAR_AGENT_ENABLED is turned off.
+	LinearAgentDeps *LinearAgentEventHandlerDeps
+	ReviewLoops     interface {
+		OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error
+		OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error
+		Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+	}
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
 	// or run state transition so the eval-batch detail page can replace its
 	// 5s poll with a Redis-backed SSE. nil-safe: best-effort publish, the
@@ -219,6 +394,7 @@ type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
+	CancelSessionByID(sessionID uuid.UUID) bool
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -276,6 +452,16 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 			Str("session_id", input.SessionID.String()).
 			Msg("processing start_preview job")
 		if err := services.PreviewStarter.StartReservedPreview(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				retryAfter := previewCapacityRetryDelay
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview capacity reached; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			return &FatalError{Err: err}
 		}
 		return nil
@@ -953,9 +1139,10 @@ func parseSlackTimestamp(ts string) time.Time {
 func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID           string `json:"session_id"`
+			OrgID               string `json:"org_id"`
+			ThreadID            string `json:"thread_id"`
+			HumanInputRequestID string `json:"human_input_request_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
@@ -1042,11 +1229,19 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("local sandbox capacity reached; retrying run_agent")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrRecoveryAttemptsExhausted) {
+				logger.Warn().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent recovery exhausted; dead-lettering without another restart")
+				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from
@@ -1055,11 +1250,12 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 				// sees a clean row and creates a fresh sandbox. A short
 				// backoff lets any in-flight cleanup settle.
 				retryAfter := 2 * time.Second
+				registerStaleSandboxDeadLetter(ctx, stores, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("run_agent cleared stale orphan container_id; retrying against the clean row")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
 				// A preview hydrate published the live container first. There is
@@ -1118,13 +1314,52 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 	}
 }
 
+func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal cancel_session payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		accepted := services.Orchestrator.CancelSessionByID(sessionID)
+		if accepted && stores != nil && stores.Sessions != nil {
+			consumeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if _, err := stores.Sessions.ConsumeCancelRequest(consumeCtx, orgID, sessionID); err != nil {
+				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to consume delivered session cancel request")
+			}
+		}
+		if !accepted {
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Msg("cancel_session job found no live local cancel registry entry")
+		}
+		return nil
+	}
+}
+
 // continue_session handler continues a multi-turn session with a follow-up message.
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID           string `json:"session_id"`
+			OrgID               string `json:"org_id"`
+			ThreadID            string `json:"thread_id"`
+			HumanInputRequestID string `json:"human_input_request_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -1156,6 +1391,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
 			Str("thread_id", input.ThreadID).
+			Str("human_input_request_id", input.HumanInputRequestID).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
@@ -1166,6 +1402,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
+		var humanInputRequestID *uuid.UUID
+		if input.HumanInputRequestID != "" {
+			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
+			if parseErr != nil {
+				return fmt.Errorf("parse human input request ID: %w", parseErr)
+			}
+			humanInputRequestID = &parsedHumanInputRequestID
+		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
 		// confidence) onto the thread row. Stays nil when the orchestrator
@@ -1208,6 +1452,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
+					HumanInputRequestID:  humanInputRequestID,
 					ThreadID:             &threadIDLocal,
 					OnTurnComplete: func(result *agent.AgentResult) {
 						lastTurnResult = result
@@ -1219,10 +1464,21 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				}
 			}
 		}
+		if continueOpts == nil && humanInputRequestID != nil {
+			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
+		} else if continueOpts != nil && humanInputRequestID != nil {
+			continueOpts.HumanInputRequestID = humanInputRequestID
+		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				var capacityThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					capacityThreadID = &threadIDLocal
+				}
+				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, session, capacityThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).
@@ -1301,6 +1557,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Msg("failed to release session thread after continue_session failure")
 				}
 				cleanupCancel()
+				if services.ReviewLoops != nil {
+					reviewCleanupCtx, reviewCleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					if reviewErr := services.ReviewLoops.OnThreadTurnFailed(reviewCleanupCtx, orgID, threadID, err.Error()); reviewErr != nil && !errors.Is(reviewErr, reviewloopsvc.ErrNoRunningReviewLoop) {
+						logger.Warn().Err(reviewErr).
+							Str("session_id", sessionID.String()).
+							Str("thread_id", threadID.String()).
+							Msg("failed to mark review loop failed after thread turn failure")
+					}
+					reviewCleanupCancel()
+				}
 			}
 			return err
 		}
@@ -1335,6 +1601,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
 						Msg("failed to persist session thread turn result")
+				}
+				if services.ReviewLoops != nil {
+					if err := services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary); err != nil && !errors.Is(err, reviewloopsvc.ErrNoRunningReviewLoop) {
+						logger.Warn().Err(err).
+							Str("session_id", sessionID.String()).
+							Str("thread_id", threadID.String()).
+							Msg("failed to advance review loop after thread turn")
+					}
 				}
 			} else {
 				if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
@@ -1478,6 +1752,14 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			run.LinkedIssues = links
 		}
 
+		ready, err := ensureAutomationPrePRReview(ctx, stores, services, logger, run)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return nil
+		}
+
 		logger.Info().
 			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
@@ -1559,6 +1841,176 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 		return nil
 	}
+}
+
+// create_branch pushes a completed session snapshot to GitHub without opening
+// a pull request, so a human can fetch and test the branch locally.
+func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			SessionID  string `json:"session_id"`
+			OrgID      string `json:"org_id"`
+			AuthorMode string `json:"author_mode,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal create_branch payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		runID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+
+		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("fetch session: %w", err)
+		}
+		if stores.SessionIssueLinks != nil {
+			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("hydrate linked issues for create_branch: %w", err)
+			}
+			run.LinkedIssues = links
+		}
+
+		logger.Info().
+			Str("session_id", runID.String()).
+			Str("org_id", orgID.String()).
+			Msg("starting create_branch job")
+
+		if err := stores.Sessions.UpdateBranchCreationState(ctx, orgID, runID, models.BranchCreationStatePushing, "", nil); err != nil {
+			logger.Error().Err(err).Msg("failed to mark branch creation as pushing")
+		}
+
+		var params []ghservice.CreatePRParams
+		if input.AuthorMode != "" {
+			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+		}
+
+		branch, branchErr := services.PR.CreateBranch(ctx, &run, params...)
+		if branchErr != nil {
+			if errors.Is(branchErr, ghservice.ErrNoChanges) {
+				logger.Info().Str("session_id", runID.String()).Msg("create_branch: no changes to push")
+			} else {
+				logger.Error().Err(branchErr).Str("session_id", runID.String()).Msg("create_branch failed")
+			}
+			msg := userFacingPRError(branchErr)
+			if stateErr := stores.Sessions.UpdateBranchCreationState(ctx, orgID, runID, models.BranchCreationStateFailed, msg, nil); stateErr != nil {
+				logger.Error().Err(stateErr).Msg("failed to mark branch creation as failed")
+			}
+			if shouldDeadLetterPRError(branchErr) {
+				return &FatalError{Err: branchErr}
+			}
+			return branchErr
+		}
+
+		if stateErr := stores.Sessions.UpdateBranchCreationState(ctx, orgID, runID, models.BranchCreationStateSucceeded, "", &branch.URL); stateErr != nil {
+			logger.Error().Err(stateErr).Msg("failed to mark branch creation as succeeded")
+		}
+		return nil
+	}
+}
+
+func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, run models.Session) (bool, error) {
+	if run.AutomationRunID == nil {
+		return true, nil
+	}
+	if stores == nil || stores.AutomationRuns == nil {
+		return true, nil
+	}
+	automationRun, err := stores.AutomationRuns.GetByRunID(ctx, run.OrgID, *run.AutomationRunID)
+	if err != nil {
+		return false, fmt.Errorf("fetch automation run for pre-pr review: %w", err)
+	}
+	passCount, err := automationPrePRReviewPasses(automationRun.ConfigSnapshot)
+	if err != nil {
+		return false, err
+	}
+	if passCount == 0 {
+		return true, nil
+	}
+	if stores.ReviewLoops == nil || services == nil || services.ReviewLoops == nil {
+		return false, fmt.Errorf("pre-pr review is enabled but review loop service is unavailable")
+	}
+	loop, err := stores.ReviewLoops.GetLatestLoopByAutomationRun(ctx, run.OrgID, *run.AutomationRunID)
+	if err == nil {
+		switch loop.Status {
+		case models.ReviewLoopStatusClean:
+			return true, nil
+		case models.ReviewLoopStatusRunning:
+			logger.Info().
+				Str("session_id", run.ID.String()).
+				Str("review_loop_id", loop.ID.String()).
+				Msg("open_pr waiting for pre-pr review loop")
+			retryAfter := prePRReviewRetryDelay
+			return false, &RetryableError{
+				Err:        fmt.Errorf("pre-pr review loop is still running"),
+				RetryAfter: &retryAfter,
+			}
+		case models.ReviewLoopStatusNeedsHumanDecision:
+			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review needs human decision."); stateErr != nil {
+				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
+			}
+			return false, nil
+		default:
+			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
+				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
+			}
+			return false, nil
+		}
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("fetch pre-pr review loop: %w", err)
+	}
+
+	_, err = services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
+		AgentType:       run.AgentType,
+		Model:           stringValue(run.ModelOverride),
+		MaxPasses:       passCount,
+		Source:          models.ReviewLoopSourceAutomation,
+		AutomationRunID: run.AutomationRunID,
+		StartedByUserID: run.TriggeredByUserID,
+		ReviewRequired:  true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("start pre-pr review loop: %w", err)
+	}
+	logger.Info().
+		Str("session_id", run.ID.String()).
+		Str("automation_run_id", run.AutomationRunID.String()).
+		Int("max_passes", passCount).
+		Msg("started pre-pr review loop")
+	return false, nil
+}
+
+func automationPrePRReviewPasses(config json.RawMessage) (int, error) {
+	if len(config) == 0 {
+		return 0, nil
+	}
+	var snapshot struct {
+		PrePRReviewLoops *int `json:"pre_pr_review_loops"`
+	}
+	if err := json.Unmarshal(config, &snapshot); err != nil {
+		return 0, fmt.Errorf("parse automation config snapshot for pre-pr review: %w", err)
+	}
+	if snapshot.PrePRReviewLoops == nil {
+		return 0, nil
+	}
+	if *snapshot.PrePRReviewLoops < 0 || *snapshot.PrePRReviewLoops > reviewloopsvc.MaxReviewPasses {
+		return 0, fmt.Errorf("pre_pr_review_loops must be between 0 and %d", reviewloopsvc.MaxReviewPasses)
+	}
+	return *snapshot.PrePRReviewLoops, nil
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // userFacingPRError collapses an internal error into a short string safe for
@@ -3160,6 +3612,15 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
 			}
 			return mapLinearWriteErrorToRetry(err)
+		}
+		// HandleAgentMilestone is a no-op for sessions not triggered through
+		// the inbound agent path. It's deliberately last + best-effort: the
+		// durable handles (attachment + rolling comment) are what
+		// HandleMilestone wrote above, and an agent-stream emit failure
+		// must not retry-cascade the milestone job and risk re-firing the
+		// idempotent-but-not-free attachment update.
+		if err := svc.HandleAgentMilestone(ctx, in); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("HandleAgentMilestone failed")
 		}
 		return nil
 	}

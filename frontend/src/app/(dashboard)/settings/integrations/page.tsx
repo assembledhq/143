@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageHeader } from "@/components/page-header";
@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   AlertDialog,
+  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -23,11 +24,9 @@ import {
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { queryKeys } from "@/lib/query-keys";
-import {
-  useDisconnectRepository,
-  useReconnectRepository,
-} from "@/hooks/use-repository-connection";
 import { useAuth } from "@/hooks/use-auth";
+import { Badge } from "@/components/ui/badge";
+import type { GitHubRepositoryClaimCandidate } from "@/lib/types";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
@@ -37,6 +36,143 @@ type SlackChannelsResp = { data: SlackChannel[] } | undefined;
 // the same referential identity - `useAutosave` throws in dev when two
 // callers register different coalesce fns against the same queryKey.
 const coalesceSlackChannels = (_a: string[], b: string[]): string[] => b;
+
+function claimStatusLabel(repo: GitHubRepositoryClaimCandidate): string {
+  switch (repo.status) {
+    case "owned_by_current_org":
+      return "Connected";
+    case "owned_by_other_org":
+      return repo.owner_org_name ? `Owned by ${repo.owner_org_name}` : "Owned by another org";
+    case "disconnected_in_current_org":
+      return "Disconnected";
+    case "unclaimed":
+    default:
+      return "Available";
+  }
+}
+
+function GitHubRepositoryClaims({
+  installationId,
+  enabled,
+}: {
+  installationId?: number;
+  enabled: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const [transferRepo, setTransferRepo] = useState<GitHubRepositoryClaimCandidate | null>(null);
+  const { data, isLoading, error } = useQuery({
+    queryKey: queryKeys.integrations.githubRepositories(installationId),
+    queryFn: () => api.integrations.listGitHubRepositories(installationId),
+    enabled: enabled && !!installationId,
+  });
+  const claimMutation = useMutation({
+    mutationFn: ({ githubId, allowTransfer }: { githubId: number; allowTransfer: boolean }) =>
+      api.integrations.claimGitHubRepositories(installationId ?? 0, [githubId], allowTransfer),
+    onSuccess: () => {
+      setTransferRepo(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.githubRepositories(installationId) });
+    },
+  });
+
+  if (!enabled || !installationId) return null;
+
+  const repos = data?.data ?? [];
+  const actionable = repos.filter((repo) =>
+    repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (repo.status === "owned_by_other_org" && repo.can_transfer)
+  );
+  const claimError = claimMutation.error;
+  const needsGitHubUserAuth = claimError instanceof ApiError && claimError.code === "GITHUB_USER_AUTH_REQUIRED";
+
+  return (
+    <>
+      <div className="mt-3">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading repositories...</p>
+        ) : error ? (
+          <p className="text-sm text-destructive">
+            {error instanceof Error ? error.message : "Failed to load GitHub repositories."}
+          </p>
+        ) : repos.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
+        ) : (
+          <div className="space-y-2">
+            {repos.map((repo) => {
+              const transfer = repo.status === "owned_by_other_org";
+              const canClaim = repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (transfer && repo.can_transfer);
+              const pending = claimMutation.isPending && claimMutation.variables?.githubId === repo.github_id;
+              return (
+                <div key={repo.github_id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{repo.full_name}</div>
+                    <div className="mt-1 flex items-center gap-2">
+                      <Badge variant={repo.status === "owned_by_current_org" ? "secondary" : "outline"} className="text-xs">
+                        {claimStatusLabel(repo)}
+                      </Badge>
+                      {repo.private && <span className="text-xs text-muted-foreground">Private</span>}
+                    </div>
+                  </div>
+                  {canClaim ? (
+                    <Button
+                      size="sm"
+                      variant={transfer ? "outline" : "default"}
+                      loading={pending}
+                      disabled={pending}
+                      onClick={() => {
+                        if (transfer) setTransferRepo(repo);
+                        else claimMutation.mutate({ githubId: repo.github_id, allowTransfer: false });
+                      }}
+                    >
+                      {transfer ? "Transfer" : "Claim"}
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
+            {claimMutation.isError && (
+              <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <p className="text-sm text-destructive">
+                  {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
+                </p>
+                {needsGitHubUserAuth && (
+                  <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
+                    Connect GitHub account
+                  </Button>
+                )}
+              </div>
+            )}
+            {actionable.length === 0 && (
+              <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>
+            )}
+          </div>
+        )}
+      </div>
+      <AlertDialog open={!!transferRepo} onOpenChange={(open) => !open && setTransferRepo(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Transfer {transferRepo?.full_name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will disconnect the repository from {transferRepo?.owner_org_name ?? "the current owning organization"} and make this organization the active owner. Sessions, settings, automations, and learned context will not move.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={claimMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={claimMutation.isPending || !transferRepo}
+              onClick={() => {
+                if (!transferRepo) return;
+                claimMutation.mutate({ githubId: transferRepo.github_id, allowTransfer: true });
+              }}
+            >
+              Transfer
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
 
 function SlackChannelPicker() {
   const { data: channelsResp, isLoading } = useQuery<{ data: SlackChannel[] }>({
@@ -201,16 +337,7 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
-  // Fetch disconnected repos too so the user has a "Reconnect" affordance —
-  // without this, a user-disconnected repo becomes a ghost with no discoverable
-  // path back to active.
-  const { data: reposResp } = useQuery({
-    queryKey: ["repositories", { includeDisconnected: true }],
-    queryFn: () => api.repositories.list({ includeDisconnected: true }),
-  });
   const disconnectMutation = useDisconnectIntegration();
-  const disconnectRepoMutation = useDisconnectRepository();
-  const reconnectRepoMutation = useReconnectRepository();
 
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
   const [notionError, setNotionError] = useState<string | null>(null);
@@ -269,17 +396,6 @@ export default function IntegrationsPage() {
     (integration) => integration.provider === "circleci" && integration.status === "active"
   );
 
-  const githubRepos = (reposResp?.data ?? []).map((r) => ({
-    id: r.id,
-    full_name: r.full_name,
-    status: r.status,
-  }));
-  const pendingRepoID = disconnectRepoMutation.isPending
-    ? (disconnectRepoMutation.variables ?? null)
-    : reconnectRepoMutation.isPending
-      ? (reconnectRepoMutation.variables ?? null)
-      : null;
-
   return (
     <PageContainer size="default">
       <div className="space-y-6">
@@ -294,10 +410,14 @@ export default function IntegrationsPage() {
       )}
       <AllIntegrationCards
         githubConnected={githubConnected}
-        githubRepos={githubRepos}
-        onDisconnectRepo={(id) => disconnectRepoMutation.mutate(id)}
-        onReconnectRepo={(id) => reconnectRepoMutation.mutate(id)}
-        pendingRepoID={pendingRepoID}
+        githubExtra={
+          isAdmin && githubConnected ? (
+            <GitHubRepositoryClaims
+              installationId={githubIntegration?.github_installation_id}
+              enabled={githubConnected}
+            />
+          ) : undefined
+        }
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}

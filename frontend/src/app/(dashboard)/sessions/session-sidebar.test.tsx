@@ -356,6 +356,29 @@ describe('SessionSidebar', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
+  it('uses the same row padding frame for the new-session draft and normal sessions', async () => {
+    mockPathname = '/sessions/new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Existing session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const draftOption = await screen.findByRole('option', { name: 'New session draft' });
+    const normalOption = (await screen.findByText('Existing session')).closest('[role="option"]');
+    expect(normalOption).not.toBeNull();
+
+    expect(draftOption).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+
+    const draftLink = draftOption.querySelector('a');
+    const normalLink = normalOption!.querySelector('a');
+    expect(draftLink).not.toBeNull();
+    expect(normalLink).not.toBeNull();
+    expect(draftLink!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+    expect(normalLink!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+  });
+
   it('clears search on Escape key', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Alpha fix' }),
@@ -953,6 +976,88 @@ describe('SessionSidebar', () => {
     expect(screen.getByRole('link', { name: 'New session' })).toHaveAttribute(
       'href',
       '/sessions/new?people=all&status=active&repo=repo-1&search=Linked',
+    );
+  });
+
+  it('selects the new-session draft row without highlighting a saved session', async () => {
+    mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Saved session below draft' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Saved session below draft');
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute(
+      'aria-activedescendant',
+      'session-sidebar-option-new-session',
+    );
+
+    const draftOption = screen.getByRole('option', { name: 'New session draft' });
+    expect(draftOption).toHaveAttribute('aria-selected', 'true');
+    expect(draftOption).toHaveClass('p-1');
+
+    const savedOption = screen.getByText('Saved session below draft').closest('[role="option"]');
+    expect(savedOption).toHaveAttribute('aria-selected', 'false');
+    expect(savedOption?.className).not.toContain('ring-ring/20');
+  });
+
+  it('clears stale saved-session focus when navigating into the new-session draft', async () => {
+    const user = userEvent.setup();
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'First saved session' }),
+      makeSession({ id: 's2', result_summary: 'Second saved session' }),
+    ]);
+
+    const { rerender } = renderWithProviders(<SessionSidebar />);
+    await screen.findByText('First saved session');
+
+    await user.keyboard('j');
+    expect(screen.getByText('Second saved session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+
+    mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
+    rerender(<SessionSidebar />);
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute(
+      'aria-activedescendant',
+      'session-sidebar-option-new-session',
+    );
+    expect(screen.getByRole('option', { name: 'New session draft' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByText('Second saved session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'false',
+    );
+  });
+
+  it('removes draft selected styling after keyboard navigation moves to a saved session', async () => {
+    const user = userEvent.setup();
+    mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Keyboard-selected saved session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Keyboard-selected saved session');
+
+    await user.keyboard('j');
+
+    const draftOption = screen.getByRole('option', { name: 'New session draft' });
+    expect(draftOption).toHaveAttribute('aria-selected', 'false');
+    expect(draftOption.querySelector('a')?.className).not.toContain('ring-primary/10');
+    expect(screen.getByText('Keyboard-selected saved session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
     );
   });
 

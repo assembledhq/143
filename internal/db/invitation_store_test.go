@@ -14,7 +14,7 @@ import (
 )
 
 var invitationColumns = []string{
-	"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
+	"id", "org_id", "email", "github_username", "acceptance_method", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
 }
 
 func TestInvitationStore_Create(t *testing.T) {
@@ -32,17 +32,18 @@ func TestInvitationStore_Create(t *testing.T) {
 
 	email := "new@example.com"
 	inv := &models.Invitation{
-		OrgID:     orgID,
-		Email:     &email,
-		Role:      "member",
-		InvitedBy: invitedBy,
-		Token:     "tok_abc123",
-		ExpiresAt: now.Add(72 * time.Hour),
+		OrgID:            orgID,
+		Email:            &email,
+		AcceptanceMethod: models.InvitationAcceptanceMethodEmail,
+		Role:             "member",
+		InvitedBy:        invitedBy,
+		Token:            "tok_abc123",
+		ExpiresAt:        now.Add(72 * time.Hour),
 	}
 
 	mock.ExpectQuery("INSERT INTO invitations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "status", "created_at"}).
 				AddRow(generatedID, "pending", now),
@@ -56,6 +57,39 @@ func TestInvitationStore_Create(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestInvitationStore_Create_DefaultsEmptyAcceptanceMethod(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+	now := time.Now()
+	email := "new@example.com"
+	inv := &models.Invitation{
+		OrgID:     uuid.New(),
+		Email:     &email,
+		Role:      "member",
+		InvitedBy: uuid.New(),
+		Token:     "tok_default",
+		ExpiresAt: now.Add(72 * time.Hour),
+	}
+
+	mock.ExpectQuery("INSERT INTO invitations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "status", "created_at"}).
+				AddRow(uuid.New(), "pending", now),
+		)
+
+	err = store.Create(context.Background(), inv)
+	require.NoError(t, err, "Create should persist invitations with legacy zero-value acceptance methods")
+	require.Equal(t, models.InvitationAcceptanceMethodEither, inv.AcceptanceMethod, "Create should normalize empty acceptance methods before insert")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestInvitationStore_Create_Error(t *testing.T) {
 	t.Parallel()
 
@@ -67,17 +101,18 @@ func TestInvitationStore_Create_Error(t *testing.T) {
 
 	email := "new@example.com"
 	inv := &models.Invitation{
-		OrgID:     uuid.New(),
-		Email:     &email,
-		Role:      "member",
-		InvitedBy: uuid.New(),
-		Token:     "tok_abc",
-		ExpiresAt: time.Now().Add(72 * time.Hour),
+		OrgID:            uuid.New(),
+		Email:            &email,
+		AcceptanceMethod: models.InvitationAcceptanceMethodEmail,
+		Role:             "member",
+		InvitedBy:        uuid.New(),
+		Token:            "tok_abc",
+		ExpiresAt:        time.Now().Add(72 * time.Hour),
 	}
 
 	mock.ExpectQuery("INSERT INTO invitations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("unique violation"))
 
 	err = store.Create(context.Background(), inv)
@@ -102,7 +137,7 @@ func TestInvitationStore_GetByToken(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(id, orgID, strPtr("user@example.com"), nil, "member", invitedBy, "tok_xyz", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(id, orgID, strPtr("user@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", invitedBy, "tok_xyz", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	inv, err := store.GetByToken(context.Background(), "tok_xyz")
@@ -147,8 +182,8 @@ func TestInvitationStore_ListPendingByOrg(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(uuid.New(), orgID, strPtr("a@example.com"), nil, "member", uuid.New(), "tok_a", "pending", now.Add(72*time.Hour), now, nil).
-				AddRow(uuid.New(), orgID, strPtr("b@example.com"), nil, "admin", uuid.New(), "tok_b", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(uuid.New(), orgID, strPtr("a@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok_a", "pending", now.Add(72*time.Hour), now, nil).
+				AddRow(uuid.New(), orgID, strPtr("b@example.com"), nil, models.InvitationAcceptanceMethodEither, "admin", uuid.New(), "tok_b", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	invs, err := store.ListPendingByOrg(context.Background(), orgID)
@@ -271,7 +306,7 @@ func TestInvitationStore_GetByID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(id, orgID, strPtr("invitee@example.com"), nil, "member", invitedBy, "tok_abc", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(id, orgID, strPtr("invitee@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", invitedBy, "tok_abc", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	inv, err := store.GetByID(context.Background(), id)

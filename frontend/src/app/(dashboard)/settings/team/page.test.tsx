@@ -41,6 +41,7 @@ const {
       {
         id: 'inv-1',
         email: 'new@example.com',
+        acceptance_method: 'email',
         role: 'member',
         status: 'pending',
         invited_by: { id: 'user-1', name: 'Admin User' },
@@ -191,6 +192,33 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
   });
 
+  it('labels expired invitations so admins know the invitee cannot accept them', async () => {
+    listInvitationsMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'inv-expired',
+          email: null,
+          github_username: 'malfrine-assembled',
+          acceptance_method: 'github',
+          role: 'member',
+          status: 'expired',
+          invited_by: { id: 'user-1', name: 'Admin User' },
+          expires_at: '2026-02-01T00:00:00Z',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    expect(await screen.findByText('@malfrine-assembled')).toBeInTheDocument();
+    expect(screen.getByText('Expired')).toBeInTheDocument();
+    expect(
+      screen.getByText('The invitee will not see this invite. Revoke it and send a new one.'),
+    ).toBeInTheDocument();
+  });
+
   it('renders compact member metadata labels for mobile layouts', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
@@ -240,6 +268,27 @@ describe('TeamSettingsPage', () => {
     expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
   });
 
+  it('labels the member role as Engineer while submitting the member value', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(await screen.findByLabelText('Role'));
+
+    expect(await screen.findByRole('option', { name: 'Engineer' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Member' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Role')).toHaveTextContent('Engineer');
+
+    await user.click(screen.getByRole('option', { name: 'Engineer' }));
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'engineer@test.com');
+    await user.click(screen.getByRole('button', { name: 'Add email' }));
+    await user.click(screen.getByRole('button', { name: 'Send invite to engineer@test.com' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({ email: 'engineer@test.com', role: 'member' });
+    });
+  });
+
   it('offers builder in the member role selector for admins', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
@@ -247,6 +296,21 @@ describe('TeamSettingsPage', () => {
     await user.click(await screen.findByLabelText('Role for Member User'));
 
     expect(await screen.findByRole('option', { name: 'Builder' })).toBeInTheDocument();
+  });
+
+  it('labels existing member rows as Engineer', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    const roleSelectTrigger = await screen.findByRole('combobox', {
+      name: 'Role for Member User',
+    });
+
+    expect(roleSelectTrigger).toHaveTextContent('Engineer');
+
+    await user.click(roleSelectTrigger);
+    expect(await screen.findByRole('option', { name: 'Engineer' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Member' })).not.toBeInTheDocument();
   });
 
   it('shows informative self action text instead of a dash placeholder', async () => {
@@ -344,8 +408,8 @@ describe('TeamSettingsPage', () => {
 
     // Both admin badge and select option contain "Admin" text
     expect(screen.getAllByText('Admin').length).toBeGreaterThanOrEqual(1);
-    // Other user should show "Member" role
-    expect(screen.getAllByText('Member').length).toBeGreaterThanOrEqual(1);
+    // Other user should show the Engineer label for the persisted member role.
+    expect(screen.getAllByText('Engineer').length).toBeGreaterThanOrEqual(1);
   });
 
   it('prompts for confirmation before changing another member role', async () => {
@@ -447,6 +511,33 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
         github_username: 'octocat',
+        acceptance_method: 'github',
+        role: 'member',
+      });
+    });
+  });
+
+  it('sends GitHub invites with a durable notification email while requiring GitHub acceptance', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    await user.type(screen.getByPlaceholderText('octocat'), 'octocat');
+    await user.type(screen.getByLabelText('Notification email'), 'octo@example.com');
+    await user.click(screen.getByRole('button', { name: 'Add GitHub username' }));
+
+    expect(await screen.findByText('@octocat')).toBeInTheDocument();
+    expect(screen.getByText(/octo@example\.com/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        email: 'octo@example.com',
+        github_username: 'octocat',
+        acceptance_method: 'github',
         role: 'member',
       });
     });
@@ -492,6 +583,7 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
         github_username: 'octocat',
+        acceptance_method: 'github',
         role: 'member',
       });
     });
@@ -524,6 +616,7 @@ describe('TeamSettingsPage', () => {
           id: 'inv-2',
           email: null,
           github_username: 'octocat',
+          acceptance_method: 'github',
           role: 'member',
           status: 'pending',
           invited_by: { id: 'user-1', name: 'Admin User' },

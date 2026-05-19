@@ -3,6 +3,7 @@
 package providers
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -873,18 +875,122 @@ func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path s
 }
 
 // WriteFile writes data to a file inside the sandbox.
-func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
-	var stderr bytes.Buffer
+func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, filePath string, data []byte) error {
+	cleanPath := filepath.ToSlash(filepath.Clean(filePath))
+	if cleanPath == "." {
+		return fmt.Errorf("write file %s: invalid path", filePath)
+	}
+	relPath := strings.TrimPrefix(cleanPath, "/")
+	if relPath == "" {
+		return fmt.Errorf("write file %s: invalid path", filePath)
+	}
+	for _, part := range strings.Split(relPath, "/") {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("write file %s: invalid path", filePath)
+		}
+	}
+	extractDir, archiveName := writeFileTarTarget(sb, cleanPath, relPath)
 
-	cmd := fmt.Sprintf("printf '%%s' '%s' > '%s'", shellEscape(string(data)), shellEscape(path))
-	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, &stderr)
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	if err := writeTarDirs(tw, path.Dir(archiveName)); err != nil {
+		return fmt.Errorf("write file %s: build tar dirs: %w", filePath, err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: int64(len(data))}); err != nil {
+		return fmt.Errorf("write file %s: build tar header: %w", filePath, err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		return fmt.Errorf("write file %s: build tar body: %w", filePath, err)
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("write file %s: close tar: %w", filePath, err)
+	}
+
+	execCfg := container.ExecOptions{
+		Cmd:          []string{"tar", "xf", "-", "-C", extractDir},
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
 	if err != nil {
-		return fmt.Errorf("write file %s: %w", path, err)
+		return fmt.Errorf("write file %s: %w", filePath, err)
 	}
-	if exitCode != 0 {
-		return fmt.Errorf("write file %s: exited with code %d: %s", path, exitCode, stderr.String())
+	attachResp, err := d.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("write file %s: attach: %w", filePath, err)
 	}
+	defer attachResp.Close()
+	if _, err := io.Copy(attachResp.Conn, &archive); err != nil {
+		return fmt.Errorf("write file %s: stream tar: %w", filePath, err)
+	}
+	_ = attachResp.CloseWrite()
+	stderrBuf := newCappedBuffer(tarStderrCap)
+	_, _ = stdcopy.StdCopy(io.Discard, stderrBuf, attachResp.Reader)
+	inspect, err := waitForExecExit(ctx, d.client, execResp.ID)
+	if err != nil {
+		return fmt.Errorf("write file %s: inspect tar: %w", filePath, err)
+	}
+	if inspect.ExitCode != 0 {
+		return fmt.Errorf("write file %s: tar exited with code %d%s", filePath, inspect.ExitCode, formatStderrSuffix(stderrBuf))
+	}
+	return nil
+}
 
+func writeFileTarTarget(sb *agent.Sandbox, cleanPath, fallbackRelPath string) (string, string) {
+	if !strings.HasPrefix(cleanPath, "/") || sb == nil {
+		return "/", fallbackRelPath
+	}
+	bestRoot := ""
+	for _, root := range []string{sb.WorkDir, sb.HomeDir} {
+		root = cleanContainerRoot(root)
+		if root == "" || root == "/" {
+			continue
+		}
+		if strings.HasPrefix(cleanPath, root+"/") && len(root) > len(bestRoot) {
+			bestRoot = root
+		}
+	}
+	if bestRoot == "" {
+		if strings.HasPrefix(cleanPath, "/") {
+			return path.Dir(cleanPath), path.Base(cleanPath)
+		}
+		return "/", fallbackRelPath
+	}
+	return bestRoot, strings.TrimPrefix(cleanPath, bestRoot+"/")
+}
+
+func cleanContainerRoot(root string) string {
+	root = filepath.ToSlash(filepath.Clean(strings.TrimSpace(root)))
+	if !strings.HasPrefix(root, "/") {
+		return ""
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(root, "/"), "/") {
+		if part == "" || part == "." || part == ".." {
+			return ""
+		}
+	}
+	return root
+}
+
+func writeTarDirs(tw *tar.Writer, dir string) error {
+	if dir == "." || dir == "/" || dir == "" {
+		return nil
+	}
+	var current string
+	for _, part := range strings.Split(dir, "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current = current + "/" + part
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: current + "/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

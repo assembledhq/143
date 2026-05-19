@@ -146,7 +146,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	}()
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	if _, err := adapter.Execute(execCtx, sb, params.prompt, logCh); err != nil {
+	if _, err := s.executeAgentWithCredentialFallback(ctx, params.orgID, agentType, settings, sbCfg, sb, adapter, execCtx, params.prompt, logCh); err != nil {
 		exitReason = containerExitReason(ctx, err)
 		close(logCh)
 		logWg.Wait()

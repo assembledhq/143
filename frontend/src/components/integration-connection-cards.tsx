@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { RefreshCw, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
@@ -38,6 +38,7 @@ type RepoCallbacks = {
 type SourceControlIntegrationCardProps = IntegrationCallbacks & RepoCallbacks & {
   githubConnected: boolean;
   githubRepos?: GithubRepoChip[];
+  githubExtra?: ReactNode;
   onConnectGitHub: () => void;
   onSyncRepos?: () => void;
   isSyncing?: boolean;
@@ -407,6 +408,7 @@ export function SourceControlIntegrationCard({
   onDisconnectRepo,
   onReconnectRepo,
   pendingRepoID,
+  githubExtra,
 }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
@@ -420,12 +422,15 @@ export function SourceControlIntegrationCard({
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           extra: githubConnected ? (
-            <ConnectedReposList
-              repos={githubRepos}
-              onDisconnectRepo={onDisconnectRepo}
-              onReconnectRepo={onReconnectRepo}
-              pendingRepoID={pendingRepoID}
-            />
+            <>
+              <ConnectedReposList
+                repos={githubRepos}
+                onDisconnectRepo={onDisconnectRepo}
+                onReconnectRepo={onReconnectRepo}
+                pendingRepoID={pendingRepoID}
+              />
+              {githubExtra}
+            </>
           ) : undefined,
           action: (
             <div className="flex items-center gap-1.5">
@@ -527,12 +532,15 @@ export function AllIntegrationCards(props: AllIntegrationCardsProps) {
     logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
     badge: <Badge variant="outline" className="text-xs">Required</Badge>,
     extra: props.githubConnected ? (
-      <ConnectedReposList
-        repos={props.githubRepos ?? []}
-        onDisconnectRepo={props.readOnly ? undefined : props.onDisconnectRepo}
-        onReconnectRepo={props.readOnly ? undefined : props.onReconnectRepo}
-        pendingRepoID={props.pendingRepoID}
-      />
+      <>
+        <ConnectedReposList
+          repos={props.githubRepos ?? []}
+          onDisconnectRepo={props.readOnly ? undefined : props.onDisconnectRepo}
+          onReconnectRepo={props.readOnly ? undefined : props.onReconnectRepo}
+          pendingRepoID={props.pendingRepoID}
+        />
+        {props.githubExtra}
+      </>
     ) : undefined,
     action: (
       <IntegrationAction

@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -310,6 +311,37 @@ func TestParseAgentStreamLine_EmptyErrorFallsBackToUnknown(t *testing.T) {
 	require.Equal(t, "error", logs[0].Level)
 	require.Equal(t, "unknown error", logs[0].Message,
 		"empty error events must surface a placeholder instead of a blank message")
+}
+
+func TestParseAgentStreamLine_NormalizesActionChoiceHumanInput(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 5)
+	result := &agent.AgentResult{}
+	var summary []string
+	var last string
+
+	parseAgentStreamLine(
+		[]byte(`{"type":"action_choice","request_id":"action-1","title":"Choose next step","content":"The agent needs direction.","actions":[{"id":"fix_tests","label":"Fix tests","description":"Update the failing suite"},{"id":"open_pr","label":"Open PR","kind":"positive"}],"response_schema":{"type":"object","required":["decision"],"properties":{"decision":{"type":"string"}}}}`),
+		ampStreamingConfig.ParseConfig,
+		result,
+		logCh,
+		&summary,
+		&last,
+	)
+	close(logCh)
+
+	logs := drain(logCh)
+	require.True(t, result.RequiresHumanInput, "generic action_choice events should pause the run for human input")
+	require.Len(t, logs, 1, "generic action_choice events should emit one normalized human-input log")
+	require.Equal(t, "human_input", logs[0].Level, "generic action_choice events should use the normalized human-input log level")
+	require.Equal(t, "The agent needs direction.", logs[0].Message, "generic action_choice content should become the user-visible request body")
+	require.Equal(t, string(models.HumanInputRequestKindActionChoice), logs[0].Metadata["request_kind"], "generic action_choice events should normalize the request kind")
+	require.NotNil(t, logs[0].HumanInput, "generic action_choice logs should include a durable request payload")
+	require.Equal(t, "action-1", logs[0].HumanInput.ProviderRequestID, "generic action_choice payload should retain the provider request id")
+	require.Equal(t, models.HumanInputRequestKindActionChoice, logs[0].HumanInput.Kind, "generic action_choice payload should use the action choice kind")
+	require.Equal(t, "Fix tests", logs[0].HumanInput.Choices[0].Label, "generic action_choice payload should retain action labels")
+	require.JSONEq(t, `{"type":"object","required":["decision"],"properties":{"decision":{"type":"string"}}}`, string(logs[0].HumanInput.ResponseSchema), "generic action_choice payload should retain the response schema")
 }
 
 // TestParseAgentStreamLine_OutputOnlyTokenUsageAccepted covers a reported bug:

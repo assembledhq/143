@@ -121,3 +121,69 @@ func (s *SessionQuestionStore) AnswerLatestPendingBySession(ctx context.Context,
 	}
 	return question, nil
 }
+
+func (s *SessionQuestionStore) AnswerLatestPendingBySessionAndQuestion(ctx context.Context, orgID, sessionID uuid.UUID, questionText, answerText string, answeredBy uuid.UUID) (models.SessionQuestion, error) {
+	query := `
+		UPDATE session_questions
+		SET answer_text = @answer_text, answered_by = @answered_by, answered_at = now(), status = 'answered'
+		WHERE id = (
+			SELECT id
+			FROM session_questions
+			WHERE session_id = @session_id
+			  AND org_id = @org_id
+			  AND status = 'pending'
+			  AND question_text = @question_text
+			ORDER BY created_at DESC
+			LIMIT 1
+		)
+		RETURNING id, session_id, org_id, question_text, options, context,
+		          blocks_phase, answer_text, answered_by, answered_at, status, created_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"session_id":    sessionID,
+		"org_id":        orgID,
+		"question_text": questionText,
+		"answer_text":   answerText,
+		"answered_by":   answeredBy,
+	})
+	if err != nil {
+		return models.SessionQuestion{}, fmt.Errorf("answer matching pending session question: %w", err)
+	}
+	question, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionQuestion])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.SessionQuestion{}, pgx.ErrNoRows
+		}
+		return models.SessionQuestion{}, fmt.Errorf("collect answered matching session question: %w", err)
+	}
+	return question, nil
+}
+
+func (s *SessionQuestionStore) SkipLatestPendingBySessionAndQuestion(ctx context.Context, orgID, sessionID uuid.UUID, questionText string) error {
+	query := `
+		UPDATE session_questions
+		SET status = 'skipped'
+		WHERE id = (
+			SELECT id
+			FROM session_questions
+			WHERE session_id = @session_id
+			  AND org_id = @org_id
+			  AND status = 'pending'
+			  AND question_text = @question_text
+			ORDER BY created_at DESC
+			LIMIT 1
+		)`
+
+	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"session_id":    sessionID,
+		"org_id":        orgID,
+		"question_text": questionText,
+	})
+	if err != nil {
+		return fmt.Errorf("skip matching pending session question: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
