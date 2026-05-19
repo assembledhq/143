@@ -408,7 +408,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		})
 		if capErr != nil {
 			return acquireSandboxResult{
-				ErrCode: "PREVIEW_CAPACITY_REACHED",
+				ErrCode: preview.PreviewCapacityCode,
 				Err:     fmt.Errorf("%w: %w", preview.ErrPreviewCapacity, capErr),
 			}
 		}
@@ -574,7 +574,7 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error(), err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
 		}
 		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
@@ -640,7 +640,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error(), err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
 		}
 		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
@@ -661,7 +661,11 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 		// hydratedContainerID is "" — either we never hydrated, or
 		// acquireSandbox's race-loss branch already destroyed the local
 		// container before returning.
-		h.manager.AbortReservation(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		abortReason := fmt.Sprintf("acquire sandbox: %v", acq.Err)
+		if errors.Is(acq.Err, preview.ErrPreviewCapacity) {
+			abortReason = preview.PreviewCapacityMessage
+		}
+		h.manager.AbortReservation(ctx, reservation, "", abortReason)
 		switch acq.ErrCode {
 		case "SNAPSHOT_EXPIRED":
 			return nil, newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
@@ -671,8 +675,8 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		case "SANDBOX_BUSY":
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "PREVIEW_CAPACITY_REACHED":
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, acq.Err.Error(), acq.Err)
+		case preview.PreviewCapacityCode:
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, preview.PreviewCapacityMessage, acq.Err)
 		default:
 			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
 		}
