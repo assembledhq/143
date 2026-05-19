@@ -1371,9 +1371,10 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, "capacity errors must map to 503")
 	var resp models.ErrorResponse
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	require.Equal(t, "PREVIEW_CAPACITY_REACHED", resp.Error.Code)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response body should decode as an error response")
+	require.Equal(t, preview.PreviewCapacityCode, resp.Error.Code, "capacity errors should keep their stable API code")
+	require.Equal(t, preview.PreviewCapacityMessage, resp.Error.Message, "capacity errors should show a user-facing recovery message")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *testing.T) {
@@ -1631,7 +1632,8 @@ func TestPreviewHandler_StartPreview_HydrateCapacityReached(t *testing.T) {
 	h.StartPreview(w, req)
 
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, "preview hydrate capacity should surface as 503")
-	require.Contains(t, w.Body.String(), "PREVIEW_CAPACITY_REACHED", "preview hydrate capacity should use the capacity error code")
+	require.Contains(t, w.Body.String(), preview.PreviewCapacityCode, "preview hydrate capacity should use the capacity error code")
+	require.Contains(t, w.Body.String(), preview.PreviewCapacityMessage, "preview hydrate capacity should use user-facing copy")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
