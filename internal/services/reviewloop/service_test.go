@@ -342,6 +342,63 @@ func TestService_OnThreadTurnCompleteAutomationDecisionFailureEnqueuesOpenPRGate
 	require.Equal(t, []string{"failed_open_pr"}, store.events, "invalid automation review decision should durably queue the PR gate")
 }
 
+func TestService_OnThreadTurnFailedMarksRunningLoopFailed(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID:        loopID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			ThreadID:  &threadID,
+			Status:    models.ReviewLoopStatusRunning,
+			AgentType: models.AgentTypeCodex,
+			MaxPasses: 2,
+		},
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnFailed(context.Background(), orgID, threadID, " sandbox hydrate failed ")
+
+	require.NoError(t, err, "thread failure should terminalize the running review loop")
+	require.Equal(t, loopID, store.failedLoopID, "thread failure should mark the active review loop failed")
+	require.Equal(t, "sandbox hydrate failed", store.failedSummary, "thread failure should store a trimmed failure summary")
+	require.Equal(t, []string{"failed"}, store.events, "manual review-loop failure should not enqueue PR creation")
+}
+
+func TestService_OnThreadTurnFailedAutomationEnqueuesOpenPRGate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	automationRunID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID:              loopID,
+			OrgID:           orgID,
+			SessionID:       sessionID,
+			AutomationRunID: &automationRunID,
+			ThreadID:        &threadID,
+			Status:          models.ReviewLoopStatusRunning,
+			AgentType:       models.AgentTypeCodex,
+			MaxPasses:       1,
+		},
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnFailed(context.Background(), orgID, threadID, "agent exited")
+
+	require.NoError(t, err, "automation thread failure should terminalize the running review loop")
+	require.Equal(t, loopID, store.failedLoopID, "automation thread failure should mark the review loop failed")
+	require.Equal(t, []string{"failed_open_pr"}, store.events, "automation review-loop failure should requeue the PR gate")
+}
+
 func TestParseDecisionRequiresExactSentinel(t *testing.T) {
 	t.Parallel()
 
@@ -387,6 +444,7 @@ type fakeReviewLoopStore struct {
 	needsHumanDecision           models.ReviewLoopDecision
 	needsHumanLoopID             uuid.UUID
 	failedLoopID                 uuid.UUID
+	failedSummary                string
 	fixSummary                   string
 	terminalErr                  error
 	events                       []string
@@ -504,7 +562,10 @@ func (f *fakeReviewLoopStore) MarkLoopNeedsHumanDecisionAndEnqueueOpenPR(_ conte
 	return nil
 }
 
-func (f *fakeReviewLoopStore) MarkLoopFailed(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+func (f *fakeReviewLoopStore) MarkLoopFailed(_ context.Context, _ uuid.UUID, loopID uuid.UUID, summary string) error {
+	f.failedLoopID = loopID
+	f.failedSummary = summary
+	f.events = append(f.events, "failed")
 	return nil
 }
 
