@@ -503,6 +503,25 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 	require.Contains(t, repairText, "/opt/143/deploy/scripts/install-docker-dns.sh *", "repair-deploy-sudoers.sh should grant the install-docker-dns.sh sudoers entry — otherwise legacy-host repair via the no-teardown path leaves DNS pinning broken")
 }
 
+func TestProvisionWaitsForDockerDaemonBeforePullingImages(t *testing.T) {
+	t.Parallel()
+
+	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provision)
+
+	require.Contains(t, provisionText, "wait_for_docker_daemon()", "provision.sh should define a reusable Docker daemon readiness gate for fresh hosts")
+	require.Contains(t, provisionText, "systemctl enable --now docker", "provision.sh should start Docker before the first daemon-backed docker command")
+	require.Contains(t, provisionText, "su - deploy -c 'docker info >/dev/null 2>&1'", "provision.sh should verify the deploy user can reach the Docker daemon, not just that root can")
+	require.Contains(t, provisionText, "journalctl -u docker", "provision.sh should print Docker daemon logs when readiness fails so setup failures are actionable")
+
+	waitCallIndex := strings.Index(provisionText, "\nwait_for_docker_daemon\n")
+	pullStepIndex := strings.Index(provisionText, "echo \"--- Step 4/5: Pulling images ---\"")
+	require.NotEqual(t, -1, waitCallIndex, "provision.sh should call the Docker readiness gate")
+	require.NotEqual(t, -1, pullStepIndex, "provision.sh should still have the image-pulling step")
+	require.Less(t, waitCallIndex, pullStepIndex, "provision.sh should wait for Docker before docker login or docker pull runs")
+}
+
 // The synthetic DNS probe is what surfaces upstream DNS issues directly,
 // before they cascade into user-visible failures. Pin its wiring: the
 // service definition must exist in the shared compose include, both

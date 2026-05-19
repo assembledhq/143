@@ -190,6 +190,32 @@ fi
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
+wait_for_docker_daemon() {
+  echo "--- Waiting for Docker daemon ---"
+  ssh "${SSH_OPTS[@]}" root@"$HOST" << 'WAIT_DOCKER'
+    set -euo pipefail
+    if ! systemctl enable --now docker; then
+      echo "ERROR: failed to start Docker." >&2
+      systemctl status docker --no-pager >&2 || true
+      journalctl -u docker --no-pager -n 100 >&2 || true
+      exit 1
+    fi
+
+    for i in $(seq 1 30); do
+      if su - deploy -c 'docker info >/dev/null 2>&1'; then
+        echo "Docker daemon is ready."
+        exit 0
+      fi
+      sleep 2
+    done
+
+    echo "ERROR: Docker daemon did not become ready for deploy within 60s." >&2
+    systemctl status docker --no-pager >&2 || true
+    journalctl -u docker --no-pager -n 100 >&2 || true
+    exit 1
+WAIT_DOCKER
+}
+
 configure_tailscale_if_requested() {
   if [ -z "${TS_AUTH_KEY:-}" ]; then
     return
@@ -453,6 +479,7 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.
 # next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
 # operators and networks.
 ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
+wait_for_docker_daemon
 
 # Optional Tailscale enrollment. This runs before worker identity resolution
 # so a new west-region worker can use WORKER_PRIVATE_IP_SOURCE=tailscale and
