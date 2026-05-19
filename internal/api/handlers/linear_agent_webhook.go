@@ -37,35 +37,50 @@ const (
 // linearAgentEventEnvelope is the minimal subset of the AgentSessionEvent
 // payload the dispatcher needs to (a) decide whether to act, (b) idempotency-
 // upsert the linear_agent_sessions row, and (c) build the worker job
-// payload.
+// payload. It accepts both Linear's top-level `agentSession` shape and the
+// older/wrapped `payload.agentSession` shape.
 //
 // We deliberately don't try to consume the full Linear payload here — the
 // worker fetches the live issue from Linear when it runs (see Phase 2.7),
 // which gives it the freshest issue body and label set. Caching the inbound
 // payload would just risk going stale between dispatch and worker
 // execution.
+type linearAgentEventIssue struct {
+	ID         string `json:"id"`
+	Identifier string `json:"identifier,omitempty"`
+	TeamID     string `json:"teamId,omitempty"`
+	ProjectID  string `json:"projectId,omitempty"`
+}
+
+type linearAgentEventCreator struct {
+	ID string `json:"id,omitempty"`
+}
+
+type linearAgentEventSession struct {
+	ID        string                  `json:"id"`
+	IssueID   string                  `json:"issueId"`
+	CommentID string                  `json:"commentId,omitempty"`
+	Issue     linearAgentEventIssue   `json:"issue,omitempty"`
+	Creator   linearAgentEventCreator `json:"creator,omitempty"`
+}
+
+type linearAgentEventActivity struct {
+	Body string `json:"body,omitempty"`
+}
+
+type linearAgentEventPayload struct {
+	AgentSession  linearAgentEventSession  `json:"agentSession"`
+	AgentActivity linearAgentEventActivity `json:"agentActivity,omitempty"`
+}
+
 type linearAgentEventEnvelope struct {
-	Type    string `json:"type"`
-	Action  string `json:"action"`
-	Payload struct {
-		AgentSession struct {
-			ID        string `json:"id"`
-			IssueID   string `json:"issueId"`
-			CommentID string `json:"commentId,omitempty"`
-			Issue     struct {
-				ID         string `json:"id"`
-				Identifier string `json:"identifier,omitempty"`
-				TeamID     string `json:"teamId,omitempty"`
-				ProjectID  string `json:"projectId,omitempty"`
-			} `json:"issue,omitempty"`
-			Creator struct {
-				ID string `json:"id,omitempty"`
-			} `json:"creator,omitempty"`
-		} `json:"agentSession"`
-		AgentActivity struct {
-			Body string `json:"body,omitempty"`
-		} `json:"agentActivity,omitempty"`
-	} `json:"payload"`
+	Type   string `json:"type"`
+	Action string `json:"action"`
+	// Linear currently emits agentSession/agentActivity at the top level.
+	// Payload remains as a read-only fallback for older wrapped deliveries.
+	Payload       linearAgentEventPayload  `json:"payload,omitempty"`
+	AgentSession  linearAgentEventSession  `json:"agentSession,omitempty"`
+	AgentActivity linearAgentEventActivity `json:"agentActivity,omitempty"`
 	// AppUserID is the id of the Linear app user this webhook is
 	// addressed to. Linear sets it on AppUserNotification deliveries and
 	// recent AgentSessionEvent payloads; older AgentSessionEvent
@@ -75,6 +90,24 @@ type linearAgentEventEnvelope struct {
 	// URL setups). Empty here means "Linear didn't tell us the target
 	// user" — we don't filter on it in that case.
 	AppUserID string `json:"appUserId,omitempty"`
+}
+
+func (e linearAgentEventEnvelope) agentSession() linearAgentEventSession {
+	session := e.AgentSession
+	if session.ID == "" {
+		session = e.Payload.AgentSession
+	}
+	if session.IssueID == "" {
+		session.IssueID = session.Issue.ID
+	}
+	return session
+}
+
+func (e linearAgentEventEnvelope) agentActivity() linearAgentEventActivity {
+	if e.AgentActivity.Body != "" {
+		return e.AgentActivity
+	}
+	return e.Payload.AgentActivity
 }
 
 // linearAgentEventAction names a value of envelope.action. The worker
@@ -269,7 +302,6 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			Msg("agent dispatcher: HMAC verified but body failed to parse; requesting Linear redelivery")
 		return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("parse agent event envelope: %w", err)}
 	}
-
 	action = linearAgentEventAction(env.Action)
 	if action != linearAgentActionCreated && action != linearAgentActionPrompted {
 		// Linear may add new actions in the future. Surface as 500 so
@@ -282,7 +314,9 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			Msg("agent dispatcher: unrecognized action; requesting Linear redelivery")
 		return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("unrecognized agent event action: %q", env.Action)}
 	}
-	if env.Payload.AgentSession.ID == "" || env.Payload.AgentSession.IssueID == "" {
+	agentSession := env.agentSession()
+	agentActivity := env.agentActivity()
+	if agentSession.ID == "" || agentSession.IssueID == "" {
 		// Missing required IDs is a contract violation, not transient.
 		// Don't retry — Linear sending the same malformed payload again
 		// won't help. Operator must investigate.
@@ -353,15 +387,15 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		row, created, err = d.agentSessions.UpsertOnCreated(ctx, integration.OrgID, db.UpsertOnCreatedInput{
 			OrgID:                 integration.OrgID,
 			IntegrationID:         integration.ID,
-			LinearAgentSessionID:  env.Payload.AgentSession.ID,
-			LinearIssueID:         env.Payload.AgentSession.IssueID,
-			LinearIssueIdentifier: env.Payload.AgentSession.Issue.Identifier,
+			LinearAgentSessionID:  agentSession.ID,
+			LinearIssueID:         agentSession.IssueID,
+			LinearIssueIdentifier: agentSession.Issue.Identifier,
 			LinearAppUserID:       env.AppUserID,
-			LinearCreatorUserID:   env.Payload.AgentSession.Creator.ID,
+			LinearCreatorUserID:   agentSession.Creator.ID,
 		})
 		if err != nil {
 			d.logger.Error().Err(err).
-				Str("agent_session_id", env.Payload.AgentSession.ID).
+				Str("agent_session_id", agentSession.ID).
 				Msg("failed to upsert linear_agent_sessions; requesting Linear redelivery")
 			return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("upsert linear_agent_sessions: %w", err)}
 		}
@@ -374,30 +408,30 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		// activity-log writes that key on agent_session_row_id — have a
 		// real UUID to bind to. The late-arriving `created` re-upserts
 		// idempotently on the (org_id, linear_agent_session_id) UNIQUE.
-		row, err = d.agentSessions.Lookup(ctx, integration.OrgID, env.Payload.AgentSession.ID)
+		row, err = d.agentSessions.Lookup(ctx, integration.OrgID, agentSession.ID)
 		if err != nil {
 			if errors.Is(err, db.ErrLinearAgentSessionNotFound) {
 				d.logger.Warn().
-					Str("agent_session_id", env.Payload.AgentSession.ID).
+					Str("agent_session_id", agentSession.ID).
 					Msg("prompted event arrived before created; persisting synthetic row")
 				row, _, err = d.agentSessions.UpsertOnCreated(ctx, integration.OrgID, db.UpsertOnCreatedInput{
 					OrgID:                 integration.OrgID,
 					IntegrationID:         integration.ID,
-					LinearAgentSessionID:  env.Payload.AgentSession.ID,
-					LinearIssueID:         env.Payload.AgentSession.IssueID,
-					LinearIssueIdentifier: env.Payload.AgentSession.Issue.Identifier,
+					LinearAgentSessionID:  agentSession.ID,
+					LinearIssueID:         agentSession.IssueID,
+					LinearIssueIdentifier: agentSession.Issue.Identifier,
 					LinearAppUserID:       env.AppUserID,
-					LinearCreatorUserID:   env.Payload.AgentSession.Creator.ID,
+					LinearCreatorUserID:   agentSession.Creator.ID,
 				})
 				if err != nil {
 					d.logger.Error().Err(err).
-						Str("agent_session_id", env.Payload.AgentSession.ID).
+						Str("agent_session_id", agentSession.ID).
 						Msg("failed to persist synthetic linear_agent_sessions row; requesting Linear redelivery")
 					return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("persist synthetic linear_agent_sessions: %w", err)}
 				}
 			} else {
 				d.logger.Error().Err(err).
-					Str("agent_session_id", env.Payload.AgentSession.ID).
+					Str("agent_session_id", agentSession.ID).
 					Msg("failed to lookup linear_agent_sessions; requesting Linear redelivery")
 				return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("lookup linear_agent_sessions: %w", err)}
 			}
@@ -413,7 +447,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	// because the AgentSession is already alive and Linear's UI doesn't
 	// need a "Reading…" thought for follow-ups.
 	if action == linearAgentActionCreated && d.emitter != nil {
-		bootstrap := linear.BootstrapActivity(env.Payload.AgentSession.Issue.Identifier)
+		bootstrap := linear.BootstrapActivity(agentSession.Issue.Identifier)
 		bootstrapStart := time.Now()
 		// Hard sub-second cap on the synchronous Linear roundtrip. The
 		// outer Linear webhook ack SLA is 5s and we still owe an enqueue
@@ -463,8 +497,8 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		url.QueryEscape(row.LinearAgentSessionID),
 		url.QueryEscape(string(action)),
 	}
-	if action == linearAgentActionPrompted && env.Payload.AgentSession.CommentID != "" {
-		dedupeParts = append(dedupeParts, url.QueryEscape(env.Payload.AgentSession.CommentID))
+	if action == linearAgentActionPrompted && agentSession.CommentID != "" {
+		dedupeParts = append(dedupeParts, url.QueryEscape(agentSession.CommentID))
 	}
 	dedupe := strings.Join(dedupeParts, ":")
 	// Surface payload context that's missing from the webhook envelope so
@@ -472,11 +506,11 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 	// production logs. The worker tolerates empty values (FetchIssue
 	// re-derives them), but a chronically-empty team_id usually means the
 	// workspace is sending a slimmer payload than we expect.
-	if env.Payload.AgentSession.Issue.TeamID == "" || env.Payload.AgentSession.Issue.ProjectID == "" {
+	if agentSession.Issue.TeamID == "" || agentSession.Issue.ProjectID == "" {
 		d.logger.Debug().
 			Str("agent_session_id", row.LinearAgentSessionID).
-			Bool("missing_team_id", env.Payload.AgentSession.Issue.TeamID == "").
-			Bool("missing_project_id", env.Payload.AgentSession.Issue.ProjectID == "").
+			Bool("missing_team_id", agentSession.Issue.TeamID == "").
+			Bool("missing_project_id", agentSession.Issue.ProjectID == "").
 			Msg("agent event payload missing optional issue context; worker will derive from FetchIssue")
 	}
 	jobPayload := map[string]any{
@@ -485,12 +519,12 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		"integration_id":          integration.ID.String(),
 		"agent_session_row_id":    row.ID.String(),
 		"linear_agent_session_id": row.LinearAgentSessionID,
-		"linear_issue_id":         env.Payload.AgentSession.IssueID,
-		"linear_issue_team_id":    env.Payload.AgentSession.Issue.TeamID,
-		"linear_issue_project_id": env.Payload.AgentSession.Issue.ProjectID,
-		"linear_creator_user_id":  env.Payload.AgentSession.Creator.ID,
-		"linear_comment_id":       env.Payload.AgentSession.CommentID,
-		"linear_prompt_body":      env.Payload.AgentActivity.Body,
+		"linear_issue_id":         agentSession.IssueID,
+		"linear_issue_team_id":    agentSession.Issue.TeamID,
+		"linear_issue_project_id": agentSession.Issue.ProjectID,
+		"linear_creator_user_id":  agentSession.Creator.ID,
+		"linear_comment_id":       agentSession.CommentID,
+		"linear_prompt_body":      agentActivity.Body,
 	}
 	jobID, err := d.jobs.Enqueue(ctx, integration.OrgID, "linear", "linear_agent_event", jobPayload, 5, &dedupe)
 	if err != nil {

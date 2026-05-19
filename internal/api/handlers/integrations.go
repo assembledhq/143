@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -700,7 +701,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		bgCtx, bgCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
 		go func() {
 			defer bgCancel()
-			if err := h.linearTeamKeyRefresher(bgCtx, orgID); err != nil {
+			if err := h.refreshLinearTeamKeysAfterInstall(bgCtx, orgID); err != nil {
 				logger.Warn().Err(err).
 					Str("org_id", orgID.String()).
 					Msg("background refresh_linear_team_keys after install failed; worker fallback or 24h cron will retry")
@@ -717,6 +718,32 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)
+}
+
+const linearTeamKeyInstallRetryDelay = 100 * time.Millisecond
+
+func (h *IntegrationHandler) refreshLinearTeamKeysAfterInstall(ctx context.Context, orgID uuid.UUID) error {
+	if h.linearTeamKeyRefresher == nil {
+		return nil
+	}
+	err := h.linearTeamKeyRefresher(ctx, orgID)
+	if err == nil || !isTransientLinearIntegrationLookupMiss(err) {
+		return err
+	}
+
+	timer := time.NewTimer(linearTeamKeyInstallRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return h.linearTeamKeyRefresher(ctx, orgID)
+}
+
+func isTransientLinearIntegrationLookupMiss(err error) bool {
+	return errors.Is(err, linearservice.ErrIntegrationNotFound) ||
+		(err != nil && strings.Contains(err.Error(), "linear integration not found"))
 }
 
 func (h *IntegrationHandler) preserveExistingWebhookSecret(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) (models.ProviderConfig, error) {
