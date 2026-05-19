@@ -3,6 +3,7 @@
 import { useId, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   CircleHelp,
   ShieldAlert,
@@ -56,6 +57,7 @@ export function HumanInputRequestCard({
   const hasChoices = request.choices.length > 0;
   const isMulti = request.request_kind === "multi_choice";
   const isFreeText = request.request_kind === "free_text";
+  const hasHiddenChoices = request.choices.length > 3;
   const requiresDecision =
     request.request_kind === "tool_approval" ||
     request.request_kind === "action_choice";
@@ -125,6 +127,22 @@ export function HumanInputRequestCard({
     );
   }
 
+  function selectInlineChoice(id: string) {
+    if (isMulti) {
+      toggleChoice(id, !selectedChoices.includes(id));
+      return;
+    }
+    setSelectedChoice(id);
+  }
+
+  function handlePrimaryAction() {
+    if (canSubmit && !payloadEditor.required) {
+      void submit();
+      return;
+    }
+    setOpen(true);
+  }
+
   const content = (
     <div className="space-y-4">
       {request.context ? (
@@ -146,18 +164,26 @@ export function HumanInputRequestCard({
               return (
                 <Label
                   key={choice.id}
+                  data-testid={`human-input-dialog-choice-${choice.id}`}
                   className={cn(
-                    "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors hover:bg-muted/60",
-                    checked && "border-primary bg-primary/5",
-                    choice.destructive && "border-destructive/40",
+                    choiceTileClasses({
+                      destructive: choice.destructive,
+                      selected: checked,
+                    }),
+                    "relative",
                   )}
                 >
                   <Checkbox
                     aria-label={choice.label}
                     checked={checked}
+                    className="absolute inset-0 h-full w-full cursor-pointer rounded-lg opacity-0"
                     onCheckedChange={(value) =>
                       toggleChoice(choice.id, value === true)
                     }
+                  />
+                  <ChoiceSelectionMark
+                    destructive={choice.destructive}
+                    selected={checked}
                   />
                   <ChoiceText choice={choice} />
                 </Label>
@@ -169,16 +195,23 @@ export function HumanInputRequestCard({
             {request.choices.map((choice) => (
               <Label
                 key={choice.id}
+                data-testid={`human-input-dialog-choice-${choice.id}`}
                 className={cn(
-                  "flex cursor-pointer items-start gap-3 rounded-md border border-border p-3 transition-colors hover:bg-muted/60",
-                  selectedChoice === choice.id && "border-primary bg-primary/5",
-                  choice.destructive && "border-destructive/40",
+                  choiceTileClasses({
+                    destructive: choice.destructive,
+                    selected: selectedChoice === choice.id,
+                  }),
+                  "relative",
                 )}
               >
                 <RadioGroupItem
                   value={choice.id}
                   aria-label={choice.label}
-                  className="mt-0.5"
+                  className="absolute inset-0 h-full w-full cursor-pointer rounded-lg opacity-0"
+                />
+                <ChoiceSelectionMark
+                  destructive={choice.destructive}
+                  selected={selectedChoice === choice.id}
                 />
                 <ChoiceText choice={choice} />
               </Label>
@@ -217,40 +250,81 @@ export function HumanInputRequestCard({
 
   return (
     <>
-      <div className="flex justify-start">
-        <Card className="max-w-2xl border-amber-300/60 bg-amber-50/60 dark:border-amber-800/60 dark:bg-amber-950/20">
-          <CardHeader className="space-y-2 pb-3">
-            <div className="flex items-start gap-3">
-              <div className="rounded-md bg-background p-2 text-amber-700 dark:text-amber-300">
-                <Icon className="h-4 w-4" />
+      <div className="w-full">
+        <Card className="w-full rounded-lg border-amber-300/70 bg-amber-50/60 shadow-sm dark:border-amber-800/60 dark:bg-amber-950/20">
+          <CardHeader className="border-b border-amber-200/70 bg-amber-50/80 pb-4 dark:border-amber-900/60 dark:bg-amber-950/20">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
+                <div className="rounded-md bg-background p-2 text-amber-700 shadow-sm dark:text-amber-300">
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <CardTitle className="text-base leading-snug">
+                    {request.title}
+                  </CardTitle>
+                  <p className="max-w-4xl text-sm leading-6 text-muted-foreground">
+                    {request.body}
+                  </p>
+                </div>
               </div>
-              <div className="min-w-0 flex-1">
-                <CardTitle className="text-sm">{request.title}</CardTitle>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {request.body}
-                </p>
-              </div>
-              <Badge variant="outline" className="capitalize">
+              <Badge variant="outline" className="w-fit shrink-0 capitalize">
                 {kindLabel}
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="space-y-3">
-            {request.choices.slice(0, 3).map((choice) => (
-              <div
-                key={choice.id}
-                className="rounded-md border border-border bg-background/70 px-3 py-2"
-              >
-                <ChoiceText choice={choice} compact />
+          <CardContent className="space-y-4 p-4">
+            {request.choices.length > 0 ? (
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {request.choices.slice(0, 3).map((choice) => {
+                  const selected = selectedIDs.includes(choice.id);
+                  return isPending ? (
+                    <Button
+                      key={choice.id}
+                      type="button"
+                      variant="outline"
+                      aria-pressed={selected}
+                      data-testid={`human-input-choice-${choice.id}`}
+                      className={cn(
+                        choiceTileClasses({
+                          destructive: choice.destructive,
+                          selected,
+                        }),
+                        "h-auto w-full justify-start whitespace-normal text-left",
+                      )}
+                      onClick={() => selectInlineChoice(choice.id)}
+                      disabled={!answerable || submitting}
+                    >
+                      <ChoiceSelectionMark
+                        destructive={choice.destructive}
+                        selected={selected}
+                      />
+                      <ChoiceText choice={choice} compact />
+                    </Button>
+                  ) : (
+                    <div
+                      key={choice.id}
+                      className="rounded-md border border-border bg-background/80 px-3 py-2"
+                    >
+                      <ChoiceText choice={choice} compact />
+                    </div>
+                  );
+                })}
               </div>
-            ))}
+            ) : null}
             {isPending ? (
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 <Button
                   type="button"
                   size="sm"
-                  onClick={() => setOpen(true)}
-                  disabled={!answerable}
+                  onClick={handlePrimaryAction}
+                  disabled={
+                    !answerable ||
+                    submitting ||
+                    (requiresDecision &&
+                      hasChoices &&
+                      !hasHiddenChoices &&
+                      selectedIDs.length === 0)
+                  }
                 >
                   Respond
                 </Button>
@@ -425,6 +499,44 @@ function escapeJSONPlaceholder(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
+function choiceTileClasses({
+  destructive,
+  selected,
+}: {
+  destructive?: boolean;
+  selected: boolean;
+}) {
+  return cn(
+    "flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-border bg-background/80 px-3 py-2 text-foreground shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:bg-muted/60 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30",
+    selected && "border-primary bg-primary/5 shadow",
+    destructive && "hover:border-destructive/50",
+    destructive && selected && "border-destructive bg-destructive/10",
+  );
+}
+
+function ChoiceSelectionMark({
+  destructive,
+  selected,
+}: {
+  destructive?: boolean;
+  selected: boolean;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "flex size-5 shrink-0 items-center justify-center rounded-md border border-border bg-background text-transparent transition-colors",
+        selected && "border-primary bg-primary text-primary-foreground",
+        destructive &&
+          selected &&
+          "border-destructive bg-destructive text-destructive-foreground",
+      )}
+    >
+      <Check className="size-3.5" />
+    </span>
+  );
+}
+
 function ChoiceText({
   choice,
   compact,
@@ -434,8 +546,10 @@ function ChoiceText({
 }) {
   return (
     <span className="min-w-0 flex-1 space-y-1">
-      <span className="flex items-center gap-2">
-        <span className="text-sm font-medium leading-none">{choice.label}</span>
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 text-sm font-medium leading-snug">
+          {choice.label}
+        </span>
         {choice.kind ? (
           <Badge variant="secondary" className="capitalize">
             {choice.kind}
