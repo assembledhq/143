@@ -2,13 +2,15 @@
 set -euo pipefail
 
 # Provision a node by running bootstrap.sh + copying config files via SSH.
-# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
+# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision|--tailscale-only]
 #
 # Roles: app, worker, db, logging, redis
 # This is the SSH-based alternative to cloud-init for already-running servers.
 #
 # Pass --reprovision to tear down existing containers and volumes before reprovisioning.
 # Without --reprovision, the script will abort if services are already running.
+# Pass --tailscale-only to enroll an already-provisioned host in Tailscale without
+# changing Docker containers, volumes, or application env files.
 #
 # No env vars required by default — the script reads your age key from
 # ~/.config/sops/age/keys.txt and all other secrets from .env.production.enc.
@@ -25,7 +27,8 @@ set -euo pipefail
 ROLE="$1"
 HOST="$2"
 SSH_KEY="$3"
-REPROVISION="${4:-}"
+MODE="${4:-}"
+REPROVISION="$MODE"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
@@ -43,6 +46,11 @@ case "$ROLE" in
   logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
   redis)   COMPOSE_FILE="docker-compose.redis.yml" ;;
   *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
+esac
+
+case "$MODE" in
+  ""|"--reprovision"|"--tailscale-only") ;;
+  *) echo "Unknown mode: $MODE (expected --reprovision or --tailscale-only)"; exit 1 ;;
 esac
 
 # Logging nodes use only public runtime images, but they still rely on values
@@ -84,6 +92,68 @@ else
   echo "Falling back to environment variables."
 fi
 
+apply_tailscale_worker_host_map() {
+  if [ "$ROLE" != "worker" ] || [ -z "${TS_WORKER_HOSTS:-}" ]; then
+    return
+  fi
+
+  # TS_WORKER_HOSTS is a comma-separated list of worker management hosts that
+  # should join the tailnet. Entries may be either "<host>" or
+  # "<node-id>:<host>" so the same production secret can also pin NODE_ID.
+  # Example: TS_WORKER_HOSTS="worker-usw-1:87.99.158.39,worker-ec2-1:54.1.2.3"
+  IFS=',' read -ra mappings <<< "$TS_WORKER_HOSTS"
+  for mapping in "${mappings[@]}"; do
+    map_node_id=""
+    map_host="$mapping"
+    if [[ "$mapping" == *:* ]]; then
+      map_node_id="${mapping%%:*}"
+      map_host="${mapping#*:}"
+    fi
+
+    if [ "$map_host" = "$HOST" ]; then
+      : "${WORKER_PRIVATE_IP_SOURCE:=tailscale}"
+      if [ -n "$map_node_id" ]; then
+        : "${NODE_ID:=$map_node_id}"
+      fi
+      return
+    fi
+  done
+}
+
+apply_tailscale_role_defaults() {
+  apply_tailscale_worker_host_map
+
+  case "$ROLE" in
+    app)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_APP:-}}"
+      : "${TS_TAG:=${TS_TAG_APP:-tag:prod-app}}"
+      ;;
+    db)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_DB:-}}"
+      : "${TS_TAG:=${TS_TAG_DB:-tag:prod-db}}"
+      if [ -n "${TS_AUTH_KEY:-}" ]; then
+        : "${DB_BIND_IP:?DB_BIND_IP is required for db Tailscale route advertisement}"
+        : "${TS_ADVERTISE_ROUTES:=${DB_BIND_IP}/32}"
+      fi
+      ;;
+    worker)
+      if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+        : "${TS_AUTH_KEY:=${TS_AUTH_KEY_WORKER:-}}"
+        : "${TS_TAG:=${TS_TAG_WORKER:-tag:prod-worker}}"
+        TS_ACCEPT_ROUTES=true
+      fi
+      ;;
+  esac
+
+  if [ "$ROLE" = "worker" ] && [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_WORKER is required for Tailscale worker provisioning}"
+  fi
+  if [ "$ROLE" = "db" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_DB is required when TS_ADVERTISE_ROUTES is set}"
+  fi
+}
+
+apply_tailscale_role_defaults
 apply_worker_bucket_overrides "$ROLE" "$HOST"
 if [ "$ROLE" = "worker" ]; then
   : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"
@@ -94,51 +164,96 @@ if [ "$ROLE" = "worker" ]; then
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
-if [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
   : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" = "logging" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
   GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-$DISABLED_WARNING_WEBHOOK_URL}"
   GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
 fi
-if [ "$ROLE" = "redis" ]; then
+if [ "$ROLE" = "db" ]; then
+  : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node primary private IP)}"
+fi
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "redis" ]; then
   : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
   : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis role (Redis node private IP)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
-# Per-host identity for workers. These are written to /opt/143/.env.local and
-# preserved across deploys (deploy.sh never overwrites .env.local). Auto-detect
-# WORKER_PRIVATE_IP from the host's outbound source address if the caller
-# didn't supply one. NODE_ID and PREVIEW_INTERNAL_BASE_URL get sensible
-# defaults derived from WORKER_PRIVATE_IP — override either via env var if
-# needed. Resolved values are echoed before writing so the operator can
-# eyeball them and Ctrl-C if something looks wrong.
-if [ "$ROLE" = "worker" ]; then
+configure_tailscale_if_requested() {
+  if [ -z "${TS_AUTH_KEY:-}" ]; then
+    return
+  fi
+
+  local ts_hostname="${TS_HOSTNAME:-143-${ROLE}-${HOST//./-}}"
+  local ts_tag="${TS_TAG:-tag:prod-${ROLE}}"
+  local ts_advertise_routes="${TS_ADVERTISE_ROUTES:-}"
+  local ts_accept_routes="${TS_ACCEPT_ROUTES:-false}"
+  echo "--- Configuring Tailscale ($ts_hostname, $ts_tag) ---"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$TS_AUTH_KEY" "$ts_hostname" "$ts_tag" "$ts_advertise_routes" "$ts_accept_routes" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" '
+        set -euo pipefail
+        read -r TS_AUTH_KEY
+        read -r TS_HOSTNAME
+        read -r TS_TAG
+        read -r TS_ADVERTISE_ROUTES
+        read -r TS_ACCEPT_ROUTES
+        export TS_AUTH_KEY TS_HOSTNAME TS_TAG TS_ADVERTISE_ROUTES TS_ACCEPT_ROUTES
+        /opt/143/deploy/scripts/install-tailscale.sh
+      '
+}
+
+if [ "$MODE" = "--tailscale-only" ]; then
+  : "${TS_AUTH_KEY:?TS_AUTH_KEY or a role-specific TS_AUTH_KEY_* is required for Tailscale enrollment}"
+
+  echo "=== Enrolling $ROLE node at $HOST in Tailscale only ==="
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "mkdir -p /opt/143/deploy/scripts"
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-tailscale.sh" root@"$HOST":/opt/143/deploy/scripts/install-tailscale.sh
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "chmod +x /opt/143/deploy/scripts/install-tailscale.sh"
+  configure_tailscale_if_requested
+  echo ""
+  echo "=== Tailscale enrollment applied for $ROLE node at $HOST ==="
+  exit 0
+fi
+
+resolve_worker_identity() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
   if [ -z "${WORKER_PRIVATE_IP:-}" ]; then
-    echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
-    # Enumerate every private IPv4 on a real network interface, deliberately
-    # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
-    # filter would silently return 172.17.0.1 (docker0) on hosts where the
-    # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
-    # the *public* IP because the default route goes through the public NIC.
-    # We collect candidates (no awk `exit`) so multi-homed hosts surface as
-    # an error rather than silently picking whichever NIC enumerates first.
-    WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
-      'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+    if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+      echo "Auto-detecting WORKER_PRIVATE_IP from Tailscale (100.64.0.0/10) via SSH..."
+      WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
+        'command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true')"
+    else
+      echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
+      # Enumerate every private IPv4 on a real network interface, deliberately
+      # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
+      # filter would silently return 172.17.0.1 (docker0) on hosts where the
+      # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
+      # the *public* IP because the default route goes through the public NIC.
+      # We collect candidates (no awk `exit`) so multi-homed hosts surface as
+      # an error rather than silently picking whichever NIC enumerates first.
+      WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
+        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+    fi
     CANDIDATE_COUNT="$(printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | grep -c . || true)"
     if [ "$CANDIDATE_COUNT" -eq 0 ]; then
       echo "ERROR: could not auto-detect WORKER_PRIVATE_IP on $HOST."
+      if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+        echo "       Tailscale discovery was requested, but no tailscale ip -4 address was available."
+      fi
       echo "       Set WORKER_PRIVATE_IP=<ip> and re-run."
       exit 1
     elif [ "$CANDIDATE_COUNT" -gt 1 ]; then
@@ -169,7 +284,7 @@ if [ "$ROLE" = "worker" ]; then
   echo "  WORKER_PRIVATE_IP         = $WORKER_PRIVATE_IP"
   echo "  NODE_ID                   = $NODE_ID"
   echo "  PREVIEW_INTERNAL_BASE_URL = $PREVIEW_INTERNAL_BASE_URL"
-fi
+}
 
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
@@ -315,7 +430,7 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
 
 # Step 2a: Cap docker container log files (max-size/max-file in
 # /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
@@ -339,6 +454,12 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.
 # operators and networks.
 ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
 
+# Optional Tailscale enrollment. This runs before worker identity resolution
+# so a new west-region worker can use WORKER_PRIVATE_IP_SOURCE=tailscale and
+# publish its 100.64.0.0/10 address as the internal preview endpoint.
+configure_tailscale_if_requested
+resolve_worker_identity
+
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
 # Safe here because provisioning just set up the deploy user with the SSH key.
@@ -356,7 +477,7 @@ if [ "$ROLE" = "logging" ]; then
     "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "logging" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
-  printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
+  printf 'DB_PASSWORD=%s\nDB_BIND_IP=%s\n' "$DB_PASSWORD" "$DB_BIND_IP" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "redis" ]; then
   printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
