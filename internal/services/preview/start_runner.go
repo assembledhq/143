@@ -95,6 +95,10 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 			Str("session_id", payload.SessionID.String()).
 			Str("error_code", acq.ErrCode).
 			Msg("preview start job: failed to acquire sandbox")
+		if errors.Is(acq.Err, ErrPreviewCapacity) {
+			r.registerCapacityDeadLetter(ctx, reservation)
+			return fmt.Errorf("%s: %w", acq.ErrCode, acq.Err)
+		}
 		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
@@ -149,6 +153,21 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 
 func shouldReassignPreviewWorker(deadTargetNode, reservationWorkerNode, claimingWorkerNode string) bool {
 	return deadTargetNode != "" && claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
+}
+
+func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
+	if r == nil || r.manager == nil || reservation == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if deadLetterErr != nil {
+			r.logger.Warn().Err(deadLetterErr).
+				Str("preview_id", reservation.ID.String()).
+				Str("session_id", reservation.SessionID.String()).
+				Msg("preview start dead-lettered after capacity retries")
+		}
+		r.manager.AbortReservation(hookCtx, reservation, "", PreviewCapacityRetryExhaustedMessage)
+	})
 }
 
 func (r *StartRunner) abort(ctx context.Context, reservation *models.PreviewInstance, hydratedID, reason string) {
@@ -274,7 +293,7 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 			Purpose: sandboxCfg.Purpose, SessionID: sandboxCfg.SessionID, OrgID: sandboxCfg.OrgID,
 		})
 		if capErr != nil {
-			return acquireSandboxResult{ErrCode: "PREVIEW_CAPACITY_REACHED", Err: fmt.Errorf("%w: %w", ErrPreviewCapacity, capErr)}
+			return acquireSandboxResult{ErrCode: PreviewCapacityCode, Err: fmt.Errorf("%w: %w", ErrPreviewCapacity, capErr)}
 		}
 		defer capacityReservation.Release()
 	}

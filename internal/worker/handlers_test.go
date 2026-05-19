@@ -2709,12 +2709,13 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 type mockPreviewStarter struct {
 	called  bool
 	payload previewsvc.StartPreviewJobPayload
+	err     error
 }
 
 func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error {
 	m.called = true
 	m.payload = payload
-	return nil
+	return m.err
 }
 
 func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T) {
@@ -2748,6 +2749,33 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	err = handler(context.Background(), models.JobTypeStartPreview, raw)
 	require.NoError(t, err, "start_preview handler should delegate successfully")
 	require.True(t, starter.called, "start_preview handler should call the preview starter")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartPreviewHandler(&Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "preview capacity should requeue start_preview instead of dead-lettering the preview")
+	require.ErrorIs(t, retryable.Err, previewsvc.ErrPreviewCapacity, "retryable error should preserve the preview capacity sentinel")
+	require.NotNil(t, retryable.RetryAfter, "preview capacity retry should use an explicit short delay")
+	require.Equal(t, 5*time.Second, *retryable.RetryAfter, "preview capacity retry should run again quickly")
+	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
 }
 
