@@ -225,6 +225,38 @@ describe('SessionDetailPage', () => {
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
+  it('renders the review setup agent selector without a nested panel or clipboard icon', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            snapshot_key: 'snapshot-manual-review',
+            sandbox_state: 'snapshotted',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Review' });
+    expect(within(dialog).getByRole('combobox', { name: 'Review coding agent' })).toBeInTheDocument();
+    expect(dialog.querySelector('.rounded-lg.border')).not.toBeInTheDocument();
+    expect(dialog.querySelector('.lucide-clipboard-list')).not.toBeInTheDocument();
+  });
+
   it('starts a manual review loop with the selected pass count', async () => {
     const user = userEvent.setup();
     let postedMaxPasses = 0;
