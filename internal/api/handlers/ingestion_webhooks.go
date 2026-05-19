@@ -332,7 +332,6 @@ func sniffLinearEventEnvelope(body []byte) (LinearAgentEventType, *linearAgentEv
 	if err := json.Unmarshal(body, &env); err != nil {
 		return "", nil
 	}
-	env.normalize()
 	switch LinearAgentEventType(env.Type) {
 	case LinearAgentEventAgentSession, LinearAgentEventAppUserNotification:
 		return LinearAgentEventType(env.Type), &env

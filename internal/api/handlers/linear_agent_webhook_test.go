@@ -417,11 +417,11 @@ func TestLinearAgentDispatcher_UsesParsedEnvelopeWhenProvided(t *testing.T) {
 	var env linearAgentEventEnvelope
 	env.Type = string(LinearAgentEventAgentSession)
 	env.Action = string(linearAgentActionCreated)
-	env.Payload.AgentSession.ID = "as_parsed"
-	env.Payload.AgentSession.IssueID = "iss_1"
-	env.Payload.AgentSession.Issue.ID = "iss_1"
-	env.Payload.AgentSession.Issue.Identifier = "ACS-1"
-	env.Payload.AgentSession.Creator.ID = "user_1"
+	env.AgentSession.ID = "as_parsed"
+	env.AgentSession.IssueID = "iss_1"
+	env.AgentSession.Issue.ID = "iss_1"
+	env.AgentSession.Issue.Identifier = "ACS-1"
+	env.AgentSession.Creator.ID = "user_1"
 
 	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, []byte(`not json`), &env)
 	require.Equal(t, "agent_dispatched", res.Status, "dispatcher should reuse the parsed envelope instead of reparsing the body")
@@ -527,16 +527,17 @@ func TestSniffLinearEventType(t *testing.T) {
 	}
 }
 
-func TestSniffLinearEventEnvelope_NormalizesTopLevelAgentSession(t *testing.T) {
+func TestSniffLinearEventEnvelope_ParsesTopLevelAgentSession(t *testing.T) {
 	t.Parallel()
 
 	eventType, env := sniffLinearEventEnvelope([]byte(`{"type":"AgentSessionEvent","action":"created","agentSession":{"id":"as_top_level","issueId":"iss_1","issue":{"identifier":"ACS-1"}}}`))
 
 	require.Equal(t, LinearAgentEventAgentSession, eventType, "sniffing should identify top-level AgentSessionEvent payloads")
 	require.NotNil(t, env, "sniffing should return a parsed envelope")
-	require.Equal(t, "as_top_level", env.Payload.AgentSession.ID, "sniffing should normalize top-level agentSession into payload.agentSession")
-	require.Equal(t, "iss_1", env.Payload.AgentSession.IssueID, "sniffing should preserve the top-level issue id")
-	require.Equal(t, "ACS-1", env.Payload.AgentSession.Issue.Identifier, "sniffing should preserve the issue identifier")
+	session := env.agentSession()
+	require.Equal(t, "as_top_level", session.ID, "sniffing should parse the top-level agentSession")
+	require.Equal(t, "iss_1", session.IssueID, "sniffing should preserve the top-level issue id")
+	require.Equal(t, "ACS-1", session.Issue.Identifier, "sniffing should preserve the issue identifier")
 }
 
 // newDispatcherForTest constructs a dispatcher with non-nil feature-required
