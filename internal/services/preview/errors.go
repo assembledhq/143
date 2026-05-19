@@ -7,6 +7,11 @@ import "errors"
 // instead of a generic "failed to start preview". Wrap with %w when adding
 // context (e.g. fmt.Errorf("%w: pull postgres:17-alpine: %v", ErrInfraImageUnavailable, err)).
 var (
+	// ErrPreviewCapacity is returned when a preview cannot start because a
+	// preview or sandbox concurrency cap is full. Wrap with %w so callers can
+	// detect transient capacity pressure with errors.Is.
+	ErrPreviewCapacity = errors.New("preview capacity reached")
+
 	// ErrInfraImageUnavailable means a preview infrastructure container could
 	// not be created because the requested image is not present locally and
 	// the on-demand pull failed (registry unreachable, image renamed/removed,

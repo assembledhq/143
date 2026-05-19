@@ -36,6 +36,7 @@ import (
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
+const previewCapacityRetryDelay = 5 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
 const failureCategoryStaleSandbox = "stale_sandbox"
 
@@ -434,6 +435,16 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 			Str("session_id", input.SessionID.String()).
 			Msg("processing start_preview job")
 		if err := services.PreviewStarter.StartReservedPreview(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				retryAfter := previewCapacityRetryDelay
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview capacity reached; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
 			return &FatalError{Err: err}
 		}
 		return nil
