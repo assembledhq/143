@@ -200,7 +200,7 @@ func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, 
 		}
 		return agent.TokenBillingModeSubscription, nil
 	case models.AgentTypeClaudeCode:
-		injected, err := s.env.InjectClaudeCodeAuth(ctx, orgID, sb)
+		injected, err := s.env.InjectClaudeCodeAuthWithEnv(ctx, orgID, sb, env)
 		if err != nil {
 			if fallbackErr := s.env.PrepareClaudeCodeAPIKeyFallback(ctx, sb, env); fallbackErr == nil {
 				s.logger.Warn().

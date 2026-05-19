@@ -5030,6 +5030,13 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 		capturedSandbox = &agent.Sandbox{ID: "sub-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}
 		return capturedSandbox, nil
 	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "claude --version" {
+			_, writeErr := stdout.Write([]byte("2.1.139\n"))
+			require.NoError(t, writeErr, "version mock should write stdout")
+		}
+		return 0, nil
+	}
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
@@ -5066,7 +5073,9 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 		"mkdir -p '/home/sandbox/.claude' && install -m 600 /dev/null '/home/sandbox/.claude/.credentials.json'",
 		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
 	require.Equal(t, agent.ClaudeCodePermissionModeAuto, capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode],
-		"Claude Max subscription should opt into auto mode for the default supported Claude Code model")
+		"Claude Max subscription should opt into auto mode for a supported Claude Code CLI and default model")
+	require.Equal(t, "2.1.139", capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodeVersion],
+		"detected Claude Code CLI version should be cached in sandbox metadata")
 }
 
 func TestRunAgent_ClaudeUnifiedAPIKeyIsNotOverriddenBySubscription(t *testing.T) {
