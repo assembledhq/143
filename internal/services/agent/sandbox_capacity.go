@@ -14,20 +14,31 @@ import (
 // more sandbox container right now. Callers should treat it as transient.
 var ErrSandboxCapacity = errors.New("sandbox capacity reached")
 
-const defaultSandboxCapacityCountTimeout = 2 * time.Second
+const (
+	defaultSandboxCapacityCountTimeout   = 2 * time.Second
+	defaultSandboxPressureCleanupTimeout = 5 * time.Second
+)
 
 // LiveSandboxCounter counts live sandbox containers on the local machine.
 type LiveSandboxCounter interface {
 	CountLiveSandboxes(ctx context.Context) (int, error)
 }
 
+// SandboxPressureCleaner performs a best-effort local cleanup pass when a
+// worker host is full before admission gives up.
+type SandboxPressureCleaner interface {
+	ReapForCapacity(ctx context.Context, now time.Time) error
+}
+
 // SandboxCapacityGateConfig configures local sandbox admission control.
 type SandboxCapacityGateConfig struct {
-	Counter      LiveSandboxCounter
-	MaxActive    int
-	CountTimeout time.Duration
-	NodeID       string
-	Logger       zerolog.Logger
+	Counter                LiveSandboxCounter
+	PressureCleaner        SandboxPressureCleaner
+	MaxActive              int
+	CountTimeout           time.Duration
+	PressureCleanupTimeout time.Duration
+	NodeID                 string
+	Logger                 zerolog.Logger
 }
 
 // SandboxCapacityRequest carries tracing fields for an admission attempt.
@@ -49,8 +60,10 @@ type SandboxCapacitySnapshot struct {
 // live Docker count plus in-flight reservations.
 type SandboxCapacityGate struct {
 	counter   LiveSandboxCounter
+	cleaner   SandboxPressureCleaner
 	maxActive int
 	countTTL  time.Duration
+	cleanTTL  time.Duration
 	nodeID    string
 	logger    zerolog.Logger
 
@@ -66,10 +79,16 @@ func NewSandboxCapacityGate(cfg SandboxCapacityGateConfig) *SandboxCapacityGate 
 	if countTTL <= 0 {
 		countTTL = defaultSandboxCapacityCountTimeout
 	}
+	cleanTTL := cfg.PressureCleanupTimeout
+	if cleanTTL <= 0 {
+		cleanTTL = defaultSandboxPressureCleanupTimeout
+	}
 	return &SandboxCapacityGate{
 		counter:   cfg.Counter,
+		cleaner:   cfg.PressureCleaner,
 		maxActive: cfg.MaxActive,
 		countTTL:  countTTL,
+		cleanTTL:  cleanTTL,
 		nodeID:    cfg.NodeID,
 		logger:    cfg.Logger,
 	}
@@ -81,6 +100,17 @@ func (g *SandboxCapacityGate) MaxActive() int {
 		return 0
 	}
 	return g.maxActive
+}
+
+// SetPressureCleaner installs or replaces the cleanup hook used when a worker
+// host is full. It is safe to call during startup before workers begin polling.
+func (g *SandboxCapacityGate) SetPressureCleaner(cleaner SandboxPressureCleaner) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cleaner = cleaner
 }
 
 // ReservedCount returns the current in-flight reservation count.
@@ -109,6 +139,7 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		return nil, err
 	}
 
+	cleanedForPressure := false
 	for {
 		g.mu.Lock()
 		releaseGeneration := g.releaseGeneration
@@ -130,7 +161,20 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		total := live + g.reserved
 		if total >= g.maxActive {
 			reserved := g.reserved
+			cleaner := g.cleaner
 			g.mu.Unlock()
+			if !cleanedForPressure && cleaner != nil {
+				cleanedForPressure = true
+				cleanCtx, cancel := context.WithTimeout(ctx, g.cleanTTL)
+				cleanErr := cleaner.ReapForCapacity(cleanCtx, time.Now())
+				cancel()
+				if cleanErr != nil {
+					g.logCapacity(req, live, reserved).Err(cleanErr).Msg("sandbox pressure cleanup failed before admission retry")
+				} else {
+					g.logCapacity(req, live, reserved).Msg("sandbox pressure cleanup completed before admission retry")
+				}
+				continue
+			}
 			err := fmt.Errorf("%w: %d/%d sandboxes active or reserved", ErrSandboxCapacity, total, g.maxActive)
 			g.logCapacity(req, live, reserved).Msg("sandbox capacity reached; rejecting sandbox admission")
 			return nil, err
