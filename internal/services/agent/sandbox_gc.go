@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	defaultSandboxGCGracePeriod = 30 * time.Minute
-	defaultSandboxGCHardMaxAge  = 24 * time.Hour
+	defaultSandboxGCGracePeriod         = 30 * time.Minute
+	defaultSandboxGCPressureGracePeriod = 2 * time.Minute
+	defaultSandboxGCPressureMaxDestroy  = 2
+	defaultSandboxGCHardMaxAge          = 24 * time.Hour
 )
 
 // ManagedSandboxContainer is the provider-neutral subset of Docker container
@@ -49,30 +51,40 @@ type SandboxUsageCloser interface {
 type SandboxGCConfig struct {
 	Interval                time.Duration
 	UnreferencedGracePeriod time.Duration
+	PressureGracePeriod     time.Duration
+	PressureMaxDestroy      int
 	HardMaxAge              time.Duration
 }
 
 type SandboxGC struct {
-	provider SandboxGCProvider
-	store    SandboxReferenceStore
-	usage    SandboxUsageCloser
-	cfg      SandboxGCConfig
-	logger   zerolog.Logger
+	provider      SandboxGCProvider
+	store         SandboxReferenceStore
+	usage         SandboxUsageCloser
+	cfg           SandboxGCConfig
+	startupCutoff time.Time
+	logger        zerolog.Logger
 }
 
 func NewSandboxGC(provider SandboxGCProvider, store SandboxReferenceStore, usage SandboxUsageCloser, cfg SandboxGCConfig, logger zerolog.Logger) *SandboxGC {
 	if cfg.UnreferencedGracePeriod <= 0 {
 		cfg.UnreferencedGracePeriod = defaultSandboxGCGracePeriod
 	}
+	if cfg.PressureGracePeriod <= 0 {
+		cfg.PressureGracePeriod = defaultSandboxGCPressureGracePeriod
+	}
+	if cfg.PressureMaxDestroy <= 0 {
+		cfg.PressureMaxDestroy = defaultSandboxGCPressureMaxDestroy
+	}
 	if cfg.HardMaxAge <= 0 {
 		cfg.HardMaxAge = defaultSandboxGCHardMaxAge
 	}
 	return &SandboxGC{
-		provider: provider,
-		store:    store,
-		usage:    usage,
-		cfg:      cfg,
-		logger:   logger,
+		provider:      provider,
+		store:         store,
+		usage:         usage,
+		cfg:           cfg,
+		startupCutoff: time.Now().UTC(),
+		logger:        logger,
 	}
 }
 
@@ -108,6 +120,24 @@ func (g *SandboxGC) reapAndLog(ctx context.Context, now time.Time) {
 }
 
 func (g *SandboxGC) ReapOnce(ctx context.Context, now time.Time) error {
+	return g.reapOnce(ctx, now, g.cfg.UnreferencedGracePeriod, time.Time{}, "sandbox_gc_unreferenced", 0)
+}
+
+// ReapStartup performs a Docker-first cleanup pass before workers accept new
+// jobs. DB-unreferenced containers that predate this process cannot belong to
+// an in-flight turn in this process, so they do not need the normal grace.
+func (g *SandboxGC) ReapStartup(ctx context.Context, now time.Time) error {
+	return g.reapOnce(ctx, now, 0, g.startupCutoff, "sandbox_gc_startup_unreferenced", 0)
+}
+
+// ReapForCapacity runs a pressure cleanup pass when local sandbox admission is
+// full. It uses a short grace so leaked Docker-only containers do not outlive
+// the worker job retry window.
+func (g *SandboxGC) ReapForCapacity(ctx context.Context, now time.Time) error {
+	return g.reapOnce(ctx, now, g.cfg.PressureGracePeriod, time.Time{}, "sandbox_gc_capacity_unreferenced", g.cfg.PressureMaxDestroy)
+}
+
+func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGrace time.Duration, unreferencedCreatedBefore time.Time, unreferencedReason string, maxDestroyAttempts int) error {
 	if g == nil || g.provider == nil || g.store == nil {
 		return nil
 	}
@@ -128,17 +158,24 @@ func (g *SandboxGC) ReapOnce(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("list managed sandbox containers: %w", err)
 	}
 
-	var destroyedUnreferenced, destroyedExpired, skippedReferenced int
+	var destroyedUnreferenced, destroyedExpired, skippedReferenced, destroyAttempts int
 	for _, c := range containers {
 		if c.ID == "" {
 			continue
 		}
 		age := sandboxContainerAge(now, c.CreatedAt)
 		if _, ok := refSet[c.ID]; !ok {
-			if age < g.cfg.UnreferencedGracePeriod {
+			if !unreferencedCreatedBefore.IsZero() && c.CreatedAt.After(unreferencedCreatedBefore) {
 				continue
 			}
-			if g.destroyContainer(ctx, c, now, "sandbox_gc_unreferenced") {
+			if age < unreferencedGrace {
+				continue
+			}
+			if maxDestroyAttempts > 0 && destroyAttempts >= maxDestroyAttempts {
+				break
+			}
+			destroyAttempts++
+			if g.destroyContainer(ctx, c, now, unreferencedReason) {
 				destroyedUnreferenced++
 			}
 			continue
@@ -147,6 +184,9 @@ func (g *SandboxGC) ReapOnce(ctx context.Context, now time.Time) error {
 		if age < g.cfg.HardMaxAge {
 			skippedReferenced++
 			continue
+		}
+		if maxDestroyAttempts > 0 && destroyAttempts >= maxDestroyAttempts {
+			break
 		}
 		orgID, sessionID, parseErr := parseManagedSandboxIDs(c)
 		if parseErr != nil {
@@ -170,6 +210,7 @@ func (g *SandboxGC) ReapOnce(ctx context.Context, now time.Time) error {
 				Msg("sandbox GC: hard-expired container is still held; leaving it alive")
 			continue
 		}
+		destroyAttempts++
 		if g.destroyContainer(ctx, c, now, "sandbox_gc_expired") {
 			destroyedExpired++
 		}
