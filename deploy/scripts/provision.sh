@@ -2,13 +2,15 @@
 set -euo pipefail
 
 # Provision a node by running bootstrap.sh + copying config files via SSH.
-# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
+# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision|--tailscale-only]
 #
 # Roles: app, worker, db, logging, redis
 # This is the SSH-based alternative to cloud-init for already-running servers.
 #
 # Pass --reprovision to tear down existing containers and volumes before reprovisioning.
 # Without --reprovision, the script will abort if services are already running.
+# Pass --tailscale-only to enroll an already-provisioned host in Tailscale without
+# changing Docker containers, volumes, or application env files.
 #
 # No env vars required by default — the script reads your age key from
 # ~/.config/sops/age/keys.txt and all other secrets from .env.production.enc.
@@ -25,7 +27,8 @@ set -euo pipefail
 ROLE="$1"
 HOST="$2"
 SSH_KEY="$3"
-REPROVISION="${4:-}"
+MODE="${4:-}"
+REPROVISION="$MODE"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
@@ -43,6 +46,11 @@ case "$ROLE" in
   logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
   redis)   COMPOSE_FILE="docker-compose.redis.yml" ;;
   *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
+esac
+
+case "$MODE" in
+  ""|"--reprovision"|"--tailscale-only") ;;
+  *) echo "Unknown mode: $MODE (expected --reprovision or --tailscale-only)"; exit 1 ;;
 esac
 
 # Logging nodes use only public runtime images, but they still rely on values
@@ -123,7 +131,10 @@ apply_tailscale_role_defaults() {
     db)
       : "${TS_AUTH_KEY:=${TS_AUTH_KEY_DB:-}}"
       : "${TS_TAG:=${TS_TAG_DB:-tag:prod-db}}"
-      : "${TS_ADVERTISE_ROUTES:=${TS_DB_ADVERTISE_ROUTES:-}}"
+      if [ -n "${TS_AUTH_KEY:-}" ]; then
+        : "${DB_BIND_IP:?DB_BIND_IP is required for db Tailscale route advertisement}"
+        : "${TS_ADVERTISE_ROUTES:=${DB_BIND_IP}/32}"
+      fi
       ;;
     worker)
       if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
@@ -138,7 +149,7 @@ apply_tailscale_role_defaults() {
     : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_WORKER is required for Tailscale worker provisioning}"
   fi
   if [ "$ROLE" = "db" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
-    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_DB is required when TS_DB_ADVERTISE_ROUTES/TS_ADVERTISE_ROUTES is set}"
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_DB is required when TS_ADVERTISE_ROUTES is set}"
   fi
 }
 
@@ -153,14 +164,14 @@ if [ "$ROLE" = "worker" ]; then
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
-if [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
   : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" = "logging" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
   GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-$DISABLED_WARNING_WEBHOOK_URL}"
   GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
@@ -168,11 +179,11 @@ fi
 if [ "$ROLE" = "db" ]; then
   : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node primary private IP)}"
 fi
-if [ "$ROLE" = "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "redis" ]; then
   : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
   : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis role (Redis node private IP)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 
@@ -201,6 +212,19 @@ configure_tailscale_if_requested() {
         /opt/143/deploy/scripts/install-tailscale.sh
       '
 }
+
+if [ "$MODE" = "--tailscale-only" ]; then
+  : "${TS_AUTH_KEY:?TS_AUTH_KEY or a role-specific TS_AUTH_KEY_* is required for Tailscale enrollment}"
+
+  echo "=== Enrolling $ROLE node at $HOST in Tailscale only ==="
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "mkdir -p /opt/143/deploy/scripts"
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-tailscale.sh" root@"$HOST":/opt/143/deploy/scripts/install-tailscale.sh
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "chmod +x /opt/143/deploy/scripts/install-tailscale.sh"
+  configure_tailscale_if_requested
+  echo ""
+  echo "=== Tailscale enrollment applied for $ROLE node at $HOST ==="
+  exit 0
+fi
 
 resolve_worker_identity() {
   if [ "$ROLE" != "worker" ]; then

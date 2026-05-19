@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -318,6 +318,8 @@ secrets-rotate:
 #   DB_BIND_IP                   — required for db role. Set to the db node's
 #                                  primary private IP so same-datacenter nodes
 #                                  keep a DB path if Tailscale is unavailable.
+#                                  DB Tailscale enrollment advertises DB_BIND_IP/32
+#                                  automatically when TS_AUTH_KEY_DB is present.
 #
 # Worker-only env vars (per-host identity, written to /opt/143/.env.local
 # and preserved across deploys):
@@ -335,9 +337,6 @@ secrets-rotate:
 #                                  TS_AUTH_KEY_DB, TS_AUTH_KEY_WORKER.
 #   TS_TAG_<ROLE>                — role-specific tags. Defaults to tag:prod-<role>.
 #   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
-#   TS_DB_ADVERTISE_ROUTES       — optional comma-separated routes. Use the db
-#                                  private IP as /32 to let remote workers reach
-#                                  Postgres without changing the DB listener.
 #   TS_WORKER_HOSTS              — comma-separated tailnet workers. Entries can be
 #                                  "<host>" or "<node-id>:<host>". Mapped
 #                                  workers always accept advertised routes.
@@ -347,6 +346,7 @@ secrets-rotate:
 #   make provision-app HOST=<public-ip>
 #   make provision-db HOST=<public-ip>
 #   make provision-worker HOST=<public-ip>
+#   make tailscale-enroll ROLE=app HOST=<existing-app-public-ip>
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -393,7 +393,6 @@ export TS_AUTH_KEY_WORKER
 export TS_TAG_APP
 export TS_TAG_DB
 export TS_TAG_WORKER
-export TS_DB_ADVERTISE_ROUTES
 export TS_WORKER_HOSTS
 export TS_AUTH_KEY
 export TS_TAG
@@ -432,6 +431,13 @@ provision-redis:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-redis HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh redis $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
+tailscale-enroll:
+	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make tailscale-enroll ROLE=<app|db> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	@test "$(ROLE)" = "app" -o "$(ROLE)" = "db" || { echo "ROLE must be app or db. Use provision-worker for new tailnet workers."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make tailscale-enroll ROLE=<app|db> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	./deploy/scripts/provision.sh $(ROLE) $(HOST) $(SSH_KEY) --tailscale-only
 
 # Refresh deploy's narrow sudoers grant on an existing host without tearing
 # down containers. Use when deploy fails on a legacy host with
