@@ -483,6 +483,28 @@ func TestInjectScriptsIntoHTML_UnsupportedEncodingSkipsInjectionWithoutMutatingR
 	require.Equal(t, original, body, "unsupported encoded bodies should not be mutated")
 }
 
+func TestInjectBeforeEndTag_InsertsBeforeRealHeadNotFlightPayload(t *testing.T) {
+	t.Parallel()
+
+	marker := "<script>preview marker</script>"
+	body := []byte(`<!DOCTYPE html><html><head><title>Login</title></head><body>` +
+		`<script>self.__next_f.push([1,"0:{\"children\":[\"$\",\"html\",null,{\"children\":[\"$\",\"body\",null,{\"children\":\"payload\"}]}]}"])</script>` +
+		strings.Repeat("x", 8192) +
+		`</body></html>`)
+
+	out := string(injectBeforeEndTag(body, marker))
+	markerIndex := strings.Index(out, marker)
+	headCloseIndex := strings.Index(out, "</head>")
+	flightIndex := strings.Index(out, "self.__next_f.push")
+
+	require.NotEqual(t, -1, markerIndex, "injection should add the marker script")
+	require.NotEqual(t, -1, headCloseIndex, "test document should contain a real head close tag")
+	require.NotEqual(t, -1, flightIndex, "test document should contain a Next Flight script payload")
+	require.Less(t, markerIndex, headCloseIndex, "injection should happen before the real closing head tag")
+	require.Less(t, headCloseIndex, flightIndex, "the real head should close before the Flight script payload begins")
+	require.NotContains(t, out, `[\"$\",<script>preview marker</script>`, "injection should not splice the marker into the escaped Flight payload")
+}
+
 func TestGateway_ServeHTTP_InvalidHost(t *testing.T) {
 	t.Parallel()
 

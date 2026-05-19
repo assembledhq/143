@@ -658,8 +658,14 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
 	z := html.NewTokenizer(bytes.NewReader(body))
 	offset := -1
+	consumed := 0
 	for {
-		switch z.Next() {
+		tokenType := z.Next()
+		raw := z.Raw()
+		tokenStart := consumed
+		consumed += len(raw)
+
+		switch tokenType {
 		case html.ErrorToken:
 			// End of input or parse error — no matching end tag found.
 			if offset == -1 {
@@ -669,16 +675,11 @@ func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
 		case html.EndTagToken:
 			name, _ := z.TagName()
 			if string(name) == "head" {
-				// Offset is the position immediately before the `<` that
-				// started this token. Compute from remaining bytes.
-				raw := z.Raw()
-				tokenStart := len(body) - len(z.Buffered()) - len(raw)
 				return spliceAt(body, tokenStart, scriptBlock)
 			}
 			if string(name) == "body" && offset == -1 {
 				// Remember body offset as a fallback if no </head> appears.
-				raw := z.Raw()
-				offset = len(body) - len(z.Buffered()) - len(raw)
+				offset = tokenStart
 			}
 		}
 	}
