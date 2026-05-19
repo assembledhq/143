@@ -437,11 +437,13 @@ func TestParseCodexStreamOutput(t *testing.T) {
 				require.Len(t, logs, 2, "should have tool_use + tool_result")
 				require.Equal(t, "tool_use", logs[0].Level)
 				require.Equal(t, "command_execution", logs[0].Metadata["tool"])
+				require.Equal(t, "item_1", logs[0].Metadata["item_id"])
 				inputMap, ok := logs[0].Metadata["input"].(map[string]interface{})
 				require.True(t, ok)
 				require.Contains(t, inputMap["command"], "ls -la /workspace")
 				require.Equal(t, "output", logs[1].Level)
 				require.Equal(t, "tool_result", logs[1].Metadata["type"])
+				require.Equal(t, "item_1", logs[1].Metadata["item_id"])
 			},
 		},
 		{
