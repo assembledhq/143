@@ -5520,43 +5520,34 @@ export function SessionDetailContent({ id }: { id: string }) {
           <div className="space-y-3">
             <div className="space-y-2">
               <Label htmlFor="review-agent-type">Coding agent</Label>
-              <div className="rounded-lg border border-border bg-muted/30 p-3">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground">
-                    <ClipboardList className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 flex-1 space-y-2">
-                    <Select
-                      value={reviewAgentType}
-                      onValueChange={setReviewAgentType}
-                      disabled={startReviewLoopMutation.isPending}
-                    >
-                      <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="h-8 w-full">
-                        <SelectValue placeholder="Select coding agent" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {reviewAgentOptions.map((agent) => (
-                          <SelectItem key={agent.key} value={agent.key}>
-                            {agent.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">
-                      Reviews the current working tree, fixes findings, and stops early if the follow-up pass is clean.
-                    </p>
-                    {session.agent_type === reviewAgentType ? (
-                      <p className="text-xs text-muted-foreground">
-                        This is the same agent used by the main session.
-                      </p>
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Separate from the main session&apos;s {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} agent.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
+              <Select
+                value={reviewAgentType}
+                onValueChange={setReviewAgentType}
+                disabled={startReviewLoopMutation.isPending}
+              >
+                <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="h-9 w-full">
+                  <SelectValue placeholder="Select coding agent" />
+                </SelectTrigger>
+                <SelectContent>
+                  {reviewAgentOptions.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Reviews the current working tree, fixes findings, and stops early if the follow-up pass is clean.
+              </p>
+              {session.agent_type === reviewAgentType ? (
+                <p className="text-xs text-muted-foreground">
+                  This is the same agent used by the main session.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Separate from the main session&apos;s {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} agent.
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
@@ -5617,15 +5608,10 @@ export function SessionDetailContent({ id }: { id: string }) {
             </Button>
             <Button
               type="button"
-              className="gap-1.5"
               disabled={reviewActionDisabled}
               onClick={() => startReviewLoopMutation.mutate()}
             >
-              {startReviewLoopMutation.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <ClipboardList className="h-3.5 w-3.5" />
-              )}
+              {startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
               Start review
             </Button>
           </DialogFooter>
