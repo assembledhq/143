@@ -205,6 +205,22 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
 }
 
+func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for Linear agent worker wiring regression test")
+
+	body := string(src)
+	depsAssign := strings.Index(body, "svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps")
+	require.NotEqual(t, -1, depsAssign, "buildServices should still wire LinearAgentDeps")
+
+	beforeDeps := body[:depsAssign]
+	lastFeatureFlagGate := strings.LastIndex(beforeDeps, "if cfg.LinearAgentEnabled")
+	lastFuncStart := strings.LastIndex(beforeDeps, "func buildServices(")
+	require.Less(t, lastFeatureFlagGate, lastFuncStart, "LinearAgentDeps must be wired even when LINEAR_AGENT_ENABLED=false so queued jobs drain")
+}
+
 func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *testing.T) {
 	t.Parallel()
 

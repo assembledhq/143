@@ -15,6 +15,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -510,6 +512,16 @@ func main() {
 				}
 				rehydrateCancel()
 			}
+		}
+
+		// Plumb stores into LinearAgentDeps now that the Stores struct is
+		// fully constructed. buildServices runs before stores is built, so
+		// the deps struct it produces leaves Stores nil; setting it here
+		// closes the loop without forcing buildServices to take stores as
+		// an argument (which would entangle two otherwise-independent
+		// build phases).
+		if services.LinearAgentDeps != nil {
+			services.LinearAgentDeps.Stores = stores
 		}
 
 		processWorkers = startProcessWorkers(
@@ -1193,6 +1205,15 @@ func buildServices(
 	// post-link milestones (PR open / PR merged / etc.). Constructed via
 	// the shared Build helper so the API server (router.go) and the worker
 	// (here) wire the service identically.
+	//
+	// Inbound-agent metrics shared between Service.HandleAgentMilestone
+	// and (in MODE=all) the API router's dispatcher. Failure to register
+	// the OTel instruments is non-fatal — nil-safe RecordX helpers
+	// degrade to no-ops.
+	workerLinearAgentMetrics, mErr := metrics.NewLinearAgentMetrics()
+	if mErr != nil {
+		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
 		Logger:             logger,
@@ -1209,7 +1230,8 @@ func buildServices(
 			ClientID:     cfg.LinearOAuthClientID,
 			ClientSecret: cfg.LinearOAuthClientSecret,
 		},
-		AppBaseURL: cfg.FrontendURL,
+		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: workerLinearAgentMetrics,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 	// Wire the linear service into the agent env so sandbox-bound
@@ -1268,6 +1290,38 @@ func buildServices(
 		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
+	}
+
+	// Linear inbound-agent worker wiring. The process-wide
+	// LINEAR_AGENT_ENABLED flag gates the webhook dispatcher, not the
+	// worker handler: disabling the flag must stop new inbound events while
+	// still allowing already-enqueued linear_agent_event jobs to drain.
+	if linearService != nil {
+		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+		repoResolver := linear.NewAgentRepoResolver(
+			db.NewLinearTeamRepoMappingStore(pool),
+			linearAgentSettingsView,
+			repoStore,
+		)
+		svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps{
+			Stores:         nil, // populated below in BuildStores
+			Linear:         linearService,
+			RepoResolver:   repoResolver,
+			ProviderState:  db.NewLinearProviderStateStore(pool),
+			SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
+			OrgSettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+				org, err := orgStore.GetByID(ctx, orgID)
+				if err != nil {
+					return models.OrgSettings{}, err
+				}
+				return models.ParseOrgSettings(org.Settings)
+			},
+			ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+				return linearService.ClientForOrg(ctx, orgID)
+			},
+			Metrics: workerLinearAgentMetrics,
+			Logger:  logger,
+		}
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

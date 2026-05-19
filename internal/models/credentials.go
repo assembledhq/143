@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -218,6 +219,26 @@ type LinearConfig struct {
 	Scope         string    `json:"scope,omitempty"`
 	WorkspaceID   string    `json:"workspace_id,omitempty"`
 	WorkspaceName string    `json:"workspace_name,omitempty"`
+
+	// AppUserID is the id of the @143 agent user provisioned by Linear when
+	// the OAuth flow was completed with actor=app. Empty for legacy installs
+	// that completed before the agent flow shipped — the health probe flips
+	// the integration into a "needs re-authorize" state when this is empty
+	// after the cutover. Persisted because filtering inbound webhooks by
+	// AppUserID lets us distinguish events targeted at our agent from
+	// arbitrary issue activity.
+	AppUserID string `json:"app_user_id,omitempty"`
+	// AppUserName is the display-name handle Linear assigned the agent user
+	// (typically "143"). Cosmetic; surfaced in admin UIs so operators can
+	// confirm the install paired the right OAuth app.
+	AppUserName string `json:"app_user_name,omitempty"`
+	// AgentScopesGranted is true when the OAuth Scope string contains both
+	// app:assignable and app:mentionable. Cached at install time so the
+	// runtime hot path doesn't re-parse Scope on every webhook. The health
+	// probe re-derives this on each pass so a token rotated through a
+	// non-agent flow (e.g. legacy "connect Linear") flips this back to false
+	// and surfaces a re-authorize banner.
+	AgentScopesGranted bool `json:"agent_scopes_granted,omitempty"`
 }
 
 // IsExpired returns true if the access token has a known expiry that has
@@ -436,6 +457,42 @@ func (c LinearConfig) Validate() error {
 		return errors.New("access_token or webhook_secret is required")
 	}
 	return nil
+}
+
+// HasAgentScopes returns true when the OAuth Scope string contains the
+// scopes required by the Linear agent feature (app:assignable AND
+// app:mentionable). Used by the health probe to decide whether to surface
+// a "re-authorize Linear (admin required)" banner. Computed from Scope
+// rather than the cached AgentScopesGranted bit so a token rotated through
+// the legacy `read,write` flow demotes correctly even if the cache was
+// stale.
+func (c LinearConfig) HasAgentScopes() bool {
+	if c.Scope == "" {
+		return false
+	}
+	// Linear stores scopes as a comma-separated list (the same shape the
+	// OAuth params used). Splitting on both `,` and ` ` is defensive — the
+	// spec allows both and Linear has historically used commas.
+	scopes := splitScopeString(c.Scope)
+	wantA, wantM := false, false
+	for _, s := range scopes {
+		switch s {
+		case LinearScopeAppAssignable:
+			wantA = true
+		case LinearScopeAppMentionable:
+			wantM = true
+		}
+	}
+	return wantA && wantM
+}
+
+// splitScopeString splits an OAuth scope string on commas or spaces. Linear
+// uses commas, but the OAuth spec leaves the separator implementation-defined
+// and other providers use spaces; accepting both keeps parsing robust.
+func splitScopeString(scope string) []string {
+	return strings.FieldsFunc(scope, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
 }
 
 func (c SlackConfig) Validate() error {

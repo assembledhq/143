@@ -33,8 +33,9 @@ import (
 )
 
 const (
-	defaultMaxConcurrent = 10
-	planModePrefix       = "[PLAN_MODE]\n"
+	defaultMaxConcurrent    = 10
+	mentionIndexWarmTimeout = 2 * time.Second
+	planModePrefix          = "[PLAN_MODE]\n"
 )
 
 // ErrConcurrencyLimit is returned when an org has reached its maximum
@@ -811,6 +812,30 @@ func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session 
 	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
 		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
 	}
+}
+
+func (o *Orchestrator) warmMentionIndexFromSandboxAsync(ctx context.Context, session *models.Session, liveSandbox *Sandbox, snapshotKey string, log zerolog.Logger) {
+	if o == nil || o.mentionIndexes == nil || o.fileReader == nil || session == nil || liveSandbox == nil || snapshotKey == "" {
+		return
+	}
+
+	sessionCopy := *session
+	sandboxCopy := *liveSandbox
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warn().Interface("panic", r).Str("snapshot_key", snapshotKey).Msg("panic warming proactive mention index")
+			}
+		}()
+
+		baseCtx := context.Background()
+		if ctx != nil {
+			baseCtx = context.WithoutCancel(ctx)
+		}
+		warmCtx, cancel := context.WithTimeout(baseCtx, mentionIndexWarmTimeout)
+		defer cancel()
+		o.warmMentionIndexFromSandbox(warmCtx, &sessionCopy, &sandboxCopy, snapshotKey, log)
+	}()
 }
 
 func defaultSandboxPATH() string {
@@ -1840,6 +1865,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("resolve issue context: %s", err))
 		return fmt.Errorf("resolve issue context: %w", err)
 	}
+	drainInitialQueuedMessages := false
+	initialProcessedMessageID := int64(0)
 	var messages []models.SessionMessage
 	if o.sessionMessages != nil {
 		messages, err = o.sessionMessages.ListBySession(ctx, run.OrgID, run.ID)
@@ -1849,6 +1876,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 	latestMsg := latestUserMessage(messages)
+	if latestMsg != nil {
+		initialProcessedMessageID = latestMsg.ID
+	}
 	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestMsg, issueSnapshot)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("resolve prompt seed: %s", err))
@@ -2104,6 +2134,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
 	defer func() {
+		if !drainInitialQueuedMessages {
+			return
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer drainCancel()
+		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, nil, log)
+	}()
+	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
 			// Use a detached context so the billing write succeeds even if
@@ -2308,6 +2346,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 	}
 
+	// From this point every exit releases the initial turn hold and leaves the
+	// session in a drainable post-execution state. Prompts appended while
+	// run_agent was active need a continuation even when this turn fails,
+	// times out, or is cancelled.
+	drainInitialQueuedMessages = true
+
 	// 11. Handle result.
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -2413,7 +2457,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
 		}
-		o.warmMentionIndexFromSandbox(ctx, run, sandbox, snapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(ctx, run, sandbox, snapshotKey, log)
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -3690,7 +3734,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
-		o.warmMentionIndexFromSandbox(ctx, session, sandbox, newSnapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(ctx, session, sandbox, newSnapshotKey, log)
 	}
 
 	// 9. Update turn complete — sets status to idle.
@@ -3730,6 +3774,13 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if processed == nil || o.jobs == nil || o.sessionMessages == nil {
 		return
 	}
+	o.drainQueuedMessagesAfterProcessedID(ctx, session, processed.ID, threadID, log)
+}
+
+func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, session *models.Session, processedMessageID int64, threadID *uuid.UUID, log zerolog.Logger) {
+	if o.jobs == nil || o.sessionMessages == nil {
+		return
+	}
 	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
@@ -3738,7 +3789,7 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	var queued *models.SessionMessage
 	for i := range messages {
 		m := messages[i]
-		if m.Role != models.MessageRoleUser || m.ID <= processed.ID {
+		if m.Role != models.MessageRoleUser || m.ID <= processedMessageID {
 			continue
 		}
 		// On the thread path, a queued message is bound to the same thread —
@@ -3761,9 +3812,8 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 
 	// Confirm the session is in a state that can accept another turn before
 	// enqueueing. Skipping the GetByID would still be safe (the worker would
-	// refuse a job for a terminal session), but it would create a noisy
-	// dead-letter trail on every cancelled run that left the session marked
-	// failed/cancelled.
+	// refuse a job for a non-resumable terminal session), but it would create a
+	// noisy dead-letter trail on skipped sessions and future terminal states.
 	current, getErr := o.sessions.GetByID(ctx, session.OrgID, session.ID)
 	if getErr != nil {
 		log.Warn().Err(getErr).Msg("failed to fetch session for queue drain status check")
@@ -3788,7 +3838,7 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if requestID := o.answerQueuedHumanInputRequest(ctx, session, queued, threadID, log); requestID != nil {
 		payload["human_input_request_id"] = requestID.String()
 	}
-	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
 	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 	}
@@ -3825,11 +3875,9 @@ func (o *Orchestrator) answerQueuedHumanInputRequest(ctx context.Context, sessio
 }
 
 // drainAcceptableStatus returns true for session states that can absorb
-// another continue_session turn: running (the in-flight job will pick the
-// queued message up via latest-message reads) and idle (a fresh
-// continue_session can claim it). Terminal states are skipped — a queued
-// message after a failed/cancelled session waits for the user to take an
-// explicit action.
+// another continue_session turn. Running and idle are the common paths; the
+// resumable statuses cover prompts that arrived during an initial run_agent
+// and must be picked up after that run lands in a terminal or paused state.
 func drainAcceptableStatus(status string) bool {
 	switch status {
 	case string(models.SessionStatusIdle),
@@ -3838,7 +3886,7 @@ func drainAcceptableStatus(status string) bool {
 		string(models.SessionStatusNeedsHumanGuidance):
 		return true
 	}
-	return false
+	return models.SessionStatus(status).IsResumable()
 }
 
 // continueSessionDedupeKey mirrors db.ContinueSessionDedupeKey. The agent
@@ -5381,7 +5429,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
 			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
 		}
-		o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))

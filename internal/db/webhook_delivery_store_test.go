@@ -3,11 +3,13 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -48,6 +50,90 @@ func TestWebhookDeliveryStore_Create(t *testing.T) {
 	require.Equal(t, now, delivery.ReceivedAt, "should set the received_at timestamp on the delivery")
 	require.Equal(t, now, delivery.CreatedAt, "should set the created_at timestamp on the delivery")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhookDeliveryStore_CreateDuplicateDeliveryStatusHandling(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	deliveryID := "linear-delivery-1"
+	now := time.Now()
+
+	tests := []struct {
+		name      string
+		status    string
+		expectErr error
+	}{
+		{
+			name:   "reuses received delivery so provider retry is processed",
+			status: "received",
+		},
+		{
+			name:   "reuses failed delivery so provider retry is processed",
+			status: "failed",
+		},
+		{
+			name:      "returns replay for processed delivery",
+			status:    "processed",
+			expectErr: ErrWebhookDeliveryReplay,
+		},
+		{
+			name:      "returns replay for ignored delivery",
+			status:    "ignored",
+			expectErr: ErrWebhookDeliveryReplay,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create pgx mock")
+			defer mock.Close()
+
+			existingID := uuid.New()
+			delivery := &models.WebhookDelivery{
+				OrgID:         orgID,
+				IntegrationID: integrationID,
+				Provider:      "linear",
+				DeliveryID:    &deliveryID,
+				EventType:     "AgentSessionEvent",
+				Payload:       json.RawMessage(`{"type":"AgentSessionEvent"}`),
+				Status:        "received",
+			}
+
+			mock.ExpectQuery("INSERT INTO webhook_deliveries").
+				WithArgs(
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				).
+				WillReturnError(&pgconn.PgError{Code: "23505", Message: "duplicate delivery"})
+			mock.ExpectQuery("SELECT id, org_id, integration_id").
+				WithArgs("linear", &deliveryID).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "integration_id", "provider", "delivery_id", "event_type",
+					"signature_valid", "received_at", "processed_at", "status", "attempts",
+					"error", "payload", "headers", "created_at",
+				}).AddRow(
+					existingID, orgID, integrationID, "linear", &deliveryID, "AgentSessionEvent",
+					nil, now, nil, tt.status, 1,
+					nil, json.RawMessage(`{"type":"AgentSessionEvent"}`), nil, now,
+				))
+
+			err = NewWebhookDeliveryStore(mock).Create(context.Background(), delivery)
+			if tt.expectErr != nil {
+				require.True(t, errors.Is(err, tt.expectErr), "terminal duplicate deliveries should return the replay sentinel")
+			} else {
+				require.NoError(t, err, "non-terminal duplicate deliveries should be retried using the existing row")
+				require.Equal(t, existingID, delivery.ID, "retry should hydrate the existing delivery id for MarkProcessed")
+				require.Equal(t, tt.status, delivery.Status, "retry should preserve the existing delivery status")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestWebhookDeliveryStore_MarkProcessed(t *testing.T) {
