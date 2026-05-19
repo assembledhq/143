@@ -1494,6 +1494,8 @@ func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, san
 		Str("org_id", orgID.String()).
 		Msg("injected claude subscription credentials into sandbox")
 
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, sub.AccountType, ""))
+
 	return true, nil
 }
 
@@ -1501,7 +1503,11 @@ func (e *AgentEnv) PrepareClaudeCodeAPIKeyFallback(ctx context.Context, sandbox 
 	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
 	}
-	return e.RemoveClaudeCodeCredentialsFile(ctx, sandbox)
+	if err := e.RemoveClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
+		return err
+	}
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]))
+	return nil
 }
 
 func (e *AgentEnv) RemoveClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
