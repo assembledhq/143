@@ -545,6 +545,7 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	require.Contains(t, deployText, "deploy/vector.yaml", "logging deploy should sync Vector config for the logging node")
 	require.Contains(t, deployText, "deploy/grafana/provisioning", "logging deploy should sync Grafana provisioning files")
 	require.Contains(t, deployText, "deploy/vmalert/rules", "logging deploy should sync vmalert rules")
+	require.Contains(t, deployText, "deploy/scripts/alertmanager_slack_relay.py", "logging deploy should sync the Alertmanager Slack relay script mounted by docker-compose.logging.yml")
 	require.Contains(t, deployText, "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules", "logging deploy should remove stale provisioned dashboards and rules before syncing repo-owned config")
 
 	compose, err := os.ReadFile("../docker-compose.logging.yml")
@@ -554,6 +555,10 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	require.Contains(t, deployText, "SERVER_ROLE=%s", "logging deploy should write SERVER_ROLE=logging for Vector")
 	vectorCheck := deployText[strings.Index(deployText, "# Verify Vector is running"):]
 	require.Contains(t, vectorCheck, `"$ROLE" = "logging"`, "logging deploy should verify the logging-node Vector collector after stack recreation")
+
+	vectorCompose, err := os.ReadFile("../docker-compose.vector.yml")
+	require.NoError(t, err, "test should read shared Vector compose file")
+	require.Contains(t, string(vectorCompose), "--api.enabled=true", "Vector compose should enable the API endpoint used by its /health healthcheck")
 
 	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
 	require.NoError(t, err, "test should read Grafana dashboard provider config")
