@@ -24,7 +24,6 @@ import {
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { queryKeys } from "@/lib/query-keys";
-import { useDisconnectRepository } from "@/hooks/use-repository-connection";
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import type { GitHubRepositoryClaimCandidate } from "@/lib/types";
@@ -88,13 +87,7 @@ function GitHubRepositoryClaims({
 
   return (
     <>
-      <div className="mt-3 border-t border-border pt-3">
-        <div className="mb-2">
-          <p className="text-xs font-medium text-foreground">Repository access</p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Choose which repositories this 143 organization owns from the connected GitHub installation.
-          </p>
-        </div>
+      <div className="mt-3">
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading repositories...</p>
         ) : error ? (
@@ -344,12 +337,7 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
-  const { data: reposResp } = useQuery({
-    queryKey: ["repositories", { includeDisconnected: true }],
-    queryFn: () => api.repositories.list({ includeDisconnected: true }),
-  });
   const disconnectMutation = useDisconnectIntegration();
-  const disconnectRepoMutation = useDisconnectRepository();
 
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
   const [notionError, setNotionError] = useState<string | null>(null);
@@ -408,15 +396,6 @@ export default function IntegrationsPage() {
     (integration) => integration.provider === "circleci" && integration.status === "active"
   );
 
-  const githubRepos = (reposResp?.data ?? []).map((r) => ({
-    id: r.id,
-    full_name: r.full_name,
-    status: r.status,
-  }));
-  const pendingRepoID = disconnectRepoMutation.isPending
-    ? (disconnectRepoMutation.variables ?? null)
-    : null;
-
   return (
     <PageContainer size="default">
       <div className="space-y-6">
@@ -431,10 +410,6 @@ export default function IntegrationsPage() {
       )}
       <AllIntegrationCards
         githubConnected={githubConnected}
-        githubRepos={githubRepos}
-        onDisconnectRepo={(id) => disconnectRepoMutation.mutate(id)}
-        onReconnectRepo={undefined}
-        pendingRepoID={pendingRepoID}
         githubExtra={
           isAdmin && githubConnected ? (
             <GitHubRepositoryClaims
