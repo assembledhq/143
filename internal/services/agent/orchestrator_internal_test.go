@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
 
 func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
@@ -37,6 +39,55 @@ func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	require.NotEqual(t, -1, hold, "RunAgent should publish the turn hold")
 	require.NotEqual(t, -1, usage, "RunAgent should record container usage")
 	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
+}
+
+func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	reader := &blockingMentionIndexFileReader{release: release}
+	o := &Orchestrator{
+		fileReader:     reader,
+		mentionIndexes: workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{}),
+	}
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	liveSandbox := &Sandbox{ID: "container-1", WorkDir: "/workspace"}
+
+	done := make(chan struct{})
+	go func() {
+		o.warmMentionIndexFromSandboxAsync(context.Background(), session, liveSandbox, "snapshot-1", zerolog.Nop())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(25 * time.Millisecond):
+		close(release)
+		require.Fail(t, "async mention-index warmup should return before the workspace traversal completes")
+		return
+	}
+	close(release)
+}
+
+type blockingMentionIndexFileReader struct {
+	release chan struct{}
+}
+
+func (r *blockingMentionIndexFileReader) ListDir(ctx context.Context, _, _, _ string) ([]sandbox.FileEntry, error) {
+	select {
+	case <-r.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (r *blockingMentionIndexFileReader) ReadFile(context.Context, string, string, string) (string, bool, error) {
+	return "", false, errors.New("not used")
+}
+
+func (r *blockingMentionIndexFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
+	return sandbox.FileContextResult{}, errors.New("not used")
 }
 
 type testInternalSessionLogStore struct {

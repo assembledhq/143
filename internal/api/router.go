@@ -26,6 +26,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
@@ -231,6 +233,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 
+	// Inbound-agent metrics. Constructed once and shared between the
+	// linear.Service (so HandleAgentMilestone records milestone emits)
+	// and the dispatcher (so webhook deliveries record). Failure here is
+	// non-fatal; nil-safe RecordX helpers degrade to no-ops.
+	linearAgentMetrics, err := metrics.NewLinearAgentMetrics()
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to register linear_agent metrics; continuing without dispatcher/writer metrics")
+	}
+
 	// Linear session-linking: detection, primary resolution + context
 	// snapshotting, attachment/comment writes, state-sync transitions —
 	// see design 62. Wired here so it's available to CreateManual; the
@@ -252,7 +263,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			ClientID:     cfg.LinearOAuthClientID,
 			ClientSecret: cfg.LinearOAuthClientSecret,
 		},
-		AppBaseURL: cfg.FrontendURL,
+		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: linearAgentMetrics,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
@@ -275,6 +287,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// disconnected so post-disconnect session creates can't admit
 	// bare-identifier matches via a stale cache.
 	integrationHandler.SetLinearTeamKeyCacheInvalidator(linearService.InvalidateTeamKeyCache)
+	// Auto-enable the inbound agent + auto-pick the org's only repo as the
+	// default mapping when the OAuth callback grants agent scopes. Both are
+	// idempotent and only apply when the admin hasn't already configured
+	// the corresponding field — re-auth never clobbers an explicit choice.
+	linearAgentBootstrap := linearAgentBootstrapAdapter{orgs: orgStore, repos: repoStore, logger: logger}
+	integrationHandler.SetLinearAgentBootstrapper(linearAgentBootstrap.Bootstrap)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
@@ -330,6 +348,54 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
+	// Reject unsigned webhook deliveries in production. Local dev keeps
+	// the historical fail-open behavior so loopback test POSTs work
+	// without configuring credentials.
+	ingestionWebhookHandler.SetRequireSecret(cfg.Env == "production")
+	// Shared per-OAuth-app HMAC secret for Linear. Used by the SaaS
+	// deployment where one Linear OAuth app handles every workspace.
+	// Self-hosted deployments leave this empty and store per-org
+	// overrides on LinearConfig.WebhookSecret instead.
+	ingestionWebhookHandler.SetGlobalLinearWebhookSecret(cfg.LinearWebhookSigningSecret)
+
+	// Linear inbound-agent dispatcher. Wired here so HandleLinear can branch
+	// AgentSessionEvent webhooks into the agent path. Behind the feature
+	// flag — see cfg.LinearAgentEnabled. Settings loader resolves
+	// org_settings.linear_agent.enabled per-org so a single org can opt
+	// in even before the org-level default flips. ClientForOrg uses the
+	// existing linear.Service credential resolution so the agent path
+	// uses the same actor=app token the rest of the writes do. Metrics
+	// recorder is shared with linearService.HandleAgentMilestone so a
+	// single OTel meter sees both inbound dispatches and outbound emits.
+	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
+		Logger:         logger,
+		AgentSessions:  linearService.AgentSessionStore(),
+		Activities:     linearService.AgentActivityStore(),
+		Jobs:           jobStore,
+		Metrics:        linearAgentMetrics,
+		FeatureEnabled: cfg.LinearAgentEnabled,
+		Credentials:    credentialStore,
+		SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
+		ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+			return linearService.ClientForOrg(ctx, orgID)
+		},
+	})
+	if linearAgentDispatcher != nil {
+		ingestionWebhookHandler.SetLinearAgentDispatcher(linearAgentDispatcher)
+	}
+
+	// Linear agent settings handler — exposes the team→repo mapping CRUD
+	// and install-status surfaces consumed by the settings UI.
+	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(handlers.LinearAgentSettingsConfig{
+		Mappings:      db.NewLinearTeamRepoMappingStore(pool),
+		Credentials:   credentialStore,
+		Settings:      linearAgentSettingsView,
+		AgentSessions: linearService.AgentSessionStore(),
+		Activities:    linearService.AgentActivityStore(),
+		Orgs:          linearAgentOrgWriterAdapter{orgs: orgStore},
+		Logger:        logger,
+	})
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
@@ -1076,6 +1142,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
 				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
 				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
+				// Linear agent settings: install status + team→repo mappings.
+				// Admin-only enforced by the surrounding middleware tier.
+				r.Get("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.GetStatus)
+				r.Patch("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.PatchSettings)
+				r.Get("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.ListMappings)
+				r.Post("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.UpsertMapping)
+				r.Delete("/api/v1/integrations/linear/agent/mappings/{id}", linearAgentSettingsHandler.DeleteMapping)
+				// Operator debug surface — read-only listings of the
+				// inbound agent rows + activity log so an admin can
+				// answer "what did we send for AgentSession X".
+				r.Get("/api/v1/integrations/linear/agent/sessions", linearAgentSettingsHandler.ListSessions)
+				r.Get("/api/v1/integrations/linear/agent/sessions/{id}", linearAgentSettingsHandler.GetSession)
 				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
@@ -1113,6 +1191,93 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Mount("/", apiRoutes)
 
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
+}
+
+// linearAgentOrgWriterAdapter persists the per-org Enabled flag by
+// loading the existing settings, mutating only the LinearAgent.Enabled
+// field, and writing back the merged JSON. Read-modify-write is fine
+// here because the org settings JSONB is a low-write-volume blob and
+// any concurrent admin edits would land seconds apart at worst.
+type linearAgentOrgWriterAdapter struct {
+	orgs *db.OrganizationStore
+}
+
+func (a linearAgentOrgWriterAdapter) SetLinearAgentEnabled(ctx context.Context, orgID uuid.UUID, enabled bool) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return fmt.Errorf("parse org settings: %w", err)
+	}
+	parsed.LinearAgent.Enabled = &enabled
+	// Surgical merge of just the linear_agent sub-key so a concurrent
+	// admin edit to a sibling settings key (e.g. agent_config) isn't
+	// clobbered.
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, parsed.LinearAgent)
+}
+
+// linearAgentBootstrapAdapter applies the post-OAuth convenience defaults
+// for the inbound agent feature. Two independent steps, both gated on
+// "admin hasn't expressed an opinion yet" so an idempotent re-auth never
+// overrides an explicit user choice:
+//
+//  1. Flip LinearAgent.Enabled to true when it is still nil. Once the admin
+//     has explicitly disabled (or re-enabled) the agent, that wins.
+//  2. Set LinearAgent.DefaultRepoID to the org's lone connected repo when
+//     the org has exactly one and no default is configured yet. Multi-repo
+//     orgs intentionally fall through — picking arbitrarily would surprise.
+type linearAgentBootstrapAdapter struct {
+	orgs   *db.OrganizationStore
+	repos  *db.RepositoryStore
+	logger zerolog.Logger
+}
+
+func (a linearAgentBootstrapAdapter) Bootstrap(ctx context.Context, orgID uuid.UUID) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return fmt.Errorf("parse org settings: %w", err)
+	}
+
+	mutated := false
+	if parsed.LinearAgent.Enabled == nil {
+		enabled := true
+		parsed.LinearAgent.Enabled = &enabled
+		mutated = true
+	}
+
+	if parsed.LinearAgent.DefaultRepoID == nil && a.repos != nil {
+		repos, err := a.repos.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+		if err != nil {
+			// Don't fail the whole bootstrap — the enable flip is still
+			// valuable on its own, and the default-repo picker is a pure
+			// convenience.
+			a.logger.Warn().Err(err).Str("org_id", orgID.String()).
+				Msg("linear agent bootstrap: failed to list repos; skipping default-repo auto-set")
+		} else if len(repos) == 1 {
+			repoID := repos[0].ID
+			parsed.LinearAgent.DefaultRepoID = &repoID
+			mutated = true
+		}
+	}
+
+	if !mutated {
+		return nil
+	}
+
+	// Surgical jsonb_set merge — see MergeLinearAgentSettings for why.
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, parsed.LinearAgent)
 }
 
 func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Service, shared ...*db.CodingCredentialStore) *db.CodingCredentialStore {

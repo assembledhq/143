@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,10 @@ func signBody(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func signedLinearIssueWebhookBody(ts time.Time) string {
+	return fmt.Sprintf(`{"webhookTimestamp":%d,"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`, ts.UnixMilli())
 }
 
 func TestIngestionWebhook_HandleSentry(t *testing.T) {
@@ -329,6 +334,295 @@ func TestIngestionWebhook_HandleLinear_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestIngestionWebhook_HandleLinear_MultiTenantWorkspaceRouting pins the SaaS
+// routing contract: a single Linear OAuth app installed across many workspaces
+// shares one webhook URL with no per-install query param. The handler must
+// resolve the owning 143 org by matching the payload's `organizationId` against
+// integrations.config->>'workspace_id', then verify the HMAC against that
+// org's secret. Without this path, every install would need its own webhook
+// URL — which Linear's OAuth app model doesn't allow.
+func TestIngestionWebhook_HandleLinear_MultiTenantWorkspaceRouting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		body           string
+		workspaceID    string
+		integrationCfg string
+		lookupErr      error
+		expectStatus   int
+		expectInBody   string
+	}{
+		{
+			name:           "resolves integration via payload workspace id",
+			body:           `{"organizationId":"lin-org-A","action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`,
+			workspaceID:    "lin-org-A",
+			integrationCfg: `{"workspace_id":"lin-org-A"}`,
+			expectStatus:   http.StatusOK,
+			expectInBody:   "processed",
+		},
+		{
+			name:         "rejects with 400 when payload has no organizationId and no query param",
+			body:         `{"action":"create","type":"Issue","data":{"id":"LIN-1"}}`,
+			expectStatus: http.StatusBadRequest,
+			expectInBody: "MISSING_INTEGRATION",
+		},
+		{
+			name:         "rejects with 401 when workspace id has no active integration",
+			body:         `{"organizationId":"lin-org-unknown","action":"create","type":"Issue"}`,
+			workspaceID:  "lin-org-unknown",
+			lookupErr:    pgx.ErrNoRows,
+			expectStatus: http.StatusUnauthorized,
+			expectInBody: "UNAUTHORIZED",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			handler := setupIngestionHandler(t, mock, nil)
+			integrationID := uuid.New()
+			orgID := uuid.New()
+			now := time.Now()
+
+			if tt.workspaceID != "" {
+				// Workspace-id lookup query. On lookupErr cases this is the
+				// only DB call we expect — the handler rejects before any
+				// downstream work fires.
+				if tt.lookupErr != nil {
+					mock.ExpectQuery("SELECT .+ FROM integrations .+workspace_id").
+						WithArgs(pgxmock.AnyArg()).
+						WillReturnError(tt.lookupErr)
+				} else {
+					mock.ExpectQuery("SELECT .+ FROM integrations .+workspace_id").
+						WithArgs(pgxmock.AnyArg()).
+						WillReturnRows(
+							pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+								AddRow(integrationID, orgID, "linear", json.RawMessage(tt.integrationCfg), "active", nil, now),
+						)
+				}
+			}
+
+			if tt.expectStatus == http.StatusOK {
+				// Full happy-path expectations identical to the
+				// integration_id-based test, just downstream of the new
+				// resolver. Confirms the resolved integration flows through
+				// the existing ingestion adapter unchanged.
+				mock.ExpectQuery("INSERT INTO webhook_deliveries").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+				mock.ExpectQuery("INSERT INTO issues").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				mock.ExpectExec("UPDATE webhook_deliveries").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			// No integration_id query param — that's the whole point.
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear", strings.NewReader(tt.body))
+			w := httptest.NewRecorder()
+
+			handler.HandleLinear(w, req)
+
+			require.Equal(t, tt.expectStatus, w.Code, "status code should match expected resolver outcome")
+			require.Contains(t, w.Body.String(), tt.expectInBody)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestIngestionWebhook_HandleLinearAgentEnqueueFailureDoesNotMarkProcessed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	handler := setupIngestionHandler(t, mock, nil)
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
+	enabled := true
+	handler.SetLinearAgentDispatcher(&LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          &fakeJobs{err: errors.New("job store down")},
+		settingsLoader: func(context.Context, uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{Enabled: &enabled}, nil
+		},
+		featureEnabled: true,
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+		)
+	mock.ExpectQuery("INSERT INTO webhook_deliveries").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at", "inserted",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_enqueue_fail",
+			"iss_1", "ACS-1",
+			"", "",
+			nil, "pending", &now,
+			now, now, true,
+		))
+
+	body := `{"type":"AgentSessionEvent","action":"created","payload":{"agentSession":{"id":"as_enqueue_fail","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"}}}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+	req.Header.Set("Linear-Event", "AgentSessionEvent")
+	w := httptest.NewRecorder()
+
+	handler.HandleLinear(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "enqueue failures should ask Linear to retry instead of marking the delivery processed")
+	require.Contains(t, w.Body.String(), "DISPATCH_FAILED", "response should identify the dispatch failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "delivery must remain unprocessed so a replay can retry the enqueue")
+}
+
+// TestIngestionWebhook_HandleLinear_QueryParamStillWorks pins the
+// backward-compat contract for self-hosted installs that paste a
+// `?integration_id=<uuid>` URL into Linear. The new workspace-id resolver
+// must not regress this path — query param is always honored when present
+// and takes priority over body sniffing.
+func TestIngestionWebhook_HandleLinear_QueryParamStillWorks(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := setupIngestionHandler(t, mock, nil)
+	integrationID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+		)
+	mock.ExpectQuery("INSERT INTO webhook_deliveries").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE webhook_deliveries").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Body has a *different* workspace id than what the query param points
+	// to. The query param must win; if the resolver ever started preferring
+	// the body sniff, this test would direct the delivery to the wrong org
+	// — that's the regression we're guarding.
+	body := `{"organizationId":"lin-org-DIFFERENT","action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinear(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "query-param routing must continue to work for self-hosted installs")
+	require.Contains(t, w.Body.String(), "processed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestIngestionWebhook_HandleLinear_RejectsDisconnectedIntegration pins the
+// rule that a stale ?integration_id=<uuid> URL pointing at a non-active
+// integration must be rejected at the resolver, before any HMAC verify or
+// downstream dispatch. Without this guard, a disconnected integration whose
+// signing secret has rotated could still spawn agent sessions or webhook
+// deliveries via a self-hosted-style URL.
+func TestIngestionWebhook_HandleLinear_RejectsDisconnectedIntegration(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []string{"inactive", "error"} {
+		status := status
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			handler := setupIngestionHandler(t, mock, nil)
+			integrationID := uuid.New()
+			orgID := uuid.New()
+			now := time.Now()
+
+			mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+						AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), status, nil, now),
+				)
+
+			body := `{"action":"create","type":"Issue","data":{"id":"LIN-1","title":"Bug","priority":1,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-02T00:00:00Z"}}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+			w := httptest.NewRecorder()
+
+			handler.HandleLinear(w, req)
+
+			require.Equal(t, http.StatusUnauthorized, w.Code, "disconnected integration must produce 401, not silently proceed")
+			require.NoError(t, mock.ExpectationsWereMet(), "no downstream calls should have been made after rejection")
+		})
+	}
+}
+
 func TestIngestionWebhook_SignatureVerification(t *testing.T) {
 	t.Parallel()
 
@@ -531,6 +825,345 @@ func TestIngestionWebhook_SignatureVerification(t *testing.T) {
 		handler.HandleSentry(w, req)
 		require.Equal(t, http.StatusUnauthorized, w.Code, "operational credential errors should reject webhook requests")
 		require.Contains(t, w.Body.String(), "UNAUTHORIZED")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestIngestionWebhook_HandleLinear_UsesDocumentedSignatureHeader(t *testing.T) {
+	t.Parallel()
+
+	secret := "linear-webhook-secret"
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	body := signedLinearIssueWebhookBody(time.Now())
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	credMock := &mockWebhookSecretLookup{
+		cred: &models.DecryptedCredential{
+			ID:       uuid.New(),
+			OrgID:    orgID,
+			Provider: models.ProviderLinear,
+			Config:   models.LinearConfig{WebhookSecret: secret},
+			Status:   "active",
+		},
+	}
+	handler := setupIngestionHandler(t, mock, credMock)
+
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+		)
+	mock.ExpectQuery("INSERT INTO webhook_deliveries").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE webhook_deliveries").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+	req.Header.Set("Linear-Signature", signBody(secret, []byte(body)))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinear(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "documented Linear-Signature header should verify successfully")
+	require.Contains(t, w.Body.String(), "processed", "verified Linear webhook should process normally")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIngestionWebhook_HandleLinear_AcceptsDelayedSignedWebhookRetry(t *testing.T) {
+	t.Parallel()
+
+	secret := "linear-webhook-secret"
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	body := signedLinearIssueWebhookBody(time.Now().Add(-2 * time.Minute))
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	credMock := &mockWebhookSecretLookup{
+		cred: &models.DecryptedCredential{
+			ID:       uuid.New(),
+			OrgID:    orgID,
+			Provider: models.ProviderLinear,
+			Config:   models.LinearConfig{WebhookSecret: secret},
+			Status:   "active",
+		},
+	}
+	handler := setupIngestionHandler(t, mock, credMock)
+
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+		)
+	mock.ExpectQuery("INSERT INTO webhook_deliveries").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE webhook_deliveries").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+	req.Header.Set("Linear-Signature", signBody(secret, []byte(body)))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinear(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "delayed signed Linear retries should pass signature verification")
+	require.Contains(t, w.Body.String(), "processed", "delayed signed Linear retry should reach normal delivery processing")
+	require.NoError(t, mock.ExpectationsWereMet(), "delayed webhook should be recorded and processed normally")
+}
+
+// TestIngestionWebhook_GlobalLinearSecretFallback pins the SaaS-deployment
+// contract: when no per-org Linear webhook secret is configured, the
+// signature verifier falls back to the shared LINEAR_WEBHOOK_SIGNING_SECRET
+// — the per-OAuth-app secret Linear shows once at app-creation time. Without
+// this fallback, the multi-tenant deployment can't verify any inbound
+// webhook because there's no install-time UI for entering the per-app
+// secret.
+//
+// The fallback is Linear-specific by design: Sentry's OAuth flow gives each
+// install its own webhook secret, so applying a process-wide override to
+// Sentry would be a regression.
+func TestIngestionWebhook_GlobalLinearSecretFallback(t *testing.T) {
+	t.Parallel()
+
+	globalSecret := "global-linear-app-secret"
+	perOrgSecret := "per-org-override"
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	body := signedLinearIssueWebhookBody(time.Now())
+
+	// Helpers — every subtest exercises the same downstream path once the
+	// signature check resolves, so the DB expectations are shared.
+	expectIntegrationLookup := func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+					AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "active", nil, now),
+			)
+	}
+	expectProcessed := func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectQuery("INSERT INTO webhook_deliveries").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "received_at", "created_at"}).AddRow(uuid.New(), now, now))
+		mock.ExpectQuery("INSERT INTO issues").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+		mock.ExpectExec("UPDATE webhook_deliveries").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	}
+
+	t.Run("global secret verifies when per-org credential missing", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// credStore returns ErrNoRows — the SaaS case where the org never
+		// pasted its own secret because there isn't one to paste.
+		credMock := &mockWebhookSecretLookup{err: fmt.Errorf("get linear credential: %w", pgx.ErrNoRows)}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+		expectProcessed(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(globalSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "global secret must verify when no per-org credential exists")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("global secret verifies when per-org credential has empty webhook_secret", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// Per-org row exists (Linear OAuth completed) but has no
+		// WebhookSecret — exactly the state after an OAuth callback in a
+		// SaaS deployment, since the OAuth code never has access to the
+		// app-level signing secret.
+		credMock := &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID: uuid.New(), OrgID: orgID, Provider: models.ProviderLinear,
+				Config: models.LinearConfig{WebhookSecret: ""}, Status: "active",
+			},
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+		expectProcessed(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(globalSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "global secret must fill in when per-org override is empty")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("per-org secret wins when both are set", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		credMock := &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID: uuid.New(), OrgID: orgID, Provider: models.ProviderLinear,
+				Config: models.LinearConfig{WebhookSecret: perOrgSecret}, Status: "active",
+			},
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+		expectProcessed(mock)
+
+		// Sign with the *per-org* secret. If precedence ever flipped this
+		// would fail with 401 because the global secret would be used for
+		// verification.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(perOrgSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "per-org override must take precedence over the global secret")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("no per-org and no global with requireSecret=true returns 401", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		credMock := &mockWebhookSecretLookup{err: fmt.Errorf("get linear credential: %w", pgx.ErrNoRows)}
+		handler := setupIngestionHandler(t, mock, credMock)
+		// Global left unset.
+		handler.SetRequireSecret(true)
+
+		expectIntegrationLookup(mock)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/linear?integration_id="+integrationID.String(), strings.NewReader(body))
+		req.Header.Set("Linear-Signature", signBody(globalSecret, []byte(body)))
+		w := httptest.NewRecorder()
+
+		handler.HandleLinear(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, "no secret + requireSecret=true must reject")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("global secret does NOT apply to Sentry", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// Sentry credential has no webhook_secret. The Linear global
+		// fallback must not leak into Sentry verification — Sentry's
+		// per-install secret is the right thing there, and a
+		// process-wide fallback would silently authorize forged Sentry
+		// webhooks if the Linear secret leaked.
+		credMock := &mockWebhookSecretLookup{
+			cred: &models.DecryptedCredential{
+				ID: uuid.New(), OrgID: orgID, Provider: models.ProviderSentry,
+				Config: models.SentryConfig{WebhookSecret: ""}, Status: "active",
+			},
+		}
+		handler := setupIngestionHandler(t, mock, credMock)
+		handler.SetGlobalLinearWebhookSecret(globalSecret)
+		handler.SetRequireSecret(true)
+
+		mock.ExpectQuery("SELECT .+ FROM integrations WHERE id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+					AddRow(integrationID, orgID, "sentry", json.RawMessage(`{}`), "active", nil, now),
+			)
+
+		sentryBody := `{"action":"created","data":{}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/sentry?integration_id="+integrationID.String(), strings.NewReader(sentryBody))
+		req.Header.Set("X-Sentry-Hook-Signature", signBody(globalSecret, []byte(sentryBody)))
+		w := httptest.NewRecorder()
+
+		handler.HandleSentry(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, "global Linear secret must not be applied to Sentry verification")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

@@ -193,10 +193,10 @@ func TestUnprocessedUserMessages_NoMessages(t *testing.T) {
 func TestDrainAcceptableStatus(t *testing.T) {
 	t.Parallel()
 
-	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance"} {
+	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance", "completed", "failed", "cancelled", "pr_created"} {
 		require.True(t, drainAcceptableStatus(status), "status %q should accept a drain enqueue", status)
 	}
-	for _, status := range []string{"completed", "failed", "cancelled", "skipped", "pr_created", "pending", ""} {
+	for _, status := range []string{"skipped", "pending", ""} {
 		require.False(t, drainAcceptableStatus(status), "status %q should not accept a drain enqueue", status)
 	}
 }

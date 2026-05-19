@@ -443,6 +443,69 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	return session, nil
 }
 
+// SessionMessageAppendState is the small slice of a session needed to append
+// an inbound message without claiming a new turn. It intentionally avoids the
+// full sessionSelectColumns payload because running-session fast paths only
+// need status and turn numbering.
+type SessionMessageAppendState struct {
+	ID          uuid.UUID `db:"id"`
+	OrgID       uuid.UUID `db:"org_id"`
+	Status      string    `db:"status"`
+	CurrentTurn int       `db:"current_turn"`
+}
+
+// GetMessageAppendState returns the current status and turn number for a
+// session, scoped to org. Used by follow-up-message paths after a claim loses
+// a race to an already-running turn: the caller can append the message to the
+// running session without enqueueing a duplicate continuation.
+func (s *SessionStore) GetMessageAppendState(ctx context.Context, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
+	return scanMessageAppendStateFromRow(s.db.QueryRow(ctx, sessionMessageAppendStateQuery(false), pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}))
+}
+
+// LockMessageAppendState is the SELECT ... FOR UPDATE variant of
+// GetMessageAppendState. The caller MUST already hold a transaction (passed
+// as tx) — the row lock is released on tx.Commit / tx.Rollback. Used by the
+// Linear agent prompted handler to read-and-pin status atomically before
+// inserting a queued user message under a still-running turn, so the
+// finisher's drain doesn't race the insert.
+//
+// Keeping the SQL co-located with the rest of the session queries (rather
+// than inlined in the worker package) means a future rename of `deleted_at`
+// or `status` rebuilds in one place.
+func (s *SessionStore) LockMessageAppendState(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (SessionMessageAppendState, error) {
+	if tx == nil {
+		return SessionMessageAppendState{}, fmt.Errorf("LockMessageAppendState requires a non-nil tx")
+	}
+	return scanMessageAppendStateFromRow(tx.QueryRow(ctx, sessionMessageAppendStateQuery(true), pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}))
+}
+
+func sessionMessageAppendStateQuery(forUpdate bool) string {
+	const base = `
+		SELECT id, org_id, status, current_turn
+		FROM sessions
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL`
+	if forUpdate {
+		return base + "\n\t\tFOR UPDATE"
+	}
+	return base
+}
+
+func scanMessageAppendStateFromRow(row pgx.Row) (SessionMessageAppendState, error) {
+	var state SessionMessageAppendState
+	if err := row.Scan(&state.ID, &state.OrgID, &state.Status, &state.CurrentTurn); err != nil {
+		return SessionMessageAppendState{}, err
+	}
+	return state, nil
+}
+
 func (s *SessionStore) GetAPIDetailByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
 	query := `
 		SELECT ` + sessionAPIDetailColumns + `
@@ -511,6 +574,26 @@ func (s *SessionStore) GetDiffByID(ctx context.Context, orgID, sessionID uuid.UU
 }
 
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session create transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := createSessionRows(ctx, tx, run); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit session create transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionStore) CreateInTx(ctx context.Context, tx pgx.Tx, run *models.Session) error {
+	return createSessionRows(ctx, tx, run)
+}
+
+func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.Origin == "" {
 		run.Origin = models.SessionOriginIssueTrigger
 	}
@@ -520,13 +603,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	if run.ValidationPolicy == "" {
 		run.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
 	}
-
-	tx, err := s.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin session create transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	if run.LinearPrepareState == "" {
 		run.LinearPrepareState = models.LinearPrepareStateNone
 	}
@@ -576,7 +652,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"linear_prepare_state":       run.LinearPrepareState,
 	}
 
-	row := tx.QueryRow(ctx, query, args)
+	row := q.QueryRow(ctx, query, args)
 	if err := row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt); err != nil {
 		return err
 	}
@@ -587,7 +663,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	// "every session row implies at least one thread row" cannot be violated
 	// by a partial failure between session insert and thread insert.
 	var primaryThreadID uuid.UUID
-	if err := tx.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		INSERT INTO session_threads (
 			session_id, org_id, agent_type, model_override, label, status
 		)
@@ -606,7 +682,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	run.PrimaryThreadID = &primaryThreadID
 
 	if run.PrimaryIssueID != nil {
-		if _, err := tx.Exec(ctx, `
+		if _, err := q.Exec(ctx, `
 			INSERT INTO session_issue_links (org_id, session_id, issue_id, role, position, added_by_user_id)
 			VALUES (@org_id, @session_id, @issue_id, 'primary', 0, @added_by_user_id)
 			ON CONFLICT (session_id, issue_id) DO NOTHING
@@ -618,9 +694,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		}); err != nil {
 			return fmt.Errorf("insert session issue link: %w", err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit session create transaction: %w", err)
 	}
 	return nil
 }

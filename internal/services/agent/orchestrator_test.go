@@ -3399,6 +3399,44 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
+func TestRunAgent_FailedExecutionDrainsInitialQueuedPrompt(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.getByIDFn = func(orgID, sessionID uuid.UUID) (models.Session, error) {
+		return models.Session{
+			ID:     sessionID,
+			OrgID:  orgID,
+			Status: string(models.SessionStatusFailed),
+		}, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		err := d.messages.Create(ctx, &models.SessionMessage{
+			SessionID: run.ID,
+			OrgID:     run.OrgID,
+			Role:      models.MessageRoleUser,
+			Content:   "queued while initial run was active",
+		})
+		require.NoError(t, err, "test setup should append the prompted user message")
+		return nil, errors.New("agent crashed after prompt")
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should return the execution error")
+	require.Contains(t, err.Error(), "execute agent", "RunAgent should wrap the adapter execution error")
+
+	enqueued := d.jobs.getEnqueued()
+	require.Contains(t, enqueued, "analyze_failure", "failed run should still enqueue failure analysis")
+	require.Contains(t, enqueued, "continue_session", "failed initial run should drain queued prompted messages")
+	payload, ok := d.jobs.getPayload("continue_session").(map[string]string)
+	require.True(t, ok, "continue_session payload should be string-keyed")
+	require.Equal(t, run.ID.String(), payload["session_id"], "continue_session payload should target the failed initial session")
+}
+
 func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	t.Parallel()
 
