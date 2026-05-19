@@ -68,6 +68,22 @@ func (c createPathClient) HasGitHubIntegrationAttachment(context.Context, string
 	return false, errors.New("HasGitHubIntegrationAttachment not used")
 }
 
+func (c createPathClient) AgentActivityCreate(context.Context, AgentActivityInput) (AgentActivityResult, error) {
+	return AgentActivityResult{}, errors.New("AgentActivityCreate not used")
+}
+
+func (c createPathClient) AgentSessionUpdate(context.Context, AgentSessionUpdateInput) error {
+	return errors.New("AgentSessionUpdate not used")
+}
+
+func (c createPathClient) AgentSessionGet(context.Context, string) (*FetchedAgentSession, error) {
+	return nil, errors.New("AgentSessionGet not used")
+}
+
+func (c createPathClient) FetchComment(context.Context, string) (*FetchedComment, error) {
+	return nil, errors.New("FetchComment not used")
+}
+
 type createPathIntegrationReader struct {
 	integration models.Integration
 	err         error

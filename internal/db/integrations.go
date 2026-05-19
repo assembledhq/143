@@ -175,6 +175,80 @@ func (s *IntegrationStore) UpdateStatusAndConfig(ctx context.Context, orgID, int
 	return err
 }
 
+// SetLinearWorkspaceID surgically merges the Linear workspace id into the
+// integration's config jsonb. Used by the OAuth callback to record the lookup
+// key the multi-tenant webhook handler resolves against — a single Linear
+// OAuth app has one webhook URL across every workspace it's installed in,
+// so org-resolution at webhook time must come from the payload's
+// `organizationId`, not the URL.
+//
+// Surgical merge (jsonb_set with create_missing=true) is important here
+// because integrations.config can carry independently-written keys like
+// `last_auth_error` / `last_auth_error_at`. A whole-blob UPDATE would race
+// with the auth-error writer in services/linear and clobber whichever side
+// landed later. The single-key jsonb_set commits atomically per row, so
+// concurrent updates of disjoint keys are safe.
+func (s *IntegrationStore) SetLinearWorkspaceID(ctx context.Context, orgID, integrationID uuid.UUID, workspaceID string) error {
+	query := `
+		UPDATE integrations
+		SET config = jsonb_set(
+			COALESCE(config, '{}'::jsonb),
+			'{workspace_id}',
+			to_jsonb(@workspace_id::text),
+			true
+		)
+		WHERE id = @id AND org_id = @org_id`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":           integrationID,
+		"org_id":       orgID,
+		"workspace_id": workspaceID,
+	})
+	if err != nil {
+		return fmt.Errorf("set linear workspace_id: %w", err)
+	}
+	// Failing loud on zero rows turns a typo'd integration id into an
+	// immediate error rather than a silently-discarded write. The
+	// multi-tenant Linear webhook resolver depends on this row being
+	// findable, so a silent no-op here would surface much later as an
+	// undebuggable "no active integration" rejection on the webhook
+	// hot path.
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("set linear workspace_id: integration %s not found for org %s", integrationID, orgID)
+	}
+	return nil
+}
+
+// GetActiveLinearByWorkspaceID resolves an active Linear integration by the
+// Linear workspace id stored in integrations.config. This is the org-lookup
+// path used by the multi-tenant webhook handler: a single Linear OAuth app
+// has one webhook URL for every workspace it's installed in, so the
+// handler can't rely on a per-install URL parameter for routing. The
+// partial UNIQUE index `idx_integrations_linear_workspace` (see migration
+// 000133) makes this an O(log n) probe and enforces a one-workspace-per-app
+// invariant — two active 143 integrations can never share a Linear
+// workspace id, so the lookup is unambiguous by construction.
+//
+// SECURITY: this is a pre-auth lookup — callers MUST verify the webhook
+// HMAC against the resolved org's secret before treating the integration
+// as authoritative. The integration row itself contains no secrets.
+// lint:allow-no-orgid reason="Linear webhook lookup by workspace ID; no org context available pre-auth"
+func (s *IntegrationStore) GetActiveLinearByWorkspaceID(ctx context.Context, workspaceID string) (models.Integration, error) {
+	if workspaceID == "" {
+		return models.Integration{}, fmt.Errorf("workspace_id is required")
+	}
+	query := `
+		SELECT id, org_id, provider, config, status, last_synced_at, created_at
+		FROM integrations
+		WHERE provider = 'linear'
+		  AND status = 'active'
+		  AND config->>'workspace_id' = @workspace_id`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"workspace_id": workspaceID})
+	if err != nil {
+		return models.Integration{}, fmt.Errorf("query linear integration by workspace_id: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
+}
+
 // GetByGitHubInstallationID returns the active GitHub integration for the
 // given installation id, used by webhook dispatch to map an event to an org.
 // lint:allow-no-orgid reason="GitHub webhook lookup by installation ID; no org context available pre-auth"
