@@ -727,7 +727,7 @@ export function PreviewPanel({
         </div>
 
         {/* Status badge */}
-        {status && status !== "failed" && (
+        {status && status !== "failed" && status !== "stopped" && status !== "expired" && (
           <Badge variant="secondary" className={cn(statusColor(status))}>
             {status === "ready" && <CheckCircle2 className="size-3" />}
             {status === "unhealthy" && <AlertTriangle className="size-3" />}
@@ -1155,11 +1155,14 @@ export function PreviewPanel({
               Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
             </p>
             {instance?.created_at && lastPreviewStoppedAt && (
-              <p className="text-xs text-muted-foreground">
-                Started {formatTimeAgo(instance.created_at)}
-                <span aria-hidden="true" className="mx-1 text-muted-foreground/50">·</span>
-                Stopped {formatTimeAgo(lastPreviewStoppedAt)}
-              </p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Started {formatTimeAgo(instance.created_at)}
+                </span>
+                <Badge variant="secondary" className={cn(statusColor(status ?? "stopped"))}>
+                  Stopped {formatTimeAgo(lastPreviewStoppedAt)}
+                </Badge>
+              </div>
             )}
           </div>
           <Button
