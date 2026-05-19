@@ -580,6 +580,16 @@ const SandboxMetadataBaseCommitSHA = "base_commit_sha"
 // base_commit_sha when missing or when the merge-base resolution fails.
 const SandboxMetadataTargetBranch = "target_branch"
 
+// SandboxMetadataClaudeCodePermissionMode is the sandbox.Metadata key used by
+// auth setup to tell the Claude Code adapter which CLI permission mode is
+// compatible with the selected credential path.
+const SandboxMetadataClaudeCodePermissionMode = "claude_code_permission_mode"
+
+const (
+	ClaudeCodePermissionModeAuto        = "auto"
+	ClaudeCodePermissionModeAcceptEdits = "acceptEdits"
+)
+
 // SandboxConnectionInfo holds provider-specific connection details for local resume.
 type SandboxConnectionInfo struct {
 	Provider     string            // "docker" or "e2b"

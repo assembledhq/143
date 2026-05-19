@@ -551,7 +551,15 @@ func TestClaudeCodeAdapter_Execute_UsesAutoModeWithoutBypassingAllPermissions(t 
 			}
 
 			adapter := NewClaudeCodeAdapter(zerolog.Nop())
-			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+			sandbox := &agent.Sandbox{
+				ID:      "test",
+				WorkDir: "/workspace",
+				HomeDir: "/home/sandbox",
+				Metadata: map[string]string{
+					agent.SandboxMetadataBaseCommitSHA:            "abc123",
+					agent.SandboxMetadataClaudeCodePermissionMode: agent.ClaudeCodePermissionModeAuto,
+				},
+			}
 			logCh := make(chan agent.LogEntry, 10)
 			ctx := WithSandboxProvider(context.Background(), provider)
 
@@ -564,6 +572,42 @@ func TestClaudeCodeAdapter_Execute_UsesAutoModeWithoutBypassingAllPermissions(t 
 			require.NotContains(t, provider.ExecCalls[0], "--dangerously-skip-permissions", "Claude CLI should not use the bypass-permissions alias while public internet egress is available")
 		})
 	}
+}
+
+func TestClaudeCodeAdapter_Execute_DefaultsToAcceptEditsPermissionMode(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "claude") {
+			_, _ = stdout.Write([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewClaudeCodeAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, &agent.AgentPrompt{
+		SystemPrompt: "system",
+		UserPrompt:   "user prompt",
+		MaxTokens:    50_000,
+	}, logCh)
+	require.NoError(t, err, "execute should succeed")
+	require.NotNil(t, result, "execute should return a result")
+	require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
+	require.Contains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should default to the broadly supported permission mode unless auth setup opted into auto")
+	require.NotContains(t, provider.ExecCalls[0], "--permission-mode auto", "Claude CLI should not use auto mode without an auth compatibility signal")
 }
 
 func TestClaudeCodeAdapter_ResumeMode(t *testing.T) {

@@ -21,8 +21,6 @@ import (
 const (
 	defaultLowTokenMax  = 50_000
 	defaultHighTokenMax = 200_000
-
-	claudeCodePermissionModeArg = " --permission-mode auto"
 )
 
 // resolveTokenLimit returns the appropriate max token limit based on
@@ -115,13 +113,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 
 	var cmd string
 	effortArg := ""
+	permissionModeArg := claudeCodePermissionModeArg(sandbox)
 	if prompt.ReasoningEffort != "" {
 		effortArg = fmt.Sprintf(" --effort %s", shellEscapeSingle(string(prompt.ReasoningEffort)))
 	}
-	// Run Claude Code in auto mode inside the per-session gVisor sandbox.
-	// This removes routine approval loops for commands like git diff while
-	// preserving Claude's classifier-backed checks instead of fully bypassing
-	// the permission layer.
 	if prompt.Continuation && prompt.ResumeSessionID != "" {
 		settingsArg, envPrefix, err := prepareClaudeHumanInputHooks(ctx, provider, sandbox, prompt)
 		if err != nil {
@@ -138,7 +133,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			envPrefix,
 			effortArg,
 			settingsArg,
-			claudeCodePermissionModeArg,
+			permissionModeArg,
 			shellEscapeSingle(prompt.ResumeSessionID),
 			msg,
 		)
@@ -163,7 +158,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			envPrefix,
 			effortArg,
 			settingsArg,
-			claudeCodePermissionModeArg,
+			permissionModeArg,
 			promptPath,
 		)
 	}
@@ -237,6 +232,14 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
 
 	return result, nil
+}
+
+func claudeCodePermissionModeArg(sandbox *agent.Sandbox) string {
+	mode := agent.ClaudeCodePermissionModeAcceptEdits
+	if sandbox != nil && sandbox.Metadata != nil && sandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode] == agent.ClaudeCodePermissionModeAuto {
+		mode = agent.ClaudeCodePermissionModeAuto
+	}
+	return " --permission-mode " + mode
 }
 
 func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, prompt *agent.AgentPrompt) (string, string, error) {
