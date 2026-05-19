@@ -224,6 +224,7 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	require.Contains(t, provisionText, "TS_AUTH_KEY_WORKER", "provisioning should support role-specific worker Tailscale auth keys from production secrets")
 	require.Contains(t, provisionText, "TS_WORKER_HOSTS", "provisioning should use a host list to choose which workers join Tailscale")
 	require.Contains(t, provisionText, "TS_ACCEPT_ROUTES", "provisioning should pass route acceptance through to Tailscale enrollment")
+	require.NotContains(t, provisionText, "TS_WORKER_ACCEPT_ROUTES", "mapped Tailscale workers should always accept advertised private routes without a separate production knob")
 	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE:=tailscale", "worker provisioning should derive Tailscale address discovery from the worker host list")
 	require.Contains(t, provisionText, "tailscale ip -4", "worker provisioning should be able to discover the worker's Tailscale IPv4 address")
 	require.Contains(t, provisionText, "100.64.0.0/10", "worker provisioning comments/errors should make the Tailscale address range explicit")
@@ -231,10 +232,8 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
 	require.NoError(t, err, "test should read worker cloud-init template")
 	cloudInitText := string(cloudInit)
-	require.Contains(t, cloudInitText, "TS_AUTH_KEY", "worker cloud-init should support first-boot Tailscale enrollment")
-	require.Contains(t, cloudInitText, "tailscale up", "worker cloud-init should bring Tailscale up before starting the worker")
-	require.Contains(t, cloudInitText, "TS_ACCEPT_ROUTES", "worker cloud-init should support accepting advertised private routes")
-	require.Contains(t, cloudInitText, "--accept-dns=false", "worker cloud-init Tailscale setup should not rewrite host DNS")
+	require.NotContains(t, cloudInitText, "TS_AUTH_KEY", "worker Tailscale enrollment should stay in provision.sh so it can use the production host map")
+	require.NotContains(t, cloudInitText, "tailscale up", "worker cloud-init should not duplicate the Tailscale enrollment path")
 }
 
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {

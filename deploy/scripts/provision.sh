@@ -129,7 +129,7 @@ apply_tailscale_role_defaults() {
       if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
         : "${TS_AUTH_KEY:=${TS_AUTH_KEY_WORKER:-}}"
         : "${TS_TAG:=${TS_TAG_WORKER:-tag:prod-worker}}"
-        : "${TS_ACCEPT_ROUTES:=${TS_WORKER_ACCEPT_ROUTES:-true}}"
+        TS_ACCEPT_ROUTES=true
       fi
       ;;
   esac

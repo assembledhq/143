@@ -338,9 +338,9 @@ secrets-rotate:
 #   TS_DB_ADVERTISE_ROUTES       — optional comma-separated routes. Use the db
 #                                  private IP as /32 to let remote workers reach
 #                                  Postgres without changing the DB listener.
-#   TS_WORKER_ACCEPT_ROUTES      — defaults to "true" for workers in TS_WORKER_HOSTS.
 #   TS_WORKER_HOSTS              — comma-separated tailnet workers. Entries can be
-#                                  "<host>" or "<node-id>:<host>".
+#                                  "<host>" or "<node-id>:<host>". Mapped
+#                                  workers always accept advertised routes.
 #
 # Example with overrides:
 #   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
@@ -394,13 +394,11 @@ export TS_TAG_APP
 export TS_TAG_DB
 export TS_TAG_WORKER
 export TS_DB_ADVERTISE_ROUTES
-export TS_WORKER_ACCEPT_ROUTES
 export TS_WORKER_HOSTS
 export TS_AUTH_KEY
 export TS_TAG
 export TS_HOSTNAME
 export TS_ADVERTISE_ROUTES
-export TS_ACCEPT_ROUTES
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
