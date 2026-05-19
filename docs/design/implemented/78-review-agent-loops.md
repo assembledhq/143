@@ -12,6 +12,11 @@ structured `/review` messages for Codex and Claude Code, one review thread per
 loop, pass-limit enforcement, and automatic continuation from review to
 decision to fix to confirmation review.
 
+If the coding-agent turn that owns a review-loop thread fails before a normal
+completion callback, the worker marks the running loop terminal `failed` while
+also releasing the thread. The session overview must therefore render the
+review as failed instead of continuing to show a stale loading/running state.
+
 Manual session detail now exposes a `Review` action that starts a two-pass loop
 in the current sandbox. Automations persist `pre_pr_review_loops`; new
 automations default to one pass, existing rows backfill to zero, and the
