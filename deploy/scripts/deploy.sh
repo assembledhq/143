@@ -204,10 +204,17 @@ if [ "$ROLE" = "logging" ]; then
   # so the rm still runs on hosts where files are already deploy-owned.
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "sudo -n chown -R deploy:deploy /opt/143/deploy/vmalert 2>&1 | sed 's/^/  chown: /' || true; \
-     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true"
+     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true; \
+     sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules && mkdir -p /opt/143/deploy/grafana /opt/143/deploy/vmalert"
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/grafana/provisioning" deploy@"$HOST":/opt/143/deploy/grafana/
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vmalert/rules" deploy@"$HOST":/opt/143/deploy/vmalert/
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/alertmanager_slack_relay.py" \
+    deploy@"$HOST":/opt/143/deploy/scripts/alertmanager_slack_relay.py.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/alertmanager_slack_relay.py.new /opt/143/deploy/scripts/alertmanager_slack_relay.py \
+     && chmod 644 /opt/143/deploy/scripts/alertmanager_slack_relay.py \
+     || { rm -f /opt/143/deploy/scripts/alertmanager_slack_relay.py.new; exit 1; }"
 fi
 if [ "$ROLE" = "app" ]; then
   # Sync Caddyfile so the remote always has the latest reverse-proxy config.

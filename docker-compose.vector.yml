@@ -11,7 +11,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
       - vector-buffer:/var/lib/vector
-    command: ["--config", "/etc/vector/vector.yaml"]
+    command: ["--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
       interval: 30s
