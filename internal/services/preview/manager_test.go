@@ -768,38 +768,83 @@ func TestValidateBootstrapTokenUnscoped_NotFound(t *testing.T) {
 }
 
 // =============================================================================
-// ExtendTTL tests
+// SetLifetime tests
 // =============================================================================
 
-func TestExtendTTL_Success(t *testing.T) {
+func TestSetLifetime_Success(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		duration time.Duration
+	}{
+		{name: "keeps preview for thirty minutes", duration: 30 * time.Minute},
+		{name: "shortens preview to five minutes", duration: 5 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+
+			orgID := uuid.New()
+			previewID := uuid.New()
+			sessionID := uuid.New()
+			userID := uuid.New()
+			now := time.Now()
+
+			mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(previewInstanceTestCols).
+						AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+				)
+
+			mock.ExpectExec("UPDATE preview_instances SET expires_at").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			expiresAt, err := mgr.SetLifetime(context.Background(), orgID, previewID, tt.duration)
+			require.NoError(t, err, "SetLifetime should accept bounded durations")
+			require.True(t, expiresAt.After(time.Now()), "SetLifetime should return a future expiry")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSetLifetime_RejectsDurationAboveDefaultHardTTL(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "pgxmock pool should be created")
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
 
-	orgID := uuid.New()
-	previewID := uuid.New()
-	sessionID := uuid.New()
-	userID := uuid.New()
-	now := time.Now()
+	_, err = mgr.SetLifetime(context.Background(), uuid.New(), uuid.New(), DefaultHardTTL+time.Second)
+	require.Error(t, err, "SetLifetime should reject durations above the per-adjustment limit")
+	require.Contains(t, err.Error(), "cannot exceed", "SetLifetime error should explain the per-adjustment cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "SetLifetime should reject before querying the database")
+}
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
-		)
+func TestSetLifetime_RejectsDurationBelowMinLifetimeTTL(t *testing.T) {
+	t.Parallel()
 
-	mock.ExpectExec("UPDATE preview_instances SET expires_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
 
-	err = mgr.ExtendTTL(context.Background(), orgID, previewID)
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	mgr := newTestManager(mock, &mockProvider{})
+
+	_, err = mgr.SetLifetime(context.Background(), uuid.New(), uuid.New(), MinLifetimeTTL-time.Second)
+	require.Error(t, err, "SetLifetime should reject durations below the minimum")
+	require.Contains(t, err.Error(), "at least", "SetLifetime error should explain the minimum duration")
+	require.NoError(t, mock.ExpectationsWereMet(), "SetLifetime should reject before querying the database")
 }
 
 // =============================================================================

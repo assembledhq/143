@@ -33,6 +33,7 @@ const (
 	DefaultIdleTimeout = 15 * time.Minute
 	DefaultHardTTL     = 30 * time.Minute
 	DefaultMaxTTL      = 2 * time.Hour
+	MinLifetimeTTL     = 1 * time.Minute
 
 	// ProviderDocker is the provider identifier for Docker-based previews.
 	ProviderDocker = "docker"
@@ -960,32 +961,38 @@ func (m *Manager) validateSession(ctx context.Context, sess *models.PreviewAcces
 	return sess, nil
 }
 
-// =============================================================================
-// ExtendTTL
-// =============================================================================
+// SetLifetime sets the preview expiry to a bounded duration from now. It is
+// intentionally capped to DefaultHardTTL per adjustment so the UI can offer
+// short, explicit choices without creating an always-on environment. Total
+// lifetime remains capped by CreatedAt + DefaultMaxTTL.
+func (m *Manager) SetLifetime(ctx context.Context, orgID, previewID uuid.UUID, duration time.Duration) (time.Time, error) {
+	if duration < MinLifetimeTTL {
+		return time.Time{}, fmt.Errorf("preview lifetime must be at least %s", MinLifetimeTTL)
+	}
+	if duration > DefaultHardTTL {
+		return time.Time{}, fmt.Errorf("preview lifetime cannot exceed %s per adjustment", DefaultHardTTL)
+	}
 
-// ExtendTTL extends the preview's hard TTL by DefaultHardTTL from now, capped
-// at DefaultMaxTTL after the original creation time. Callers may invoke this
-// any number of times, but the effective expiry will never exceed
-// CreatedAt + DefaultMaxTTL, so repeated calls cannot extend a preview
-// indefinitely. The background recycler's DefaultMaxUptime bounds total
-// process uptime independently.
-func (m *Manager) ExtendTTL(ctx context.Context, orgID, previewID uuid.UUID) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
-		return fmt.Errorf("get preview instance: %w", err)
+		return time.Time{}, fmt.Errorf("get preview instance: %w", err)
 	}
 
+	now := time.Now()
 	maxExpiry := instance.CreatedAt.Add(DefaultMaxTTL)
-	if !time.Now().Before(maxExpiry) {
-		return fmt.Errorf("preview has reached its maximum lifetime and cannot be extended further")
+	if !now.Before(maxExpiry) {
+		return time.Time{}, fmt.Errorf("preview has reached its maximum lifetime and cannot be extended further")
 	}
-	newExpiry := time.Now().Add(DefaultHardTTL)
+
+	newExpiry := now.Add(duration)
 	if newExpiry.After(maxExpiry) {
 		newExpiry = maxExpiry
 	}
 
-	return m.store.UpdatePreviewExpiry(ctx, orgID, previewID, newExpiry)
+	if err := m.store.UpdatePreviewExpiry(ctx, orgID, previewID, newExpiry); err != nil {
+		return time.Time{}, err
+	}
+	return newExpiry, nil
 }
 
 // =============================================================================
