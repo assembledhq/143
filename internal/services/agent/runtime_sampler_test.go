@@ -333,31 +333,6 @@ type wrappedErr struct {
 func (w *wrappedErr) Error() string { return w.prefix + ": " + w.err.Error() }
 func (w *wrappedErr) Unwrap() error { return w.err }
 
-// syncBuffer is a thread-safe bytes.Buffer wrapper for capturing zerolog output
-// when a writer goroutine and an Eventually reader goroutine touch the same buffer.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.String()
-}
-
-func (s *syncBuffer) Bytes() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]byte(nil), s.buf.Bytes()...)
-}
-
 func TestUsageTrackerSnapshot_IsCopy(t *testing.T) {
 	t.Parallel()
 	tracker := agent.NewUsageTracker(nil, newMetrics(t), zerolog.Nop())
