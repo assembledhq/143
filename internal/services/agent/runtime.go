@@ -216,11 +216,6 @@ func isTerminalCommandExecution(metadata map[string]any) bool {
 	}
 }
 
-func isCommandExecutionStart(message string) bool {
-	_, ok := commandExecutionStartItemID(message)
-	return ok
-}
-
 func commandExecutionStartItemID(message string) (string, bool) {
 	if message == "" {
 		return "", false
