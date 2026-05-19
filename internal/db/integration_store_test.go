@@ -79,7 +79,18 @@ func TestIntegrationStore_GetByOrgAndProvider(t *testing.T) {
 		{
 			name: "returns integration when found",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+				mock.ExpectQuery("SELECT .+ FROM integrations[\\s\\S]*status IN \\('active', 'error'\\)[\\s\\S]*ORDER BY \\(status = 'active'\\) DESC, created_at DESC[\\s\\S]*LIMIT 1").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(integrationColumns).
+							AddRow(integrationID, orgID, "github", json.RawMessage(`{}`), "active", nil, now),
+					)
+			},
+		},
+		{
+			name: "filters out inactive integrations",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM integrations[\\s\\S]*status IN \\('active', 'error'\\)[\\s\\S]*ORDER BY \\(status = 'active'\\) DESC, created_at DESC[\\s\\S]*LIMIT 1").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(integrationColumns).
@@ -90,7 +101,7 @@ func TestIntegrationStore_GetByOrgAndProvider(t *testing.T) {
 		{
 			name: "returns error when integration not found",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+				mock.ExpectQuery("SELECT .+ FROM integrations[\\s\\S]*status IN \\('active', 'error'\\)[\\s\\S]*ORDER BY \\(status = 'active'\\) DESC, created_at DESC[\\s\\S]*LIMIT 1").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(integrationColumns))
 			},

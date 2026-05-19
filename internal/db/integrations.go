@@ -49,7 +49,11 @@ func (s *IntegrationStore) GetByOrgAndProvider(ctx context.Context, orgID uuid.U
 	query := `
 		SELECT id, org_id, provider, config, status, last_synced_at, created_at
 		FROM integrations
-		WHERE org_id = @org_id AND provider = @provider`
+		WHERE org_id = @org_id
+		  AND provider = @provider
+		  AND status IN ('active', 'error')
+		ORDER BY (status = 'active') DESC, created_at DESC
+		LIMIT 1`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
