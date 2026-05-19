@@ -2059,6 +2059,40 @@ func TestDockerHandle_Kill_ShimSendsSIGKILL(t *testing.T) {
 		"Kill on a shim handle must exec-send SIGKILL to the pidfile-tracked child, not just close the connection")
 }
 
+func TestDockerHandle_LogsInteractiveLifecycle(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-logged"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, logger)
+	sb := &agent.Sandbox{ID: "container-logged", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox", SessionID: "session-logged", OrgID: "org-logged"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err, "interactive command should start")
+	require.NoError(t, h.Kill(context.Background()), "kill should force-stop the handle")
+
+	got := logs.String()
+	require.Contains(t, got, "started interactive command in sandbox", "start log should identify the interactive exec")
+	require.Contains(t, got, "force-stopping interactive command", "kill log should identify force-stop escalation")
+	require.Contains(t, got, "exec-logged", "logs should include the Docker exec id")
+	require.Contains(t, got, "container-logged", "logs should include the container id")
+	require.Contains(t, got, "session-logged", "logs should include the session id")
+}
+
 func TestDockerProvider_ConnectionInfo(t *testing.T) {
 	t.Parallel()
 

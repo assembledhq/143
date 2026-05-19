@@ -186,6 +186,15 @@ func (d *DockerProvider) StartInteractiveCommand(ctx context.Context, sb *agent.
 		h.stdinW = attachResp.Conn
 	}
 
+	log := d.scopedLogger(sb)
+	log.Info().
+		Str("exec_id", execResp.ID).
+		Bool("tty", wantTTY).
+		Bool("stdin", wantStdin).
+		Bool("signal_shim", hasShim).
+		Str("pid_file", pidFile).
+		Msg("started interactive command in sandbox")
+
 	return h, nil
 }
 
@@ -332,6 +341,15 @@ func (h *dockerInteractiveHandle) Interrupt(ctx context.Context, spec agent.Canc
 		method = agent.CancellationMethodCtrlC
 	}
 
+	log := h.provider.scopedLogger(h.sandbox)
+	log.Info().
+		Str("exec_id", h.execID).
+		Str("method", string(method)).
+		Bool("tty", h.spec.TTY).
+		Bool("stdin_open", h.stdinW != nil).
+		Bool("signal_shim", h.hasShim).
+		Msg("interrupting interactive command")
+
 	switch method {
 	case agent.CancellationMethodEscape:
 		if h.stdinW == nil {
@@ -360,6 +378,12 @@ func (h *dockerInteractiveHandle) signalTrackedChild(ctx context.Context, signal
 	if h.pidFile == "" {
 		return agent.ErrUnsupportedInterruptMethod
 	}
+	log := h.provider.scopedLogger(h.sandbox)
+	log.Info().
+		Str("exec_id", h.execID).
+		Str("signal", signal).
+		Str("pid_file", h.pidFile).
+		Msg("signaling tracked interactive command child")
 	deadline, cancel := context.WithTimeout(ctx, pidFileWriteTimeout)
 	defer cancel()
 	if err := h.waitForPIDFile(deadline); err != nil {
@@ -424,6 +448,15 @@ func (h *dockerInteractiveHandle) execSignal(ctx context.Context, signal string)
 // Wait return. The container itself stays alive — only the exec process
 // is torn down.
 func (h *dockerInteractiveHandle) Kill(ctx context.Context) error {
+	log := h.provider.scopedLogger(h.sandbox)
+	log.Warn().
+		Str("exec_id", h.execID).
+		Bool("tty", h.spec.TTY).
+		Bool("stdin_open", h.stdinW != nil).
+		Bool("signal_shim", h.hasShim).
+		Str("pid_file", h.pidFile).
+		Msg("force-stopping interactive command")
+
 	var killErr error
 	switch {
 	case h.hasShim:
