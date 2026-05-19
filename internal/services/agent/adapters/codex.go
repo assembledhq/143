@@ -492,9 +492,10 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 				}
 			case "command_execution":
 				metadata := map[string]interface{}{
-					"tool":   "command_execution",
-					"input":  map[string]interface{}{"command": event.Item.Command},
-					"status": event.Item.Status,
+					"tool":    "command_execution",
+					"item_id": event.Item.ID,
+					"input":   map[string]interface{}{"command": event.Item.Command},
+					"status":  event.Item.Status,
 				}
 				if event.Item.ExitCode != nil {
 					metadata["exit_code"] = *event.Item.ExitCode
@@ -510,7 +511,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 						Timestamp: time.Now(),
 						Level:     "output",
 						Message:   event.Item.AggregatedOutput,
-						Metadata:  map[string]interface{}{"type": "tool_result"},
+						Metadata:  map[string]interface{}{"type": "tool_result", "item_id": event.Item.ID},
 					}
 				}
 			default:

@@ -45,6 +45,88 @@ func TestSessionStore_RecordRuntimeProgress(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_MarkRuntimeStopRequested(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		execErr      error
+		expectErr    bool
+		queryPattern string
+	}{
+		{
+			name:         "records stop reason on running session",
+			queryPattern: `UPDATE sessions\s+SET runtime_stop_reason = CASE`,
+		},
+		{
+			name:         "wraps exec errors",
+			execErr:      errors.New("write failed"),
+			expectErr:    true,
+			queryPattern: `runtime_stop_reason = CASE`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			expect := mock.ExpectExec(tt.queryPattern).
+				WithArgs(
+					pgxmock.AnyArg(),
+					pgxmock.AnyArg(),
+					pgxmock.AnyArg(),
+					pgxmock.AnyArg(),
+				)
+			if tt.execErr != nil {
+				expect.WillReturnError(tt.execErr)
+			} else {
+				expect.WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			err = store.MarkRuntimeStopRequested(
+				context.Background(),
+				uuid.New(),
+				uuid.New(),
+				models.RuntimeStopReasonNoProgress,
+				time.Now().UTC().Add(5*time.Minute),
+			)
+			if tt.expectErr {
+				require.Error(t, err, "MarkRuntimeStopRequested should wrap database errors")
+			} else {
+				require.NoError(t, err, "MarkRuntimeStopRequested should persist the requested stop reason")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ListRuntimeControlStalledSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`runtime_graceful_stop_at < @stop_after_before`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListRuntimeControlStalledSessions(
+		context.Background(),
+		time.Now().UTC().Add(-2*time.Minute),
+		time.Now().UTC().Add(-2*time.Minute),
+	)
+	require.NoError(t, err, "ListRuntimeControlStalledSessions should query stalled runtime rows")
+	require.Empty(t, sessions, "empty result set should return no sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_GrantRuntimeExtension(t *testing.T) {
 	t.Parallel()
 
