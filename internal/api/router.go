@@ -982,7 +982,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
 				r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
 				r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
-				r.Post("/api/v1/sessions/{id}/preview/extend", previewHandler.ExtendTTL)
+				r.Patch("/api/v1/sessions/{id}/preview/lifetime", previewHandler.SetLifetime)
 				r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)
 				r.Post("/api/v1/sessions/{id}/preview/inspect", previewHandler.InspectElement)
 				r.Post("/api/v1/sessions/{id}/preview/design-feedback", previewHandler.SubmitDesignFeedback)

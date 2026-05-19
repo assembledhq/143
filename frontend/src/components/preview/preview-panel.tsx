@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Circle,
+  Clock,
   Palette,
   RefreshCw,
   X,
@@ -33,6 +34,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
 import {
@@ -63,6 +72,12 @@ const WIDTH_PRESETS = [
   { name: "Tablet", width: 768, icon: Tablet },
   { name: "Desktop", width: 1280, icon: Monitor },
   { name: "Full", width: 0, icon: Maximize2 },
+] as const;
+
+const PREVIEW_LIFETIME_OPTIONS = [
+  { label: "Keep for 15 min", durationSeconds: 15 * 60 },
+  { label: "Keep for 30 min", durationSeconds: 30 * 60 },
+  { label: "Stop in 5 min", durationSeconds: 5 * 60 },
 ] as const;
 
 const STATUS_LABELS: Record<PreviewStatus, string> = {
@@ -315,6 +330,77 @@ function startupPhaseState(
   return "pending";
 }
 
+function formatPreviewShutdownTime(expiresAt: string): string {
+  const date = new Date(expiresAt);
+  if (!Number.isFinite(date.getTime())) return "Unknown";
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function formatPreviewRemaining(expiresAt: string): string {
+  const expiresMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) return "Unknown time left";
+  const remainingMs = expiresMs - Date.now();
+  if (remainingMs <= 0) return "Expired";
+  const remainingMinutes = Math.ceil(remainingMs / 60000);
+  if (remainingMinutes < 60) return `${remainingMinutes} min left`;
+  const hours = Math.floor(remainingMinutes / 60);
+  const minutes = remainingMinutes % 60;
+  return minutes > 0 ? `${hours} hr ${minutes} min left` : `${hours} hr left`;
+}
+
+interface PreviewLifetimeMenuProps {
+  expiresAt: string;
+  disabled: boolean;
+  onSetLifetime: (durationSeconds: number) => void;
+  onStopNow: () => void;
+}
+
+function PreviewLifetimeMenu({
+  expiresAt,
+  disabled,
+  onSetLifetime,
+  onStopNow,
+}: PreviewLifetimeMenuProps) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="outline"
+          aria-label="Preview lifetime"
+          title="Preview lifetime"
+          disabled={disabled}
+        >
+          <Clock className="size-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuLabel className="space-y-0.5">
+          <span className="block">Preview lifetime</span>
+          <span className="block text-xs font-normal text-muted-foreground">
+            Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
+          </span>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {PREVIEW_LIFETIME_OPTIONS.map((option) => (
+          <DropdownMenuItem
+            key={option.durationSeconds}
+            onSelect={() => onSetLifetime(option.durationSeconds)}
+          >
+            {option.label}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onSelect={onStopNow}>
+          <Square className="size-3.5" />
+          Stop now
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function PreviewPanel({
   sessionId,
   previewOriginTemplate,
@@ -510,6 +596,20 @@ export function PreviewPanel({
     },
   });
 
+  const lifetimeMutation = useMutation({
+    mutationFn: (durationSeconds: number) =>
+      api.sessions.preview.setLifetime(sessionId, { duration_seconds: durationSeconds }),
+    onSuccess: () => {
+      setMutationError(null);
+      queryClient.invalidateQueries({
+        queryKey: ["preview-status", sessionId],
+      });
+    },
+    onError: (err) => {
+      setMutationError(`Failed to update preview lifetime: ${err.message}`);
+    },
+  });
+
   // Bootstrap token exchange
   const bootstrapMutation = useMutation({
     mutationFn: () => api.sessions.preview.bootstrap(sessionId),
@@ -638,7 +738,8 @@ export function PreviewPanel({
   const isMutating =
     startMutation.isPending ||
     stopMutation.isPending ||
-    restartMutation.isPending;
+    restartMutation.isPending ||
+    lifetimeMutation.isPending;
   const showStartupCanvas = isActive && !isReady;
   const startupChecklist = useMemo(
     () =>
@@ -740,6 +841,15 @@ export function PreviewPanel({
           <ErrorBoundary fallback={null}>
             <ConsoleBadge sessionId={sessionId} />
           </ErrorBoundary>
+        )}
+
+        {isReady && instance?.expires_at && (
+          <PreviewLifetimeMenu
+            expiresAt={instance.expires_at}
+            disabled={isMutating}
+            onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
+            onStopNow={() => stopMutation.mutate()}
+          />
         )}
 
         {/* TTL Warning */}
