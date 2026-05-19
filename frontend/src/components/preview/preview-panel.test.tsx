@@ -218,10 +218,9 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    // Should also render the status badge
-    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.queryByText("Stopped")).not.toBeInTheDocument();
     expect(screen.getByText(/Started 5m ago/)).toBeInTheDocument();
-    expect(screen.getByText(/Stopped 1m ago/)).toBeInTheDocument();
+    expect(screen.getByText(/Stopped 1m ago/)).toHaveClass("rounded-full");
   });
 
   it("treats async start success as startup in progress and resumes polling", async () => {
