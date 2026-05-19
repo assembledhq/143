@@ -76,14 +76,14 @@ if [ -f "$ENC_FILE" ]; then
   echo "Reading secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
 
-  # Source decrypted values, but don't overwrite existing env vars
+  # Source decrypted values, but don't overwrite non-empty env vars.
   while IFS= read -r line; do
     # Skip empty lines and comments
     [[ -z "$line" || "$line" == \#* ]] && continue
     key="${line%%=*}"
     value="${line#*=}"
-    # Only set if not already in environment
-    if [ -z "${!key+x}" ]; then
+    # Make exports empty vars for forwarding, so allow secrets to fill empties.
+    if [ -z "${!key:-}" ]; then
       export "$key=$value"
     fi
   done <<< "$DECRYPTED"
