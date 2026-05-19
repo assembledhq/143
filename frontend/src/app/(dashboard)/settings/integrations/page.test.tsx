@@ -135,4 +135,25 @@ describe("IntegrationsPage", () => {
     expect(within(githubCard as HTMLElement).getByText("acme/api")).toBeInTheDocument();
     expect(screen.queryByText("GitHub repositories")).not.toBeInTheDocument();
   });
+
+  it("renders GitHub repository cards without duplicate repo pills or section intro copy", async () => {
+    repositoriesListMock.mockResolvedValue({
+      data: [
+        {
+          id: "repo-1",
+          full_name: "acme/web",
+          status: "active",
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    await screen.findByText("acme/api");
+
+    expect(screen.queryByText("acme/web")).not.toBeInTheDocument();
+    expect(screen.queryByText("Repository access")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Choose which repositories this 143 organization owns/)).not.toBeInTheDocument();
+  });
 });
