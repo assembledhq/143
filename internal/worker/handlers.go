@@ -383,6 +383,11 @@ type Services struct {
 	// PreviewStarter completes durable preview startup jobs. nil when this
 	// node has no preview provider.
 	PreviewStarter previewStarter
+
+	// SessionExecutorsEnabled moves run_agent and continue_session ownership
+	// from the worker process to durable per-session executor containers.
+	SessionExecutorsEnabled   bool
+	SessionExecutorDispatcher sessionExecutorDispatcher
 }
 
 type previewStarter interface {
@@ -1191,6 +1196,10 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
 		}
 
+		if err := maybeDispatchSessionExecutor(ctx, services, jobType, run, run.PrimaryThreadID); err != nil {
+			return err
+		}
+
 		// Apply the per-session wall-clock timeout at the handler boundary so
 		// the orchestrator exits cleanly when a container is killed or
 		// ExecStream hangs. HandlerCleanupBuffer gives the orchestrator slack
@@ -1457,6 +1466,15 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
 		} else if continueOpts != nil && humanInputRequestID != nil {
 			continueOpts.HumanInputRequestID = humanInputRequestID
+		}
+
+		var dispatchThreadID *uuid.UUID
+		if hasThread {
+			threadIDLocal := threadID
+			dispatchThreadID = &threadIDLocal
+		}
+		if err := maybeDispatchSessionExecutor(ctx, services, jobType, session, dispatchThreadID); err != nil {
+			return err
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {

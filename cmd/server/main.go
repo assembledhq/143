@@ -64,6 +64,11 @@ const (
 )
 
 func main() {
+	if isSessionExecutorInvocation(os.Args) {
+		runSessionExecutorMain()
+		return
+	}
+
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
 	cfg.LogStatus(logger)
@@ -542,6 +547,7 @@ func main() {
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
+		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 
@@ -1290,6 +1296,29 @@ func buildServices(
 		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
+	}
+	if cfg.SessionExecutorsEnabled {
+		executorImage := cfg.SessionExecutorImage
+		if executorImage == "" {
+			logger.Warn().Msg("SESSION_EXECUTORS_ENABLED is true but SESSION_EXECUTOR_IMAGE is empty; executor dispatch will fail until configured")
+		}
+		svc.SessionExecutorsEnabled = true
+		svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
+			Executors: db.NewSessionExecutorStore(pool),
+			Jobs:      jobStore,
+			Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
+				Image:       executorImage,
+				NetworkMode: cfg.SessionExecutorDockerNetwork,
+				Binds: []string{
+					"/var/run/docker.sock:/var/run/docker.sock",
+					"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+				},
+				Env: os.Environ(),
+			}),
+			NodeID:   cfg.NodeID,
+			Image:    executorImage,
+			BuildSHA: version.BuildSHA,
+		}
 	}
 
 	// Linear inbound-agent worker wiring. The process-wide

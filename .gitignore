@@ -43,6 +43,8 @@ sandbox/.build-stamp
 # Runtime data (sandbox snapshots, etc.)
 .data/
 server
+!cmd/server/
+!cmd/server/session_executor_main.go
 coverage.html
 
 # Go module/build caches (if created locally)

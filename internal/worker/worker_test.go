@@ -73,6 +73,16 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
+func TestHandoffError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("executor owns job")
+	handoff := &HandoffError{Err: cause}
+
+	require.Equal(t, "executor owns job", handoff.Error(), "Error should return the wrapped error message")
+	require.ErrorIs(t, handoff.Unwrap(), cause, "Unwrap should expose the wrapped error")
+}
+
 func TestWorker_Poll(t *testing.T) {
 	t.Parallel()
 
@@ -263,6 +273,24 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "handoff error skips terminal write",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				handlerErr := &HandoffError{Err: errors.New("session executor owns the job")}
+
+				w.Register("run_agent", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "run_agent", json.RawMessage(`{}`), now, lockToken)
+			},
+		},
+		{
 			name: "draining worker skips claiming new jobs",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
@@ -282,11 +310,11 @@ func TestWorker_Poll(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
-						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", nil, nil, nil, now, now, nil,
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -832,11 +860,11 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-			"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
-			lockToken.String(), "test-node", nil, nil, target, createdAt, createdAt, nil,
+			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, createdAt, createdAt, nil,
 		))
 }
