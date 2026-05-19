@@ -1369,16 +1369,28 @@ func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox 
 // subscription credential is selected. API-key credentials intentionally return
 // false so callers can use ANTHROPIC_API_KEY after removing any stale file.
 func (e *AgentEnv) InjectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
-	return e.InjectClaudeCodeAuthForUser(ctx, orgID, nil, sandbox)
+	return e.InjectClaudeCodeAuthWithEnv(ctx, orgID, sandbox, nil)
+}
+
+func (e *AgentEnv) InjectClaudeCodeAuthWithEnv(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, env map[string]string) (bool, error) {
+	return e.InjectClaudeCodeAuthForUserWithEnv(ctx, orgID, nil, sandbox, env)
 }
 
 func (e *AgentEnv) InjectClaudeCodeAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	return e.InjectClaudeCodeAuthForUserWithEnv(ctx, orgID, userID, sandbox, nil)
+}
+
+func (e *AgentEnv) InjectClaudeCodeAuthForUserWithEnv(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox, env map[string]string) (bool, error) {
 	if e == nil {
 		return false, nil
 	}
+	model := ""
+	if env != nil {
+		model = env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
+	}
 	if e.codingCredentials != nil {
 		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
-			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, picked)
+			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, picked, model)
 		}
 		_, picked, handled := e.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
 			models.ProviderAnthropic,
@@ -1388,7 +1400,7 @@ func (e *AgentEnv) InjectClaudeCodeAuthForUser(ctx context.Context, orgID uuid.U
 			if picked == nil {
 				return false, nil
 			}
-			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
+			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, *picked, model)
 		}
 	}
 
@@ -1402,10 +1414,10 @@ func (e *AgentEnv) InjectClaudeCodeAuthForUser(ctx context.Context, orgID uuid.U
 	if sub == nil {
 		return false, nil
 	}
-	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub, model)
 }
 
-func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential, model string) (bool, error) {
 	if picked.Provider != models.ProviderAnthropicSubscription {
 		return false, nil
 	}
@@ -1443,10 +1455,10 @@ func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UU
 			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
 		}
 	}
-	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, sub, model)
 }
 
-func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
+func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription, model string) (bool, error) {
 	if e.provider == nil {
 		return false, fmt.Errorf("sandbox provider is required to write claude credentials")
 	}
@@ -1494,7 +1506,8 @@ func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, san
 		Str("org_id", orgID.String()).
 		Msg("injected claude subscription credentials into sandbox")
 
-	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, sub.AccountType, ""))
+	version := e.detectClaudeCodeVersion(ctx, sandbox)
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, sub.AccountType, model, version))
 
 	return true, nil
 }
@@ -1506,8 +1519,17 @@ func (e *AgentEnv) PrepareClaudeCodeAPIKeyFallback(ctx context.Context, sandbox 
 	if err := e.RemoveClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
 		return err
 	}
-	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]))
+	version := e.detectClaudeCodeVersion(ctx, sandbox)
+	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, version))
 	return nil
+}
+
+func (e *AgentEnv) detectClaudeCodeVersion(ctx context.Context, sandbox *Sandbox) string {
+	if e == nil {
+		return ""
+	}
+	return detectClaudeCodeVersion(ctx, sandbox, e.provider, e.logger)
 }
 
 func (e *AgentEnv) RemoveClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
