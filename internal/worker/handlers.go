@@ -346,6 +346,7 @@ type Services struct {
 	LinearAgentDeps *LinearAgentEventHandlerDeps
 	ReviewLoops     interface {
 		OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, assistantSummary string) error
+		OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error
 		Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
 	}
 	// EvalBatchStreams publishes lightweight pub/sub signals on every batch
@@ -1545,6 +1546,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Msg("failed to release session thread after continue_session failure")
 				}
 				cleanupCancel()
+				if services.ReviewLoops != nil {
+					reviewCleanupCtx, reviewCleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					if reviewErr := services.ReviewLoops.OnThreadTurnFailed(reviewCleanupCtx, orgID, threadID, err.Error()); reviewErr != nil && !errors.Is(reviewErr, reviewloopsvc.ErrNoRunningReviewLoop) {
+						logger.Warn().Err(reviewErr).
+							Str("session_id", sessionID.String()).
+							Str("thread_id", threadID.String()).
+							Msg("failed to mark review loop failed after thread turn failure")
+					}
+					reviewCleanupCancel()
+				}
 			}
 			return err
 		}
