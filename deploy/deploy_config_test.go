@@ -192,7 +192,7 @@ func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
 	provisionText := string(provisionScript)
 	require.Contains(t, provisionText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db provisioning should fail loudly until the operator chooses the primary private bind address")
 	require.Contains(t, provisionText, "DB_BIND_IP=%s", "db provisioning should write DB_BIND_IP into /opt/143/.env for compose interpolation")
-	require.Contains(t, provisionText, "TS_ADVERTISE_ROUTES", "db provisioning should be able to advertise the private DB route over Tailscale without changing the DB listener")
+	require.Contains(t, provisionText, "TS_DB_ADVERTISE_ROUTES", "db provisioning should be able to advertise the private DB route from role-specific production secrets")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
@@ -219,8 +219,12 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provisionScript)
 	require.Contains(t, provisionText, "install-tailscale.sh", "provisioning should run the shared Tailscale setup helper when TS_AUTH_KEY is provided")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_APP", "provisioning should support role-specific app Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_DB", "provisioning should support role-specific db Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_WORKER", "provisioning should support role-specific worker Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_WORKER_HOSTS", "provisioning should use a host list to choose which workers join Tailscale")
 	require.Contains(t, provisionText, "TS_ACCEPT_ROUTES", "provisioning should pass route acceptance through to Tailscale enrollment")
-	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE", "worker provisioning should let operators explicitly choose Tailscale address discovery")
+	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE:=tailscale", "worker provisioning should derive Tailscale address discovery from the worker host list")
 	require.Contains(t, provisionText, "tailscale ip -4", "worker provisioning should be able to discover the worker's Tailscale IPv4 address")
 	require.Contains(t, provisionText, "100.64.0.0/10", "worker provisioning comments/errors should make the Tailscale address range explicit")
 

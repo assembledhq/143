@@ -84,6 +84,65 @@ else
   echo "Falling back to environment variables."
 fi
 
+apply_tailscale_worker_host_map() {
+  if [ "$ROLE" != "worker" ] || [ -z "${TS_WORKER_HOSTS:-}" ]; then
+    return
+  fi
+
+  # TS_WORKER_HOSTS is a comma-separated list of worker management hosts that
+  # should join the tailnet. Entries may be either "<host>" or
+  # "<node-id>:<host>" so the same production secret can also pin NODE_ID.
+  # Example: TS_WORKER_HOSTS="worker-usw-1:87.99.158.39,worker-ec2-1:54.1.2.3"
+  IFS=',' read -ra mappings <<< "$TS_WORKER_HOSTS"
+  for mapping in "${mappings[@]}"; do
+    map_node_id=""
+    map_host="$mapping"
+    if [[ "$mapping" == *:* ]]; then
+      map_node_id="${mapping%%:*}"
+      map_host="${mapping#*:}"
+    fi
+
+    if [ "$map_host" = "$HOST" ]; then
+      : "${WORKER_PRIVATE_IP_SOURCE:=tailscale}"
+      if [ -n "$map_node_id" ]; then
+        : "${NODE_ID:=$map_node_id}"
+      fi
+      return
+    fi
+  done
+}
+
+apply_tailscale_role_defaults() {
+  apply_tailscale_worker_host_map
+
+  case "$ROLE" in
+    app)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_APP:-}}"
+      : "${TS_TAG:=${TS_TAG_APP:-tag:prod-app}}"
+      ;;
+    db)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_DB:-}}"
+      : "${TS_TAG:=${TS_TAG_DB:-tag:prod-db}}"
+      : "${TS_ADVERTISE_ROUTES:=${TS_DB_ADVERTISE_ROUTES:-}}"
+      ;;
+    worker)
+      if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+        : "${TS_AUTH_KEY:=${TS_AUTH_KEY_WORKER:-}}"
+        : "${TS_TAG:=${TS_TAG_WORKER:-tag:prod-worker}}"
+        : "${TS_ACCEPT_ROUTES:=${TS_WORKER_ACCEPT_ROUTES:-true}}"
+      fi
+      ;;
+  esac
+
+  if [ "$ROLE" = "worker" ] && [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_WORKER is required for Tailscale worker provisioning}"
+  fi
+  if [ "$ROLE" = "db" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_DB is required when TS_DB_ADVERTISE_ROUTES/TS_ADVERTISE_ROUTES is set}"
+  fi
+}
+
+apply_tailscale_role_defaults
 apply_worker_bucket_overrides "$ROLE" "$HOST"
 if [ "$ROLE" = "worker" ]; then
   : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"

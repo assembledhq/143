@@ -325,29 +325,28 @@ secrets-rotate:
 #                                  hosts (cluster NIC + storage VLAN, etc.)
 #                                  abort with the candidate list so you can
 #                                  pick the one app nodes will reach.
-#   WORKER_PRIVATE_IP_SOURCE     — set to "tailscale" to auto-detect the
-#                                  worker's `tailscale ip -4` address instead
-#                                  of a Hetzner private-network RFC1918 IP.
 #   NODE_ID                      — defaults to "worker-<WORKER_PRIVATE_IP with
 #                                  dots replaced by dashes>" (e.g. worker-10-0-0-4),
 #                                  unique across the full RFC1918 space.
 #   PREVIEW_INTERNAL_BASE_URL    — defaults to "http://${WORKER_PRIVATE_IP}:8080"
 #
 # Optional Tailscale provisioning env vars:
-#   TS_AUTH_KEY                  — when set, provision.sh enrolls the host.
-#   TS_TAG                       — defaults to tag:prod-<role>.
+#   TS_AUTH_KEY_<ROLE>           — role-specific auth keys: TS_AUTH_KEY_APP,
+#                                  TS_AUTH_KEY_DB, TS_AUTH_KEY_WORKER.
+#   TS_TAG_<ROLE>                — role-specific tags. Defaults to tag:prod-<role>.
 #   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
-#   TS_ADVERTISE_ROUTES          — optional comma-separated routes. Use the db
+#   TS_DB_ADVERTISE_ROUTES       — optional comma-separated routes. Use the db
 #                                  private IP as /32 to let remote workers reach
 #                                  Postgres without changing the DB listener.
-#   TS_ACCEPT_ROUTES             — set to "true" on remote workers that should
-#                                  use advertised private routes.
+#   TS_WORKER_ACCEPT_ROUTES      — defaults to "true" for workers in TS_WORKER_HOSTS.
+#   TS_WORKER_HOSTS              — comma-separated tailnet workers. Entries can be
+#                                  "<host>" or "<node-id>:<host>".
 #
 # Example with overrides:
 #   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
-#   make provision-app HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... TS_TAG=tag:prod-app
-#   make provision-db HOST=<public-ip> DB_BIND_IP=10.0.0.3 TS_AUTH_KEY=tskey-auth-... TS_TAG=tag:prod-db TS_ADVERTISE_ROUTES=10.0.0.3/32
-#   make provision-worker HOST=<public-ip> TS_AUTH_KEY=tskey-auth-... TS_ACCEPT_ROUTES=true WORKER_PRIVATE_IP_SOURCE=tailscale NODE_ID=worker-usw-1
+#   make provision-app HOST=<public-ip>
+#   make provision-db HOST=<public-ip>
+#   make provision-worker HOST=<public-ip>
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -388,6 +387,15 @@ export WORKER_PRIVATE_IP_SOURCE
 export NODE_ID
 export PREVIEW_INTERNAL_BASE_URL
 export DB_BIND_IP
+export TS_AUTH_KEY_APP
+export TS_AUTH_KEY_DB
+export TS_AUTH_KEY_WORKER
+export TS_TAG_APP
+export TS_TAG_DB
+export TS_TAG_WORKER
+export TS_DB_ADVERTISE_ROUTES
+export TS_WORKER_ACCEPT_ROUTES
+export TS_WORKER_HOSTS
 export TS_AUTH_KEY
 export TS_TAG
 export TS_HOSTNAME
