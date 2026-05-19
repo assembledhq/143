@@ -1457,7 +1457,11 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	})
 }
 
-func findLogEvent(t *testing.T, logs *bytes.Buffer, message string) map[string]any {
+type logEventBuffer interface {
+	Bytes() []byte
+}
+
+func findLogEvent(t *testing.T, logs logEventBuffer, message string) map[string]any {
 	t.Helper()
 	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -1796,8 +1800,8 @@ func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 
@@ -1805,7 +1809,7 @@ func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should complete successfully")
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "RunAgent should emit agent run finished log")
 	require.Equal(t, string(models.AgentTypeClaudeCode), completion["agent_type"], "completion log should include agent type")
 	require.Equal(t, "completed", completion["outcome"], "completion log should include platform outcome")
@@ -1825,8 +1829,8 @@ func TestRunAgent_InteractiveSuccessLogIncludesPlatformHealthFields(t *testing.T
 	run.InteractionMode = models.SessionInteractionModeInteractive
 	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.issues.issue = issue
@@ -1845,7 +1849,7 @@ func TestRunAgent_InteractiveSuccessLogIncludesPlatformHealthFields(t *testing.T
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err, "interactive RunAgent should complete successfully")
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "interactive RunAgent should emit agent run finished log")
 	require.Equal(t, string(models.AgentTypeClaudeCode), completion["agent_type"], "interactive completion log should include agent type")
 	require.Equal(t, "idle", completion["outcome"], "interactive completion log should include idle outcome")
@@ -1937,8 +1941,8 @@ func TestRunAgent_LogsDuplicateMarkerFailureAndSucceeds(t *testing.T) {
 		}, nil
 	}
 
-	var buf bytes.Buffer
-	logger := zerolog.New(&buf)
+	buf := &syncBuffer{}
+	logger := zerolog.New(buf)
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         d.provider,
 		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -3452,8 +3456,8 @@ func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -3464,7 +3468,7 @@ func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.Error(t, err, "RunAgent should fail when the adapter fails")
 
-	failure := findLogEvent(t, &logs, "agent run failed")
+	failure := findLogEvent(t, logs, "agent run failed")
 	require.NotNil(t, failure, "RunAgent should emit agent run failed log")
 	require.Equal(t, string(models.AgentTypeClaudeCode), failure["agent_type"], "failure log should include agent type")
 	require.Equal(t, "failed", failure["outcome"], "failure log should include platform outcome")
@@ -7687,8 +7691,8 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 
 	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.cancels = cancelReg
@@ -7739,7 +7743,7 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "cancelled RunAgent should emit agent run finished log")
 	require.Equal(t, "cancelled", completion["outcome"], "cancelled completion log should include cancelled outcome")
 	require.Equal(t, string(models.RuntimeStopReasonUserCancel), completion["stop_reason"], "cancelled completion log should include user cancel stop reason")
@@ -7942,8 +7946,8 @@ func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
 	startedAt := time.Now().Add(-10 * time.Minute)
 	run.StartedAt = &startedAt
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -7959,7 +7963,7 @@ func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
 
-	timeout := findLogEvent(t, &logs, "session exceeded configured timeout")
+	timeout := findLogEvent(t, logs, "session exceeded configured timeout")
 	require.NotNil(t, timeout, "timeout RunAgent should emit the canonical timeout log line")
 	require.Equal(t, string(models.AgentTypeClaudeCode), timeout["agent_type"], "timeout log should include agent type")
 	require.Equal(t, "timeout", timeout["outcome"], "timeout log should include platform outcome")
@@ -7970,7 +7974,7 @@ func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
 	// The canonical timeout log is the only failure event emitted on this
 	// path. Emitting a second "agent run failed" log would double-count
 	// timeouts in dashboards/alerts that key off either message.
-	require.Nil(t, findLogEvent(t, &logs, "agent run failed"), "timeout path should not also emit agent run failed log")
+	require.Nil(t, findLogEvent(t, logs, "agent run failed"), "timeout path should not also emit agent run failed log")
 }
 
 func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
@@ -8102,8 +8106,8 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 
 	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}}
@@ -8141,7 +8145,7 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category, "policy stop should use the timeout family category")
 	require.Contains(t, failures[0].explanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "policy-stopped RunAgent should emit agent run finished log")
 	require.Equal(t, "runtime_policy_stopped", completion["outcome"], "policy stop completion log should include policy outcome")
 	require.Equal(t, string(models.RuntimeStopReasonNoProgress), completion["stop_reason"], "policy stop completion log should include runtime stop reason")
