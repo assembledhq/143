@@ -37,35 +37,51 @@ const (
 // linearAgentEventEnvelope is the minimal subset of the AgentSessionEvent
 // payload the dispatcher needs to (a) decide whether to act, (b) idempotency-
 // upsert the linear_agent_sessions row, and (c) build the worker job
-// payload.
+// payload. It accepts both Linear's top-level `agentSession` shape and the
+// older/wrapped `payload.agentSession` shape.
 //
 // We deliberately don't try to consume the full Linear payload here — the
 // worker fetches the live issue from Linear when it runs (see Phase 2.7),
 // which gives it the freshest issue body and label set. Caching the inbound
 // payload would just risk going stale between dispatch and worker
 // execution.
+type linearAgentEventIssue struct {
+	ID         string `json:"id"`
+	Identifier string `json:"identifier,omitempty"`
+	TeamID     string `json:"teamId,omitempty"`
+	ProjectID  string `json:"projectId,omitempty"`
+}
+
+type linearAgentEventCreator struct {
+	ID string `json:"id,omitempty"`
+}
+
+type linearAgentEventSession struct {
+	ID        string                  `json:"id"`
+	IssueID   string                  `json:"issueId"`
+	CommentID string                  `json:"commentId,omitempty"`
+	Issue     linearAgentEventIssue   `json:"issue,omitempty"`
+	Creator   linearAgentEventCreator `json:"creator,omitempty"`
+}
+
+type linearAgentEventActivity struct {
+	Body string `json:"body,omitempty"`
+}
+
+type linearAgentEventPayload struct {
+	AgentSession  linearAgentEventSession  `json:"agentSession"`
+	AgentActivity linearAgentEventActivity `json:"agentActivity,omitempty"`
+}
+
 type linearAgentEventEnvelope struct {
-	Type    string `json:"type"`
-	Action  string `json:"action"`
-	Payload struct {
-		AgentSession struct {
-			ID        string `json:"id"`
-			IssueID   string `json:"issueId"`
-			CommentID string `json:"commentId,omitempty"`
-			Issue     struct {
-				ID         string `json:"id"`
-				Identifier string `json:"identifier,omitempty"`
-				TeamID     string `json:"teamId,omitempty"`
-				ProjectID  string `json:"projectId,omitempty"`
-			} `json:"issue,omitempty"`
-			Creator struct {
-				ID string `json:"id,omitempty"`
-			} `json:"creator,omitempty"`
-		} `json:"agentSession"`
-		AgentActivity struct {
-			Body string `json:"body,omitempty"`
-		} `json:"agentActivity,omitempty"`
-	} `json:"payload"`
+	Type    string                  `json:"type"`
+	Action  string                  `json:"action"`
+	Payload linearAgentEventPayload `json:"payload"`
+	// Linear has emitted both payload.agentSession and top-level
+	// agentSession shapes. Normalize either shape into Payload before
+	// dispatch so the rest of the pipeline has one contract.
+	AgentSession  linearAgentEventSession  `json:"agentSession,omitempty"`
+	AgentActivity linearAgentEventActivity `json:"agentActivity,omitempty"`
 	// AppUserID is the id of the Linear app user this webhook is
 	// addressed to. Linear sets it on AppUserNotification deliveries and
 	// recent AgentSessionEvent payloads; older AgentSessionEvent
@@ -75,6 +91,18 @@ type linearAgentEventEnvelope struct {
 	// URL setups). Empty here means "Linear didn't tell us the target
 	// user" — we don't filter on it in that case.
 	AppUserID string `json:"appUserId,omitempty"`
+}
+
+func (e *linearAgentEventEnvelope) normalize() {
+	if e.Payload.AgentSession.ID == "" && e.AgentSession.ID != "" {
+		e.Payload.AgentSession = e.AgentSession
+	}
+	if e.Payload.AgentActivity.Body == "" && e.AgentActivity.Body != "" {
+		e.Payload.AgentActivity = e.AgentActivity
+	}
+	if e.Payload.AgentSession.IssueID == "" {
+		e.Payload.AgentSession.IssueID = e.Payload.AgentSession.Issue.ID
+	}
 }
 
 // linearAgentEventAction names a value of envelope.action. The worker
@@ -269,6 +297,7 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 			Msg("agent dispatcher: HMAC verified but body failed to parse; requesting Linear redelivery")
 		return DispatchResult{Status: "retryable_error", Err: fmt.Errorf("parse agent event envelope: %w", err)}
 	}
+	env.normalize()
 
 	action = linearAgentEventAction(env.Action)
 	if action != linearAgentActionCreated && action != linearAgentActionPrompted {

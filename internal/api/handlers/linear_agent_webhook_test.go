@@ -141,6 +141,58 @@ func TestLinearAgentDispatcher_PromptedWithoutCreatedEnqueuesRetryableJob(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should look up, then upsert a synthetic row before enqueueing the retry job")
 }
 
+func TestLinearAgentDispatcher_CreatedAcceptsTopLevelAgentSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
+	jobs := &fakeJobs{}
+	enabled := true
+	d := &LinearAgentDispatcher{
+		logger:        zerolog.Nop(),
+		agentSessions: db.NewLinearAgentSessionStore(mock),
+		jobs:          jobs,
+		settingsLoader: func(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
+			return models.LinearAgentSettings{Enabled: &enabled}, nil
+		},
+		featureEnabled: true,
+	}
+
+	mock.ExpectQuery("INSERT INTO linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at", "inserted",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_top_level",
+			"iss_1", "ACS-1",
+			"app_user_1", "user_1",
+			nil, "pending", &now,
+			now, now, true,
+		))
+
+	body := []byte(`{"type":"AgentSessionEvent","action":"created","appUserId":"app_user_1","agentSession":{"id":"as_top_level","issueId":"iss_1","issue":{"id":"iss_1","identifier":"ACS-1","teamId":"team_1"},"creator":{"id":"user_1"}}}`)
+	res := d.Dispatch(context.Background(), &models.Integration{ID: integrationID, OrgID: orgID}, LinearAgentEventAgentSession, body, nil)
+
+	require.Equal(t, "agent_dispatched", res.Status, "dispatcher should accept Linear's top-level agentSession webhook shape")
+	require.Len(t, jobs.calls, 1, "dispatcher should enqueue one created worker job")
+	payload, ok := jobs.calls[0].Payload.(map[string]any)
+	require.True(t, ok, "dispatcher should enqueue a map payload")
+	require.Equal(t, "as_top_level", payload["linear_agent_session_id"], "worker payload should carry the top-level Linear AgentSession id")
+	require.Equal(t, "created", payload["action"], "worker payload should identify created action")
+	require.NoError(t, mock.ExpectationsWereMet(), "dispatcher should upsert the AgentSession row from the top-level payload")
+}
+
 func TestLinearAgentDispatcher_EnqueueFailureReturnsRetryableStatus(t *testing.T) {
 	t.Parallel()
 
@@ -473,6 +525,18 @@ func TestSniffLinearEventType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSniffLinearEventEnvelope_NormalizesTopLevelAgentSession(t *testing.T) {
+	t.Parallel()
+
+	eventType, env := sniffLinearEventEnvelope([]byte(`{"type":"AgentSessionEvent","action":"created","agentSession":{"id":"as_top_level","issueId":"iss_1","issue":{"identifier":"ACS-1"}}}`))
+
+	require.Equal(t, LinearAgentEventAgentSession, eventType, "sniffing should identify top-level AgentSessionEvent payloads")
+	require.NotNil(t, env, "sniffing should return a parsed envelope")
+	require.Equal(t, "as_top_level", env.Payload.AgentSession.ID, "sniffing should normalize top-level agentSession into payload.agentSession")
+	require.Equal(t, "iss_1", env.Payload.AgentSession.IssueID, "sniffing should preserve the top-level issue id")
+	require.Equal(t, "ACS-1", env.Payload.AgentSession.Issue.Identifier, "sniffing should preserve the issue identifier")
 }
 
 // newDispatcherForTest constructs a dispatcher with non-nil feature-required
