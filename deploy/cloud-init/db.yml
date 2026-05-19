@@ -41,6 +41,7 @@ write_files:
     permissions: '0600'
     content: |
       DB_PASSWORD=${DB_PASSWORD}
+      DB_BIND_IP=${DB_BIND_IP}
 
   - path: /opt/143/.ghcr-token
     owner: deploy:deploy
