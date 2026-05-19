@@ -5042,6 +5042,8 @@ func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID,
 		Str("org_id", orgID.String()).
 		Msg("injected claude subscription credentials into sandbox")
 
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, sub.AccountType, ""))
+
 	return true, nil
 }
 
@@ -5116,6 +5118,7 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // path is configured.
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]))
 		return TokenBillingModeAPIKey, nil
 	}
 
@@ -5138,6 +5141,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("unified claude code auth injection: %w", err)
 	}
 	if injected {
+		restrictClaudeCodePermissionModeForModel(sandbox, env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)])
 		return TokenBillingModeSubscription, nil
 	}
 
@@ -5168,6 +5172,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("claude code auth injection: %w", err)
 	}
 	if injected {
+		restrictClaudeCodePermissionModeForModel(sandbox, env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)])
 		return TokenBillingModeSubscription, nil
 	}
 
@@ -5212,6 +5217,7 @@ func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run 
 	if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
 		return err
 	}
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]))
 	return nil
 }
 

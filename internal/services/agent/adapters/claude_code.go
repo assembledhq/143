@@ -21,8 +21,6 @@ import (
 const (
 	defaultLowTokenMax  = 50_000
 	defaultHighTokenMax = 200_000
-
-	claudeCodeFileEditPermissionArg = " --permission-mode acceptEdits"
 )
 
 // resolveTokenLimit returns the appropriate max token limit based on
@@ -115,13 +113,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 
 	var cmd string
 	effortArg := ""
+	permissionModeArg := claudeCodePermissionModeArg(sandbox)
 	if prompt.ReasoningEffort != "" {
 		effortArg = fmt.Sprintf(" --effort %s", shellEscapeSingle(string(prompt.ReasoningEffort)))
 	}
-	// Auto-approve file edits in the per-session gVisor sandbox without
-	// bypassing every Claude Code permission check. This removes the
-	// file-by-file approval loop while preserving Claude's remaining tool
-	// checks for network-capable actions such as WebFetch and arbitrary Bash.
 	if prompt.Continuation && prompt.ResumeSessionID != "" {
 		settingsArg, envPrefix, err := prepareClaudeHumanInputHooks(ctx, provider, sandbox, prompt)
 		if err != nil {
@@ -138,7 +133,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			envPrefix,
 			effortArg,
 			settingsArg,
-			claudeCodeFileEditPermissionArg,
+			permissionModeArg,
 			shellEscapeSingle(prompt.ResumeSessionID),
 			msg,
 		)
@@ -163,7 +158,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			envPrefix,
 			effortArg,
 			settingsArg,
-			claudeCodeFileEditPermissionArg,
+			permissionModeArg,
 			promptPath,
 		)
 	}
@@ -239,6 +234,14 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	return result, nil
 }
 
+func claudeCodePermissionModeArg(sandbox *agent.Sandbox) string {
+	mode := agent.ClaudeCodePermissionModeAcceptEdits
+	if sandbox != nil && sandbox.Metadata != nil && sandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode] == agent.ClaudeCodePermissionModeAuto {
+		mode = agent.ClaudeCodePermissionModeAuto
+	}
+	return " --permission-mode " + mode
+}
+
 func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, prompt *agent.AgentPrompt) (string, string, error) {
 	hookPath := fmt.Sprintf("%s/.143-claude-human-input-hook.mjs", sandbox.HomeDir)
 	settingsPath := fmt.Sprintf("%s/.143-claude-settings.json", sandbox.HomeDir)
@@ -294,13 +297,6 @@ func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxPro
 
 var claudeHumanInputHookMatchers = []string{
 	"AskUserQuestion",
-	"Bash",
-	"Edit",
-	"MultiEdit",
-	"Write",
-	"WebFetch",
-	"WebSearch",
-	"NotebookEdit",
 }
 
 const claudeHumanInputHookScript = `#!/usr/bin/env node
