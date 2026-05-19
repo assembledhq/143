@@ -5008,9 +5008,10 @@ func cloneStringMap(in map[string]string) map[string]string {
 // sandbox if an active Claude Code subscription exists for this org. The
 // Claude Code CLI prefers the credentials file over ANTHROPIC_API_KEY env
 // vars, so when a subscription is present the file path wins even though
-// resolveAgentEnv still sets ANTHROPIC_API_KEY as a fallback. Returns (true, nil) when the file
-// was written, (false, nil) when no subscription exists so the API-key
-// fallback should be used, or (false, err) on failure.
+// resolveAgentEnv still sets ANTHROPIC_API_KEY as a fallback. Returns the
+// injection result plus the Claude subscription account type when the file was
+// written, false when no subscription exists so the API-key fallback should be
+// used, or an error on failure.
 //
 // Credentials file schema: the shape (claudeAiOauth.{accessToken,
 // refreshToken, expiresAt, scopes, subscriptionType, rateLimitTier}) mirrors
@@ -5019,20 +5020,21 @@ func cloneStringMap(in map[string]string) map[string]string {
 // uses; we translate from the space-separated `scope` response string when
 // the tokens are issued. If Anthropic ever changes this format, update this
 // marshal block and the AnthropicSubscription struct together.
-func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, string, error) {
 	if o.claudeCodeAuth == nil {
-		return false, nil
+		return false, "", nil
 	}
 
 	sub, _, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
 	if err != nil {
-		return false, fmt.Errorf("get claude code subscription token: %w", err)
+		return false, "", fmt.Errorf("get claude code subscription token: %w", err)
 	}
 	if sub == nil {
-		return false, nil
+		return false, "", nil
 	}
 
-	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+	injected, err := o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+	return injected, sub.AccountType, err
 }
 
 func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
@@ -5090,14 +5092,12 @@ func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID,
 		Str("org_id", orgID.String()).
 		Msg("injected claude subscription credentials into sandbox")
 
-	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, sub.AccountType, ""))
-
 	return true, nil
 }
 
-func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
 	if o.env == nil || o.env.codingCredentials == nil {
-		return false, nil
+		return false, "", nil
 	}
 
 	if picked, ok := o.env.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
@@ -5109,18 +5109,18 @@ func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uu
 		models.ProviderAnthropicSubscription,
 	})
 	if !handled || picked == nil {
-		return false, nil
+		return false, "", nil
 	}
 	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
 }
 
-func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, string, error) {
 	if picked.Provider != models.ProviderAnthropicSubscription {
-		return false, nil
+		return false, "", nil
 	}
 	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
 	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
-		return false, nil
+		return false, "", nil
 	}
 	sub := models.AnthropicSubscription{
 		AccessToken:   cfg.AccessToken,
@@ -5143,9 +5143,9 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 				sub = *refreshed
 			} else if sub.IsExpired() {
 				if err != nil {
-					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+					return false, "", fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
 				}
-				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+				return false, "", fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
 			} else if err != nil {
 				o.logger.Warn().
 					Err(err).
@@ -5153,10 +5153,11 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 					Msg("unified claude subscription refresh failed; using cached token")
 			}
 		} else if sub.IsExpired() {
-			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+			return false, "", fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
 		}
 	}
-	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+	injected, err := o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+	return injected, sub.AccountType, err
 }
 
 // ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
@@ -5165,12 +5166,14 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
 // path is configured.
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
+	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
-		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]))
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, claudeCodeVersion))
 		return TokenBillingModeAPIKey, nil
 	}
 
-	injected, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
+	injected, accountType, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
@@ -5189,11 +5192,11 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("unified claude code auth injection: %w", err)
 	}
 	if injected {
-		restrictClaudeCodePermissionModeForModel(sandbox, env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)])
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, accountType, model, claudeCodeVersion))
 		return TokenBillingModeSubscription, nil
 	}
 
-	injected, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	injected, accountType, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
@@ -5220,7 +5223,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("claude code auth injection: %w", err)
 	}
 	if injected {
-		restrictClaudeCodePermissionModeForModel(sandbox, env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)])
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, accountType, model, claudeCodeVersion))
 		return TokenBillingModeSubscription, nil
 	}
 
@@ -5265,8 +5268,17 @@ func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run 
 	if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
 		return err
 	}
-	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]))
+	version := o.detectClaudeCodeVersion(ctx, sandbox)
+	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, version))
 	return nil
+}
+
+func (o *Orchestrator) detectClaudeCodeVersion(ctx context.Context, sandbox *Sandbox) string {
+	if o == nil {
+		return ""
+	}
+	return detectClaudeCodeVersion(ctx, sandbox, o.provider, o.logger)
 }
 
 func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
