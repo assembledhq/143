@@ -351,7 +351,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithSessionIDUsesResumeByID(t *te
 	require.False(t, exists, "deterministic resume should not write a fresh prompt file")
 }
 
-func TestPrepareClaudeHumanInputHooks_ConfiguresActionableToolApprovals(t *testing.T) {
+func TestPrepareClaudeHumanInputHooks_ConfiguresAskUserQuestionDeferral(t *testing.T) {
 	t.Parallel()
 
 	provider := testutil.NewMockSandboxProvider()
@@ -379,9 +379,8 @@ func TestPrepareClaudeHumanInputHooks_ConfiguresActionableToolApprovals(t *testi
 	for _, hook := range settings.Hooks["PreToolUse"] {
 		matchers[hook.Matcher] = true
 	}
-	for _, matcher := range []string{"AskUserQuestion", "Bash", "Edit", "MultiEdit", "Write", "WebFetch", "WebSearch"} {
-		require.True(t, matchers[matcher], "PreToolUse hooks should route %s approvals through 143", matcher)
-	}
+	require.True(t, matchers["AskUserQuestion"], "PreToolUse hooks should route explicit Claude questions through 143")
+	require.False(t, matchers["Bash"], "PreToolUse hooks should let Claude auto mode classify Bash instead of routing every command through 143")
 }
 
 func TestClaudeHumanInputHookScopesResumeAnswerToMatchingToolUse(t *testing.T) {
@@ -394,10 +393,10 @@ func TestClaudeHumanInputHookScopesResumeAnswerToMatchingToolUse(t *testing.T) {
 		"AnswerPayload":     map[string]any{"decision": "approve"},
 	}
 	output := runClaudeHumanInputHookForTest(t, map[string]any{
-		"tool_name":   "Bash",
+		"tool_name":   "AskUserQuestion",
 		"tool_use_id": "toolu_other",
 		"tool_input": map[string]any{
-			"command": "echo unrelated",
+			"questions": []map[string]any{{"question": "Continue?", "options": []string{"Yes", "No"}}},
 		},
 	}, answer)
 
@@ -415,10 +414,10 @@ func TestClaudeHumanInputHookConsumesMatchedResumeAnswer(t *testing.T) {
 		"AnswerPayload":     map[string]any{"decision": "approve"},
 	})
 	output := runClaudeHumanInputHookWithAnswerPathForTest(t, map[string]any{
-		"tool_name":   "Bash",
+		"tool_name":   "AskUserQuestion",
 		"tool_use_id": "toolu_expected",
 		"tool_input": map[string]any{
-			"command": "echo ok",
+			"questions": []map[string]any{{"question": "Continue?", "options": []string{"Yes", "No"}}},
 		},
 	}, answerPath)
 
@@ -452,7 +451,7 @@ func runClaudeHumanInputHookWithAnswerPathForTest(t *testing.T, event map[string
 	require.NoError(t, err, "test hook event should marshal as JSON")
 	cmd := exec.Command("node", hookPath)
 	cmd.Env = append(os.Environ(),
-		"CLAUDE_143_HUMAN_INPUT_TOOLS=AskUserQuestion,Bash,Edit,MultiEdit,Write,WebFetch,WebSearch",
+		"CLAUDE_143_HUMAN_INPUT_TOOLS="+strings.Join(claudeHumanInputHookMatchers, ","),
 		"CLAUDE_143_HUMAN_INPUT_ANSWER="+answerPath,
 	)
 	cmd.Stdin = strings.NewReader(string(eventBytes))
@@ -505,7 +504,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshE
 	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
 }
 
-func TestClaudeCodeAdapter_Execute_AcceptsFileEditsWithoutBypassingAllPermissions(t *testing.T) {
+func TestClaudeCodeAdapter_Execute_UsesAutoModeWithoutBypassingAllPermissions(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -560,8 +559,9 @@ func TestClaudeCodeAdapter_Execute_AcceptsFileEditsWithoutBypassingAllPermission
 			require.NoError(t, err, "execute should succeed")
 			require.NotNil(t, result, "execute should return a result")
 			require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
-			require.Contains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should auto-approve file edits inside the gVisor sandbox")
-			require.NotContains(t, provider.ExecCalls[0], "--dangerously-skip-permissions", "Claude CLI should not bypass every permission check while public internet egress is available")
+			require.Contains(t, provider.ExecCalls[0], "--permission-mode auto", "Claude CLI should use auto mode inside the gVisor sandbox to reduce routine approval prompts")
+			require.NotContains(t, provider.ExecCalls[0], "--permission-mode bypassPermissions", "Claude CLI should not skip every permission check while public internet egress is available")
+			require.NotContains(t, provider.ExecCalls[0], "--dangerously-skip-permissions", "Claude CLI should not use the bypass-permissions alias while public internet egress is available")
 		})
 	}
 }

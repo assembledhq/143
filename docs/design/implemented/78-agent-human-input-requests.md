@@ -209,15 +209,16 @@ designs:
 Preferred path: keep running the `claude` command directly.
 
 143 should continue using `claude --print --output-format stream-json
---verbose` as the execution transport, then add a sandbox-local `--settings`
-file that installs a small hook script. The hook should defer Claude tool
-calls that need 143 UI involvement:
+--verbose --permission-mode auto` as the execution transport, then add a
+sandbox-local `--settings` file that installs a small hook script. The hook
+should defer Claude tool calls that need 143 UI involvement:
 
 - `AskUserQuestion` becomes `free_text`, `single_choice`, or `multi_choice`
   depending on the tool input.
-- approval-like tool calls become `tool_approval` or `action_choice`.
-- native permission prompts can use `--permission-prompt-tool` when an MCP
-  permission tool is a better fit than a hook.
+- Routine tool execution, including Bash and file edits, is left to Claude
+  auto mode so common review commands do not become 143 approval prompts.
+- Native permission prompts can use `--permission-prompt-tool` later if an MCP
+  permission tool is a better fit than auto mode for reviewable approvals.
 
 When the hook returns `permissionDecision: "defer"`, Claude exits with a
 deferred tool payload. The adapter should parse that payload from the
@@ -378,11 +379,11 @@ Implemented on 2026-05-12. Full once-over fixes completed on 2026-05-13.
   instead of relying on ad hoc `question` logs. Legacy `question` logs are
   normalized into durable `free_text` requests and still create compatibility
   `session_questions`.
-- Claude Code continues to run through the direct `claude` command. 143
-  writes a sandbox-local Claude settings file plus hook script, defers
-  `AskUserQuestion` and actionable tool approvals, parses
-  `deferred_tool_use`, checkpoints the session, and resumes the same Claude
-  session with the user's normalized answer or denial.
+- Claude Code continues to run through the direct `claude` command in `auto`
+  permission mode. 143 writes a sandbox-local Claude settings file plus hook
+  script, defers `AskUserQuestion`, parses `deferred_tool_use`, checkpoints the
+  session, and resumes the same Claude session with the user's normalized
+  answer.
 - Codex and the shared stream parser now recognize generic human-input,
   approval, and action-choice events, while Codex's existing bypass mode
   remains unchanged for unattended isolated runs.
@@ -423,14 +424,16 @@ Implemented on 2026-05-12. Full once-over fixes completed on 2026-05-13.
   away.
 - The primary Claude integration remains the direct `claude` CLI. The Agent
   SDK is not required for this implementation.
-- Claude uses hook-based deferral for normalized prompts.
+- Claude uses hook-based deferral for explicit user questions, while routine
+  tool permissions are handled by Claude auto mode.
   `--permission-prompt-tool` remains an optional future transport for
   permission prompts, not a dependency of the current path.
 - Resume uses a durable `continue_session` job with the answered request id.
   Live callback delivery can be added later without changing the persistence
   or API contract.
-- Tool-approval policy is represented as normalized choices today. Org-level
-  allow/deny policy can layer on top of those choices later.
+- Tool-approval rows remain supported by the provider-neutral API, but Claude
+  Code's default sandbox path no longer converts routine Bash/edit permissions
+  into 143 approval cards. Org-level allow/deny policy can layer on top later.
 - Selected choices are stored in answer metadata and reflected through a user
   transcript message when the answer resumes the run.
 - Pending requests do not expire automatically. The schema includes
