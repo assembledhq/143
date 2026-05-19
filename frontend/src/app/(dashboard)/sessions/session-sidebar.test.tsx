@@ -356,6 +356,29 @@ describe('SessionSidebar', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
+  it('uses the same row padding frame for the new-session draft and normal sessions', async () => {
+    mockPathname = '/sessions/new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Existing session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const draftOption = await screen.findByRole('option', { name: 'New session draft' });
+    const normalOption = (await screen.findByText('Existing session')).closest('[role="option"]');
+    expect(normalOption).not.toBeNull();
+
+    expect(draftOption).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+
+    const draftLink = draftOption.querySelector('a');
+    const normalLink = normalOption!.querySelector('a');
+    expect(draftLink).not.toBeNull();
+    expect(normalLink).not.toBeNull();
+    expect(draftLink!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+    expect(normalLink!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+  });
+
   it('clears search on Escape key', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Alpha fix' }),
@@ -974,7 +997,7 @@ describe('SessionSidebar', () => {
 
     const draftOption = screen.getByRole('option', { name: 'New session draft' });
     expect(draftOption).toHaveAttribute('aria-selected', 'true');
-    expect(draftOption.className).toContain('mb-2');
+    expect(draftOption).toHaveClass('p-1');
 
     const savedOption = screen.getByText('Saved session below draft').closest('[role="option"]');
     expect(savedOption).toHaveAttribute('aria-selected', 'false');
