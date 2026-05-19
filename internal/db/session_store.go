@@ -866,6 +866,75 @@ func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, session
 	return err
 }
 
+func (s *SessionStore) MarkRuntimeStopRequested(ctx context.Context, orgID, sessionID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time) error {
+	query := `
+		UPDATE sessions
+		SET runtime_stop_reason = CASE
+		        WHEN runtime_stop_reason = '' OR @runtime_stop_reason = 'user_cancel' THEN @runtime_stop_reason
+		        ELSE runtime_stop_reason
+		    END,
+		    runtime_graceful_stop_at = CASE
+		        WHEN runtime_graceful_stop_at IS NULL OR @runtime_stop_reason = 'user_cancel' THEN @runtime_stop_after
+		        ELSE runtime_graceful_stop_at
+		    END
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		  AND status = 'running'`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                  sessionID,
+		"org_id":              orgID,
+		"runtime_stop_reason": string(reason),
+		"runtime_stop_after":  stopAfter.UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("mark runtime stop requested: %w", err)
+	}
+	return nil
+}
+
+// ListRuntimeControlStalledSessions returns running sessions whose runtime
+// controller should already have stopped or requested stop handling. This is a
+// narrower watchdog than ListStaleRunningSessions: it only targets rows whose
+// own runtime budget has already expired or whose persisted stop-after deadline
+// has passed.
+// lint:allow-no-orgid reason="cross-org reaper scan for stalled runtime control"
+func (s *SessionStore) ListRuntimeControlStalledSessions(ctx context.Context, deadlineBefore, stopAfterBefore time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionListColumns + `
+		FROM sessions
+		WHERE status = 'running'
+		  AND deleted_at IS NULL
+		  AND (
+		    (
+		      runtime_stop_reason <> ''
+		      AND runtime_graceful_stop_at IS NOT NULL
+		      AND runtime_graceful_stop_at < @stop_after_before
+		    )
+		    OR (
+		      runtime_stop_reason = ''
+		      AND runtime_soft_deadline_at IS NOT NULL
+		      AND runtime_soft_deadline_at < @deadline_before
+		    )
+		  )
+		ORDER BY COALESCE(runtime_graceful_stop_at, runtime_soft_deadline_at) ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"deadline_before":   deadlineBefore,
+		"stop_after_before": stopAfterBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query runtime-control stalled sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, fmt.Errorf("collect runtime-control stalled sessions: %w", err)
+	}
+	return sessions, nil
+}
+
 func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error) {
 	args := pgx.NamedArgs{
 		"id":                     sessionID,

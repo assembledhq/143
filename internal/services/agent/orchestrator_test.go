@@ -302,6 +302,7 @@ type mockSessionStore struct {
 	turnUpdates            []turnUpdate
 	runtimeBegins          []runtimeBegin
 	progressUpdates        []runtimeProgressUpdate
+	stopRequests           []models.RuntimeStopReason
 	extensionGrants        []runtimeExtensionGrant
 	checkpoints            []checkpointUpdate
 	recoveryStates         []recoveryStateUpdate
@@ -496,6 +497,13 @@ func (m *mockSessionStore) RecordRuntimeProgress(ctx context.Context, orgID, ses
 		strength:     strength,
 		observedAt:   observedAt,
 	})
+	return nil
+}
+
+func (m *mockSessionStore) MarkRuntimeStopRequested(ctx context.Context, orgID, sessionID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopRequests = append(m.stopRequests, reason)
 	return nil
 }
 

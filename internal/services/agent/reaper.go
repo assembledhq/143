@@ -38,6 +38,9 @@ type PreviewStopper interface {
 // SessionReaper periodically cleans up stale sessions and expired snapshots
 // in seven phases:
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
+//   - Phase 0.4: Fail sessions whose runtime controller missed an already
+//     expired soft deadline or left a stop request in-flight past its grace
+//     window
 //   - Phase 0.5: Fail sessions stuck in running for longer than maxRunningAge
 //     (safety net for orphaned sessions when the worker handler timeout path
 //     didn't run, e.g. worker crash or DB write failure during failure handling)
@@ -57,6 +60,7 @@ type SessionReaper struct {
 	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
+	runtimeStallAge  time.Duration
 	maxRunningAge    time.Duration
 	maxSnapshotAge   time.Duration
 	interval         time.Duration
@@ -70,6 +74,7 @@ type StaleSessionLister interface {
 	ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error)
 	ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error)
+	ListRuntimeControlStalledSessions(ctx context.Context, deadlineBefore, stopRequestedBefore time.Time) ([]models.Session, error)
 	ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
@@ -120,6 +125,8 @@ func WithStuckThreadLister(t StuckThreadLister) SessionReaperOption {
 // before the reaper considers it stuck and marks it as failed.
 const defaultMaxPendingAge = 10 * time.Minute
 
+const defaultRuntimeStallAge = 2 * time.Minute
+
 // reaperPreviewStopTimeout is the deadline the reaper gives
 // StopActivePreviewForSession before moving on to delete the snapshot blob.
 // Must be generous enough for the preview's hold-aware destroy path
@@ -150,14 +157,15 @@ var minRunningAgeFloor = time.Duration(models.MaxMaxSessionDurationSeconds)*time
 
 func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger, opts ...SessionReaperOption) *SessionReaper {
 	r := &SessionReaper{
-		sessions:       sessions,
-		snapshotStore:  snapshotStore,
-		maxIdleAge:     maxIdleAge,
-		maxPendingAge:  defaultMaxPendingAge,
-		maxRunningAge:  defaultMaxRunningAge,
-		maxSnapshotAge: maxSnapshotAge,
-		interval:       interval,
-		logger:         logger,
+		sessions:        sessions,
+		snapshotStore:   snapshotStore,
+		maxIdleAge:      maxIdleAge,
+		maxPendingAge:   defaultMaxPendingAge,
+		runtimeStallAge: defaultRuntimeStallAge,
+		maxRunningAge:   defaultMaxRunningAge,
+		maxSnapshotAge:  maxSnapshotAge,
+		interval:        interval,
+		logger:          logger,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -190,6 +198,7 @@ func (r *SessionReaper) Run(ctx context.Context) {
 	r.logger.Info().
 		Dur("interval", r.interval).
 		Dur("max_pending", r.maxPendingAge).
+		Dur("runtime_stall", r.runtimeStallAge).
 		Dur("max_running", r.maxRunningAge).
 		Dur("max_idle", r.maxIdleAge).
 		Dur("max_snapshot_age", r.maxSnapshotAge).
@@ -216,6 +225,12 @@ const FailureCategoryStuckPending = "stuck_pending"
 // handler context timeout path didn't execute (crashed worker, DB write
 // failure during failure bookkeeping, or a new silent-failure code path).
 const FailureCategoryStuckRunning = "stuck_running"
+
+// FailureCategoryRuntimeControlStalled is for sessions whose per-run runtime
+// controller missed or could not complete its own stop policy. This is narrower
+// than stuck_running and should page earlier because it means an active worker
+// may still be renewing the job lease while no useful agent work is happening.
+const FailureCategoryRuntimeControlStalled = "runtime_control_stalled"
 
 // FailureCategoryStuckThread is the failure category for threads stuck in
 // status='running' past maxRunningAge. Distinguished from StuckRunning so
@@ -250,6 +265,47 @@ func (r *SessionReaper) reap(ctx context.Context) {
 				Str("org_id", s.OrgID.String()).
 				Time("created_at", s.CreatedAt).
 				Msg("reaper: failed stale pending session")
+		}
+	}
+
+	// Phase 0.4: Fail sessions whose runtime controller has already missed
+	// an expired deadline or left a stop request past its persisted stop-after
+	// deadline. Unlike the broad maxRunningAge safety net, this is keyed off
+	// the row's own runtime budget fields, so it can act quickly without
+	// cutting off healthy long-running sessions.
+	now := time.Now()
+	runtimeDeadlineCutoff := now.Add(-r.runtimeStallAge)
+	runtimeStalled, err := r.sessions.ListRuntimeControlStalledSessions(ctx, runtimeDeadlineCutoff, now)
+	if err != nil {
+		r.logger.Error().Err(err).Msg("reaper: failed to list runtime-control stalled sessions")
+	} else {
+		for _, s := range runtimeStalled {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed)); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark runtime-control stalled session as failed")
+				continue
+			}
+			explanation := "This session crossed its runtime stop deadline, but the worker kept the job alive without completing shutdown. The platform stopped it so it does not consume capacity indefinitely."
+			nextSteps := []string{
+				"Retry the session; a fresh worker should start from the latest durable state when available",
+				"If this repeats, inspect worker logs for interactive command cancellation and Docker exec shutdown failures",
+			}
+			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryRuntimeControlStalled, nextSteps, true); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for runtime-control stalled session")
+			}
+			event := r.logger.Error().
+				Str("session_id", s.ID.String()).
+				Str("org_id", s.OrgID.String()).
+				Str("runtime_stop_reason", string(s.RuntimeStopReason))
+			if s.RuntimeLastProgressAt != nil {
+				event = event.Time("runtime_last_progress_at", *s.RuntimeLastProgressAt)
+			}
+			if s.RuntimeSoftDeadlineAt != nil {
+				event = event.Time("runtime_soft_deadline_at", *s.RuntimeSoftDeadlineAt)
+			}
+			if s.RuntimeGracefulStopAt != nil {
+				event = event.Time("runtime_graceful_stop_at", *s.RuntimeGracefulStopAt)
+			}
+			event.Msg("reaper: failed runtime-control stalled session")
 		}
 	}
 
