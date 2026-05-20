@@ -234,6 +234,29 @@ func TestValidateSessionExecutorStartupConfig(t *testing.T) {
 	}
 }
 
+func TestSessionExecutorGroupAdd(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		dockerGID string
+		expected  []string
+	}{
+		{name: "empty docker gid omits supplemental groups", dockerGID: "", expected: nil},
+		{name: "configured docker gid is passed through", dockerGID: "123", expected: []string{"123"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := sessionExecutorGroupAdd(tt.dockerGID)
+
+			require.Equal(t, tt.expected, got, "session executor group add should reflect the configured Docker socket group")
+		})
+	}
+}
+
 func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	t.Parallel()
 
