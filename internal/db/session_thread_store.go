@@ -288,6 +288,34 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 	return nil
 }
 
+// FailRunningBySession fails every currently running thread for a terminalized
+// session. It is used by reaper paths that fail the parent session outside the
+// normal orchestrator/handler completion flow.
+func (s *SessionThreadStore) FailRunningBySession(ctx context.Context, orgID, sessionID uuid.UUID, result *models.SessionResult) (int64, error) {
+	var failureExplanation *string
+	var failureCategory *string
+	if result != nil {
+		failureExplanation = result.Error
+		failureCategory = result.FailureCategory
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_threads
+		SET status = 'failed',
+		    completed_at = now(),
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category
+		WHERE org_id = @org_id AND session_id = @session_id AND status = 'running'`, pgx.NamedArgs{
+		"org_id":              orgID,
+		"session_id":          sessionID,
+		"failure_explanation": failureExplanation,
+		"failure_category":    failureCategory,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("fail running session threads: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ListStuckRunningThreads returns threads stuck in status='running' whose
 // started_at is older than the given cutoff. The reaper uses this to fail
 // rows the orchestrator/handler couldn't reset themselves — typically when
