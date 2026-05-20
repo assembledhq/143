@@ -81,6 +81,13 @@ warn_docker_dns_skipped() {
 # testing without touching the script that runs as root.
 DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
 
+# App deploys must keep the Cloudflare-facing origin bound on 80/443. The
+# daemon hardening helpers below can restart Docker when daemon.json changes,
+# which recycles Caddy and creates a visible origin outage on a single app
+# host. Keep those checks out of routine app deploys unless an operator is
+# intentionally running maintenance.
+ALLOW_DEPLOY_DOCKER_DAEMON_RESTART="${ALLOW_DEPLOY_DOCKER_DAEMON_RESTART:-0}"
+
 run_worker_host_reconcile() {
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
@@ -324,128 +331,136 @@ if [ "$ROLE" = "worker" ]; then
      || { rm -f /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 fi
 
-# --- Docker log rotation (idempotent) ---
-# Cap container log file growth so a chatty container can't fill the disk.
-# Docker's default json-file driver has no size limit. Logs ship to
-# VictoriaLogs (Vector → 30d retention) on app/worker/logging hosts; the
-# local file is just a buffer plus a crash-recovery window. db and redis
-# hosts have no Vector — the local file is the only copy — so db gets a
-# larger cap because postgresql.conf logs every connection, every query
-# >500ms, and every lock wait, and the entire trail is local-only.
-#
-# Sync the helper, then call it via deploy+sudo (matches sandbox-firewall.sh
-# pattern). The script is idempotent and only restarts docker when the
-# content of /etc/docker/daemon.json actually changes, so steady-state
-# deploys cost nothing.
-case "$ROLE" in
-  db) LOG_MAX_SIZE="500m" ;;  # postgres logs are verbose AND local-only
-  *)  LOG_MAX_SIZE="100m" ;;
-esac
-LOG_MAX_FILE="5"
-LOG_ROTATION_READY=1
+if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  echo "Skipping docker log rotation check on app deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 for explicit maintenance."
+else
+  # --- Docker log rotation (idempotent) ---
+  # Cap container log file growth so a chatty container can't fill the disk.
+  # Docker's default json-file driver has no size limit. Logs ship to
+  # VictoriaLogs (Vector → 30d retention) on app/worker/logging hosts; the
+  # local file is just a buffer plus a crash-recovery window. db and redis
+  # hosts have no Vector — the local file is the only copy — so db gets a
+  # larger cap because postgresql.conf logs every connection, every query
+  # >500ms, and every lock wait, and the entire trail is local-only.
+  #
+  # Sync the helper, then call it via deploy+sudo (matches sandbox-firewall.sh
+  # pattern). The script is idempotent and only restarts docker when the
+  # content of /etc/docker/daemon.json actually changes, so steady-state
+  # deploys cost nothing.
+  case "$ROLE" in
+    db) LOG_MAX_SIZE="500m" ;;  # postgres logs are verbose AND local-only
+    *)  LOG_MAX_SIZE="100m" ;;
+  esac
+  LOG_MAX_FILE="5"
+  LOG_ROTATION_READY=1
 
-# Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
-# avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
-# break the subsequent `sudo install-log-rotation.sh` exec.
-ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
-    deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
-  echo "install-log-rotation.sh sync failed; trying no-teardown deploy sudoers repair..."
-  if repair_deploy_sudoers; then
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
-      deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
-  else
-    warn_log_rotation_skipped
-    LOG_ROTATION_READY=0
-  fi
-fi
-if [ "$LOG_ROTATION_READY" -eq 1 ]; then
-  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
-     && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
-     || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"; then
-    warn_log_rotation_skipped
-    LOG_ROTATION_READY=0
-  fi
-fi
-
-if [ "$LOG_ROTATION_READY" -eq 1 ]; then
-  echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
-  # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
-  # prompt CI can't satisfy. If the repair path also isn't available, keep the
-  # deploy moving: log rotation is an operational hardening step, not the app
-  # or database rollout itself.
-  run_log_rotation() {
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
-  }
-  if ! run_log_rotation; then
-    echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  # Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
+  # avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
+  # break the subsequent `sudo install-log-rotation.sh` exec.
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+  if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
+    echo "install-log-rotation.sh sync failed; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
-      echo "Retrying docker log rotation after sudoers repair..."
-      if ! run_log_rotation; then
-        warn_log_rotation_skipped
-      fi
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+      scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+        deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
     else
       warn_log_rotation_skipped
+      LOG_ROTATION_READY=0
+    fi
+  fi
+  if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+    if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
+       && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
+       || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"; then
+      warn_log_rotation_skipped
+      LOG_ROTATION_READY=0
+    fi
+  fi
+
+  if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+    echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
+    # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
+    # prompt CI can't satisfy. If the repair path also isn't available, keep the
+    # deploy moving: log rotation is an operational hardening step, not the app
+    # or database rollout itself.
+    run_log_rotation() {
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
+    }
+    if ! run_log_rotation; then
+      echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+      if repair_deploy_sudoers; then
+        echo "Retrying docker log rotation after sudoers repair..."
+        if ! run_log_rotation; then
+          warn_log_rotation_skipped
+        fi
+      else
+        warn_log_rotation_skipped
+      fi
     fi
   fi
 fi
 
-# --- Docker daemon DNS resolvers (idempotent) ---
-# Pin /etc/docker/daemon.json's `dns` list to multiple independent
-# resolvers so a single upstream DNS outage doesn't take every container's
-# outbound DNS down at once. The 2026-05-07T04:15Z incident hit three
-# workers simultaneously this way (sandboxes couldn't resolve chatgpt.com,
-# workers couldn't resolve github.com) because the embedded resolver at
-# 127.0.0.11 inherits a single host resolv.conf entry by default.
-#
-# Sync + invoke pattern mirrors install-log-rotation.sh above.
-DOCKER_DNS_READY=1
+if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  echo "Skipping docker daemon DNS check on app deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 for explicit maintenance."
+else
+  # --- Docker daemon DNS resolvers (idempotent) ---
+  # Pin /etc/docker/daemon.json's `dns` list to multiple independent
+  # resolvers so a single upstream DNS outage doesn't take every container's
+  # outbound DNS down at once. The 2026-05-07T04:15Z incident hit three
+  # workers simultaneously this way (sandboxes couldn't resolve chatgpt.com,
+  # workers couldn't resolve github.com) because the embedded resolver at
+  # 127.0.0.11 inherits a single host resolv.conf entry by default.
+  #
+  # Sync + invoke pattern mirrors install-log-rotation.sh above.
+  DOCKER_DNS_READY=1
 
-ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
-    deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new; then
-  echo "install-docker-dns.sh sync failed; trying no-teardown deploy sudoers repair..."
-  if repair_deploy_sudoers; then
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
-      deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
-  else
-    warn_docker_dns_skipped
-    DOCKER_DNS_READY=0
-  fi
-fi
-if [ "$DOCKER_DNS_READY" -eq 1 ]; then
-  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/install-docker-dns.sh.new /opt/143/deploy/scripts/install-docker-dns.sh \
-     && chmod +x /opt/143/deploy/scripts/install-docker-dns.sh \
-     || { rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new; exit 1; }"; then
-    warn_docker_dns_skipped
-    DOCKER_DNS_READY=0
-  fi
-fi
-
-if [ "$DOCKER_DNS_READY" -eq 1 ]; then
-  echo "Ensuring docker daemon DNS resolvers (${DOCKER_DNS_RESOLVERS[*]})..."
-  run_docker_dns() {
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh ${DOCKER_DNS_RESOLVERS[*]}"
-  }
-  if ! run_docker_dns; then
-    echo "install-docker-dns.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+  if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new; then
+    echo "install-docker-dns.sh sync failed; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
-      echo "Retrying docker daemon DNS pinning after sudoers repair..."
-      if ! run_docker_dns; then
-        warn_docker_dns_skipped
-      fi
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+      scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+        deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
     else
       warn_docker_dns_skipped
+      DOCKER_DNS_READY=0
+    fi
+  fi
+  if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+    if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "mv /opt/143/deploy/scripts/install-docker-dns.sh.new /opt/143/deploy/scripts/install-docker-dns.sh \
+       && chmod +x /opt/143/deploy/scripts/install-docker-dns.sh \
+       || { rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new; exit 1; }"; then
+      warn_docker_dns_skipped
+      DOCKER_DNS_READY=0
+    fi
+  fi
+
+  if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+    echo "Ensuring docker daemon DNS resolvers (${DOCKER_DNS_RESOLVERS[*]})..."
+    run_docker_dns() {
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh ${DOCKER_DNS_RESOLVERS[*]}"
+    }
+    if ! run_docker_dns; then
+      echo "install-docker-dns.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+      if repair_deploy_sudoers; then
+        echo "Retrying docker daemon DNS pinning after sudoers repair..."
+        if ! run_docker_dns; then
+          warn_docker_dns_skipped
+        fi
+      else
+        warn_docker_dns_skipped
+      fi
     fi
   fi
 fi

@@ -543,8 +543,10 @@ deploy-redis:
 	$(check-ssh-key)
 	@$(call resolve-host,redis)
 
-# Deploy all nodes in the fleet.
+# Deploy app+worker nodes in the fleet by default.
 # Uses FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
+# For explicit maintenance deploys of every role:
+#   DEPLOY_FLEET_ROLES=all make deploy-fleet
 deploy-fleet:
 	$(check-ssh-key)
 	./deploy/scripts/deploy-fleet.sh $(SSH_KEY)
