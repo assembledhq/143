@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -26,10 +27,18 @@ import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { queryKeys } from "@/lib/query-keys";
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
-import type { GitHubRepositoryClaimCandidate } from "@/lib/types";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { GitHubRepositoryClaimCandidate, LinearTeamRepoMapping, Repository } from "@/lib/types";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
+const NO_DEFAULT_REPO_VALUE = "__none__";
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
 // `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
@@ -261,6 +270,170 @@ function SlackChannelPicker() {
   );
 }
 
+function repoName(repositories: Repository[], repoID?: string): string {
+  return repositories.find((repo) => repo.id === repoID)?.full_name ?? repoID ?? "Unknown repository";
+}
+
+function LinearAgentRoutingSettings() {
+  const queryClient = useQueryClient();
+  const [teamID, setTeamID] = useState("");
+  const [projectID, setProjectID] = useState("");
+  const [mappingRepoID, setMappingRepoID] = useState("");
+
+  const { data: statusResp, isLoading: statusLoading } = useQuery({
+    queryKey: queryKeys.integrations.linearAgentStatus,
+    queryFn: () => api.integrations.getLinearAgentStatus(),
+  });
+  const { data: mappingsResp, isLoading: mappingsLoading } = useQuery({
+    queryKey: queryKeys.integrations.linearAgentMappings,
+    queryFn: () => api.integrations.listLinearAgentMappings(),
+  });
+  const { data: repositoriesResp } = useQuery({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+
+  const repositories = (repositoriesResp?.data ?? []).filter((repo) => repo.status === "active");
+  const status = statusResp?.data;
+  const mappings = mappingsResp?.data ?? [];
+
+  const updateSettings = useMutation({
+    mutationFn: (body: { default_repo_id: string | null }) => api.integrations.updateLinearAgentSettings(body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.integrations.linearAgentStatus, exact: true }),
+  });
+  const upsertMapping = useMutation({
+    mutationFn: (body: { linear_team_id: string; linear_project_id?: string; repository_id: string }) =>
+      api.integrations.upsertLinearAgentMapping(body),
+    onSuccess: () => {
+      setTeamID("");
+      setProjectID("");
+      setMappingRepoID("");
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.linearAgentMappings });
+    },
+  });
+  const deleteMapping = useMutation({
+    mutationFn: (id: string) => api.integrations.deleteLinearAgentMapping(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.integrations.linearAgentMappings }),
+  });
+
+  const defaultRepoValue = status?.default_repo_id ?? NO_DEFAULT_REPO_VALUE;
+  const canAddMapping = teamID.trim() !== "" && mappingRepoID !== "";
+
+  return (
+    <div className="mt-3 space-y-4 rounded-md border border-border px-3 py-3">
+      <div>
+        <div className="text-sm font-medium">Linear agent routing</div>
+      </div>
+      <div className="space-y-4">
+        {statusLoading ? (
+          <p className="text-sm text-muted-foreground">Loading Linear agent settings...</p>
+        ) : (
+          <div className="grid gap-2">
+            <Label htmlFor="linear-default-repo">Default repository</Label>
+            <Select
+              value={defaultRepoValue}
+              onValueChange={(value) =>
+                updateSettings.mutate({ default_repo_id: value === NO_DEFAULT_REPO_VALUE ? null : value })
+              }
+              disabled={repositories.length === 0 || updateSettings.isPending}
+            >
+              <SelectTrigger id="linear-default-repo" aria-label="Default repository">
+                <SelectValue placeholder="Choose a default repository" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DEFAULT_REPO_VALUE}>No default repository</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {repositories.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Connect a GitHub repository before routing Linear agent work.</p>
+            ) : null}
+            {!status?.agent_scopes_granted ? (
+              <p className="text-xs text-muted-foreground">Reconnect Linear to grant the agent assignment and mention scopes.</p>
+            ) : null}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Team overrides</div>
+          {mappingsLoading ? (
+            <p className="text-sm text-muted-foreground">Loading team mappings...</p>
+          ) : mappings.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No team-specific overrides yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {mappings.map((mapping: LinearTeamRepoMapping) => (
+                <div key={mapping.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{mapping.linear_team_id}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {mapping.linear_project_id ? `Project ${mapping.linear_project_id} -> ` : ""}{repoName(repositories, mapping.repository_id)}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Remove mapping"
+                    disabled={deleteMapping.isPending}
+                    onClick={() => deleteMapping.mutate(mapping.id)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-2 border-t border-border pt-4">
+          <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1.3fr_auto]">
+            <Input
+              aria-label="Linear team ID"
+              placeholder="Linear team ID"
+              value={teamID}
+              onChange={(event) => setTeamID(event.target.value)}
+            />
+            <Input
+              aria-label="Linear project ID"
+              placeholder="Project ID (optional)"
+              value={projectID}
+              onChange={(event) => setProjectID(event.target.value)}
+            />
+            <Select value={mappingRepoID} onValueChange={setMappingRepoID} disabled={repositories.length === 0}>
+              <SelectTrigger aria-label="Override repository">
+                <SelectValue placeholder="Repository" />
+              </SelectTrigger>
+              <SelectContent>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              disabled={!canAddMapping || upsertMapping.isPending}
+              loading={upsertMapping.isPending}
+              onClick={() => upsertMapping.mutate({
+                linear_team_id: teamID.trim(),
+                linear_project_id: projectID.trim() || undefined,
+                repository_id: mappingRepoID,
+              })}
+            >
+              Add
+            </Button>
+          </div>
+          {updateSettings.isError || upsertMapping.isError || deleteMapping.isError ? (
+            <p className="text-xs text-destructive">Failed to update Linear agent routing.</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type TokenDialogField = {
   id: string;
   label: string;
@@ -420,6 +593,7 @@ export default function IntegrationsPage() {
         }
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
+        linearExtra={linearIntegration && isAdmin ? <LinearAgentRoutingSettings /> : undefined}
         linearLoading={false}
         linearAuthError={linearAuthError}
         slackConnected={Boolean(slackIntegration)}

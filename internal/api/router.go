@@ -393,7 +393,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Settings:      linearAgentSettingsView,
 		AgentSessions: linearService.AgentSessionStore(),
 		Activities:    linearService.AgentActivityStore(),
-		Orgs:          linearAgentOrgWriterAdapter{orgs: orgStore},
+		Orgs:          linearAgentOrgWriterAdapter{orgs: orgStore, repos: repoStore},
 		Logger:        logger,
 	})
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
@@ -1199,26 +1199,54 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 // here because the org settings JSONB is a low-write-volume blob and
 // any concurrent admin edits would land seconds apart at worst.
 type linearAgentOrgWriterAdapter struct {
-	orgs *db.OrganizationStore
+	orgs  *db.OrganizationStore
+	repos *db.RepositoryStore
 }
 
 func (a linearAgentOrgWriterAdapter) SetLinearAgentEnabled(ctx context.Context, orgID uuid.UUID, enabled bool) error {
-	if a.orgs == nil {
-		return fmt.Errorf("organization store unavailable")
-	}
-	org, err := a.orgs.GetByID(ctx, orgID)
+	settings, err := a.loadLinearAgentSettings(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("load org: %w", err)
+		return err
 	}
-	parsed, err := models.ParseOrgSettings(org.Settings)
-	if err != nil {
-		return fmt.Errorf("parse org settings: %w", err)
-	}
-	parsed.LinearAgent.Enabled = &enabled
+	settings.Enabled = &enabled
 	// Surgical merge of just the linear_agent sub-key so a concurrent
 	// admin edit to a sibling settings key (e.g. agent_config) isn't
 	// clobbered.
-	return a.orgs.MergeLinearAgentSettings(ctx, orgID, parsed.LinearAgent)
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, settings)
+}
+
+func (a linearAgentOrgWriterAdapter) SetLinearAgentSettings(ctx context.Context, orgID uuid.UUID, settings models.LinearAgentSettings) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	if settings.DefaultRepoID != nil {
+		if a.repos == nil {
+			return fmt.Errorf("repository store unavailable")
+		}
+		repo, err := a.repos.GetByID(ctx, orgID, *settings.DefaultRepoID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", handlers.ErrInvalidDefaultRepo, err)
+		}
+		if repo.Status != "active" {
+			return fmt.Errorf("%w: repository is disconnected", handlers.ErrInvalidDefaultRepo)
+		}
+	}
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, settings)
+}
+
+func (a linearAgentOrgWriterAdapter) loadLinearAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+	if a.orgs == nil {
+		return models.LinearAgentSettings{}, fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return models.LinearAgentSettings{}, fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return models.LinearAgentSettings{}, fmt.Errorf("parse org settings: %w", err)
+	}
+	return parsed.LinearAgent, nil
 }
 
 // linearAgentBootstrapAdapter applies the post-OAuth convenience defaults

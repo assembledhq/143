@@ -7,6 +7,10 @@ const {
   repositoriesListMock,
   listGitHubRepositoriesMock,
   claimGitHubRepositoriesMock,
+  linearAgentStatusMock,
+  linearAgentMappingsMock,
+  updateLinearAgentMock,
+  upsertLinearAgentMappingMock,
   githubConnectMock,
   currentUserMock,
   ApiErrorMock,
@@ -23,6 +27,10 @@ const {
     repositoriesListMock: vi.fn(),
     listGitHubRepositoriesMock: vi.fn(),
     claimGitHubRepositoriesMock: vi.fn(),
+    linearAgentStatusMock: vi.fn(),
+    linearAgentMappingsMock: vi.fn(),
+    updateLinearAgentMock: vi.fn(),
+    upsertLinearAgentMappingMock: vi.fn(),
     githubConnectMock: vi.fn(),
     currentUserMock: {
       id: "user-1",
@@ -50,6 +58,10 @@ vi.mock("@/lib/api", () => ({
       disconnect: vi.fn(),
       listGitHubRepositories: listGitHubRepositoriesMock,
       claimGitHubRepositories: claimGitHubRepositoriesMock,
+      getLinearAgentStatus: linearAgentStatusMock,
+      listLinearAgentMappings: linearAgentMappingsMock,
+      updateLinearAgentSettings: updateLinearAgentMock,
+      upsertLinearAgentMapping: upsertLinearAgentMappingMock,
     },
     repositories: {
       list: repositoriesListMock,
@@ -103,6 +115,18 @@ describe("IntegrationsPage", () => {
       ],
       meta: {},
     });
+    linearAgentStatusMock.mockResolvedValue({
+      data: {
+        enabled: true,
+        agent_scopes_granted: true,
+        app_user_name: "143",
+        has_linear_integration: true,
+        default_repo_id: "repo-1",
+      },
+    });
+    linearAgentMappingsMock.mockResolvedValue({ data: [], meta: {} });
+    updateLinearAgentMock.mockResolvedValue(undefined);
+    upsertLinearAgentMappingMock.mockResolvedValue({ data: {}, meta: {} });
     claimGitHubRepositoriesMock.mockRejectedValue(
       new ApiErrorMock("GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories"),
     );
@@ -155,5 +179,83 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByText("acme/web")).not.toBeInTheDocument();
     expect(screen.queryByText("Repository access")).not.toBeInTheDocument();
     expect(screen.queryByText(/Choose which repositories this 143 organization owns/)).not.toBeInTheDocument();
+  });
+
+  it("renders Linear agent routing settings in the Linear integration card", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-linear",
+          org_id: "org-1",
+          provider: "linear",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        { id: "repo-1", org_id: "org-1", full_name: "acme/api", status: "active" },
+        { id: "repo-2", org_id: "org-1", full_name: "acme/web", status: "active" },
+      ],
+      meta: {},
+    });
+    linearAgentMappingsMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "mapping-1",
+          org_id: "org-1",
+          linear_team_id: "team-1",
+          repository_id: "repo-2",
+          priority: 0,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const linearCard = (await screen.findByText("Linear agent routing")).closest("[data-testid='integration-card']");
+    expect(linearCard).not.toBeNull();
+    expect(within(linearCard as HTMLElement).getByText("Linear agent routing")).toBeInTheDocument();
+    expect(await within(linearCard as HTMLElement).findByText("Default repository")).toBeInTheDocument();
+    expect(within(linearCard as HTMLElement).getByText("team-1")).toBeInTheDocument();
+    expect(within(linearCard as HTMLElement).getByText("acme/web")).toBeInTheDocument();
+  });
+
+  it("updates the Linear agent default repository", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-linear",
+          org_id: "org-1",
+          provider: "linear",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        { id: "repo-1", org_id: "org-1", full_name: "acme/api", status: "active" },
+        { id: "repo-2", org_id: "org-1", full_name: "acme/web", status: "active" },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await screen.findByText("Linear agent routing");
+    await user.click(await screen.findByRole("combobox", { name: "Default repository" }));
+    await user.click(await screen.findByRole("option", { name: "acme/web" }));
+
+    await waitFor(() => {
+      expect(updateLinearAgentMock).toHaveBeenCalledWith({ default_repo_id: "repo-2" });
+    });
   });
 });
