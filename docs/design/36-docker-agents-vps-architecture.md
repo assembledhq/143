@@ -1197,9 +1197,11 @@ endpoint. Keep the role-specific auth keys and host selection in
 TS_AUTH_KEY_APP=tskey-auth-...
 TS_AUTH_KEY_DB=tskey-auth-...
 TS_AUTH_KEY_WORKER=tskey-auth-...
+TS_AUTH_KEY_REDIS=tskey-auth-...
 TS_TAG_APP=tag:prod-app
 TS_TAG_DB=tag:prod-db
 TS_TAG_WORKER=tag:prod-worker
+TS_TAG_REDIS=tag:prod-redis
 TS_WORKER_HOSTS=worker-usw-1:<worker-public-management-ip>
 ```
 
@@ -1234,12 +1236,19 @@ overlay is down, those out-of-region workers stop reaching Postgres, but
 same-datacenter nodes keep connecting over the private network because Docker
 and Postgres do not depend on the Tailscale address being present.
 
-For already-provisioned app or db nodes, enroll Tailscale without touching
-containers or volumes:
+Redis is the same pattern as the database node: enroll the Redis node or an
+Ashburn subnet router with `TS_AUTH_KEY_REDIS`; provisioning advertises
+`REDIS_PRIVATE_IP/32` automatically. Approve that route in Tailscale so
+out-of-region workers can keep using `REDIS_PRIVATE_IP` for Redis without
+exposing Redis on a public interface.
+
+For already-provisioned app, db, or Redis nodes, enroll Tailscale without
+touching containers or volumes:
 
 ```bash
 make tailscale-enroll ROLE=app HOST=<app-public-management-ip>
 make tailscale-enroll ROLE=db HOST=<db-public-management-ip>
+make tailscale-enroll ROLE=redis HOST=<redis-public-management-ip>
 ```
 
 **Worker VPS sizing:**
