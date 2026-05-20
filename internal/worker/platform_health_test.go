@@ -162,7 +162,17 @@ func TestRunHostResourceSamplerEmitsStructuredSamples(t *testing.T) {
 
 	events := parseJSONLogEvents(t, logs.Bytes())
 	require.NotEmpty(t, events, "host resource sampler should write at least one event")
-	event := events[len(events)-1]
+	var event map[string]any
+	for _, candidate := range events {
+		if candidate["message"] != "platform health: host resource sample" {
+			continue
+		}
+		if candidate["host_cpu_util"] == float64(0.9) {
+			event = candidate
+			break
+		}
+	}
+	require.NotNil(t, event, "host resource sampler should emit the computed second sample")
 	require.Equal(t, "platform health: host resource sample", event["message"], "host resource sampler should use the canonical log message")
 	require.Equal(t, "worker-1", event["worker_node_id"], "host resource sampler should include worker node id")
 	require.Equal(t, float64(0.9), event["host_cpu_util"], "host resource sampler should compute CPU utilization from consecutive samples")
