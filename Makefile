@@ -465,12 +465,16 @@ repair-worker-host:
 	$(check-ssh-key)
 	ssh -i $(SSH_KEY) -o BatchMode=yes -o StrictHostKeyChecking=accept-new deploy@$(HOST) 'sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox'
 
+TAG ?= latest
+ROLES ?= app,worker
+
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
 #   make deploy-app
 #   make deploy-app    HOST=87.99.150.138
+#   make deploy-app    TAG=<sha>
 
 # Shell snippet to read FLEET_HOSTS from env var or .env.production.enc via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);
@@ -488,7 +492,7 @@ endef
 define resolve-host
 if [ -n "$(HOST)" ]; then \
 	echo "Deploying $(1) → $(HOST)"; \
-	./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY); \
+	./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG); \
 else \
 	$(read-fleet-hosts); \
 	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^$(1):' | cut -d: -f2)"; \
@@ -498,7 +502,7 @@ else \
 	fi; \
 	for h in $$HOSTS; do \
 		echo "Deploying $(1) → $$h"; \
-		./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY); \
+		./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG); \
 	done; \
 fi
 endef
@@ -543,11 +547,15 @@ deploy-redis:
 	$(check-ssh-key)
 	@$(call resolve-host,redis)
 
-# Deploy all nodes in the fleet.
+# Deploy app+worker nodes in the fleet by default.
 # Uses FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
+# For explicit maintenance deploys of every role:
+#   make deploy-fleet ROLES=all
+# For a specific image tag:
+#   make deploy-fleet TAG=<sha> ROLES=app,worker
 deploy-fleet:
 	$(check-ssh-key)
-	./deploy/scripts/deploy-fleet.sh $(SSH_KEY)
+	./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
