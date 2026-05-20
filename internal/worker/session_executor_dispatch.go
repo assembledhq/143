@@ -17,11 +17,8 @@ type sessionExecutorDispatcher interface {
 }
 
 func maybeDispatchSessionExecutor(ctx context.Context, services *Services, jobType string, session models.Session, threadID *uuid.UUID) error {
-	if services == nil || !services.SessionExecutorsEnabled {
+	if services == nil || services.SessionExecutorDispatcher == nil {
 		return nil
-	}
-	if services.SessionExecutorDispatcher == nil {
-		return &FatalError{Err: fmt.Errorf("session executors enabled but dispatcher is not configured")}
 	}
 	executorID, err := services.SessionExecutorDispatcher.Dispatch(ctx, jobType, session, threadID)
 	if err != nil {

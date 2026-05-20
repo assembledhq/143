@@ -473,6 +473,7 @@ func TestWorkerComposeConfiguresSessionExecutorNetwork(t *testing.T) {
 
 	require.Contains(t, composeText, "SESSION_EXECUTOR_DOCKER_NETWORK", "worker compose should configure executor containers onto the worker docker network")
 	require.Contains(t, composeText, "${SESSION_EXECUTOR_DOCKER_NETWORK:-143_default}", "worker compose should default executor containers to the production compose network")
+	require.NotContains(t, composeText, "SESSION_EXECUTORS_ENABLED", "worker compose should launch session executors without a dark-launch boolean")
 }
 
 // Pin the multi-resolver Docker DNS wiring so a future refactor doesn't

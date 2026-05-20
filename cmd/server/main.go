@@ -1313,28 +1313,25 @@ func buildServices(
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
 	}
-	if cfg.SessionExecutorsEnabled {
-		executorImage := cfg.SessionExecutorImage
-		if executorImage == "" {
-			logger.Warn().Msg("SESSION_EXECUTORS_ENABLED is true but SESSION_EXECUTOR_IMAGE is empty; executor dispatch will fail until configured")
-		}
-		svc.SessionExecutorsEnabled = true
-		svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
-			Executors: db.NewSessionExecutorStore(pool),
-			Jobs:      jobStore,
-			Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
-				Image:       executorImage,
-				NetworkMode: cfg.SessionExecutorDockerNetwork,
-				Binds: []string{
-					"/var/run/docker.sock:/var/run/docker.sock",
-					"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
-				},
-				Env: os.Environ(),
-			}),
-			NodeID:   cfg.NodeID,
-			Image:    executorImage,
-			BuildSHA: version.BuildSHA,
-		}
+	executorImage := cfg.SessionExecutorImage
+	if executorImage == "" {
+		logger.Warn().Msg("SESSION_EXECUTOR_IMAGE is empty; run_agent and continue_session executor dispatch will fail until configured")
+	}
+	svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
+		Executors: db.NewSessionExecutorStore(pool),
+		Jobs:      jobStore,
+		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
+			Image:       executorImage,
+			NetworkMode: cfg.SessionExecutorDockerNetwork,
+			Binds: []string{
+				"/var/run/docker.sock:/var/run/docker.sock",
+				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+			},
+			Env: os.Environ(),
+		}),
+		NodeID:   cfg.NodeID,
+		Image:    executorImage,
+		BuildSHA: version.BuildSHA,
 	}
 
 	// Linear inbound-agent worker wiring. The process-wide

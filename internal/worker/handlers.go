@@ -385,9 +385,9 @@ type Services struct {
 	// node has no preview provider.
 	PreviewStarter previewStarter
 
-	// SessionExecutorsEnabled moves run_agent and continue_session ownership
-	// from the worker process to durable per-session executor containers.
-	SessionExecutorsEnabled   bool
+	// SessionExecutorDispatcher moves run_agent and continue_session ownership
+	// from the worker process to durable per-session executor containers when
+	// configured. nil preserves inline execution for local tests/dev wiring.
 	SessionExecutorDispatcher sessionExecutorDispatcher
 }
 

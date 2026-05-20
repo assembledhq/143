@@ -4464,7 +4464,7 @@ func TestRunAgentHandler_PassesPrimaryThreadIDFromPayload(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestRunAgentHandler_DispatchesSessionExecutorWhenEnabled(t *testing.T) {
+func TestRunAgentHandler_DispatchesSessionExecutorWhenDispatcherConfigured(t *testing.T) {
 	t.Parallel()
 
 	stores, mock := newTestStores(t)
@@ -4487,7 +4487,6 @@ func TestRunAgentHandler_DispatchesSessionExecutorWhenEnabled(t *testing.T) {
 	orch := &orchestratorServiceStub{}
 	handler := newRunAgentHandler(stores, &Services{
 		Orchestrator:              orch,
-		SessionExecutorsEnabled:   true,
 		SessionExecutorDispatcher: dispatcher,
 	}, zerolog.Nop())
 	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
@@ -4948,7 +4947,7 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestContinueSessionHandler_DispatchesSessionExecutorWhenEnabled(t *testing.T) {
+func TestContinueSessionHandler_DispatchesSessionExecutorWhenDispatcherConfigured(t *testing.T) {
 	t.Parallel()
 
 	stores, mock := newTestStores(t)
@@ -4970,7 +4969,6 @@ func TestContinueSessionHandler_DispatchesSessionExecutorWhenEnabled(t *testing.
 	orch := &orchestratorServiceStub{}
 	handler := newContinueSessionHandler(stores, &Services{
 		Orchestrator:              orch,
-		SessionExecutorsEnabled:   true,
 		SessionExecutorDispatcher: dispatcher,
 	}, zerolog.Nop())
 	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)

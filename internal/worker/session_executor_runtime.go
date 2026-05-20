@@ -187,7 +187,6 @@ func (r *SessionExecutorRuntime) handlerFor(jobType string) (JobHandler, bool) {
 		return nil, false
 	}
 	services := *r.Services
-	services.SessionExecutorsEnabled = false
 	services.SessionExecutorDispatcher = nil
 	switch jobType {
 	case "run_agent":

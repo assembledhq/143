@@ -1,6 +1,6 @@
 # Durable Session Executors
 
-> **Status:** Dark-launched behind `SESSION_EXECUTORS_ENABLED=false` | **Last reviewed:** 2026-05-19
+> **Status:** Enabled by default for worker-dispatched session turns | **Last reviewed:** 2026-05-20
 
 Long-running `run_agent` and `continue_session` jobs should not be owned by the deployable worker process for the full turn. The durable executor design splits workers into short-lived dispatchers and per-session executor containers that own one active session turn until it completes, checkpoints, drains, or fails.
 
@@ -15,7 +15,7 @@ Long-running `run_agent` and `continue_session` jobs should not be owned by the 
 
 - `session_executors` records executor identity, session/thread/job ownership, host node, status, build/image metadata, heartbeat, lease expiry, and terminal state.
 - `jobs.owner_kind` distinguishes `worker` from `session_executor` ownership. Reclaim/retry/terminal paths reset ownership back to `worker` when a job leaves active executor ownership.
-- Worker handlers have a dark-launched handoff path behind `SESSION_EXECUTORS_ENABLED=false`.
+- Worker handlers hand off `run_agent` and `continue_session` jobs when a durable executor dispatcher is configured.
 - The handoff dispatcher creates an executor row, launches a Docker executor container, transfers the running job to `owner_kind=session_executor`, and preserves the existing `lock_token`. Launch and handoff failures mark the reserved executor failed; a launched container is force-removed if handoff does not land.
 - Worker poll treats `HandoffError` as successful dispatch and skips terminal writes.
 - `session-executor` is a first-class binary entrypoint that reuses the worker orchestrator dependencies without starting the API/router.
@@ -30,7 +30,7 @@ Long-running `run_agent` and `continue_session` jobs should not be owned by the 
 ## Follow-Up Hardening
 
 - Add production dashboards for executor start failures, lease renewal failures, heartbeat gaps, lost executors, and bootstrap checkpoint failures before broad enablement.
-- Keep inline execution as the emergency fallback for one release after executor rollout, then restrict it to local/dev and break-glass use.
+- Keep inline execution available only when no dispatcher is wired, primarily for local/dev tests and break-glass service construction.
 
 ## Failure Model
 
