@@ -318,6 +318,17 @@ func TestSessionExecutorStore_ReclaimLostClearsPreHandoffOrphans(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionExecutorStore_ReclaimLostClearsTerminalJobOrphans(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("session_executor_store.go")
+	require.NoError(t, err, "test should read session executor store source")
+
+	body := string(src)
+	require.Contains(t, body, "j.lock_token IS NULL", "ReclaimLost should consider stale executors whose job lock was already cleared")
+	require.Contains(t, body, "stale.job_status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter')", "ReclaimLost should clear active executor rows for terminal jobs")
+}
+
 func TestJobStore_GetRunningForSessionExecutor(t *testing.T) {
 	t.Parallel()
 

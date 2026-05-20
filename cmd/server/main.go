@@ -980,12 +980,24 @@ func configureSessionExecutorDispatch(
 				"/var/run/docker.sock:/var/run/docker.sock",
 				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 			},
-			Env: os.Environ(),
+			GroupAdd: sessionExecutorGroupAddFromEnv(),
+			Env:      os.Environ(),
 		}),
 		NodeID:   cfg.NodeID,
 		Image:    cfg.SessionExecutorImage,
 		BuildSHA: version.BuildSHA,
 	}
+}
+
+func sessionExecutorGroupAddFromEnv() []string {
+	return sessionExecutorGroupAdd(os.Getenv("DOCKER_GID"))
+}
+
+func sessionExecutorGroupAdd(dockerGID string) []string {
+	if dockerGID == "" {
+		return nil
+	}
+	return []string{dockerGID}
 }
 
 // buildServices constructs the full set of Phase 3+ worker services.
