@@ -127,11 +127,13 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
 	require.Contains(t, string(makefile), "ROLES ?= app,worker", "Makefile should make the default fleet role set visible to operators")
+	require.Contains(t, string(makefile), "force ?=", "Makefile should expose active-session force deploys as a make argument")
 	require.Contains(t, string(makefile), "TAG ?= latest", "Makefile should expose the image tag as the same kind of make argument as roles")
-	require.Contains(t, string(makefile), `./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)`, "single-role deploy targets should honor the same TAG argument as fleet deploys")
-	require.Contains(t, string(makefile), `./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG)`, "multi-host single-role deploy targets should pass TAG through for every host")
+	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)`, "single-role deploy targets should honor the same force argument as fleet deploys")
+	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG)`, "multi-host single-role deploy targets should pass force through for every host")
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
-	require.Contains(t, string(makefile), `./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)`, "Makefile should pass role and tag arguments through to deploy-fleet.sh")
+	require.Contains(t, string(makefile), "make deploy-fleet force=true", "Makefile should document how to override the active-session guardrail with a make argument")
+	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)`, "Makefile should pass role, tag, and force arguments through to deploy-fleet.sh")
 }
 
 // Worker preview routing and sandbox orchestration require per-host values:
