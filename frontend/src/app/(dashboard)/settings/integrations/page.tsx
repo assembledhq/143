@@ -82,6 +82,7 @@ function GitHubRepositoryClaims({
   const actionable = repos.filter((repo) =>
     repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (repo.status === "owned_by_other_org" && repo.can_transfer)
   );
+  const connectedCount = repos.filter((repo) => repo.status === "owned_by_current_org").length;
   const claimError = claimMutation.error;
   const needsGitHubUserAuth = claimError instanceof ApiError && claimError.code === "GITHUB_USER_AUTH_REQUIRED";
 
@@ -98,38 +99,46 @@ function GitHubRepositoryClaims({
           <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
         ) : (
           <div className="space-y-2">
-            {repos.map((repo) => {
-              const transfer = repo.status === "owned_by_other_org";
-              const canClaim = repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (transfer && repo.can_transfer);
-              const pending = claimMutation.isPending && claimMutation.variables?.githubId === repo.github_id;
-              return (
-                <div key={repo.github_id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{repo.full_name}</div>
-                    <div className="mt-1 flex items-center gap-2">
-                      <Badge variant={repo.status === "owned_by_current_org" ? "secondary" : "outline"} className="text-xs">
-                        {claimStatusLabel(repo)}
-                      </Badge>
-                      {repo.private && <span className="text-xs text-muted-foreground">Private</span>}
+            <p className="text-xs text-muted-foreground">
+              {repos.length} repositor{repos.length === 1 ? "y" : "ies"} · {connectedCount} connected · {actionable.length} available
+            </p>
+            <div
+              data-testid="github-repository-grid"
+              className="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-2"
+            >
+              {repos.map((repo) => {
+                const transfer = repo.status === "owned_by_other_org";
+                const canClaim = repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (transfer && repo.can_transfer);
+                const pending = claimMutation.isPending && claimMutation.variables?.githubId === repo.github_id;
+                return (
+                  <div key={repo.github_id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-border px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{repo.full_name}</div>
+                      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                        <Badge variant={repo.status === "owned_by_current_org" ? "secondary" : "outline"} className="text-xs">
+                          {claimStatusLabel(repo)}
+                        </Badge>
+                        {repo.private && <span className="text-xs text-muted-foreground">Private</span>}
+                      </div>
                     </div>
+                    {canClaim ? (
+                      <Button
+                        size="sm"
+                        variant={transfer ? "outline" : "default"}
+                        loading={pending}
+                        disabled={pending}
+                        onClick={() => {
+                          if (transfer) setTransferRepo(repo);
+                          else claimMutation.mutate({ githubId: repo.github_id, allowTransfer: false });
+                        }}
+                      >
+                        {transfer ? "Transfer" : "Claim"}
+                      </Button>
+                    ) : null}
                   </div>
-                  {canClaim ? (
-                    <Button
-                      size="sm"
-                      variant={transfer ? "outline" : "default"}
-                      loading={pending}
-                      disabled={pending}
-                      onClick={() => {
-                        if (transfer) setTransferRepo(repo);
-                        else claimMutation.mutate({ githubId: repo.github_id, allowTransfer: false });
-                      }}
-                    >
-                      {transfer ? "Transfer" : "Claim"}
-                    </Button>
-                  ) : null}
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
             {claimMutation.isError && (
               <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
                 <p className="text-sm text-destructive">
