@@ -230,6 +230,8 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	require.Contains(t, provisionText, "TS_AUTH_KEY_APP", "provisioning should support role-specific app Tailscale auth keys from production secrets")
 	require.Contains(t, provisionText, "TS_AUTH_KEY_DB", "provisioning should support role-specific db Tailscale auth keys from production secrets")
 	require.Contains(t, provisionText, "TS_AUTH_KEY_WORKER", "provisioning should support role-specific worker Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_REDIS", "provisioning should support role-specific redis Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, `TS_ADVERTISE_ROUTES:=${REDIS_PRIVATE_IP}/32`, "redis Tailscale enrollment should advertise the Redis private IP route from REDIS_PRIVATE_IP")
 	require.Contains(t, provisionText, "TS_WORKER_HOSTS", "provisioning should use a host list to choose which workers join Tailscale")
 	require.Contains(t, provisionText, "TS_ACCEPT_ROUTES", "provisioning should pass route acceptance through to Tailscale enrollment")
 	require.NotContains(t, provisionText, "TS_WORKER_ACCEPT_ROUTES", "mapped Tailscale workers should always accept advertised private routes without a separate production knob")
@@ -247,7 +249,8 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
 	makefileText := string(makefile)
-	require.Contains(t, makefileText, "tailscale-enroll:", "Makefile should expose a non-destructive Tailscale enrollment target for existing app/db nodes")
+	require.Contains(t, makefileText, "tailscale-enroll:", "Makefile should expose a non-destructive Tailscale enrollment target for existing app/db/redis nodes")
+	require.Contains(t, makefileText, `ROLE=<app|db|redis>`, "Makefile should allow non-destructive Redis Tailscale enrollment")
 	require.NotContains(t, makefileText, "TS_DB_ADVERTISE_ROUTES", "Makefile should document DB_BIND_IP as the single source for the advertised DB route")
 
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
