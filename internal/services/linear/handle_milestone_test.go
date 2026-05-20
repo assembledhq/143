@@ -1244,6 +1244,20 @@ func TestSessionURL_BuildsAbsoluteFromAppBaseURL(t *testing.T) {
 	}
 }
 
+func TestAgentSessionDebugURL_BuildsAbsoluteFromAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	configured := &Service{appBaseURL: "https://app.test.example/"}
+	if got := configured.AgentSessionDebugURL("as/1"); got != "https://app.test.example/api/v1/integrations/linear/agent/sessions/as%2F1" {
+		t.Errorf("absolute debug URL: got %q", got)
+	}
+
+	bare := &Service{}
+	if got := bare.AgentSessionDebugURL("as_1"); got != "/api/v1/integrations/linear/agent/sessions/as_1" {
+		t.Errorf("relative debug URL fallback: got %q", got)
+	}
+}
+
 // TestMergeLinearProviderState_PointerFlagsRespectNil pins the pointer-
 // typed bool semantics: a partial Merge that doesn't touch
 // CoexistsWithGitHubIntegration must NOT silently flip it back to false.
