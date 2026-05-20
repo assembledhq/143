@@ -1,8 +1,8 @@
 # Design Doc 51: Worker Deploy Safety For Long-Running Sessions
 
-> **Status:** Backlog | **Last reviewed:** 2026-05-06
+> **Status:** Historical design, mostly implemented | **Last reviewed:** 2026-05-20
 >
-> **Implementation notes:** Job leases, fencing tokens, draining workers, and dead-worker recovery are implemented. Durable per-session executors and intra-turn checkpointing remain future work.
+> **Implementation notes:** Job leases, fencing tokens, draining workers, dead-worker recovery, deploy guardrails, bootstrap checkpointing, and durable per-session executors are implemented. Richer intra-turn checkpointing remains future work.
 
 ## Summary
 
@@ -42,8 +42,10 @@ The initial hardening and checkpoint-recovery phases described here are now in p
   (`current_turn`, `snapshot_key`, `agent_session_id`, stored messages/diff);
   blob-only snapshots not referenced by the session row are intentionally ignored
 
-Phase 3 durable per-session executors remain future work. Intra-turn checkpointing
-also remains future work; the current recovery boundary is "last completed turn".
+Phase 3 durable per-session executors are implemented; see
+[82-durable-session-executors.md](../implemented/82-durable-session-executors.md).
+Richer intra-turn checkpointing remains future work; the current recovery boundary
+is bootstrap, graceful stop, or last completed turn.
 
 The system does **not** promise uninterrupted live process continuation across
 worker or host failure.
@@ -294,10 +296,11 @@ is a coordinated worker migration.
 4. Add draining mode and integrate it into worker deploys
 5. Split app deploys from worker deploys operationally
 6. Add checkpoint-aware recovery for `run_agent`
-7. Move `run_agent` to per-session executors
+7. Move `run_agent` and `continue_session` to durable per-session executors
 
-This sequence fixes the production footgun first and postpones the highest
-complexity until the system is stable enough to support it cleanly.
+This rollout sequence has shipped. Remaining hardening belongs in operational
+dashboards/alerts and richer intra-turn checkpoint coverage, not in keeping
+long-running turns inside the deployable worker process.
 
 ## Operational Targets
 
