@@ -312,6 +312,23 @@ resolve_worker_identity() {
   echo "  PREVIEW_INTERNAL_BASE_URL = $PREVIEW_INTERNAL_BASE_URL"
 }
 
+resolve_worker_docker_gid() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
+  if [ -z "${DOCKER_GID:-}" ]; then
+    DOCKER_GID="$(ssh "${SSH_OPTS[@]}" root@"$HOST" "getent group docker | cut -d: -f3")"
+  fi
+  if [[ ! "$DOCKER_GID" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: could not resolve numeric DOCKER_GID for docker.sock access on $HOST." >&2
+    echo "       Expected 'getent group docker | cut -d: -f3' to return a number; got '$DOCKER_GID'." >&2
+    exit 1
+  fi
+
+  echo "  DOCKER_GID                = $DOCKER_GID"
+}
+
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
 if [ -n "$RUNNING" ]; then
@@ -486,6 +503,7 @@ wait_for_docker_daemon
 # publish its 100.64.0.0/10 address as the internal preview endpoint.
 configure_tailscale_if_requested
 resolve_worker_identity
+resolve_worker_docker_gid
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -521,11 +539,12 @@ elif [ "$ROLE" = "worker" ]; then
     "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
-  # Per-host identity (NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL)
-  # lives in .env.local and survives every deploy — the secret refresh in
-  # deploy.sh only rewrites /opt/143/.env, then re-appends .env.local.
-  printf 'NODE_ID=%s\nWORKER_PRIVATE_IP=%s\nPREVIEW_INTERNAL_BASE_URL=%s\n' \
-    "$NODE_ID" "$WORKER_PRIVATE_IP" "$PREVIEW_INTERNAL_BASE_URL" \
+  # Per-host identity/runtime values (NODE_ID, WORKER_PRIVATE_IP,
+  # PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) live in .env.local and survive
+  # every deploy — the secret refresh in deploy.sh only rewrites /opt/143/.env,
+  # then re-appends .env.local.
+  printf 'NODE_ID=%s\nWORKER_PRIVATE_IP=%s\nPREVIEW_INTERNAL_BASE_URL=%s\nDOCKER_GID=%s\n' \
+    "$NODE_ID" "$WORKER_PRIVATE_IP" "$PREVIEW_INTERNAL_BASE_URL" "$DOCKER_GID" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env.local && chown deploy:deploy /opt/143/.env.local && chmod 600 /opt/143/.env.local'
 
   # Concatenate so docker compose can interpolate ${WORKER_PRIVATE_IP} etc.

@@ -21,9 +21,9 @@
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/worker.yml > /tmp/user-data.yml
 #
-# NODE_ID, WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL are *per-host*
-# identity. They are written to /opt/143/.env.local once at bootstrap and
-# preserved across deploys (deploy.sh only rewrites /opt/143/.env, then
+# NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID are
+# *per-host* values. They are written to /opt/143/.env.local once at bootstrap
+# and preserved across deploys (deploy.sh only rewrites /opt/143/.env, then
 # concatenates .env.local back in for docker compose). This split is what
 # lets the same .env.production.enc deploy to every worker in the fleet.
 # Workers must also stage /opt/143/.env.production.enc before the first
@@ -87,6 +87,7 @@ runcmd:
   # compose can interpolate ${NODE_ID}, ${WORKER_PRIVATE_IP}, etc. when it
   # parses docker-compose.worker.yml. Subsequent deploys (deploy.sh) repeat
   # this step so .env.local stays the source of truth for per-host values.
+  - su - deploy -c 'DOCKER_GID="$(getent group docker | cut -d: -f3)" && printf "DOCKER_GID=%s\n" "$DOCKER_GID" >> /opt/143/.env.local'
   - su - deploy -c 'cat /opt/143/.env.local >> /opt/143/.env'
 
   # Start the worker
