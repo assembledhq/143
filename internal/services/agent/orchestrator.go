@@ -4345,7 +4345,7 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 	for entry := range logCh {
 		if tracker != nil {
 			if progressType, strength, toolID, ok := runtimeProgressFromLog(entry); ok {
-				tracker.Record(progressType, strength, entry.Timestamp, toolID)
+				tracker.Record(progressType, strength, entry.Timestamp, toolID, runtimeToolSummaryFromLog(entry))
 			}
 		}
 		effectiveThreadID := threadID
