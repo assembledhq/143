@@ -212,7 +212,7 @@ Add the `vector` service and `vector-buffer` volume to the existing compose file
       - vector-buffer:/var/lib/vector  # persist disk buffer across restarts
     command: ["--config", "/etc/vector/vector.yaml"]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8686/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -245,7 +245,7 @@ services:
       - vector-buffer:/var/lib/vector
     command: ["--config", "/etc/vector/vector.yaml"]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8686/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -259,6 +259,11 @@ services:
 volumes:
   vector-buffer:
 ```
+
+The healthcheck uses `127.0.0.1` instead of `localhost` because the Vector API
+binds to IPv4 `0.0.0.0:8686`; some minimal container environments resolve
+`localhost` to IPv6 first, which can report `connection refused` even though
+Vector is running normally.
 
 Then in each server's compose file:
 
