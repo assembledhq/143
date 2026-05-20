@@ -194,7 +194,7 @@ func TestUpsertLinearIssueForAgentUsesCanonicalFingerprint(t *testing.T) {
 		Title:       "Make a full screen mode for the file diff viewer",
 		Description: "Diff viewer should support full-screen review.",
 	}
-	expectedFingerprint := "2072004d71b40dd3c2eac1cdfa1c7290"
+	expectedFingerprint := "linear:2072004d71b40dd3c2eac1cdfa1c7290"
 
 	mock.ExpectQuery("INSERT INTO issues").
 		WithArgs(

@@ -227,6 +227,9 @@ func registerLinearAgentCreatedDeadLetter(
 		if row.State.IsTerminal() {
 			return
 		}
+		if row.SessionID != nil {
+			return
+		}
 		client, err := deps.ClientForOrg(hookCtx, orgID)
 		if err != nil {
 			logger.Warn().Err(err).

@@ -16,16 +16,16 @@ func TestIssueFingerprint(t *testing.T) {
 		expected   string
 	}{
 		{
-			name:       "linear issue id uses ingestion-compatible hash",
+			name:       "linear issue id uses source-prefixed hash",
 			source:     IssueSourceLinear,
 			externalID: "2563b72a-e241-44db-85a3-4267084bb274",
-			expected:   "2072004d71b40dd3c2eac1cdfa1c7290",
+			expected:   "linear:2072004d71b40dd3c2eac1cdfa1c7290",
 		},
 		{
 			name:       "sentry issue id remains source scoped",
 			source:     IssueSourceSentry,
 			externalID: "12345",
-			expected:   "97d01c7db052953ab2eed34a407e8545",
+			expected:   "sentry:97d01c7db052953ab2eed34a407e8545",
 		},
 	}
 

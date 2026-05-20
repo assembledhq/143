@@ -11,5 +11,5 @@ import (
 func IssueFingerprint(source IssueSource, externalID string) string {
 	h := sha256.New()
 	h.Write([]byte(fmt.Sprintf("%s:%s", source, externalID)))
-	return fmt.Sprintf("%x", h.Sum(nil))[:32]
+	return fmt.Sprintf("%s:%s", source, fmt.Sprintf("%x", h.Sum(nil))[:32])
 }

@@ -278,7 +278,7 @@ func TestIssueStore_Upsert(t *testing.T) {
 		Fingerprint:           "fp-upsert",
 	}
 
-	mock.ExpectQuery("INSERT INTO issues").
+	mock.ExpectQuery("ON CONFLICT \\(org_id, source, external_id\\) DO UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -293,6 +293,49 @@ func TestIssueStore_Upsert(t *testing.T) {
 	require.Equal(t, generatedID, issue.ID, "should set the generated ID on the issue")
 	require.Equal(t, now, issue.CreatedAt, "should set the created_at timestamp on the issue")
 	require.Equal(t, now, issue.UpdatedAt, "should set the updated_at timestamp on the issue")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIssueStore_UpsertPMAgentUsesFingerprintConflictTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewIssueStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+
+	issue := &models.Issue{
+		OrgID:                 uuid.New(),
+		ExternalID:            "pm-agent-generated-id",
+		Source:                models.IssueSourcePMAgent,
+		Title:                 "PM Agent Issue",
+		Status:                "open",
+		RawData:               json.RawMessage(`{"key":"value"}`),
+		FirstSeenAt:           now,
+		LastSeenAt:            now,
+		OccurrenceCount:       1,
+		AffectedCustomerCount: 1,
+		Severity:              "medium",
+		Tags:                  []string{"pm"},
+		Fingerprint:           "content-derived-fingerprint",
+	}
+
+	mock.ExpectQuery("ON CONFLICT \\(org_id, fingerprint\\) DO UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+				AddRow(generatedID, now, now),
+		)
+
+	err = store.Upsert(context.Background(), issue)
+	require.NoError(t, err, "Upsert should not return an error for PM agent issues")
+	require.Equal(t, generatedID, issue.ID, "should set the generated ID on the PM agent issue")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

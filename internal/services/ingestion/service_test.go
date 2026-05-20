@@ -23,7 +23,7 @@ func TestComputeFingerprint(t *testing.T) {
 				t.Helper()
 				fp2 := computeFingerprint("sentry", "12345")
 				require.Equal(t, fp, fp2, "same inputs should produce identical fingerprints")
-				require.Len(t, fp, 32, "fingerprint should be 32 characters (hex-encoded MD5)")
+				require.Equal(t, "sentry:97d01c7db052953ab2eed34a407e8545", fp, "fingerprint should include a readable source prefix and bounded hash")
 			},
 		},
 		{

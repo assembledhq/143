@@ -173,25 +173,32 @@ func (s *IssueStore) UpdateRepositoryID(ctx context.Context, orgID, issueID uuid
 }
 
 func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
-	query := `
+	conflictTarget := "(org_id, source, external_id)"
+	if issue.Source == models.IssueSourcePMAgent {
+		conflictTarget = "(org_id, fingerprint)"
+	}
+	query := fmt.Sprintf(`
 		INSERT INTO issues (org_id, external_id, source, source_integration_id, repository_id,
 		                    title, description, raw_data, status, first_seen_at, last_seen_at,
 		                    occurrence_count, affected_customer_count, severity, tags, fingerprint)
 		VALUES (@org_id, @external_id, @source, @source_integration_id, @repository_id,
 		        @title, @description, @raw_data, @status, @first_seen_at, @last_seen_at,
 		        @occurrence_count, @affected_customer_count, @severity, @tags, @fingerprint)
-		ON CONFLICT (org_id, fingerprint) DO UPDATE
+		ON CONFLICT %s DO UPDATE
 		SET title = EXCLUDED.title,
 		    description = EXCLUDED.description,
 		    raw_data = EXCLUDED.raw_data,
+		    source_integration_id = COALESCE(EXCLUDED.source_integration_id, issues.source_integration_id),
+		    repository_id = COALESCE(EXCLUDED.repository_id, issues.repository_id),
 		    last_seen_at = GREATEST(issues.last_seen_at, EXCLUDED.last_seen_at),
 		    occurrence_count = issues.occurrence_count + EXCLUDED.occurrence_count,
 		    affected_customer_count = GREATEST(issues.affected_customer_count, EXCLUDED.affected_customer_count),
 		    severity = EXCLUDED.severity,
 		    tags = EXCLUDED.tags,
+		    fingerprint = EXCLUDED.fingerprint,
 		    updated_at = now()
 		WHERE issues.deleted_at IS NULL
-		RETURNING id, created_at, updated_at`
+		RETURNING id, created_at, updated_at`, conflictTarget)
 
 	args := pgx.NamedArgs{
 		"org_id":                  issue.OrgID,

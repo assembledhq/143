@@ -270,6 +270,48 @@ func TestLinearAgentCreatedDeadLetterHookEmitsErrorAndMarksBridge(t *testing.T) 
 	require.Equal(t, "error", client.lastUpdate.State, "Linear AgentSession should be explicitly pinned to error")
 }
 
+func TestLinearAgentCreatedDeadLetterHookSkipsAttachedSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	clientCalls := 0
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, linear_agent_session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, uuid.New(), "as_1",
+			"iss_1", "VIR-102",
+			"", "",
+			&sessionID, "in_progress", &now,
+			now, now,
+		))
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	registerLinearAgentCreatedDeadLetter(ctx, LinearAgentEventHandlerDeps{
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			clientCalls++
+			return &linearAgentCreatedDeadLetterClient{}, nil
+		},
+	}, db.NewLinearAgentSessionStore(mock), db.NewLinearAgentActivityLogStore(mock), orgID, rowID, "as_1", zerolog.Nop())
+
+	jobctx.RunDeadLetterHooks(ctx, errors.New("reconcile failed"))
+	require.Zero(t, clientCalls, "dead-letter hook should not close Linear when a 143 session is already attached")
+	require.NoError(t, mock.ExpectationsWereMet(), "attached bridge rows should only be inspected, not mutated")
+}
+
 // TestReconcileLinearAgentCreatedRejectsZeroValueSession pins the guardrail
 // that protects against a future SessionStore schema change silently
 // returning a zero-value row. The session_id is the worker's only handle
