@@ -20,7 +20,7 @@ const (
 	prHealthSnapshotSelectColumns = `pull_request_id, org_id, version, head_sha, base_sha, summary_json,
 		conflict_payload, failing_tests_payload, payload_size_bytes, enrichment_status, enriched_at, created_at`
 	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, action_type, health_version,
-		active, obsoleted_by_version, created_at, updated_at`
+		workspace_mode, active, obsoleted_by_version, created_at, updated_at`
 )
 
 func (s *PullRequestStore) beginTx(ctx context.Context) (pgx.Tx, error) {
@@ -346,11 +346,14 @@ func (s *PullRequestStore) ListActiveRepairRuns(ctx context.Context, orgID, pull
 }
 
 func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.PullRequestRepairRun) error {
+	if run.WorkspaceMode == "" {
+		run.WorkspaceMode = models.PullRequestRepairWorkspaceModeSnapshotContinuation
+	}
 	query := `
 		INSERT INTO pull_request_repair_runs (
-			org_id, pull_request_id, session_id, action_type, health_version, active, obsoleted_by_version
+			org_id, pull_request_id, session_id, action_type, health_version, workspace_mode, active, obsoleted_by_version
 		) VALUES (
-			@org_id, @pull_request_id, @session_id, @action_type, @health_version, @active, @obsoleted_by_version
+			@org_id, @pull_request_id, @session_id, @action_type, @health_version, @workspace_mode, @active, @obsoleted_by_version
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -360,6 +363,7 @@ func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.Pull
 		"session_id":           run.SessionID,
 		"action_type":          run.ActionType,
 		"health_version":       run.HealthVersion,
+		"workspace_mode":       run.WorkspaceMode,
 		"active":               run.Active,
 		"obsoleted_by_version": run.ObsoletedByVersion,
 	}).Scan(&run.ID, &run.CreatedAt, &run.UpdatedAt)
