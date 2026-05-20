@@ -52,6 +52,12 @@ type failureUpdate struct {
 	nextSteps   []string
 }
 
+type terminalizeUpdate struct {
+	orgID     uuid.UUID
+	sessionID uuid.UUID
+	reason    string
+}
+
 type sandboxUpdate struct {
 	orgID     uuid.UUID
 	sessionID uuid.UUID
@@ -93,6 +99,16 @@ func (m *reaperMockSessionLister) UpdateFailure(_ context.Context, orgID, sessio
 func (m *reaperMockSessionLister) UpdateSandboxState(_ context.Context, orgID, sessionID uuid.UUID, state string) error {
 	m.updatedSandboxes = append(m.updatedSandboxes, sandboxUpdate{orgID: orgID, sessionID: sessionID, state: state})
 	return m.updateSandboxErr
+}
+
+type reaperMockRuntimeJobTerminalizer struct {
+	calls []terminalizeUpdate
+	err   error
+}
+
+func (m *reaperMockRuntimeJobTerminalizer) TerminalizeRunningSessionJobs(_ context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error) {
+	m.calls = append(m.calls, terminalizeUpdate{orgID: orgID, sessionID: sessionID, reason: reason})
+	return 1, m.err
 }
 
 // reaperMockThreadLister implements StuckThreadLister for testing.
@@ -208,8 +224,11 @@ func TestReapPhase0_4_FailsRuntimeControlStalledSessions(t *testing.T) {
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
+	terminalizer := &reaperMockRuntimeJobTerminalizer{}
 
-	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithRuntimeJobTerminalizer(terminalizer),
+	)
 	before := time.Now()
 	reaper.reap(context.Background())
 	after := time.Now()
@@ -219,6 +238,10 @@ func TestReapPhase0_4_FailsRuntimeControlStalledSessions(t *testing.T) {
 	require.Equal(t, sessionID, mock.updatedStatuses[0].sessionID, "runtime-control stalled session should be updated")
 	require.Len(t, mock.updatedFailures, 1, "runtime-control stalled session should get failure details")
 	require.Equal(t, FailureCategoryRuntimeControlStalled, mock.updatedFailures[0].category, "failure should be attributable to runtime control")
+	require.Len(t, terminalizer.calls, 1, "runtime-control reaping should terminalize the session runner job")
+	require.Equal(t, orgID, terminalizer.calls[0].orgID, "terminalize call should be scoped to the stalled session org")
+	require.Equal(t, sessionID, terminalizer.calls[0].sessionID, "terminalize call should target the stalled session")
+	require.Contains(t, terminalizer.calls[0].reason, FailureCategoryRuntimeControlStalled, "terminalize reason should preserve watchdog attribution")
 	require.True(t, !mock.stopAfterBefore.Before(before) && !mock.stopAfterBefore.After(after), "stop-after cutoff should use now so per-run persisted grace deadlines are honored")
 	require.True(t, mock.deadlineBefore.Before(mock.stopAfterBefore), "soft-deadline cutoff should retain watchdog slack for sessions with no persisted stop request")
 }
