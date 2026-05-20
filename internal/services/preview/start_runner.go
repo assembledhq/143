@@ -26,9 +26,11 @@ type StartRunner struct {
 	previews        *db.PreviewStore
 	sessions        *db.SessionStore
 	repositories    *db.RepositoryStore
+	orgs            agent.OrgSettingsReader
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
 	sandboxCapacity *agent.SandboxCapacityGate
+	staticEgress    agent.StaticEgressRuntimeConfig
 	snapshots       storage.SnapshotStore
 	nodeID          string
 	logger          zerolog.Logger
@@ -39,9 +41,11 @@ type StartRunnerConfig struct {
 	Previews        *db.PreviewStore
 	Sessions        *db.SessionStore
 	Repositories    *db.RepositoryStore
+	Orgs            agent.OrgSettingsReader
 	FileReader      sandbox.FileReader
 	SandboxProvider agent.SandboxProvider
 	SandboxCapacity *agent.SandboxCapacityGate
+	StaticEgress    agent.StaticEgressRuntimeConfig
 	Snapshots       storage.SnapshotStore
 	NodeID          string
 	Logger          zerolog.Logger
@@ -53,9 +57,11 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 		previews:        cfg.Previews,
 		sessions:        cfg.Sessions,
 		repositories:    cfg.Repositories,
+		orgs:            cfg.Orgs,
 		fileReader:      cfg.FileReader,
 		sandboxProvider: cfg.SandboxProvider,
 		sandboxCapacity: cfg.SandboxCapacity,
+		staticEgress:    cfg.StaticEgress,
 		snapshots:       cfg.Snapshots,
 		nodeID:          cfg.NodeID,
 		logger:          cfg.Logger,
@@ -239,6 +245,10 @@ func (r *StartRunner) resolveSandboxWorkDir(ctx context.Context, session *models
 
 func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := r.resolveSandboxWorkDir(ctx, session)
+	expectedNetwork, expectedErr := r.expectedSandboxNetwork(ctx, orgID)
+	if expectedErr != nil {
+		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
+	}
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
 		candidate := &agent.Sandbox{
@@ -254,7 +264,13 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 			if inspectErr != nil {
 				r.logger.Warn().Err(inspectErr).Str("session_id", session.ID.String()).Str("container_id", candidate.ID).Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				return acquireSandboxResult{Sandbox: candidate}
+				if match, mismatchErr := SandboxNetworkMatches(ctx, r.sandboxProvider, candidate, expectedNetwork, r.staticEgress.NetworkName); mismatchErr != nil {
+					r.logger.Warn().Err(mismatchErr).Str("session_id", session.ID.String()).Str("container_id", candidate.ID).Msg("preview reuse: network check failed; falling through to hydrate")
+				} else if !match {
+					return acquireSandboxResult{ErrCode: "NETWORK_SETTING_RESTART_REQUIRED", Err: fmt.Errorf("restart environment to apply network setting")}
+				} else {
+					return acquireSandboxResult{Sandbox: candidate}
+				}
 			}
 		} else {
 			return acquireSandboxResult{Sandbox: candidate}
@@ -277,6 +293,9 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, &sandboxCfg); err != nil {
+		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: err}
+	}
 
 	winningID, freshErr := r.sessions.PeekContainerID(ctx, orgID, session.ID)
 	switch {
@@ -317,6 +336,35 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
+}
+
+func (r *StartRunner) expectedSandboxNetwork(ctx context.Context, orgID uuid.UUID) (string, error) {
+	cfg := agent.DefaultSandboxConfig()
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, &cfg); err != nil {
+		return "", err
+	}
+	return cfg.NetworkName, nil
+}
+
+func SandboxNetworkMatches(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, expectedNetwork, staticNetwork string) (bool, error) {
+	if provider == nil || expectedNetwork == "" && staticNetwork == "" {
+		return true, nil
+	}
+	info, err := provider.ConnectionInfo(ctx, sb)
+	if err != nil {
+		return false, err
+	}
+	current := ""
+	if info != nil && info.Environment != nil {
+		current = info.Environment["DOCKER_HOST"]
+	}
+	if expectedNetwork != "" {
+		return current == expectedNetwork, nil
+	}
+	if staticNetwork != "" && current == staticNetwork {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, error) {

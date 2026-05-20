@@ -29,16 +29,25 @@ type PreviewHandler struct {
 	store           *db.PreviewStore
 	jobStore        *db.JobStore
 	sessionStore    *db.SessionStore
+	orgStore        agent.OrgSettingsReader
 	repoStore       *db.RepositoryStore
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
 	sandboxCapacity *agent.SandboxCapacityGate
+	staticEgress    agent.StaticEgressRuntimeConfig
 	snapshots       storage.SnapshotStore
 	workerSelector  *preview.WorkerSelector
 	workerClient    *preview.WorkerPreviewClient
 	localNodeID     string
 	logger          zerolog.Logger
 	audit           *db.AuditEmitter
+}
+
+// SetStaticEgressRuntime injects the worker-local static egress runtime for
+// local preview hydration.
+func (h *PreviewHandler) SetStaticEgressRuntime(orgs agent.OrgSettingsReader, runtime agent.StaticEgressRuntimeConfig) {
+	h.orgStore = orgs
+	h.staticEgress = runtime
 }
 
 // NewPreviewHandler creates a new PreviewHandler. fileReader is used to
@@ -288,6 +297,10 @@ func (h *PreviewHandler) resolveSandboxWorkDir(ctx context.Context, session *mod
 //     return 410 only when the reaper explicitly expired the snapshot.
 func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := h.resolveSandboxWorkDir(ctx, session)
+	expectedNetwork, expectedErr := h.expectedSandboxNetwork(ctx, orgID)
+	if expectedErr != nil {
+		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
+	}
 
 	// Reuse is only safe when the row believes the container is actually
 	// running. A lingering container_id from a crashed worker or a session
@@ -318,7 +331,16 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 					Str("container_id", candidate.ID).
 					Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				return acquireSandboxResult{Sandbox: candidate}
+				if match, mismatchErr := preview.SandboxNetworkMatches(ctx, h.sandboxProvider, candidate, expectedNetwork, h.staticEgress.NetworkName); mismatchErr != nil {
+					h.logger.Warn().Err(mismatchErr).
+						Str("session_id", session.ID.String()).
+						Str("container_id", candidate.ID).
+						Msg("preview reuse: network check failed; falling through to hydrate")
+				} else if !match {
+					return acquireSandboxResult{ErrCode: "NETWORK_SETTING_RESTART_REQUIRED", Err: fmt.Errorf("restart environment to apply network setting")}
+				} else {
+					return acquireSandboxResult{Sandbox: candidate}
+				}
 			} else {
 				h.logger.Info().
 					Str("session_id", session.ID.String()).
@@ -361,6 +383,12 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
 	preview.ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, h.orgStore, orgID, h.staticEgress, &sandboxCfg); err != nil {
+		return acquireSandboxResult{
+			ErrCode: "STATIC_EGRESS_UNAVAILABLE",
+			Err:     err,
+		}
+	}
 
 	// Pre-hydrate race check: re-read just container_id and bail early if a
 	// peer (typically a continue_session turn) has published one since we
@@ -467,6 +495,14 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		Msg("preview hydrate: new sandbox container created from snapshot")
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
+}
+
+func (h *PreviewHandler) expectedSandboxNetwork(ctx context.Context, orgID uuid.UUID) (string, error) {
+	cfg := agent.DefaultSandboxConfig()
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, h.orgStore, orgID, h.staticEgress, &cfg); err != nil {
+		return "", err
+	}
+	return cfg.NetworkName, nil
 }
 
 // requireInspector returns the PreviewInspector or writes a 501 error response.
@@ -774,7 +810,12 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
 		return
 	}
-	worker, err := h.workerSelector.SelectStartNode(r.Context(), orgID, &session)
+	reqs, err := h.workerSelectionRequirements(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to read network settings", err)
+		return
+	}
+	worker, err := h.workerSelector.SelectStartNodeWithRequirements(r.Context(), orgID, &session, reqs)
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):
@@ -792,6 +833,21 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+}
+
+func (h *PreviewHandler) workerSelectionRequirements(ctx context.Context, orgID uuid.UUID) (preview.WorkerSelectionRequirements, error) {
+	if h == nil || h.orgStore == nil {
+		return preview.WorkerSelectionRequirements{}, nil
+	}
+	org, err := h.orgStore.GetByID(ctx, orgID)
+	if err != nil {
+		return preview.WorkerSelectionRequirements{}, err
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return preview.WorkerSelectionRequirements{}, err
+	}
+	return preview.WorkerSelectionRequirements{StaticEgressRequired: settings.SandboxNetwork.StaticEgressEnabled}, nil
 }
 
 // =============================================================================

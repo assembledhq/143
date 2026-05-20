@@ -502,6 +502,7 @@ type Orchestrator struct {
 	mentionIndexes     *workspace.MentionIndexCache
 	usageTracker       UsageRecorder        // can be nil — billing tracking disabled if nil
 	sandboxCapacity    *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	staticEgress       StaticEgressRuntimeConfig
 	env                *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
 	identityResolver   *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth        SandboxAuthServer    // can be nil — paired with identityResolver
@@ -588,6 +589,9 @@ func (o *Orchestrator) RevertThread(ctx context.Context, session *models.Session
 		return fmt.Errorf("revert thread: resolve workdir: %w", err)
 	} else if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
+	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
+		return fmt.Errorf("revert thread: resolve sandbox network: %w", err)
 	}
 
 	sandbox, err := HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
@@ -724,6 +728,7 @@ type OrchestratorConfig struct {
 	MentionIndexes     *workspace.MentionIndexCache
 	UsageTracker       UsageRecorder         // optional — enables billing observability
 	SandboxCapacity    *SandboxCapacityGate  // optional — gates new local sandbox creation
+	StaticEgress       StaticEgressRuntimeConfig
 	Cancels            *CancelRegistry       // optional — enables session cancellation from API
 	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
 	OrgSettingsCache   *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
@@ -809,6 +814,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		mentionIndexes:     cfg.MentionIndexes,
 		usageTracker:       cfg.UsageTracker,
 		sandboxCapacity:    cfg.SandboxCapacity,
+		staticEgress:       cfg.StaticEgress,
 		env:                env,
 		identityResolver:   cfg.IdentityResolver,
 		sandboxAuth:        cfg.SandboxAuth,
@@ -2130,6 +2136,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
+	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, run.OrgID, o.staticEgress, &sandboxCfg); err != nil {
+		o.failRun(ctx, run, err.Error())
+		return err
+	}
 	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, token, &sandboxCfg, log)
 	if authErr != nil {
 		o.failRun(ctx, run, authErr.Error())
@@ -2907,6 +2917,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
+	}
+	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network failure")
+		}
+		return err
 	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		authLog := log.Error().Err(authErr).

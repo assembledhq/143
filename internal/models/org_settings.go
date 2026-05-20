@@ -229,29 +229,30 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	AutonomyLevel              AutonomyLevel        `json:"autonomy_level"`
-	Aggressiveness             int                  `json:"execution_aggressiveness"`
-	MaxConcurrentRuns          int                  `json:"max_concurrent_runs"`
-	AgentAutonomy              string               `json:"agent_autonomy"`
-	ConfidenceThresholds       ConfidenceThresholds `json:"confidence_thresholds"`
-	PriorityWeights            PriorityWeights      `json:"priority_weights"`
-	MinPriorityThreshold       float64              `json:"min_priority_threshold"`
-	ProductDirection           string               `json:"product_direction"`
-	ProductContext             *ProductContext      `json:"product_context,omitempty"`
-	PMScheduleHours            int                  `json:"pm_schedule_hours"`
-	PMModel                    string               `json:"pm_model"`
-	LLMModel                   string               `json:"llm_model"`
-	LLMReasoningEffort         ReasoningEffort      `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig                AgentEnvConfig       `json:"agent_config,omitempty"`
-	DefaultAgentType           AgentType            `json:"default_agent_type,omitempty"`
-	AuditRetentionDays         int                  `json:"audit_retention_days,omitempty"`
-	ContextRefreshIntervalDays int                  `json:"context_refresh_interval_days,omitempty"`
-	OrgSize                    OrgSize              `json:"org_size,omitempty"`
-	ContextLimits              ContextLimits        `json:"context_limits,omitempty"`
-	PRAuthorship               PRAuthorship         `json:"pr_authorship,omitempty"`
-	PRDraftDefault             bool                 `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose       bool                 `json:"auto_archive_on_pr_close,omitempty"`
-	BuilderPermissions         BuilderPermissions   `json:"builder_permissions,omitempty"`
+	AutonomyLevel              AutonomyLevel          `json:"autonomy_level"`
+	Aggressiveness             int                    `json:"execution_aggressiveness"`
+	MaxConcurrentRuns          int                    `json:"max_concurrent_runs"`
+	AgentAutonomy              string                 `json:"agent_autonomy"`
+	ConfidenceThresholds       ConfidenceThresholds   `json:"confidence_thresholds"`
+	PriorityWeights            PriorityWeights        `json:"priority_weights"`
+	MinPriorityThreshold       float64                `json:"min_priority_threshold"`
+	ProductDirection           string                 `json:"product_direction"`
+	ProductContext             *ProductContext        `json:"product_context,omitempty"`
+	PMScheduleHours            int                    `json:"pm_schedule_hours"`
+	PMModel                    string                 `json:"pm_model"`
+	LLMModel                   string                 `json:"llm_model"`
+	LLMReasoningEffort         ReasoningEffort        `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig                AgentEnvConfig         `json:"agent_config,omitempty"`
+	DefaultAgentType           AgentType              `json:"default_agent_type,omitempty"`
+	AuditRetentionDays         int                    `json:"audit_retention_days,omitempty"`
+	ContextRefreshIntervalDays int                    `json:"context_refresh_interval_days,omitempty"`
+	OrgSize                    OrgSize                `json:"org_size,omitempty"`
+	ContextLimits              ContextLimits          `json:"context_limits,omitempty"`
+	PRAuthorship               PRAuthorship           `json:"pr_authorship,omitempty"`
+	PRDraftDefault             bool                   `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose       bool                   `json:"auto_archive_on_pr_close,omitempty"`
+	BuilderPermissions         BuilderPermissions     `json:"builder_permissions,omitempty"`
+	SandboxNetwork             SandboxNetworkSettings `json:"sandbox_network,omitempty"`
 
 	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
 	// as the soft runtime budget for run_agent and continue_session jobs.
@@ -271,6 +272,11 @@ type OrgSettings struct {
 	// LinearAutomation, which is purely outbound. The feature is opt-in;
 	// nothing happens to a Linear-connected org until an admin enables it.
 	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
+}
+
+// SandboxNetworkSettings controls per-org sandbox egress behavior.
+type SandboxNetworkSettings struct {
+	StaticEgressEnabled bool `json:"static_egress_enabled,omitempty"`
 }
 
 // BuilderPermissions controls the narrower builder role's access to

@@ -145,6 +145,47 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	require.Equal(t, true, metadata["preview_capable"], "preview_capable should be advertised once routing is ready")
 }
 
+func TestBuildStaticEgressMetadataRequiresVerifiedCapability(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		runtime agent.StaticEgressRuntimeConfig
+		want    map[string]any
+	}{
+		{
+			name: "configured but not verified",
+			runtime: agent.StaticEgressRuntimeConfig{
+				Enabled:  true,
+				Capable:  false,
+				PublicIP: "203.0.113.10",
+			},
+			want: map[string]any{},
+		},
+		{
+			name: "verified static egress",
+			runtime: agent.StaticEgressRuntimeConfig{
+				Enabled:  true,
+				Capable:  true,
+				PublicIP: "203.0.113.10",
+			},
+			want: map[string]any{
+				"static_egress_capable":   true,
+				"static_egress_public_ip": "203.0.113.10",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := buildStaticEgressMetadata(tt.runtime)
+			require.Equal(t, tt.want, got, "worker metadata should only advertise verified static egress capability")
+		})
+	}
+}
+
 func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
 	t.Parallel()
 

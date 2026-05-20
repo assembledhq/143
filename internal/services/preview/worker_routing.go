@@ -27,6 +27,7 @@ type WorkerNodeMetadata struct {
 	BuildSHA               string `json:"build_sha,omitempty"`
 	PreviewCapable         bool   `json:"preview_capable,omitempty"`
 	PreviewInternalBaseURL string `json:"preview_internal_base_url,omitempty"`
+	StaticEgressCapable    bool   `json:"static_egress_capable,omitempty"`
 }
 
 // WorkerNode is a preview-routable worker node.
@@ -34,6 +35,11 @@ type WorkerNode struct {
 	ID      string
 	Mode    string
 	BaseURL string
+}
+
+// WorkerSelectionRequirements constrains cold-start worker selection.
+type WorkerSelectionRequirements struct {
+	StaticEgressRequired bool
 }
 
 // WorkerSelector resolves preview-owning workers and selects workers for cold starts.
@@ -66,6 +72,19 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 		Mode:    string(node.Mode),
 		BaseURL: baseURL,
 	}, nil
+}
+
+func parseWorkerNodeWithRequirements(node models.Node, req WorkerSelectionRequirements) (WorkerNode, error) {
+	var metadata WorkerNodeMetadata
+	if len(node.Metadata) > 0 {
+		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
+			return WorkerNode{}, fmt.Errorf("parse node metadata: %w", err)
+		}
+	}
+	if req.StaticEgressRequired && !metadata.StaticEgressCapable {
+		return WorkerNode{}, fmt.Errorf("node %s is not static-egress capable", node.ID)
+	}
+	return parseWorkerNode(node)
 }
 
 func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
@@ -106,6 +125,12 @@ func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (Worker
 
 // SelectStartNode picks the worker that should handle Start Preview for the session.
 func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, session *models.Session) (WorkerNode, error) {
+	return s.SelectStartNodeWithRequirements(ctx, orgID, session, WorkerSelectionRequirements{})
+}
+
+// SelectStartNodeWithRequirements picks the worker that should handle Start
+// Preview for the session while honoring optional runtime capabilities.
+func (s *WorkerSelector) SelectStartNodeWithRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, req WorkerSelectionRequirements) (WorkerNode, error) {
 	if session == nil {
 		return WorkerNode{}, fmt.Errorf("session is required")
 	}
@@ -126,7 +151,7 @@ func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, s
 		return s.ResolveNode(ctx, *session.WorkerNodeID)
 	}
 
-	return s.SelectLeastLoadedNode(ctx)
+	return s.SelectLeastLoadedNodeWithRequirements(ctx, req)
 }
 
 // SelectLeastLoadedNode picks the preview-capable active worker with the fewest active previews.
@@ -137,6 +162,16 @@ func (s *WorkerSelector) SelectLeastLoadedNode(ctx context.Context) (WorkerNode,
 // SelectLeastLoadedNodeExcept picks the least-loaded preview-capable active
 // worker while skipping any excluded worker IDs.
 func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, excluded map[string]struct{}) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, excluded, WorkerSelectionRequirements{})
+}
+
+// SelectLeastLoadedNodeWithRequirements picks the least-loaded worker that
+// satisfies the requested runtime capabilities.
+func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Context, req WorkerSelectionRequirements) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, nil, req)
+}
+
+func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, req WorkerSelectionRequirements) (WorkerNode, error) {
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {
 		return WorkerNode{}, err
@@ -149,7 +184,7 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, exclud
 		if _, skip := excluded[node.ID]; skip {
 			continue
 		}
-		worker, err := parseWorkerNode(node)
+		worker, err := parseWorkerNodeWithRequirements(node, req)
 		if err != nil {
 			continue
 		}

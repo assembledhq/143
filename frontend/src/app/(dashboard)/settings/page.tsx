@@ -1,8 +1,10 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Clipboard } from "lucide-react";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -178,6 +180,85 @@ function PRAuthorshipSettings() {
   );
 }
 
+function NetworkAccessSettings() {
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+  const { data: networkStatusResponse } = useQuery({
+    queryKey: queryKeys.settings.network,
+    queryFn: () => api.settings.getNetworkStatus(),
+  });
+  const { save, status } = useOrgSettingsAutosave();
+
+  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const sandboxNetwork = settings.sandbox_network ?? {};
+  const enabled = sandboxNetwork.static_egress_enabled ?? false;
+  const networkStatus = networkStatusResponse?.data;
+  const available = networkStatus?.static_egress_available ?? false;
+  const publicIP = networkStatus?.static_egress_public_ip;
+  const unavailableReason = networkStatus?.static_egress_unavailable_reason;
+
+  const saveStaticEgress = (checked: boolean) => {
+    save({
+      settings: {
+        sandbox_network: {
+          ...sandboxNetwork,
+          static_egress_enabled: checked,
+        },
+      },
+    });
+  };
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-medium text-foreground">Network access</h2>
+        <AutosaveIndicator status={status} />
+      </div>
+      <Card>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
+              <Label htmlFor="static-egress-enabled">Use static egress IP for sessions and previews</Label>
+              <p className="text-xs text-muted-foreground">
+                New and hydrated sandboxes use the allowlistable public IP when enabled.
+              </p>
+              {!available && unavailableReason && (
+                <p className="text-xs text-muted-foreground">{unavailableReason}</p>
+              )}
+            </div>
+            <Switch
+              id="static-egress-enabled"
+              checked={enabled}
+              disabled={!available}
+              onCheckedChange={saveStaticEgress}
+              aria-label="Use static egress IP for sessions and previews"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+            <span className="text-xs text-muted-foreground">Public IP</span>
+            <code className="font-mono text-sm text-foreground">{publicIP ?? "Not configured"}</code>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              disabled={!publicIP}
+              aria-label="Copy static egress public IP"
+              onClick={() => {
+                if (publicIP) void navigator.clipboard?.writeText(publicIP);
+              }}
+            >
+              <Clipboard className="h-4 w-4" />
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
@@ -223,6 +304,7 @@ export default function SettingsPage() {
           </Card>
         </section>
 
+        {user?.role === "admin" && <NetworkAccessSettings />}
         {user?.role === "admin" && <PRAuthorshipSettings />}
       </div>
     </PageContainer>

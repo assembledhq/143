@@ -294,6 +294,55 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	require.NotContains(t, cloudInitText, "tailscale up", "worker cloud-init should not duplicate the Tailscale enrollment path")
 }
 
+func TestStaticEgressDeployWiring(t *testing.T) {
+	t.Parallel()
+
+	firewallScript, err := os.ReadFile("../deploy/scripts/sandbox-firewall.sh")
+	require.NoError(t, err, "test should read sandbox-firewall.sh")
+	firewallText := string(firewallScript)
+	require.Contains(t, firewallText, `COMMENT_TAG="143-sandbox-egress-${NETWORK_TAG}"`, "firewall rules should use network-specific comment tags so reconciling one bridge does not delete the other bridge's rules")
+	require.Contains(t, firewallText, "169.254.0.0/16", "firewall should block metadata destinations")
+	require.Contains(t, firewallText, "10.0.0.0/8", "firewall should block private ranges")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read reconcile-worker-host.sh")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, "STATIC_EGRESS_NETWORK", "worker reconciliation should know about the static egress bridge")
+	require.Contains(t, reconcileText, "143-sandbox-static-egress", "worker reconciliation should create the static egress sandbox network")
+	require.Contains(t, reconcileText, "172.31.0.0/24", "static egress bridge should use a pinned subnet distinct from the default sandbox bridge")
+	require.Contains(t, reconcileText, "sandbox-static-egress-resolv.conf", "static egress sandboxes should get a dedicated resolver file")
+	require.Contains(t, reconcileText, "install-static-egress-worker.sh", "worker reconciliation should install policy routing and WireGuard for the static egress bridge")
+	require.Contains(t, reconcileText, "STATIC_EGRESS_ENABLED", "worker reconciliation should fail closed when static egress is enabled but cannot be installed")
+	require.Contains(t, reconcileText, "static egress is enabled but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing", "enabled static egress must not silently skip a missing install helper")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "install-static-egress-worker.sh.new", "worker deploys should sync the static egress install helper to existing workers")
+
+	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read worker compose")
+	workerComposeText := string(workerCompose)
+	require.Contains(t, workerComposeText, "SANDBOX_STATIC_EGRESS_RESOLV_CONF", "worker should pass the static egress resolver host path into the server")
+	require.Contains(t, workerComposeText, "STATIC_EGRESS_PUBLIC_IP", "worker should advertise the configured public static egress IP")
+	require.Contains(t, workerComposeText, "STATIC_EGRESS_CAPABILITY_FILE", "worker should read the host verifier marker before advertising static egress capability")
+	require.Contains(t, workerComposeText, "/etc/143:/etc/143:ro", "worker container should see the host verifier marker and resolver files read-only")
+	require.Contains(t, workerComposeText, "static-egress-sandbox", "worker service should join the static egress sandbox bridge")
+	require.Contains(t, workerComposeText, "name: 143-sandbox-static-egress", "worker compose should declare the static egress bridge as an external network")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	require.Contains(t, string(makefile), "provision-egress", "Makefile should expose an egress gateway provisioning entrypoint")
+
+	gatewayScript, err := os.ReadFile("../deploy/scripts/provision-egress-gateway.sh")
+	require.NoError(t, err, "test should read egress gateway provisioning helper")
+	gatewayText := string(gatewayScript)
+	require.Contains(t, gatewayText, "wg0", "egress gateway provisioning should configure WireGuard")
+	require.Contains(t, gatewayText, "MASQUERADE", "egress gateway should SNAT tunnel traffic to its public IPv4")
+	require.Contains(t, gatewayText, "169.254.0.0/16", "egress gateway should independently block metadata ranges")
+	require.Contains(t, gatewayText, "10.0.0.0/8", "egress gateway should independently block private ranges")
+}
+
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {
 	t.Parallel()
 
@@ -869,8 +918,8 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.NoError(t, err, "test should read the worker host reconciliation script")
 	reconcileText := string(reconcileScript)
 	require.Contains(t, reconcileText, `SANDBOX_SUBNET="`+sandboxSubnet+`"`, "reconcile-worker-host.sh should define the pinned sandbox subnet so sandbox-dns gets a predictable static IP")
-	require.Contains(t, reconcileText, `--subnet "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should create 143-sandbox with the pinned subnet variable")
-	require.Contains(t, reconcileText, `"$EXISTING_SANDBOX_SUBNET" != "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
+	require.Contains(t, reconcileText, `ensure_bridge "$SANDBOX_NETWORK" "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should create 143-sandbox with the pinned subnet variable")
+	require.Contains(t, reconcileText, `"$existing_subnet" != "$subnet"`, "reconcile-worker-host.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
 
 	// The sandbox resolv.conf writer is the single source of truth for the
 	// nameserver line. provision.sh and deploy.sh both call it so a content
@@ -878,12 +927,12 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	// reprovision maintenance window.
 	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
 	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
-	require.Contains(t, string(resolvScript), "nameserver "+sandboxDNSIP, "sandbox-resolv-conf.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+	require.Contains(t, string(resolvScript), `NAMESERVER="${2:-`+sandboxDNSIP+`}"`, "sandbox-resolv-conf.sh should default to sandbox-dns's IP for /etc/143/sandbox-resolv.conf")
 	require.Contains(t, reconcileText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read the deploy script")
 	deployText := string(deployScript)
-	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "deploy.sh should refresh worker host invariants through the canonical reconciliation script")
+	require.Contains(t, deployText, "/opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "deploy.sh should refresh worker host invariants through the canonical reconciliation script")
 	require.NotContains(t, deployText, "enable_icc=false", "deploy.sh must not create 143-sandbox with bridge ICC disabled because Docker blocks sandbox DNS before DOCKER-USER can carve it out")
 
 	compose, err := os.ReadFile("../docker-compose.worker.yml")

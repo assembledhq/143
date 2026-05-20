@@ -203,6 +203,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithMembershipStore(membershipStore),
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
+	settingsHandler.SetStaticEgressStatus(handlers.StaticEgressStatus{
+		Available:         cfg.StaticEgressEnabled && cfg.StaticEgressPublicIP != "",
+		PublicIP:          cfg.StaticEgressPublicIP,
+		UnavailableReason: staticEgressUnavailableReason(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+	})
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -637,6 +642,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	previewHandler.SetStaticEgressRuntime(orgStore, staticEgressRuntimeConfig(cfg))
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
@@ -871,6 +877,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
+				r.Get("/api/v1/settings/network", settingsHandler.GetNetworkStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 				r.Get("/api/v1/pm/current", pmHandler.Current)
@@ -1326,4 +1333,28 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func staticEgressUnavailableReason(enabled bool, publicIP string) string {
+	switch {
+	case enabled && publicIP == "":
+		return "STATIC_EGRESS_PUBLIC_IP is not configured"
+	case !enabled:
+		return "STATIC_EGRESS_ENABLED is false"
+	default:
+		return ""
+	}
+}
+
+func staticEgressRuntimeConfig(cfg *config.Config) agent.StaticEgressRuntimeConfig {
+	if cfg == nil {
+		return agent.StaticEgressRuntimeConfig{}
+	}
+	return agent.ResolveStaticEgressRuntimeConfig(
+		cfg.StaticEgressEnabled,
+		cfg.StaticEgressPublicIP,
+		cfg.SandboxStaticEgressNetwork,
+		cfg.SandboxStaticEgressResolvConf,
+		cfg.StaticEgressCapabilityFile,
+	)
 }

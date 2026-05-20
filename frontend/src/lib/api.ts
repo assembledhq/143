@@ -522,6 +522,7 @@ export const api = {
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
+    getNetworkStatus: () => get<import('./types').SingleResponse<import('./types').NetworkSettingsStatus>>('/api/v1/settings/network'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
   },

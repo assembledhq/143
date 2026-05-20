@@ -44,6 +44,7 @@ export const queryKeys = {
   },
   settings: {
     all: ["settings"] as const,
+    network: ["settings", "network"] as const,
   },
   credentials: {
     all: ["credentials"] as const,

@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -421,6 +421,12 @@ provision-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
+provision-egress:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-egress HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	scp -i $(SSH_KEY) deploy/scripts/provision-egress-gateway.sh root@$(HOST):/tmp/provision-egress-gateway.sh
+	ssh -i $(SSH_KEY) root@$(HOST) 'install -m 755 /tmp/provision-egress-gateway.sh /opt/143/provision-egress-gateway.sh && /opt/143/provision-egress-gateway.sh'
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }

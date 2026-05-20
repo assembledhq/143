@@ -1049,6 +1049,14 @@ func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer
 
 func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
 
+type previewStaticEgressOrgStore struct {
+	settings json.RawMessage
+}
+
+func (s previewStaticEgressOrgStore) GetByID(_ context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{ID: orgID, Settings: s.settings}, nil
+}
+
 // TestPreviewHandler_StartPreview_NoWorkspaceConfig covers the common path where
 // the user clicks Start Preview on a repo that has no .143/config.json
 // committed and supplies no explicit config. The handler must abort the
@@ -1994,6 +2002,45 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure surfaces as 422 PREVIEW_START_FAILED")
 	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetwork(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "direct-container"
+	h := newPreviewTestHandler()
+	h.SetStaticEgressRuntime(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}, agent.StaticEgressRuntimeConfig{
+		Enabled:     true,
+		Capable:     true,
+		NetworkName: "143-sandbox-static-egress",
+		PublicIP:    "203.0.113.10",
+	})
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sb.ID, "liveness check should inspect the recorded container")
+		return true, nil
+	}
+	sp.ConnInfoFn = func(_ context.Context, _ *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+		return &agent.SandboxConnectionInfo{
+			Environment: map[string]string{"DOCKER_HOST": "143-sandbox"},
+		}, nil
+	}
+	h.sandboxProvider = sp
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		SandboxState: string(models.SandboxStateRunning),
+	}, &models.PreviewConfig{})
+
+	require.Nil(t, result.Sandbox, "live container on the direct bridge should not be reused for static egress")
+	require.Equal(t, "NETWORK_SETTING_RESTART_REQUIRED", result.ErrCode, "network mismatch should return a restart-required error code")
+	require.Error(t, result.Err, "network mismatch should surface an actionable error")
 }
 
 // TestClassifyLaunchError verifies the error-code mapping that turns

@@ -30,6 +30,7 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
+	require.False(t, s.SandboxNetwork.StaticEgressEnabled, "static egress should be disabled by default")
 }
 
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {
@@ -69,6 +70,9 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		},
 		"builder_permissions": {
 			"require_review_before_pr": false
+		},
+		"sandbox_network": {
+			"static_egress_enabled": true
 		}
 	}`)
 
@@ -96,6 +100,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
 	require.Equal(t, 0.15, s.PriorityWeights.RevenueRisk, "should override revenue_risk")
 	require.False(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "should allow admins to disable builder review requirement")
+	require.True(t, s.SandboxNetwork.StaticEgressEnabled, "should parse sandbox_network.static_egress_enabled")
 }
 
 func TestParseOrgSettings_PartialOverride(t *testing.T) {

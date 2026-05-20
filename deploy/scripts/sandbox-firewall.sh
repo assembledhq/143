@@ -30,7 +30,8 @@
 set -euo pipefail
 
 NETWORK="${1:-143-sandbox}"
-COMMENT_TAG="143-sandbox-egress"
+NETWORK_TAG="${NETWORK//[^A-Za-z0-9_.-]/-}"
+COMMENT_TAG="143-sandbox-egress-${NETWORK_TAG}"
 BLOCKED_DESTS=(
   "169.254.0.0/16"   # cloud metadata (all major providers)
   "10.0.0.0/8"       # RFC1918

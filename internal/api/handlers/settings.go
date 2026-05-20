@@ -25,11 +25,27 @@ type OrgSettingsInvalidator interface {
 }
 
 type SettingsHandler struct {
-	orgStore    *db.OrganizationStore
-	llmDefaults map[string]string // provider name → masked key (from server env)
-	audit       *db.AuditEmitter
-	logger      zerolog.Logger
-	invalidator OrgSettingsInvalidator
+	orgStore     *db.OrganizationStore
+	llmDefaults  map[string]string // provider name → masked key (from server env)
+	audit        *db.AuditEmitter
+	logger       zerolog.Logger
+	invalidator  OrgSettingsInvalidator
+	staticEgress StaticEgressStatus
+}
+
+// StaticEgressStatus is platform-level availability for the opt-in static
+// sandbox egress path.
+type StaticEgressStatus struct {
+	Available         bool
+	PublicIP          string
+	UnavailableReason string
+}
+
+type networkStatusResponse struct {
+	StaticEgressAvailable         bool   `json:"static_egress_available"`
+	StaticEgressEnabled           bool   `json:"static_egress_enabled"`
+	StaticEgressPublicIP          string `json:"static_egress_public_ip,omitempty"`
+	StaticEgressUnavailableReason string `json:"static_egress_unavailable_reason,omitempty"`
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -50,6 +66,11 @@ func (h *SettingsHandler) SetLogger(logger zerolog.Logger) {
 // session start without waiting for the cache TTL.
 func (h *SettingsHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInvalidator) {
 	h.invalidator = invalidator
+}
+
+// SetStaticEgressStatus injects platform-level static egress availability.
+func (h *SettingsHandler) SetStaticEgressStatus(status StaticEgressStatus) {
+	h.staticEgress = status
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
@@ -84,6 +105,32 @@ func (h *SettingsHandler) GetLLMDefaults(w http.ResponseWriter, r *http.Request)
 // maintaining its own hardcoded list.
 func (h *SettingsHandler) GetLLMModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": models.LLMModelsByProvider()})
+}
+
+// GetNetworkStatus returns the customer-facing network settings status.
+func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	org, err := h.orgStore.GetByID(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "organization not found")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", err)
+		return
+	}
+	status := h.staticEgress
+	reason := status.UnavailableReason
+	if !status.Available && reason == "" {
+		reason = "static egress gateway is not configured for this environment"
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[networkStatusResponse]{Data: networkStatusResponse{
+		StaticEgressAvailable:         status.Available,
+		StaticEgressEnabled:           settings.SandboxNetwork.StaticEgressEnabled,
+		StaticEgressPublicIP:          status.PublicIP,
+		StaticEgressUnavailableReason: reason,
+	}})
 }
 
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {

@@ -89,8 +89,11 @@ DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
 ALLOW_DEPLOY_DOCKER_DAEMON_RESTART="${ALLOW_DEPLOY_DOCKER_DAEMON_RESTART:-0}"
 
 run_worker_host_reconcile() {
+  local reconcile_env
+  reconcile_env=$(printf 'STATIC_EGRESS_ENABLED=%q STATIC_EGRESS_PUBLIC_IP=%q SANDBOX_STATIC_EGRESS_NETWORK=%q SANDBOX_STATIC_EGRESS_RESOLV_CONF=%q STATIC_EGRESS_CAPABILITY_FILE=%q STATIC_EGRESS_GATEWAY_PUBLIC_IP=%q STATIC_EGRESS_GATEWAY_PUBLIC_KEY=%q STATIC_EGRESS_WORKER_PRIVATE_KEY=%q STATIC_EGRESS_WORKER_WG_ADDRESS=%q' \
+    "${STATIC_EGRESS_ENABLED:-false}" "${STATIC_EGRESS_PUBLIC_IP:-}" "${SANDBOX_STATIC_EGRESS_NETWORK:-143-sandbox-static-egress}" "${SANDBOX_STATIC_EGRESS_RESOLV_CONF:-/etc/143/sandbox-static-egress-resolv.conf}" "${STATIC_EGRESS_CAPABILITY_FILE:-/etc/143/static-egress-capable}" "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:-}" "${STATIC_EGRESS_WORKER_PRIVATE_KEY:-}" "${STATIC_EGRESS_WORKER_WG_ADDRESS:-}")
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
+    "sudo -n env $reconcile_env /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
 }
 
 # --- Refresh secrets from .env.production.enc ---
@@ -147,16 +150,21 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${SANDBOX_GC_INTERVAL:=5m}"
     : "${SANDBOX_GC_GRACE:=30m}"
     : "${SANDBOX_GC_HARD_MAX:=24h}"
+    : "${STATIC_EGRESS_ENABLED:=false}"
+    : "${SANDBOX_STATIC_EGRESS_NETWORK:=143-sandbox-static-egress}"
+    : "${SANDBOX_STATIC_EGRESS_RESOLV_CONF:=/etc/143/sandbox-static-egress-resolv.conf}"
+    : "${STATIC_EGRESS_CAPABILITY_FILE:=/etc/143/static-egress-capable}"
     # Refresh the shared secrets in /opt/143/.env, then re-append the per-host
     # identity/runtime values from /opt/143/.env.local (NODE_ID,
     # WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) so docker
     # compose can still interpolate them when it parses the compose file.
     # .env.local is owned by provisioning and we abort if it's missing instead
     # of silently coming up with empty/unsafe defaults.
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_ENABLED=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nSANDBOX_STATIC_EGRESS_NETWORK=%s\nSANDBOX_STATIC_EGRESS_RESOLV_CONF=%s\nSTATIC_EGRESS_CAPABILITY_FILE=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_KEY=%s\nSTATIC_EGRESS_WORKER_PRIVATE_KEY=%s\nSTATIC_EGRESS_WORKER_WG_ADDRESS=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
       "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
+      "$STATIC_EGRESS_ENABLED" "${STATIC_EGRESS_PUBLIC_IP:-}" "$SANDBOX_STATIC_EGRESS_NETWORK" "$SANDBOX_STATIC_EGRESS_RESOLV_CONF" "$STATIC_EGRESS_CAPABILITY_FILE" "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:-}" "${STATIC_EGRESS_WORKER_PRIVATE_KEY:-}" "${STATIC_EGRESS_WORKER_WG_ADDRESS:-}" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" '
           set -euo pipefail
           cat > /opt/143/.env
@@ -293,6 +301,17 @@ if [ "$ROLE" = "worker" ]; then
     "mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new; exit 1; }"
+
+  # Sync the static egress worker installer before reconciliation. Existing
+  # workers created before this feature need the helper present locally so
+  # STATIC_EGRESS_ENABLED=true can fail closed instead of silently skipping
+  # WireGuard/policy-route installation.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-static-egress-worker.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-static-egress-worker.sh.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh \
+     && chmod +x /opt/143/deploy/scripts/install-static-egress-worker.sh \
+     || { rm -f /opt/143/deploy/scripts/install-static-egress-worker.sh.new; exit 1; }"
 
   # Sync the canonical worker host reconciler. It owns the sandbox network,
   # firewall, resolv.conf, sandbox-auth socket dir, and worker sysctl state.

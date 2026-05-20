@@ -77,6 +77,30 @@ services:
           memory: 16M
           cpus: "0.05"
 
+  sandbox-static-egress-dns:
+    build:
+      context: .
+      dockerfile: Dockerfile.dnsmasq
+    image: 143-sandbox-dns:local
+    networks:
+      static-egress-sandbox:
+        ipv4_address: 172.31.0.2
+    healthcheck:
+      test: ["CMD-SHELL", "nslookup localhost 127.0.0.1 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.2"
+        reservations:
+          memory: 16M
+          cpus: "0.05"
+
   worker:
     image: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
     depends_on:
@@ -88,6 +112,8 @@ services:
       # Sandboxes spawned by an early worker would otherwise come up with no
       # working DNS and fail their first preview-infra lookup.
       sandbox-dns:
+        condition: service_healthy
+      sandbox-static-egress-dns:
         condition: service_healthy
     # NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID
     # are per-host identity/runtime values. They live in /opt/143/.env.local
@@ -117,6 +143,11 @@ services:
       # the *host* path because docker.sock resolves bind sources against the
       # host, not this worker container. Provisioned by provision.sh.
       SANDBOX_RESOLV_CONF: /etc/143/sandbox-resolv.conf
+      SANDBOX_STATIC_EGRESS_NETWORK: ${SANDBOX_STATIC_EGRESS_NETWORK:-143-sandbox-static-egress}
+      SANDBOX_STATIC_EGRESS_RESOLV_CONF: ${SANDBOX_STATIC_EGRESS_RESOLV_CONF:-/etc/143/sandbox-static-egress-resolv.conf}
+      STATIC_EGRESS_ENABLED: ${STATIC_EGRESS_ENABLED:-false}
+      STATIC_EGRESS_PUBLIC_IP: ${STATIC_EGRESS_PUBLIC_IP:-}
+      STATIC_EGRESS_CAPABILITY_FILE: ${STATIC_EGRESS_CAPABILITY_FILE:-/etc/143/static-egress-capable}
     env_file:
       - .env
     # App nodes reach this worker at http://${WORKER_PRIVATE_IP}:8080 over the
@@ -135,10 +166,13 @@ services:
         gw_priority: 1
       sandbox:
         gw_priority: 0
+      static-egress-sandbox:
+        gw_priority: 0
     group_add:
       - ${DOCKER_GID:?missing in /opt/143/.env.local}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/143:/etc/143:ro
       # Per-session GitHub credential sockets. Bind-mounted into this
       # container so the orchestrator (running as appuser uid 1000) can
       # create per-session unix sockets here, AND so the host docker
@@ -181,3 +215,6 @@ networks:
   sandbox:
     external: true
     name: 143-sandbox
+  static-egress-sandbox:
+    external: true
+    name: 143-sandbox-static-egress

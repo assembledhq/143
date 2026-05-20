@@ -328,6 +328,43 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("requires static egress capable worker when requested", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgxmock pool")
+		defer mock.Close()
+
+		now := time.Now().UTC()
+		directOnlyMeta, err := json.Marshal(WorkerNodeMetadata{
+			PreviewCapable:         true,
+			PreviewInternalBaseURL: "http://worker-1.internal:8080",
+		})
+		require.NoError(t, err, "should marshal direct worker metadata")
+		staticMeta, err := json.Marshal(WorkerNodeMetadata{
+			PreviewCapable:         true,
+			PreviewInternalBaseURL: "http://worker-2.internal:8080",
+			StaticEgressCapable:    true,
+		})
+		require.NoError(t, err, "should marshal static egress worker metadata")
+
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+			WillReturnRows(
+				pgxmock.NewRows(workerNodeTestCols).
+					AddRow("worker-1", "worker", "worker-1.internal", "active", directOnlyMeta, now, now).
+					AddRow("worker-2", "worker", "worker-2.internal", "active", staticMeta, now, now),
+			)
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id = @worker").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+		selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
+		worker, err := selector.SelectLeastLoadedNodeWithRequirements(context.Background(), WorkerSelectionRequirements{StaticEgressRequired: true})
+		require.NoError(t, err, "SelectLeastLoadedNodeWithRequirements should find a static egress capable worker")
+		require.Equal(t, "worker-2", worker.ID, "selection should skip preview workers that cannot serve static egress sandboxes")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("wraps worker count errors", func(t *testing.T) {
 		t.Parallel()
 

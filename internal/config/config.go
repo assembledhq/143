@@ -182,6 +182,21 @@ type Config struct {
 	// and typically contains "nameserver 1.1.1.1\nnameserver 8.8.8.8". Leaving
 	// this empty falls back to whatever resolv.conf Docker injects.
 	SandboxResolvConf string `env:"SANDBOX_RESOLV_CONF"`
+	// StaticEgressEnabled makes this worker/platform advertise and use the
+	// dedicated static egress sandbox bridge for orgs that opt into it.
+	StaticEgressEnabled bool `env:"STATIC_EGRESS_ENABLED" envDefault:"false"`
+	// StaticEgressPublicIP is the public IPv4 customers should allowlist.
+	StaticEgressPublicIP string `env:"STATIC_EGRESS_PUBLIC_IP"`
+	// StaticEgressCapabilityFile is written by host reconciliation after
+	// WireGuard, policy routing, DNS, and egress probes pass. Workers must see
+	// this file before advertising static egress capability.
+	StaticEgressCapabilityFile string `env:"STATIC_EGRESS_CAPABILITY_FILE" envDefault:"/etc/143/static-egress-capable"`
+	// SandboxStaticEgressNetwork is the Docker bridge used only for opted-in
+	// static egress sandboxes.
+	SandboxStaticEgressNetwork string `env:"SANDBOX_STATIC_EGRESS_NETWORK" envDefault:"143-sandbox-static-egress"`
+	// SandboxStaticEgressResolvConf is bind-mounted into static egress
+	// sandboxes so they resolve through the sidecar on the static bridge.
+	SandboxStaticEgressResolvConf string `env:"SANDBOX_STATIC_EGRESS_RESOLV_CONF" envDefault:"/etc/143/sandbox-static-egress-resolv.conf"`
 	// SandboxAuthSocketDir is the on-host directory under which per-session
 	// GitHub credential sockets are created (one Unix-domain socket per
 	// session, bind-mounted into the container). The orchestrator must be

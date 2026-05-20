@@ -774,6 +774,16 @@ export interface OrgSettings {
   builder_permissions?: {
     require_review_before_pr?: boolean;
   };
+  sandbox_network?: {
+    static_egress_enabled?: boolean;
+  };
+}
+
+export interface NetworkSettingsStatus {
+  static_egress_available: boolean;
+  static_egress_enabled: boolean;
+  static_egress_public_ip?: string;
+  static_egress_unavailable_reason?: string;
 }
 
 export interface ProductContext {
