@@ -134,6 +134,10 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
 	require.Contains(t, string(makefile), "make deploy-fleet force=true", "Makefile should document how to override the active-session guardrail with a make argument")
 	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)`, "Makefile should pass role, tag, and force arguments through to deploy-fleet.sh")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	require.Contains(t, string(deployScript), `-e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}"`, "worker deploy guardrail container should receive the force override from the deploy environment")
 }
 
 // Worker preview routing and sandbox orchestration require per-host values:
