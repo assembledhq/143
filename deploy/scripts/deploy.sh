@@ -835,7 +835,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       return 0
     fi
     echo "Checking active long-running sessions before worker deploy..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps "$HEALTH_SERVICE" /bin/deploy-guardrail worker-sessions < /dev/null
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps \
+      -e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
+      "$HEALTH_SERVICE" /bin/deploy-guardrail worker-sessions < /dev/null
   }
 
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
