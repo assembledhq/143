@@ -324,6 +324,10 @@ func (a SessionAutonomy) Validate() error {
 // automation-triggered runs).
 const DefaultSessionAutonomy = SessionAutonomySemi
 
+// DefaultSessionTokenMode is the token mode applied when a session is created
+// without an explicit token-mode override.
+const DefaultSessionTokenMode = "low"
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 
