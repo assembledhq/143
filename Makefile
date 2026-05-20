@@ -380,12 +380,13 @@ REPROVISION ?=
 # Per-host worker identity (forwarded as env vars to provision.sh / deploy.sh
 # so users can write `make provision-worker HOST=… WORKER_PRIVATE_IP=…` instead
 # of prefixing the env var on the command line). Empty by default; provision.sh
-# auto-detects WORKER_PRIVATE_IP via SSH when unset and derives NODE_ID and
-# PREVIEW_INTERNAL_BASE_URL from it.
+# auto-detects WORKER_PRIVATE_IP and DOCKER_GID via SSH when unset and derives
+# NODE_ID and PREVIEW_INTERNAL_BASE_URL from it.
 export WORKER_PRIVATE_IP
 export WORKER_PRIVATE_IP_SOURCE
 export NODE_ID
 export PREVIEW_INTERNAL_BASE_URL
+export DOCKER_GID
 export DB_BIND_IP
 export TS_AUTH_KEY_APP
 export TS_AUTH_KEY_DB
