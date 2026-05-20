@@ -467,6 +467,9 @@ repair-worker-host:
 
 TAG ?= latest
 ROLES ?= app,worker
+force ?=
+
+deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS))
 
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
@@ -475,6 +478,7 @@ ROLES ?= app,worker
 #   make deploy-app
 #   make deploy-app    HOST=87.99.150.138
 #   make deploy-app    TAG=<sha>
+#   make deploy-worker force=true
 
 # Shell snippet to read FLEET_HOSTS from env var or .env.production.enc via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);
@@ -492,7 +496,7 @@ endef
 define resolve-host
 if [ -n "$(HOST)" ]; then \
 	echo "Deploying $(1) → $(HOST)"; \
-	./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG); \
+	$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG); \
 else \
 	$(read-fleet-hosts); \
 	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^$(1):' | cut -d: -f2)"; \
@@ -502,7 +506,7 @@ else \
 	fi; \
 	for h in $$HOSTS; do \
 		echo "Deploying $(1) → $$h"; \
-		./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG); \
+		$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG); \
 	done; \
 fi
 endef
@@ -553,9 +557,11 @@ deploy-redis:
 #   make deploy-fleet ROLES=all
 # For a specific image tag:
 #   make deploy-fleet TAG=<sha> ROLES=app,worker
+# To override the active-session guardrail:
+#   make deploy-fleet force=true
 deploy-fleet:
 	$(check-ssh-key)
-	./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
+	$(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
