@@ -575,6 +575,7 @@ func main() {
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+			agent.WithRuntimeStalledJobTerminator(jobStore),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.

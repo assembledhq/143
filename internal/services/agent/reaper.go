@@ -35,6 +35,12 @@ type PreviewStopper interface {
 	StopActivePreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
 }
 
+// RuntimeStalledJobTerminator terminalizes active session jobs after the
+// runtime-control reaper has made the owning session terminal.
+type RuntimeStalledJobTerminator interface {
+	DeadLetterSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, errMsg string) (int64, error)
+}
+
 // SessionReaper periodically cleans up stale sessions and expired snapshots
 // in seven phases:
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
@@ -58,6 +64,7 @@ type SessionReaper struct {
 	orphanCloser     OrphanCloser   // nil-safe — billing orphan cleanup disabled if nil
 	usageRoller      UsageRoller    // nil-safe — usage rollup disabled if nil
 	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
+	jobTerminator    RuntimeStalledJobTerminator
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
 	runtimeStallAge  time.Duration
@@ -89,6 +96,10 @@ type StuckThreadLister interface {
 	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
 }
 
+type runtimeStalledThreadFailer interface {
+	FailRunningBySession(ctx context.Context, orgID, sessionID uuid.UUID, result *models.SessionResult) (int64, error)
+}
+
 // SessionReaperOption configures optional SessionReaper dependencies.
 type SessionReaperOption func(*SessionReaper)
 
@@ -117,6 +128,12 @@ func WithPreviewStopper(ps PreviewStopper) SessionReaperOption {
 // is skipped (the session-level Phase 0.5 still runs).
 func WithStuckThreadLister(t StuckThreadLister) SessionReaperOption {
 	return func(r *SessionReaper) { r.threads = t }
+}
+
+// WithRuntimeStalledJobTerminator lets Phase 0.4 close active run_agent and
+// continue_session jobs for sessions it terminalizes.
+func WithRuntimeStalledJobTerminator(j RuntimeStalledJobTerminator) SessionReaperOption {
+	return func(r *SessionReaper) { r.jobTerminator = j }
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
@@ -291,6 +308,37 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			}
 			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryRuntimeControlStalled, nextSteps, true); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for runtime-control stalled session")
+			}
+			if r.jobTerminator != nil {
+				errMsg := fmt.Sprintf("%s: session %s crossed runtime stop deadline", FailureCategoryRuntimeControlStalled, s.ID.String())
+				affected, err := r.jobTerminator.DeadLetterSessionJobs(ctx, s.OrgID, s.ID, errMsg)
+				if err != nil {
+					r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to dead-letter runtime-control stalled session jobs")
+				} else if affected > 0 {
+					r.logger.Warn().
+						Str("session_id", s.ID.String()).
+						Str("org_id", s.OrgID.String()).
+						Int64("jobs_dead_lettered", affected).
+						Msg("reaper: dead-lettered runtime-control stalled session jobs")
+				}
+			}
+			if threadFailer, ok := r.threads.(runtimeStalledThreadFailer); ok {
+				errMsg := "Session stopped after crossing its runtime stop deadline."
+				category := FailureCategoryRuntimeControlStalled
+				result := &models.SessionResult{
+					Error:           &errMsg,
+					FailureCategory: &category,
+				}
+				affected, err := threadFailer.FailRunningBySession(ctx, s.OrgID, s.ID, result)
+				if err != nil {
+					r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to fail runtime-control stalled session threads")
+				} else if affected > 0 {
+					r.logger.Warn().
+						Str("session_id", s.ID.String()).
+						Str("org_id", s.OrgID.String()).
+						Int64("threads_failed", affected).
+						Msg("reaper: failed runtime-control stalled session threads")
+				}
 			}
 			event := r.logger.Error().
 				Str("session_id", s.ID.String()).

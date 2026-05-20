@@ -591,6 +591,36 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
 }
 
+// DeadLetterSessionJobs terminalizes active agent jobs for a session that was
+// made terminal outside the normal worker handler path, such as runtime-control
+// reaping after a missed graceful-stop deadline.
+func (s *JobStore) DeadLetterSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, errMsg string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'dead_letter',
+			last_error = @last_error,
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE org_id = @org_id
+		  AND status IN ('pending', 'running')
+		  AND job_type IN ('run_agent', 'continue_session')
+		  AND payload->>'session_id' = @session_id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID.String(),
+		"last_error": errMsg,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("dead-letter session jobs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // MarkSucceededWithLease transitions a running job to succeeded only if the
 // caller still owns the current fencing token.
 // lint:allow-no-orgid reason="worker queue consumer completes cross-org jobs by design"

@@ -458,6 +458,59 @@ func TestJobStore_RenewLease(t *testing.T) {
 	}
 }
 
+func TestJobStore_DeadLetterSessionJobs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expected  int64
+		expectErr bool
+	}{
+		{
+			name: "dead letters active session jobs",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE jobs[\\s\\S]+payload->>'session_id' = @session_id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+			},
+			expected: 2,
+		},
+		{
+			name: "returns wrapped exec errors",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE jobs[\\s\\S]+payload->>'session_id' = @session_id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("write failed"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewJobStore(mock)
+			tt.setupMock(mock)
+
+			affected, err := store.DeadLetterSessionJobs(context.Background(), uuid.New(), uuid.New(), "runtime stopped")
+			if tt.expectErr {
+				require.Error(t, err, "DeadLetterSessionJobs should return an error")
+				require.Contains(t, err.Error(), "dead-letter session jobs", "DeadLetterSessionJobs should wrap exec errors")
+				return
+			}
+			require.NoError(t, err, "DeadLetterSessionJobs should not return an error")
+			require.Equal(t, tt.expected, affected, "DeadLetterSessionJobs should report rows affected")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestJobStore_MarkSucceededWithLease(t *testing.T) {
 	t.Parallel()
 
