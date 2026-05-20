@@ -36,13 +36,17 @@ type StaticEgressRuntimeConfig struct {
 }
 
 // ResolveStaticEgressRuntimeConfig converts platform config into the
-// worker-local runtime contract. Static egress is only capable after the host
-// reconciler has verified routing and written the capability marker.
-func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP, networkName, resolvConfPath, capabilityFile string) StaticEgressRuntimeConfig {
+// worker-local runtime contract. Static egress uses fixed internal bridge and
+// resolver paths; only the customer-facing public IP is configurable.
+func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP string) StaticEgressRuntimeConfig {
+	return resolveStaticEgressRuntimeConfig(enabled, publicIP, DefaultStaticEgressCapability)
+}
+
+func resolveStaticEgressRuntimeConfig(enabled bool, publicIP, capabilityFile string) StaticEgressRuntimeConfig {
 	runtime := StaticEgressRuntimeConfig{
 		Enabled:        enabled && publicIP != "",
-		NetworkName:    networkName,
-		ResolvConfPath: resolvConfPath,
+		NetworkName:    DefaultStaticEgressNetwork,
+		ResolvConfPath: DefaultStaticEgressResolvConf,
 		PublicIP:       publicIP,
 	}
 	if !enabled {

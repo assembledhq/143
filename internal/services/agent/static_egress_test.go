@@ -24,18 +24,20 @@ func TestResolveStaticEgressRuntimeConfigRequiresCapabilityFile(t *testing.T) {
 	t.Parallel()
 
 	capabilityFile := filepath.Join(t.TempDir(), "static-egress-capable")
-	cfg := ResolveStaticEgressRuntimeConfig(true, "203.0.113.10", "static-net", "/etc/static-resolv.conf", capabilityFile)
+	cfg := resolveStaticEgressRuntimeConfig(true, "203.0.113.10", capabilityFile)
 	require.True(t, cfg.Enabled, "static egress should remain enabled when platform config is present")
 	require.False(t, cfg.Capable, "static egress should not be capable before the host verifier writes its marker")
 	require.Contains(t, cfg.UnavailableReason, "capability file", "missing marker should explain why the worker is not capable")
 
 	require.NoError(t, WriteStaticEgressCapabilityFile(capabilityFile, "203.0.113.10", "static-net"), "test should write a verifier marker")
-	cfg = ResolveStaticEgressRuntimeConfig(true, "203.0.113.10", "static-net", "/etc/static-resolv.conf", capabilityFile)
+	cfg = resolveStaticEgressRuntimeConfig(true, "203.0.113.10", capabilityFile)
 	require.True(t, cfg.Capable, "matching verifier marker should make the runtime static-egress capable")
+	require.Equal(t, DefaultStaticEgressNetwork, cfg.NetworkName, "static egress bridge should use the fixed internal network")
+	require.Equal(t, DefaultStaticEgressResolvConf, cfg.ResolvConfPath, "static egress resolver should use the fixed internal path")
 	require.Empty(t, cfg.UnavailableReason, "capable runtime should not carry an unavailable reason")
 
 	require.NoError(t, WriteStaticEgressCapabilityFile(capabilityFile, "198.51.100.20", "static-net"), "test should write a mismatched verifier marker")
-	cfg = ResolveStaticEgressRuntimeConfig(true, "203.0.113.10", "static-net", "/etc/static-resolv.conf", capabilityFile)
+	cfg = resolveStaticEgressRuntimeConfig(true, "203.0.113.10", capabilityFile)
 	require.False(t, cfg.Capable, "mismatched public IP marker should not make the worker capable")
 	require.Contains(t, cfg.UnavailableReason, "does not match", "mismatched marker should explain the public IP mismatch")
 }

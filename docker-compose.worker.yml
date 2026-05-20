@@ -57,33 +57,9 @@ services:
         # Static IP so /etc/143/sandbox-resolv.conf can hard-code it. Pinned
         # to the network's first usable host after the gateway (.1).
         ipv4_address: 172.30.0.2
-    healthcheck:
-      # Resolve a name from dnsmasq's own /etc/hosts via the local listener.
-      # Doesn't touch upstream, so the check stays green when the bridge
-      # gateway or 127.0.0.11 is briefly unhealthy — we only fail when
-      # dnsmasq itself isn't answering.
-      test: ["CMD-SHELL", "nslookup localhost 127.0.0.1 >/dev/null 2>&1"]
-      interval: 15s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-          cpus: "0.2"
-        reservations:
-          memory: 16M
-          cpus: "0.05"
-
-  sandbox-static-egress-dns:
-    build:
-      context: .
-      dockerfile: Dockerfile.dnsmasq
-    image: 143-sandbox-dns:local
-    networks:
       static-egress-sandbox:
+        # Static IP so /etc/143/sandbox-static-egress-resolv.conf can
+        # hard-code the resolver on the static egress bridge.
         ipv4_address: 172.31.0.2
     healthcheck:
       test: ["CMD-SHELL", "nslookup localhost 127.0.0.1 >/dev/null 2>&1"]
@@ -113,8 +89,6 @@ services:
       # working DNS and fail their first preview-infra lookup.
       sandbox-dns:
         condition: service_healthy
-      sandbox-static-egress-dns:
-        condition: service_healthy
     # NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID
     # are per-host identity/runtime values. They live in /opt/143/.env.local
     # and are concatenated into
@@ -143,11 +117,8 @@ services:
       # the *host* path because docker.sock resolves bind sources against the
       # host, not this worker container. Provisioned by provision.sh.
       SANDBOX_RESOLV_CONF: /etc/143/sandbox-resolv.conf
-      SANDBOX_STATIC_EGRESS_NETWORK: ${SANDBOX_STATIC_EGRESS_NETWORK:-143-sandbox-static-egress}
-      SANDBOX_STATIC_EGRESS_RESOLV_CONF: ${SANDBOX_STATIC_EGRESS_RESOLV_CONF:-/etc/143/sandbox-static-egress-resolv.conf}
       STATIC_EGRESS_ENABLED: ${STATIC_EGRESS_ENABLED:-false}
       STATIC_EGRESS_PUBLIC_IP: ${STATIC_EGRESS_PUBLIC_IP:-}
-      STATIC_EGRESS_CAPABILITY_FILE: ${STATIC_EGRESS_CAPABILITY_FILE:-/etc/143/static-egress-capable}
     env_file:
       - .env
     # App nodes reach this worker at http://${WORKER_PRIVATE_IP}:8080 over the

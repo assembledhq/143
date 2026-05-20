@@ -1353,8 +1353,5 @@ func staticEgressRuntimeConfig(cfg *config.Config) agent.StaticEgressRuntimeConf
 	return agent.ResolveStaticEgressRuntimeConfig(
 		cfg.StaticEgressEnabled,
 		cfg.StaticEgressPublicIP,
-		cfg.SandboxStaticEgressNetwork,
-		cfg.SandboxStaticEgressResolvConf,
-		cfg.StaticEgressCapabilityFile,
 	)
 }

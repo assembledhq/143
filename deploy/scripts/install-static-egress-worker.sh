@@ -15,7 +15,7 @@ PUBLIC_IP="${STATIC_EGRESS_PUBLIC_IP:?STATIC_EGRESS_PUBLIC_IP is required}"
 STATIC_EGRESS_SUBNET="${STATIC_EGRESS_SUBNET:-172.31.0.0/24}"
 TABLE_ID="${STATIC_EGRESS_ROUTE_TABLE:-143}"
 FWMARK="${STATIC_EGRESS_FWMARK:-0x143}"
-CAPABILITY_FILE="${STATIC_EGRESS_CAPABILITY_FILE:-/etc/143/static-egress-capable}"
+CAPABILITY_FILE="/etc/143/static-egress-capable"
 PROBE_URL="${STATIC_EGRESS_PROBE_URL:-https://api.ipify.org}"
 
 apt-get update >/dev/null
@@ -72,7 +72,7 @@ install -d -m 755 "$(dirname "$CAPABILITY_FILE")"
 tmp_capability="${CAPABILITY_FILE}.tmp"
 cat > "$tmp_capability" <<CAPABILITY
 public_ip=${PUBLIC_IP}
-network=${STATIC_EGRESS_NETWORK:-143-sandbox-static-egress}
+network=143-sandbox-static-egress
 CAPABILITY
 chmod 644 "$tmp_capability"
 mv -f "$tmp_capability" "$CAPABILITY_FILE"
