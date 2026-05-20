@@ -1074,9 +1074,16 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			ThreadID  string `json:"thread_id"`
+			SessionID         string `json:"session_id"`
+			OrgID             string `json:"org_id"`
+			ThreadID          string `json:"thread_id"`
+			PullRequestID     string `json:"pull_request_id"`
+			RepairRunID       string `json:"repair_run_id"`
+			CommandType       string `json:"command_type"`
+			HealthVersion     int64  `json:"health_version"`
+			HeadSHA           string `json:"head_sha"`
+			WorkspaceMode     string `json:"workspace_mode"`
+			PullRequestNumber int    `json:"pull_request_number"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -1124,6 +1131,41 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		// short-circuited before completing a turn (cancel, policy stop) so
 		// we fall back to the status-only completion path.
 		var lastTurnResult *agent.AgentResult
+		if input.CommandType != "" {
+			prID, parseErr := uuid.Parse(input.PullRequestID)
+			if parseErr != nil {
+				return fmt.Errorf("parse pull request ID: %w", parseErr)
+			}
+			var repairRunID uuid.UUID
+			if input.RepairRunID != "" {
+				repairRunID, parseErr = uuid.Parse(input.RepairRunID)
+				if parseErr != nil {
+					return fmt.Errorf("parse repair run ID: %w", parseErr)
+				}
+			}
+			mode := models.PullRequestRepairWorkspaceMode(input.WorkspaceMode)
+			if mode == "" {
+				mode = models.PullRequestRepairWorkspaceModeSnapshotContinuation
+			}
+			if err := mode.Validate(); err != nil {
+				return err
+			}
+			action := models.PullRequestRepairActionType(input.CommandType)
+			if err := action.Validate(); err != nil {
+				return err
+			}
+			continueOpts = &agent.ContinueSessionOptions{
+				PRRepair: &agent.PRRepairContinueOptions{
+					PullRequestID:     prID,
+					RepairRunID:       repairRunID,
+					PullRequestNumber: input.PullRequestNumber,
+					CommandType:       action,
+					HealthVersion:     input.HealthVersion,
+					HeadSHA:           input.HeadSHA,
+					WorkspaceMode:     mode,
+				},
+			}
+		}
 		if input.ThreadID != "" && stores.SessionThreads != nil {
 			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -1155,7 +1197,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				}
 
 				threadIDLocal := threadID
-				continueOpts = &agent.ContinueSessionOptions{
+				threadOpts := &agent.ContinueSessionOptions{
 					AgentType:            thread.AgentType,
 					ModelOverride:        thread.ModelOverride,
 					ThreadAgentSessionID: thread.AgentSessionID,
@@ -1169,6 +1211,10 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						emitThreadAttribution(ctx, stores, orgID, sessionID, threadIDLocal, threadTurnBefore+1, result.Diff, result.TokenUsage.TotalCostUSD, logger)
 					},
 				}
+				if continueOpts != nil {
+					threadOpts.PRRepair = continueOpts.PRRepair
+				}
+				continueOpts = threadOpts
 			}
 		}
 
@@ -1178,6 +1224,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// attempt. The session row is unchanged at this point.
 			if errors.Is(err, agent.ErrSnapshotPending) {
 				return &RetryableError{Err: err}
+			}
+			if errors.Is(err, agent.ErrStalePullRequestHead) {
+				if input.PullRequestID != "" && services.PR != nil {
+					if syncErr := services.PR.SyncPullRequestState(ctx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
+						logger.Warn().Err(syncErr).Str("pull_request_id", input.PullRequestID).Msg("failed to sync pull request state after stale repair head")
+					}
+				}
+				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// Stale orphan container_id cleared; retry against the clean

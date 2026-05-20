@@ -2553,24 +2553,32 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
   });
 
-  it('routes to a new revision session after starting a PR repair action', async () => {
+  it('stays on the original session after starting a PR repair action', async () => {
+    let repairRequested = false;
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
           data: {
             ...mockPRHealth,
             failing_test_count: 1,
-            can_fix_tests: true,
-            needs_agent_action: true,
+            can_fix_tests: !repairRequested,
+            needs_agent_action: !repairRequested,
             summary: 'PR #42 has 1 failing test job.',
+            active_repairs: repairRequested ? [{
+              action_type: 'fix_tests',
+              session_id: 'session-abcdef12-3456-7890',
+              session_status: 'running',
+              health_version: 2,
+            }] : [],
           },
         } satisfies SingleResponse<typeof mockPRHealth>);
       }),
       http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+        repairRequested = true;
         return HttpResponse.json({
           data: {
-            session_id: 'session-revision-123',
-            mode: 'revision',
+            session_id: 'session-abcdef12-3456-7890',
+            mode: 'reconstructed',
             reused_in_flight: false,
             head_sha: 'head-sha',
             base_sha: 'base-sha',
@@ -2587,29 +2595,37 @@ describe('SessionDetailPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
 
     await waitFor(() => {
-      expect(routerPush).toHaveBeenCalledWith('/sessions/session-revision-123');
+      expect(screen.getByText('Fix tests running')).toBeInTheDocument();
     });
+    expect(routerPush).not.toHaveBeenCalled();
   });
 
-  it('keeps the repair CTA suppressed while navigating to a different repair session', async () => {
+  it('keeps the repair CTA suppressed while the original-session repair starts', async () => {
+    let repairRequested = false;
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
           data: {
             ...mockPRHealth,
             failing_test_count: 1,
-            can_fix_tests: true,
-            needs_agent_action: true,
+            can_fix_tests: !repairRequested,
+            needs_agent_action: !repairRequested,
             summary: 'PR #42 has 1 failing test job.',
-            active_repairs: [],
+            active_repairs: repairRequested ? [{
+              action_type: 'fix_tests',
+              session_id: 'session-abcdef12-3456-7890',
+              session_status: 'running',
+              health_version: 1,
+            }] : [],
           },
         } satisfies SingleResponse<typeof mockPRHealth>);
       }),
       http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+        repairRequested = true;
         return HttpResponse.json({
           data: {
-            session_id: 'session-revision-123',
-            mode: 'revision',
+            session_id: 'session-abcdef12-3456-7890',
+            mode: 'reconstructed',
             reused_in_flight: false,
             head_sha: 'head-sha',
             base_sha: 'base-sha',
@@ -2626,9 +2642,9 @@ describe('SessionDetailPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
 
     await waitFor(() => {
-      expect(routerPush).toHaveBeenCalledWith('/sessions/session-revision-123');
+      expect(screen.getByText('Fix tests running')).toBeInTheDocument();
     });
-    expect(screen.getByRole('button', { name: 'Opening repair session…' })).toBeDisabled();
+    expect(routerPush).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
   });
 

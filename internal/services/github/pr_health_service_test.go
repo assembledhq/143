@@ -209,8 +209,8 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 			"health_version":  int64(7),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns).
-			AddRow(uuid.New(), orgID, pullRequestID, sessionID, models.PullRequestRepairActionTypeFixTests, int64(7), true, nil, now, now).
-			AddRow(uuid.New(), orgID, pullRequestID, terminalSessionID, models.PullRequestRepairActionTypeResolveConflicts, int64(7), true, nil, now, now))
+			AddRow(uuid.New(), orgID, pullRequestID, sessionID, models.PullRequestRepairActionTypeFixTests, int64(7), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
+			AddRow(uuid.New(), orgID, pullRequestID, terminalSessionID, models.PullRequestRepairActionTypeResolveConflicts, int64(7), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id = .+ AND id = ANY\\(@ids\\) AND deleted_at IS NULL").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID,
@@ -1022,7 +1022,7 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 			"health_version":  int64(5),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns).AddRow(
-			repairRunID, orgID, pullRequestID, sessionID, models.PullRequestRepairActionTypeResolveConflicts, int64(5), true, nil, now, now,
+			repairRunID, orgID, pullRequestID, sessionID, models.PullRequestRepairActionTypeResolveConflicts, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1077,79 +1077,13 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.Equal(t, "12345…", truncateText("123456", 5), "truncateText should append an ellipsis when trimming long strings")
 }
 
-func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T) {
+func TestPRServiceResumeRepairSession(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
 		run  func(t *testing.T, mock pgxmock.PgxPoolIface, service *PRService, pr models.PullRequest, parentSession models.Session, userID uuid.UUID, now time.Time)
 	}{
-		{
-			name: "create repair revision session",
-			run: func(t *testing.T, mock pgxmock.PgxPoolIface, service *PRService, pr models.PullRequest, parentSession models.Session, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(parentSession.ID, pr.OrgID, now, string(models.SessionStatusCompleted))...))
-				mock.ExpectBegin()
-				mock.ExpectBegin()
-				mock.ExpectQuery("INSERT INTO sessions").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-					).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(uuid.New(), now, now))
-				mock.ExpectQuery("INSERT INTO session_threads").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(),
-					).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-				mock.ExpectExec("INSERT INTO session_issue_links").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-					).
-					WillReturnResult(pgxmock.NewResult("INSERT", 1))
-				mock.ExpectCommit()
-				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(),
-					).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
-				mock.ExpectQuery("INSERT INTO jobs").
-					WithArgs(pgx.NamedArgs{
-						"org_id":     pr.OrgID,
-						"queue":      "agent",
-						"job_type":   "run_agent",
-						"payload":    pgxmock.AnyArg(),
-						"priority":   5,
-						"dedupe_key": pgxmock.AnyArg(),
-					}).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
-					WithArgs(pgx.NamedArgs{
-						"org_id":               pr.OrgID,
-						"pull_request_id":      pr.ID,
-						"session_id":           pgxmock.AnyArg(),
-						"action_type":          models.PullRequestRepairActionTypeFixTests,
-						"health_version":       int64(8),
-						"active":               true,
-						"obsoleted_by_version": (*int64)(nil),
-					}).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
-				mock.ExpectCommit()
-
-				resp, err := service.createRepairRevisionSession(context.Background(), pr, []byte(`{"repair":true}`), "Please fix these tests.", userID, models.PullRequestRepairActionTypeFixTests, 8, "head", "base")
-				require.NoError(t, err, "createRepairRevisionSession should create a revision session")
-				require.Equal(t, "revision", resp.Mode, "createRepairRevisionSession should report revision mode")
-				require.Equal(t, int64(8), resp.HealthVersion, "createRepairRevisionSession should return the selected health version")
-			},
-		},
 		{
 			name: "resume repair session",
 			run: func(t *testing.T, mock pgxmock.PgxPoolIface, service *PRService, pr models.PullRequest, parentSession models.Session, userID uuid.UUID, now time.Time) {
@@ -1188,6 +1122,18 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
+					WithArgs(pgx.NamedArgs{
+						"org_id":               pr.OrgID,
+						"pull_request_id":      pr.ID,
+						"session_id":           parentSession.ID,
+						"action_type":          models.PullRequestRepairActionTypeResolveConflicts,
+						"health_version":       int64(9),
+						"workspace_mode":       models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+						"active":               true,
+						"obsoleted_by_version": (*int64)(nil),
+					}).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgx.NamedArgs{
 						"org_id":     pr.OrgID,
@@ -1198,22 +1144,11 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						"dedupe_key": pgxmock.AnyArg(),
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-				mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
-					WithArgs(pgx.NamedArgs{
-						"org_id":               pr.OrgID,
-						"pull_request_id":      pr.ID,
-						"session_id":           parentSession.ID,
-						"action_type":          models.PullRequestRepairActionTypeResolveConflicts,
-						"health_version":       int64(9),
-						"active":               true,
-						"obsoleted_by_version": (*int64)(nil),
-					}).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 				mock.ExpectCommit()
 
-				resp, err := service.resumeRepairSession(context.Background(), pr, parentSession, []byte(`{"repair":true}`), "Please resolve the conflicts.", userID, models.PullRequestRepairActionTypeResolveConflicts, 9, "head", "base")
+				resp, err := service.resumeRepairSession(context.Background(), pr, parentSession, []byte(`{"repair":true}`), "Please resolve the conflicts.", userID, models.PullRequestRepairActionTypeResolveConflicts, 9, "head", "base", models.PullRequestRepairWorkspaceModePRHeadReconstruction)
 				require.NoError(t, err, "resumeRepairSession should continue an existing session")
-				require.Equal(t, "resumed", resp.Mode, "resumeRepairSession should report resumed mode")
+				require.Equal(t, "reconstructed", resp.Mode, "resumeRepairSession should report reconstructed mode when no snapshot continuation is used")
 				require.False(t, resp.ReusedInFlight, "resumeRepairSession should create a fresh active repair run for the resumed session")
 			},
 		},
@@ -1386,6 +1321,14 @@ func TestPRServiceCanResumeRepairSession(t *testing.T) {
 			name:    "rejects sessions without snapshots",
 			session: models.Session{Status: string(models.SessionStatusCompleted)},
 			want:    false,
+		},
+		{
+			name: "rejects pending snapshot uploads",
+			session: func() models.Session {
+				pendingSnapshotKey := "snapshots/post-pr.tar.zst"
+				return models.Session{Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey, PendingSnapshotKey: &pendingSnapshotKey, SandboxState: "snapshotted"}
+			}(),
+			want: false,
 		},
 		{
 			name:    "rejects destroyed sandboxes",
@@ -1753,13 +1696,9 @@ func TestPRServiceDirectErrorBranches(t *testing.T) {
 
 	service := &PRService{logger: zerolog.New(io.Discard)}
 
-	_, err := service.resumeRepairSession(context.Background(), models.PullRequest{}, models.Session{}, nil, "", uuid.New(), models.PullRequestRepairActionTypeFixTests, 1, "head", "base")
+	_, err := service.resumeRepairSession(context.Background(), models.PullRequest{}, models.Session{}, nil, "", uuid.New(), models.PullRequestRepairActionTypeFixTests, 1, "head", "base", models.PullRequestRepairWorkspaceModeSnapshotContinuation)
 	require.Error(t, err, "resumeRepairSession should require a session message store")
 	require.Contains(t, err.Error(), "session message store not configured", "resumeRepairSession should explain the missing dependency")
-
-	_, err = service.createRepairRevisionSession(context.Background(), models.PullRequest{}, nil, "", uuid.New(), models.PullRequestRepairActionTypeFixTests, 1, "head", "base")
-	require.Error(t, err, "createRepairRevisionSession should require a linked session")
-	require.Contains(t, err.Error(), "linked session context is required", "createRepairRevisionSession should explain the missing linked session")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1801,7 +1740,7 @@ var prHealthSnapshotTestColumns = []string{
 }
 
 var prRepairRunTestColumns = []string{
-	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version", "active", "obsoleted_by_version", "created_at", "updated_at",
+	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version", "workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at",
 }
 
 var prHealthSessionThreadColumns = []string{

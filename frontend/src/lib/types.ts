@@ -443,7 +443,7 @@ export interface PullRequestHealthResponse {
 
 export interface PullRequestRepairResponse {
   session_id: string;
-  mode: "existing" | "resumed" | "revision";
+  mode: "existing" | "resumed" | "reconstructed";
   reused_in_flight: boolean;
   head_sha: string;
   base_sha: string;

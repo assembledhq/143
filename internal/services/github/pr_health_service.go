@@ -548,19 +548,25 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 		return nil, err
 	}
 
-	shortPrompt := repairPromptForAction(action)
-	if pr.SessionID != nil {
-		session, sessionErr := s.sessions.GetByID(ctx, orgID, *pr.SessionID)
-		if sessionErr == nil && s.canResumeRepairSession(session) {
-			resp, err := s.resumeRepairSession(ctx, pr, session, revisionContext, shortPrompt, userID, action, current.Version, current.HeadSHA, current.BaseSHA)
-			if err == nil {
-				return resp, nil
-			}
-			s.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to resume repair session; falling back to revision session")
-		}
+	if pr.SessionID == nil {
+		return nil, fmt.Errorf("pull request is not linked to a canonical session")
 	}
-
-	return s.createRepairRevisionSession(ctx, pr, revisionContext, shortPrompt, userID, action, current.Version, current.HeadSHA, current.BaseSHA)
+	session, err := s.sessions.GetByID(ctx, orgID, *pr.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	workspaceMode, reason := s.repairWorkspaceMode(session)
+	if reason != "" {
+		s.logger.Info().
+			Str("session_id", session.ID.String()).
+			Str("workspace_mode", string(workspaceMode)).
+			Str("reason", reason).
+			Msg("selected pull request repair workspace mode")
+	}
+	if workspaceMode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason != "" {
+		return nil, fmt.Errorf("canonical pull request session is not ready for repair: %s", reason)
+	}
+	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode)
 }
 
 func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current models.PullRequestHealthCurrent, summary models.PullRequestHealthSummary, snapshot models.PullRequestHealthSnapshot, action models.PullRequestRepairActionType) ([]byte, error) {
@@ -606,11 +612,19 @@ func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current mo
 }
 
 func (s *PRService) canResumeRepairSession(session models.Session) bool {
+	mode, reason := s.repairWorkspaceMode(session)
+	return mode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason == ""
+}
+
+func (s *PRService) repairWorkspaceMode(session models.Session) (models.PullRequestRepairWorkspaceMode, string) {
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		return models.PullRequestRepairWorkspaceModePRHeadReconstruction, "pending snapshot upload"
+	}
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-		return false
+		return models.PullRequestRepairWorkspaceModePRHeadReconstruction, "missing snapshot"
 	}
 	if session.SandboxState == string(models.SandboxStateDestroyed) {
-		return false
+		return models.PullRequestRepairWorkspaceModePRHeadReconstruction, "destroyed sandbox"
 	}
 	switch session.Status {
 	case string(models.SessionStatusIdle),
@@ -620,15 +634,21 @@ func (s *PRService) canResumeRepairSession(session models.Session) bool {
 		string(models.SessionStatusCancelled),
 		string(models.SessionStatusAwaitingInput),
 		string(models.SessionStatusNeedsHumanGuidance):
-		return true
+		return models.PullRequestRepairWorkspaceModeSnapshotContinuation, ""
 	default:
-		return false
+		return models.PullRequestRepairWorkspaceModeSnapshotContinuation, "session is not resumable"
 	}
 }
 
-func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string) (*models.PullRequestRepairResponse, error) {
+func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode) (*models.PullRequestRepairResponse, error) {
 	if s.sessionMessages == nil {
 		return nil, fmt.Errorf("session message store not configured")
+	}
+	if workspaceMode == "" {
+		workspaceMode = models.PullRequestRepairWorkspaceModeSnapshotContinuation
+	}
+	if err := workspaceMode.Validate(); err != nil {
+		return nil, err
 	}
 
 	tx, err := s.sessions.Begin(ctx)
@@ -681,27 +701,13 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := txMessages.Create(ctx, msg); err != nil {
 		return nil, err
 	}
-	continueDedupeKey := db.ContinueSessionDedupeKey(claimed.ID)
-	payload := map[string]string{
-		"session_id": claimed.ID.String(),
-		"org_id":     pr.OrgID.String(),
-	}
-	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &continueDedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&claimed),
-	}); err != nil {
-		return nil, err
-	}
 	repairRun := &models.PullRequestRepairRun{
 		OrgID:         pr.OrgID,
 		PullRequestID: pr.ID,
 		SessionID:     claimed.ID,
 		ActionType:    action,
 		HealthVersion: healthVersion,
+		WorkspaceMode: workspaceMode,
 		Active:        true,
 	}
 	if err := txPRs.CreateRepairRun(ctx, repairRun); err != nil {
@@ -721,12 +727,34 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		}
 		return nil, err
 	}
+	continueDedupeKey := db.ContinueSessionDedupeKey(claimed.ID)
+	payload := map[string]any{
+		"session_id":          claimed.ID.String(),
+		"org_id":              pr.OrgID.String(),
+		"pull_request_id":     pr.ID.String(),
+		"repair_run_id":       repairRun.ID.String(),
+		"command_type":        string(action),
+		"health_version":      healthVersion,
+		"head_sha":            headSHA,
+		"workspace_mode":      string(workspaceMode),
+		"pull_request_number": pr.GitHubPRNumber,
+	}
+	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &continueDedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&claimed),
+	}); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return &models.PullRequestRepairResponse{
 		SessionID:        claimed.ID,
-		Mode:             "resumed",
+		Mode:             repairResponseMode(workspaceMode),
 		ReusedInFlight:   false,
 		HeadSHA:          headSHA,
 		BaseSHA:          baseSHA,
@@ -735,97 +763,11 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	}, nil
 }
 
-func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.PullRequest, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string) (*models.PullRequestRepairResponse, error) {
-	if pr.SessionID == nil || s.sessionMessages == nil {
-		return nil, fmt.Errorf("linked session context is required to create a repair revision session")
+func repairResponseMode(workspaceMode models.PullRequestRepairWorkspaceMode) string {
+	if workspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
+		return "reconstructed"
 	}
-	parentSession, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	tx, err := s.sessions.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	txSessions := db.NewSessionStore(tx)
-	txMessages := db.NewSessionMessageStore(tx)
-	txPRs := db.NewPullRequestStore(tx)
-
-	session := &models.Session{
-		PrimaryIssueID:    parentSession.PrimaryIssueID,
-		OrgID:             parentSession.OrgID,
-		AgentType:         parentSession.AgentType,
-		Status:            "pending",
-		AutonomyLevel:     parentSession.AutonomyLevel,
-		TokenMode:         parentSession.TokenMode,
-		ParentSessionID:   &parentSession.ID,
-		RevisionContext:   revisionContext,
-		ModelOverride:     parentSession.ModelOverride,
-		TriggeredByUserID: &userID,
-		Title:             parentSession.Title,
-		TargetBranch:      firstNonNilString(parentSession.WorkingBranch, parentSession.TargetBranch),
-		RepositoryID:      parentSession.RepositoryID,
-	}
-	if err := txSessions.Create(ctx, session); err != nil {
-		return nil, err
-	}
-	msg := &models.SessionMessage{
-		SessionID:  session.ID,
-		OrgID:      session.OrgID,
-		ThreadID:   session.PrimaryThreadID,
-		UserID:     &userID,
-		TurnNumber: 0,
-		Role:       models.MessageRoleUser,
-		Content:    shortPrompt,
-	}
-	if err := txMessages.Create(ctx, msg); err != nil {
-		return nil, err
-	}
-	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	payload := db.RunAgentPayload(session)
-	if _, err := s.jobs.EnqueueInTx(ctx, tx, session.OrgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
-		return nil, err
-	}
-	repairRun := &models.PullRequestRepairRun{
-		OrgID:         session.OrgID,
-		PullRequestID: pr.ID,
-		SessionID:     session.ID,
-		ActionType:    action,
-		HealthVersion: healthVersion,
-		Active:        true,
-	}
-	if err := txPRs.CreateRepairRun(ctx, repairRun); err != nil {
-		if isUniqueActiveRepairRunViolation(err) {
-			existing, lookupErr := s.pullRequests.GetActiveRepairRun(ctx, session.OrgID, pr.ID, action, healthVersion)
-			if lookupErr == nil {
-				return &models.PullRequestRepairResponse{
-					SessionID:        existing.SessionID,
-					Mode:             "existing",
-					ReusedInFlight:   true,
-					HeadSHA:          headSHA,
-					BaseSHA:          baseSHA,
-					HealthVersion:    healthVersion,
-					RepairActionType: action,
-				}, nil
-			}
-		}
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return &models.PullRequestRepairResponse{
-		SessionID:        session.ID,
-		Mode:             "revision",
-		ReusedInFlight:   false,
-		HeadSHA:          headSHA,
-		BaseSHA:          baseSHA,
-		HealthVersion:    healthVersion,
-		RepairActionType: action,
-	}, nil
+	return "resumed"
 }
 
 func (s *PRService) fetchPullRequestDetails(ctx context.Context, token, owner, repo string, number int) (*gitHubPullRequestDetails, error) {

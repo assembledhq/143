@@ -50,6 +50,12 @@ var ErrSessionTimedOut = errors.New("session timed out")
 // job is requeued without consuming an attempt.
 var ErrSnapshotPending = errors.New("snapshot upload pending")
 
+// ErrStalePullRequestHead is returned by PR repair reconstruction when the
+// fetched pull-request ref does not match the health snapshot's expected head.
+// The worker uses it to refresh GitHub state instead of running the agent
+// against the wrong checkout.
+var ErrStalePullRequestHead = errors.New("stale pull request head")
+
 // ErrSandboxRaceLoser is returned from RunAgent / ContinueSession when
 // AcquireTurnHold's COALESCE reveals that another holder published a
 // container_id first AND that container is alive — i.e. a duplicate
@@ -590,6 +596,7 @@ type ContinueSessionOptions struct {
 	ModelOverride        *string
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
+	PRRepair             *PRRepairContinueOptions
 
 	// ThreadID, when set, identifies the agent tab this turn belongs to.
 	// The orchestrator passes it to the thread cancel registry so a
@@ -606,6 +613,16 @@ type ContinueSessionOptions struct {
 	// swallowed by the orchestrator: per-tab bookkeeping is operational,
 	// not critical to the turn itself.
 	OnTurnComplete func(result *AgentResult)
+}
+
+type PRRepairContinueOptions struct {
+	PullRequestID     uuid.UUID
+	RepairRunID       uuid.UUID
+	PullRequestNumber int
+	CommandType       models.PullRequestRepairActionType
+	HealthVersion     int64
+	HeadSHA           string
+	WorkspaceMode     models.PullRequestRepairWorkspaceMode
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -2194,7 +2211,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// been mutated yet — this is the cleanest place for the gate. The status
 	// stays where the user left it (typically `pr_created`); no failure
 	// message is registered because this is a transient wait, not an error.
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+	prRepairOpts := (*PRRepairContinueOptions)(nil)
+	if opts != nil && opts.PRRepair != nil {
+		prRepairOpts = opts.PRRepair
+	}
+	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
+
+	if !prHeadReconstruction && session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
 	}
@@ -2213,7 +2236,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
-	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
+	hasSnapshot := !prHeadReconstruction &&
+		session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
 		session.SandboxState != string(models.SandboxStateDestroyed)
 
@@ -3012,8 +3036,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env)
+		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, prRepairOpts)
 		if err != nil {
+			if errors.Is(err, ErrStalePullRequestHead) {
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to restore session status after stale PR head")
+				}
+				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+					log.Warn().Err(revertErr).Msg("failed to restore sandbox state after stale PR head")
+				}
+				return err
+			}
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
@@ -3326,7 +3359,7 @@ func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64
 // full name (for memory lookup). Handles sessions with or without a repository.
 // The resolved env is passed in from the caller so auth injection honors the
 // exact credential selection already baked into SandboxConfig.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) (models.Issue, string, TokenBillingMode, error) {
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -3365,7 +3398,12 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("clone repo: %w", err)
 		}
 		workingBranch := sessionWorkingBranch(session, &issue)
-		if workingBranch != "" {
+		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
+			if err := o.checkoutPullRequestHead(ctx, sandbox, workingBranch, repairOpts); err != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, err
+			}
+			session.WorkingBranch = &workingBranch
+		} else if workingBranch != "" {
 			var checkoutOut, checkoutErr bytes.Buffer
 			exitCode, execErr := o.provider.Exec(ctx, sandbox, fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch)), &checkoutOut, &checkoutErr)
 			if execErr != nil {
@@ -3396,6 +3434,59 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	}
 
 	return issue, repoFullName, authBillingMode, nil
+}
+
+func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, workingBranch string, repairOpts *PRRepairContinueOptions) error {
+	if repairOpts == nil {
+		return nil
+	}
+	if repairOpts.HeadSHA == "" {
+		return fmt.Errorf("pull request repair reconstruction missing expected head SHA")
+	}
+	if workingBranch == "" {
+		return fmt.Errorf("pull request repair reconstruction missing working branch")
+	}
+
+	if repairOpts.PullRequestNumber <= 0 {
+		return fmt.Errorf("pull request repair reconstruction missing pull request number")
+	}
+	return o.checkoutExpectedPullRequestHead(ctx, sandbox, repairOpts.PullRequestNumber, workingBranch, repairOpts.HeadSHA)
+}
+
+func (o *Orchestrator) checkoutExpectedPullRequestHead(ctx context.Context, sandbox *Sandbox, pullRequestNumber int, workingBranch, expectedHeadSHA string) error {
+	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags origin 'pull/%d/head'", pullRequestNumber)
+	var fetchErr bytes.Buffer
+	fetchExit, fetchExecErr := o.provider.Exec(ctx, sandbox, fetchCmd, io.Discard, &fetchErr)
+	if fetchExecErr != nil {
+		return fmt.Errorf("fetch pull request head: %w", fetchExecErr)
+	}
+	if fetchExit != 0 {
+		return fmt.Errorf("fetch pull request head: exit=%d stderr=%s", fetchExit, fetchErr.String())
+	}
+
+	checkoutCmd := fmt.Sprintf("git checkout -B '%s' FETCH_HEAD", shellEscapeSingleQuote(workingBranch))
+	var checkoutErr bytes.Buffer
+	checkoutExit, checkoutExecErr := o.provider.Exec(ctx, sandbox, checkoutCmd, io.Discard, &checkoutErr)
+	if checkoutExecErr != nil {
+		return fmt.Errorf("checkout pull request head: %w", checkoutExecErr)
+	}
+	if checkoutExit != 0 {
+		return fmt.Errorf("checkout pull request head: exit=%d stderr=%s", checkoutExit, checkoutErr.String())
+	}
+
+	var headOut, headErr bytes.Buffer
+	headExit, headExecErr := o.provider.Exec(ctx, sandbox, "git rev-parse HEAD", &headOut, &headErr)
+	if headExecErr != nil {
+		return fmt.Errorf("verify pull request head: %w", headExecErr)
+	}
+	if headExit != 0 {
+		return fmt.Errorf("verify pull request head: exit=%d stderr=%s", headExit, headErr.String())
+	}
+	actual := strings.TrimSpace(headOut.String())
+	if actual != expectedHeadSHA {
+		return fmt.Errorf("%w: expected %s, got %s", ErrStalePullRequestHead, expectedHeadSHA, actual)
+	}
+	return nil
 }
 
 // sessionRepoSlug returns the repo-name slug for the session's repository. The
