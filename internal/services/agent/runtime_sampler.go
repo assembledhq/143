@@ -125,13 +125,12 @@ func (s *RuntimeSampler) tick(ctx context.Context) {
 
 	var sampleFailures int
 	var agg runtimeSampleAggregate
-	var observed int
 	for result := range results {
 		if result.sampleFailed {
 			sampleFailures++
 			continue
 		}
-		observed++
+		agg.observedSamples++
 		agg.memorySum += result.memoryUtil
 		agg.cpuSum += result.cpuUtil
 		if result.memoryUtil > agg.maxMemoryUtil {
@@ -141,9 +140,9 @@ func (s *RuntimeSampler) tick(ctx context.Context) {
 			agg.maxCPUUtil = result.cpuUtil
 		}
 	}
-	if observed > 0 {
-		agg.meanMemoryUtil = agg.memorySum / float64(observed)
-		agg.meanCPUUtil = agg.cpuSum / float64(observed)
+	if agg.observedSamples > 0 {
+		agg.meanMemoryUtil = agg.memorySum / float64(agg.observedSamples)
+		agg.meanCPUUtil = agg.cpuSum / float64(agg.observedSamples)
 	}
 	s.logAggregateHealthSample(len(active), sampleFailures, agg)
 }
@@ -152,15 +151,28 @@ func (s *RuntimeSampler) tick(ctx context.Context) {
 // Mean is included alongside max so a dashboard can tell "one container at
 // 95%" from "every container at 95%" — the max collapses both cases otherwise.
 type runtimeSampleAggregate struct {
-	maxMemoryUtil  float64
-	maxCPUUtil     float64
-	meanMemoryUtil float64
-	meanCPUUtil    float64
-	memorySum      float64
-	cpuSum         float64
+	maxMemoryUtil   float64
+	maxCPUUtil      float64
+	meanMemoryUtil  float64
+	meanCPUUtil     float64
+	memorySum       float64
+	cpuSum          float64
+	observedSamples int
 }
 
 func (s *RuntimeSampler) logAggregateHealthSample(activeContainers, sampleFailures int, agg runtimeSampleAggregate) {
+	minMemoryHeadroom, minCPUHeadroom := 0.0, 0.0
+	meanMemoryHeadroom, meanCPUHeadroom := 0.0, 0.0
+	if activeContainers == 0 {
+		minMemoryHeadroom, minCPUHeadroom = 1, 1
+		meanMemoryHeadroom, meanCPUHeadroom = 1, 1
+	} else if agg.observedSamples > 0 {
+		minMemoryHeadroom = clamp01(1 - agg.maxMemoryUtil)
+		minCPUHeadroom = clamp01(1 - agg.maxCPUUtil)
+		meanMemoryHeadroom = clamp01(1 - agg.meanMemoryUtil)
+		meanCPUHeadroom = clamp01(1 - agg.meanCPUUtil)
+	}
+
 	event := s.logger.Info()
 	if s.nodeID != "" {
 		event = event.Str("worker_node_id", s.nodeID)
@@ -172,6 +184,10 @@ func (s *RuntimeSampler) logAggregateHealthSample(activeContainers, sampleFailur
 		Float64("max_cpu_util", agg.maxCPUUtil).
 		Float64("mean_memory_util", agg.meanMemoryUtil).
 		Float64("mean_cpu_util", agg.meanCPUUtil).
+		Float64("min_memory_headroom", minMemoryHeadroom).
+		Float64("min_cpu_headroom", minCPUHeadroom).
+		Float64("mean_memory_headroom", meanMemoryHeadroom).
+		Float64("mean_cpu_headroom", meanCPUHeadroom).
 		Msg("platform health: runtime sample")
 }
 
