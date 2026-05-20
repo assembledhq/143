@@ -355,6 +355,48 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	}
 }
 
+func TestPlatformHealthDashboardPrioritizesActionableQueueAndWorkerCapacity(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/platform-health.json")
+	require.NoError(t, err, "test should read platform health dashboard")
+
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "platform health dashboard should be valid JSON")
+
+	panelTitles := make(map[string]bool, len(dashboard.Panels))
+	var expressions []string
+	for _, panel := range dashboard.Panels {
+		panelTitles[panel.Title] = true
+		require.NotContains(t, panel.Title, "Runnable", "platform health dashboard should use operator-facing ready/waiting terminology instead of internal runnable wording")
+		require.NotContains(t, panel.Title, "runnable", "platform health dashboard should use operator-facing ready/waiting terminology instead of internal runnable wording")
+		for _, target := range panel.Targets {
+			expressions = append(expressions, target.Expr)
+		}
+	}
+
+	require.True(t, panelTitles["Ready jobs waiting"], "dashboard should expose jobs that are ready to claim in plain language")
+	require.True(t, panelTitles["Oldest waiting job"], "dashboard should expose queue staleness in plain language")
+	require.True(t, panelTitles["Running containers"], "dashboard should show a current container snapshot")
+	require.True(t, panelTitles["Lowest RAM headroom"], "dashboard should show remaining worker memory headroom")
+	require.True(t, panelTitles["Lowest CPU headroom"], "dashboard should show remaining worker CPU headroom")
+	require.True(t, panelTitles["Worker capacity snapshot"], "dashboard should include a per-worker capacity table")
+	require.True(t, panelTitles["Queue action list"], "dashboard should include an operator-focused queue table")
+
+	allExpressions := strings.Join(expressions, "\n")
+	require.Contains(t, allExpressions, "min_memory_headroom", "dashboard should query explicit memory headroom from runtime health logs")
+	require.Contains(t, allExpressions, "min_cpu_headroom", "dashboard should query explicit CPU headroom from runtime health logs")
+	require.Contains(t, allExpressions, "stats by (worker_node_id)", "dashboard should group worker capacity by worker node")
+	require.Contains(t, allExpressions, "pending_runnable) as ready", "dashboard can still query the stored runnable field but should alias it to ready")
+}
+
 func TestPrimaryOperationsDashboardTracksWorkerLoad(t *testing.T) {
 	t.Parallel()
 

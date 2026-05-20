@@ -351,7 +351,7 @@ Provisioning workflow:
 ### Step 3: Set Up Dashboards and Alerts
 
 1. The provisioned error drilldown dashboard lives at `deploy/grafana/provisioning/dashboards/errors.json` and covers PR creation/push failures, session problems, worker fatal jobs, API 5xxs, reaper errors, top error messages, and raw recent error logs.
-2. The provisioned platform health dashboard lives at `deploy/grafana/provisioning/dashboards/platform-health.json` and covers job queue health, session/agent outcomes, API latency and traffic, and sandbox/runtime health from structured log signals.
+2. The provisioned platform health dashboard lives at `deploy/grafana/provisioning/dashboards/platform-health.json` and is organized around actionable queue and worker-capacity signals first: ready jobs waiting, oldest wait, dead-letter jobs, active sandbox containers, and lowest CPU/RAM headroom from runtime samples. API health and session failure drilldowns remain below the headline operational snapshot.
 3. The Grafana dashboard provider uses `disableDeletion: false`, so removed dashboard JSON files are deleted from Grafana after provisioning resync.
 4. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
 5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys. App, worker, and logging deploys wait for Vector's Docker healthcheck to leave the initial `starting` state before deciding whether log collection is healthy.
