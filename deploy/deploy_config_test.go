@@ -449,10 +449,12 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 
 	require.Contains(t, deployText, "prune_docker_deploy_artifacts()", "deploy.sh should define one prune helper so app, worker, and detached worker paths stay aligned")
 	require.Contains(t, deployText, `docker container prune -f --filter "until=$prune_until"`, "deploy prune should remove stopped containers after a successful rollout")
+	require.NotContains(t, deployText, `docker rm -f`, "deploy prune must not force-remove running executor containers")
 	require.Contains(t, deployText, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
 	require.Contains(t, deployText, `docker builder prune -af --filter "until=$prune_until"`, "deploy prune should remove unused build cache after a successful rollout")
 	require.Contains(t, deployText, `"DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}"`, "deploy should pass the prune enable/disable knob through SSH to the remote host")
 	require.Contains(t, deployText, `"DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}"`, "deploy should pass the prune age window through SSH to the remote host")
+	require.Contains(t, deployText, `"SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}"`, "deploy should pass the executor network override through SSH to the remote host")
 	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
 	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
 	require.Contains(t, deployText, `$(declare -f drain_worker_service wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the prune helper in the host-side script")
@@ -460,6 +462,18 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
+}
+
+func TestWorkerComposeConfiguresSessionExecutorNetwork(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read worker compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, "SESSION_EXECUTOR_DOCKER_NETWORK", "worker compose should configure executor containers onto the worker docker network")
+	require.Contains(t, composeText, "${SESSION_EXECUTOR_DOCKER_NETWORK:-143_default}", "worker compose should default executor containers to the production compose network")
+	require.NotContains(t, composeText, "SESSION_EXECUTORS_ENABLED", "worker compose should launch session executors without a dark-launch boolean")
 }
 
 // Pin the multi-resolver Docker DNS wiring so a future refactor doesn't

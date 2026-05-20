@@ -850,6 +850,7 @@ type Job struct {
 	LeaseExpiresAt *time.Time      `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
 	LockToken      *uuid.UUID      `db:"lock_token" json:"lock_token,omitempty"`
 	RunOwnerID     *string         `db:"run_owner_id" json:"run_owner_id,omitempty"`
+	OwnerKind      JobOwnerKind    `db:"owner_kind" json:"owner_kind"`
 	LastError      *string         `db:"last_error" json:"last_error,omitempty"`
 	DedupeKey      *string         `db:"dedupe_key" json:"dedupe_key,omitempty"`
 	// TargetNodeID, when set, restricts the job to be claimed by this

@@ -91,7 +91,11 @@ export function buildUsageChartData(
       if (typeof hourUTC !== "string") {
         continue
       }
-      const day = new Date(hourUTC).toLocaleDateString("en-CA");
+      const hourDate = new Date(hourUTC);
+      if (Number.isNaN(hourDate.getTime())) {
+        continue;
+      }
+      const day = hourDate.toISOString().slice(0, 10);
       const row = dayMap.get(day) ?? { day, label: formatDayLabel(day), total: 0 };
       const key = typeof bucket.series_key === "string" && bucket.series_key !== "" ? bucket.series_key : "unknown";
       const metricValue = Number(bucket[metric] ?? 0);

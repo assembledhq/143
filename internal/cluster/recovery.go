@@ -16,9 +16,14 @@ type recoveryJobStore interface {
 	ReclaimLostRunningJobs(ctx context.Context, staleBefore time.Time, limit int) (int64, error)
 }
 
+type recoverySessionExecutorStore interface {
+	ReclaimLost(ctx context.Context, staleBefore time.Time, limit int) (int64, error)
+}
+
 type RecoveryLoop struct {
 	nodes            recoveryNodeStore
 	jobs             recoveryJobStore
+	executors        recoverySessionExecutorStore
 	logger           zerolog.Logger
 	deadNodeTimeout  time.Duration
 	reclaimBatchSize int
@@ -32,6 +37,10 @@ func NewRecoveryLoop(nodes recoveryNodeStore, jobs recoveryJobStore, logger zero
 		deadNodeTimeout:  deadNodeTimeout,
 		reclaimBatchSize: reclaimBatchSize,
 	}
+}
+
+func (r *RecoveryLoop) SetSessionExecutors(executors recoverySessionExecutorStore) {
+	r.executors = executors
 }
 
 func (r *RecoveryLoop) Start(ctx context.Context, interval time.Duration) {
@@ -54,6 +63,11 @@ func (r *RecoveryLoop) runOnce(ctx context.Context, now time.Time) error {
 	staleBefore := now.Add(-r.deadNodeTimeout)
 	if _, err := r.nodes.MarkStaleNodesDead(ctx, staleBefore); err != nil {
 		return fmt.Errorf("mark stale nodes dead: %w", err)
+	}
+	if r.executors != nil {
+		if _, err := r.executors.ReclaimLost(ctx, staleBefore, r.reclaimBatchSize); err != nil {
+			return fmt.Errorf("reclaim lost session executors: %w", err)
+		}
 	}
 	if _, err := r.jobs.ReclaimLostRunningJobs(ctx, staleBefore, r.reclaimBatchSize); err != nil {
 		return fmt.Errorf("reclaim lost running jobs: %w", err)
