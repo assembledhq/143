@@ -62,7 +62,7 @@ func (m *MockSandboxProvider) Create(ctx context.Context, cfg agent.SandboxConfi
 	if m.CreateFn != nil {
 		return m.CreateFn(ctx, cfg)
 	}
-	return &agent.Sandbox{ID: "test-sandbox", Provider: m.Name_, WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	return &agent.Sandbox{ID: "test-sandbox", Provider: m.Name_, WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir, Env: cloneEnv(cfg.Env)}, nil
 }
 
 func (m *MockSandboxProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
@@ -70,6 +70,17 @@ func (m *MockSandboxProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, 
 		return m.CloneRepoFn(ctx, sb, repoURL, branch, token)
 	}
 	return nil
+}
+
+func cloneEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
 }
 
 func (m *MockSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
@@ -129,7 +140,8 @@ func (m *MockSandboxProvider) Restore(ctx context.Context, sb *agent.Sandbox, re
 	if m.RestoreFn != nil {
 		return m.RestoreFn(ctx, sb, reader)
 	}
-	return nil
+	_, err := io.Copy(io.Discard, reader)
+	return err
 }
 
 func (m *MockSandboxProvider) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {

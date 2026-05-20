@@ -307,9 +307,6 @@ export function SwipeActionRow({
       : "closed";
   const trailingActionHidden = state === "closed";
   const actionAreaWidth = trailingActionHidden ? 0 : Math.max(ACTION_WIDTH, offset);
-  const commitThreshold = commitThresholdFor(gestureWidth);
-  const swipeProgress = Math.max(0, Math.min(1, offset / commitThreshold));
-  const progressFill = trailingActionHidden ? 0 : Math.max(0.18, swipeProgress);
   const actionHint = isCommitted
     ? `Release to ${actionText.toLowerCase()}`
     : "Keep swiping";
@@ -347,18 +344,11 @@ export function SwipeActionRow({
         >
           <div
             aria-hidden="true"
+            data-swipe-action-color="true"
             className={cn(
               "absolute inset-0 rounded-r-lg shadow-[inset_1px_0_0_rgba(255,255,255,0.18)] transition-colors duration-150 ease-out",
-              isCommitted ? "bg-amber-700" : "bg-amber-500",
+              isCommitted ? "bg-amber-700" : "bg-amber-600/88",
             )}
-          />
-          <div
-            aria-hidden="true"
-            className={cn(
-              "absolute inset-y-0 right-0 rounded-r-lg transition-all duration-150 ease-out",
-              isCommitted ? "bg-amber-800/90" : "bg-amber-600/88",
-            )}
-            style={{ width: `${progressFill * 100}%` }}
           />
           <Button
             variant="ghost"
@@ -366,13 +356,10 @@ export function SwipeActionRow({
             aria-hidden={trailingActionHidden}
             tabIndex={trailingActionHidden ? -1 : 0}
             className="relative h-full w-full rounded-none rounded-r-lg bg-transparent px-0 text-white shadow-none hover:bg-transparent hover:text-white active:bg-transparent"
-            onClick={() => {
-              close();
-              try {
-                handleActionPromise(onAction());
-              } catch (error) {
-                throw error;
-              }
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              commitAction(containerRef.current?.offsetWidth || gestureWidth);
             }}
           >
             <span className="relative flex h-full w-full flex-col items-center justify-center gap-0.5 px-4 text-center">

@@ -3,6 +3,9 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -55,12 +59,21 @@ const (
 )
 
 type integrationCredentialStore interface {
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 }
 
 // githubAppService provides GitHub App installation tokens for fetching repos.
 type githubAppService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
+}
+
+type githubAppUserCredentialProvider interface {
+	GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
+}
+
+type githubMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 }
 
 // --- Linear types ---
@@ -82,7 +95,15 @@ type linearOrganization struct {
 }
 
 type linearViewer struct {
+	// Organization is the Linear workspace this token belongs to.
 	Organization linearOrganization `json:"organization"`
+	// ID and Name describe the *agent user* Linear provisioned at install
+	// time when the OAuth flow used actor=app. For a non-agent install
+	// these fields describe the human installer and we ignore them.
+	// Distinguishing the two cases happens upstream: HandleLinearOAuthCallback
+	// only stores AppUserID when AgentScopesGranted is true.
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type linearViewerData struct {
@@ -153,8 +174,12 @@ type IntegrationHandler struct {
 	githubAppSlug string
 
 	// GitHub App service and repo store (for fetching repos on install)
-	githubService githubAppService
-	repoStore     *db.RepositoryStore
+	githubService       githubAppService
+	repoStore           *db.RepositoryStore
+	githubInstallations *db.GitHubInstallationStore
+	githubAppUserAuth   githubAppUserCredentialProvider
+	memberships         githubMembershipStore
+	setupSigningKey     string
 
 	// Slack OAuth
 	slackClientID string
@@ -169,6 +194,7 @@ type IntegrationHandler struct {
 	linearJobStore                *db.JobStore
 	linearTeamKeyRefresher        func(ctx context.Context, orgID uuid.UUID) error
 	linearTeamKeyCacheInvalidator func(orgID uuid.UUID)
+	linearAgentBootstrapper       func(ctx context.Context, orgID uuid.UUID) error
 }
 
 // SetLinearJobStore wires a JobStore so the OAuth callback can enqueue an
@@ -196,6 +222,17 @@ func (h *IntegrationHandler) SetLinearTeamKeyRefresher(fn func(ctx context.Conte
 // (60s) bounds the worst-case staleness window on its own.
 func (h *IntegrationHandler) SetLinearTeamKeyCacheInvalidator(fn func(orgID uuid.UUID)) {
 	h.linearTeamKeyCacheInvalidator = fn
+}
+
+// SetLinearAgentBootstrapper wires the hook that runs after a successful
+// Linear OAuth callback that granted agent scopes. The hook flips the
+// per-org agent toggle to enabled when the admin hasn't expressed an
+// opinion yet and picks an org-default repo when the org has exactly one
+// connected GitHub repo — both are convenience defaults that remove the
+// "I re-authorized but nothing happens" cliff without overriding any
+// explicit user choice. Nil-safe.
+func (h *IntegrationHandler) SetLinearAgentBootstrapper(fn func(ctx context.Context, orgID uuid.UUID) error) {
+	h.linearAgentBootstrapper = fn
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -256,12 +293,36 @@ func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
 	}
 }
 
-// WithGitHubApp injects the GitHub App service and repo store so that
-// HandleGitHubAppInstalled can fetch repos from the GitHub API.
+// WithGitHubApp injects the GitHub App service and repo store used by
+// repository selection, explicit claims, and legacy sync status endpoints.
 func WithGitHubApp(svc githubAppService, repoStore *db.RepositoryStore) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.githubService = svc
 		h.repoStore = repoStore
+	}
+}
+
+func WithGitHubInstallationStore(store *db.GitHubInstallationStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubInstallations = store
+	}
+}
+
+func WithGitHubAppUserAuth(auth githubAppUserCredentialProvider) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubAppUserAuth = auth
+	}
+}
+
+func WithIntegrationMembershipStore(store githubMembershipStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.memberships = store
+	}
+}
+
+func WithGitHubSetupSigningKey(key string) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.setupSigningKey = key
 	}
 }
 
@@ -349,15 +410,39 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 		InstallationID int64 `json:"installation_id"`
 	}
 	installed := false
+	var installationID int64
+	var accountLogin string
 	if len(integration.Config) > 0 && json.Unmarshal(integration.Config, &cfg) == nil && cfg.InstallationID > 0 {
 		installed = true
+		installationID = cfg.InstallationID
+	}
+	if h.githubInstallations != nil {
+		if link, err := h.githubInstallations.FirstOrgLink(ctx, integration.OrgID); err == nil {
+			installed = true
+			installationID = link.InstallationID
+			accountLogin = link.AccountLogin
+		}
 	}
 	if !installed && h.repoStore != nil {
-		if installationID, err := h.repoStore.GetAnyInstallationIDByOrg(ctx, integration.OrgID); err == nil && installationID > 0 {
+		if fallbackInstallationID, err := h.repoStore.GetAnyInstallationIDByOrg(ctx, integration.OrgID); err == nil && fallbackInstallationID > 0 {
 			installed = true
+			installationID = fallbackInstallationID
 		}
 	}
 	integration.GitHubAppInstalled = &installed
+	if installationID > 0 {
+		integration.GitHubInstallationID = &installationID
+	}
+	if accountLogin != "" {
+		integration.GitHubAccountLogin = &accountLogin
+	}
+	if h.repoStore != nil {
+		if count, err := h.repoStore.CountActiveByOrg(ctx, integration.OrgID); err == nil {
+			integration.GitHubActiveRepoCount = &count
+			required := installed && count == 0
+			integration.GitHubRepoSelectionRequired = &required
+		}
+	}
 }
 
 // readAuthErrorFromConfig extracts the auth-error pair the linear service
@@ -428,6 +513,12 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 				return
 			}
 		}
+		if provider == models.IntegrationProviderGitHub && h.githubInstallations != nil {
+			if err := h.githubInstallations.DeactivateOrgLinksByIntegration(r.Context(), orgID, integration.ID); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect github installation links", err)
+				return
+			}
+		}
 	}
 
 	// Drop the Linear team-key allowlist cache for this org so a session
@@ -459,12 +550,31 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Single OAuth flow that grants the legacy read/write scopes used by
+	// the existing session-linking write-back plus the agent scopes
+	// (app:assignable, app:mentionable) used by the inbound agent feature.
+	// Linear treats scopes additively, so this flow is a strict superset
+	// of the previous one — orgs that only ever use the outbound
+	// integration pay nothing for the agent scopes being granted.
+	//
+	// Refresh tokens are issued automatically by Linear without any
+	// special scope. PR #807 attempted offline_access but Linear rejected
+	// it as "Invalid scope"; PR #816 dropped it and confirmed refresh
+	// works without it.
+	//
+	// actor=app provisions a dedicated agent user (`@143`) in the workspace
+	// and ties subsequent token-authored writes to it. Workspace-admin
+	// privileges are required by Linear; the install copy in the frontend
+	// must reflect that. See docs/design/implemented/69-linear-agent.md
+	// §"OAuth flow — single upgraded install" for the rationale on a single
+	// flow vs parallel flows.
 	params := url.Values{
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read,write"},
+		"scope":         {strings.Join(models.LinearAgentRequiredScopes, ",")},
 		"state":         {state},
+		"actor":         {"app"},
 	}
 
 	http.Redirect(w, r, linearAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
@@ -485,7 +595,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
-	workspaceID, workspaceName, err := h.fetchLinearWorkspace(r.Context(), token.AccessToken)
+	viewer, err := h.fetchLinearViewer(r.Context(), token.AccessToken)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LINEAR_API_FAILED", "failed to fetch linear workspace", err)
 		return
@@ -498,31 +608,76 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
+	// Build the credential. AppUser* fields are recorded only when the
+	// returned token actually carries the agent scopes — installing through
+	// a third-party OAuth tool that strips actor=app will give us a legacy
+	// scope set even though the GraphQL viewer call returned *something*.
+	// Storing AppUserID in that case would lie to downstream code that
+	// uses "AppUserID != \"\"" as the "agent installed" predicate.
 	linearConfig := models.LinearConfig{
 		AccessToken:   token.AccessToken,
 		RefreshToken:  token.RefreshToken,
 		TokenType:     token.TokenType,
 		Scope:         token.Scope,
-		WorkspaceID:   workspaceID,
-		WorkspaceName: workspaceName,
+		WorkspaceID:   viewer.WorkspaceID,
+		WorkspaceName: viewer.WorkspaceName,
+	}
+	if linearConfig.HasAgentScopes() {
+		linearConfig.AppUserID = viewer.AppUserID
+		linearConfig.AppUserName = viewer.AppUserName
+		linearConfig.AgentScopesGranted = true
 	}
 	if token.ExpiresIn > 0 {
 		linearConfig.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
+	mergedConfig, err := h.preserveExistingWebhookSecret(r.Context(), orgID, linearConfig)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to preserve linear webhook secret", err)
+		return
+	}
+	linearConfig = mergedConfig.(models.LinearConfig)
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
 		return
 	}
 
-	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
+	integration, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
 	}
 
+	// Persist the Linear workspace id on integrations.config so the
+	// multi-tenant webhook handler can resolve org-by-workspace at request
+	// time. A single Linear OAuth app has one webhook URL across every
+	// workspace it's installed in; the payload's `organizationId` field is
+	// the only org-identifying signal available pre-HMAC. This is a
+	// Required write: if it fails, the shared Linear webhook URL would keep
+	// routing to an old org (or to no org), so the OAuth callback must not
+	// report a successful connection.
+	if viewer.WorkspaceID != "" {
+		if err := h.integrationStore.SetLinearWorkspaceID(r.Context(), orgID, integration.ID, viewer.WorkspaceID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to persist linear workspace routing key", err)
+			return
+		}
+	}
+
 	logger.Info().
 		Str("org_id", orgID.String()).
-		Str("workspace_id", workspaceID).
+		Str("workspace_id", viewer.WorkspaceID).
 		Msg("linear oauth callback completed; credentials stored and integration active")
+
+	// Auto-enable the agent and pick an org-default repo when the install
+	// just acquired agent scopes. Best-effort: failures here are logged but
+	// don't break the OAuth flow — the admin can always toggle/configure
+	// manually from Settings → Integrations → Linear → Agent.
+	if linearConfig.HasAgentScopes() && h.linearAgentBootstrapper != nil {
+		if err := h.linearAgentBootstrapper(r.Context(), orgID); err != nil {
+			logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Msg("linear agent bootstrap (enable + default repo) failed; admin can configure manually")
+		}
+	}
 
 	// Trigger an initial team-key refresh so detection's bare-identifier
 	// branch works on the very next session. Three-tier strategy:
@@ -546,7 +701,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		bgCtx, bgCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
 		go func() {
 			defer bgCancel()
-			if err := h.linearTeamKeyRefresher(bgCtx, orgID); err != nil {
+			if err := h.refreshLinearTeamKeysAfterInstall(bgCtx, orgID); err != nil {
 				logger.Warn().Err(err).
 					Str("org_id", orgID.String()).
 					Msg("background refresh_linear_team_keys after install failed; worker fallback or 24h cron will retry")
@@ -563,6 +718,73 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)
+}
+
+const linearTeamKeyInstallRetryDelay = 100 * time.Millisecond
+
+func (h *IntegrationHandler) refreshLinearTeamKeysAfterInstall(ctx context.Context, orgID uuid.UUID) error {
+	if h.linearTeamKeyRefresher == nil {
+		return nil
+	}
+	err := h.linearTeamKeyRefresher(ctx, orgID)
+	if err == nil || !isTransientLinearIntegrationLookupMiss(err) {
+		return err
+	}
+
+	timer := time.NewTimer(linearTeamKeyInstallRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return h.linearTeamKeyRefresher(ctx, orgID)
+}
+
+func isTransientLinearIntegrationLookupMiss(err error) bool {
+	return errors.Is(err, linearservice.ErrIntegrationNotFound) ||
+		(err != nil && strings.Contains(err.Error(), "linear integration not found"))
+}
+
+func (h *IntegrationHandler) preserveExistingWebhookSecret(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) (models.ProviderConfig, error) {
+	if h.credentialStore == nil {
+		return cfg, nil
+	}
+
+	switch next := cfg.(type) {
+	case models.LinearConfig:
+		if next.WebhookSecret != "" {
+			return cfg, nil
+		}
+		existing, err := h.credentialStore.Get(ctx, orgID, models.ProviderLinear)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cfg, nil
+			}
+			return nil, err
+		}
+		if prior, ok := existing.Config.(models.LinearConfig); ok && prior.WebhookSecret != "" {
+			next.WebhookSecret = prior.WebhookSecret
+		}
+		return next, nil
+	case models.SentryConfig:
+		if next.WebhookSecret != "" {
+			return cfg, nil
+		}
+		existing, err := h.credentialStore.Get(ctx, orgID, models.ProviderSentry)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cfg, nil
+			}
+			return nil, err
+		}
+		if prior, ok := existing.Config.(models.SentryConfig); ok && prior.WebhookSecret != "" {
+			next.WebhookSecret = prior.WebhookSecret
+		}
+		return next, nil
+	default:
+		return cfg, nil
+	}
 }
 
 func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Request) {
@@ -638,6 +860,12 @@ func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r 
 		OrgSlug:      orgSlug,
 		OrgName:      orgName,
 	}
+	mergedConfig, err := h.preserveExistingWebhookSecret(r.Context(), orgID, sentryConfig)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to preserve sentry webhook secret", err)
+		return
+	}
+	sentryConfig = mergedConfig.(models.SentryConfig)
 	if err := h.credentialStore.Upsert(r.Context(), orgID, sentryConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store sentry credential", err)
 		return
@@ -671,12 +899,10 @@ func (h *IntegrationHandler) ConnectSentry(w http.ResponseWriter, r *http.Reques
 
 func (h *IntegrationHandler) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	// If a GitHub App slug is configured, redirect to the App installation page
-	// instead of the OAuth flow. The App installation triggers a webhook that
-	// registers repos automatically. We still set the OAuth state cookie so
-	// the callback can validate the redirect when GitHub returns the user with
-	// a code (GitHub Apps pass the state parameter through).
+	// instead of the OAuth flow. Repositories are claimed explicitly after setup;
+	// the signed state binds the callback to the intended user and org.
 	if h.githubAppSlug != "" {
-		state, err := setOAuthState(w, githubIntegrationOAuthStateCookie)
+		state, err := h.setGitHubSetupState(w, r)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate oauth state", err)
 			return
@@ -712,8 +938,8 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 	// When a GitHub App has "Request user authorization during installation"
 	// enabled, GitHub redirects here with installation_id and setup_action
 	// instead of the Setup URL. Delegate to the App installation handler
-	// which stores the installation_id and syncs repos.
-	if r.URL.Query().Get("installation_id") != "" && r.URL.Query().Get("setup_action") == "install" {
+	// which stores the installation link and redirects to repository selection.
+	if r.URL.Query().Get("installation_id") != "" && isGitHubAppSetupAction(r.URL.Query().Get("setup_action")) {
 		h.HandleGitHubAppInstalled(w, r)
 		return
 	}
@@ -759,8 +985,34 @@ func (h *IntegrationHandler) HandleGitHubOAuthCallback(w http.ResponseWriter, r 
 // fetches the repos for that installation from the GitHub API, and
 // redirects to the frontend integrations page.
 func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	activeOrgID := middleware.OrgIDFromContext(r.Context())
+	orgID, userID, ok := h.validateGitHubSetupState(w, r)
+	if !ok {
+		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_SETUP_STATE", "github setup state is missing, expired, or invalid")
+		return
+	}
+	if !h.userIsAdminInOrg(r.Context(), userID, orgID) {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "admin access to the setup organization is required")
+		return
+	}
+	if activeOrgID != uuid.Nil && activeOrgID != orgID {
+		zerolog.Ctx(r.Context()).Info().
+			Str("active_org_id", activeOrgID.String()).
+			Str("setup_org_id", orgID.String()).
+			Msg("github setup state org differs from active org")
+	}
 	ctx := r.Context()
+
+	installIDStr := r.URL.Query().Get("installation_id")
+	if installIDStr == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_INSTALLATION_ID", "missing github installation id")
+		return
+	}
+	installationID, parseErr := strconv.ParseInt(installIDStr, 10, 64)
+	if parseErr != nil || installationID <= 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INSTALLATION_ID", "invalid github installation id")
+		return
+	}
 
 	integration, _, err := h.ensureIntegration(ctx, orgID, models.IntegrationProviderGitHub)
 	if err != nil {
@@ -769,76 +1021,66 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 	}
 
 	// GitHub redirects here with ?installation_id=<id>&setup_action=install.
-	// Store the installation_id in the integration config so webhooks can
-	// resolve the integration later, and fetch repos via the API so the user
-	// doesn't have to wait for the webhook.
-	if installIDStr := r.URL.Query().Get("installation_id"); installIDStr != "" {
-		installationID, parseErr := strconv.ParseInt(installIDStr, 10, 64)
-		if parseErr == nil {
-			configJSON, marshalErr := json.Marshal(map[string]any{
-				"installation_id": installationID,
-			})
-			if marshalErr != nil {
-				zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal installation config")
-				http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
-				return
-			}
-			if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, configJSON); err != nil {
-				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update integration config")
-			}
-
-			// Fetch and upsert repos from the GitHub API.
-			if h.githubService != nil && h.repoStore != nil {
-				h.syncInstallationRepos(ctx, orgID, integration.ID, installationID)
-			}
-		}
+	// Store the installation_id in the integration config and link it to the
+	// target 143 org. Repository rows are activated later through explicit claims.
+	accountLogin := r.URL.Query().Get("account_login")
+	if accountLogin == "" {
+		accountLogin = "unknown"
 	}
-
-	http.Redirect(w, r, h.frontendURL+"/integrations?github=connected", http.StatusTemporaryRedirect)
-}
-
-// syncInstallationRepos fetches repos for a GitHub App installation and
-// upserts them into the database. Errors are logged but not surfaced to
-// the caller — the webhook provides a fallback if this fails.
-func (h *IntegrationHandler) syncInstallationRepos(ctx context.Context, orgID uuid.UUID, integrationID uuid.UUID, installationID int64) {
-	token, err := h.githubService.GetInstallationToken(ctx, installationID)
-	if err != nil {
-		return
-	}
-
-	repos, err := h.listInstallationRepos(ctx, token)
-	if err != nil {
-		return
-	}
-
-	for _, ghRepo := range repos {
-		repo := &models.Repository{
-			OrgID:          orgID,
-			IntegrationID:  integrationID,
-			GitHubID:       ghRepo.ID,
-			FullName:       ghRepo.FullName,
-			DefaultBranch:  ghRepo.DefaultBranch,
-			Private:        ghRepo.Private,
-			CloneURL:       ghRepo.CloneURL,
+	if h.githubInstallations != nil {
+		inst := &models.GitHubInstallation{
 			InstallationID: installationID,
+			AccountLogin:   accountLogin,
 			Status:         "active",
-			Settings:       json.RawMessage(`{}`),
 		}
-		if repo.DefaultBranch == "" {
-			repo.DefaultBranch = "main"
+		if err := h.githubInstallations.UpsertInstallation(ctx, inst); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to upsert github installation")
+		} else if inst.AccountLogin != "" {
+			accountLogin = inst.AccountLogin
 		}
-		if repo.CloneURL == "" {
-			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
+		var linkedBy *uuid.UUID
+		if userID != uuid.Nil {
+			linkedBy = &userID
 		}
-		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-			zerolog.Ctx(ctx).Warn().Err(err).Str("repo", ghRepo.FullName).Msg("failed to upsert repo from GitHub")
-			continue
+		link := &models.GitHubInstallationOrgLink{
+			OrgID:          orgID,
+			IntegrationID:  &integration.ID,
+			InstallationID: installationID,
+			AccountLogin:   accountLogin,
+			LinkedByUserID: linkedBy,
+			Status:         "active",
 		}
+		if err := h.githubInstallations.UpsertOrgLink(ctx, link); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to link github installation to org")
+		}
+	}
+	configJSON, marshalErr := json.Marshal(map[string]any{
+		"installation_id": installationID,
+		"account_login":   accountLogin,
+	})
+	if marshalErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal installation config")
+		http.Redirect(w, r, h.frontendURL+"/settings/integrations?github=connected", http.StatusTemporaryRedirect)
+		return
+	}
+	if err := h.integrationStore.UpdateConfig(ctx, orgID, integration.ID, configJSON); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update integration config")
+	}
+
+	http.Redirect(w, r, h.frontendURL+"/settings/integrations?github=connected&select_repos=1", http.StatusTemporaryRedirect)
+}
+
+func isGitHubAppSetupAction(action string) bool {
+	switch action {
+	case "install", "update":
+		return true
+	default:
+		return false
 	}
 }
 
-// SyncGitHubRepos re-syncs repositories from a GitHub App installation.
-// This is a recovery mechanism for when the initial webhook-based sync fails.
+// SyncGitHubRepos reports repositories visible to the GitHub App installation.
+// It no longer imports repositories; admins claim repositories explicitly.
 func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orgID := middleware.OrgIDFromContext(ctx)
@@ -889,43 +1131,15 @@ func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	synced := 0
-	syncErrors := 0
-	for _, ghRepo := range repos {
-		repo := &models.Repository{
-			OrgID:          orgID,
-			IntegrationID:  integration.ID,
-			GitHubID:       ghRepo.ID,
-			FullName:       ghRepo.FullName,
-			DefaultBranch:  ghRepo.DefaultBranch,
-			Private:        ghRepo.Private,
-			CloneURL:       ghRepo.CloneURL,
-			InstallationID: config.InstallationID,
-			Status:         "active",
-			Settings:       json.RawMessage(`{}`),
-		}
-		if repo.DefaultBranch == "" {
-			repo.DefaultBranch = "main"
-		}
-		if repo.CloneURL == "" {
-			repo.CloneURL = "https://github.com/" + ghRepo.FullName + ".git"
-		}
-		if err := h.repoStore.UpsertFromGitHub(ctx, repo); err != nil {
-			zerolog.Ctx(ctx).Warn().Err(err).Str("repo", ghRepo.FullName).Msg("failed to upsert repo during sync")
-			syncErrors++
-			continue
-		}
-		synced++
-	}
-
 	if err := h.integrationStore.UpdateLastSyncedAt(ctx, orgID, integration.ID, time.Now()); err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to update last_synced_at after sync")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
-			"repos_synced": synced,
-			"errors":       syncErrors,
+			"repos_synced": 0,
+			"repos_seen":   len(repos),
+			"errors":       0,
 		},
 	})
 }
@@ -943,30 +1157,431 @@ type githubInstallationRepo struct {
 // listInstallationRepos calls the GitHub API to list all repos accessible
 // to the given installation token.
 func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token string) ([]githubInstallationRepo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIURL+"/installation/repositories?per_page=100", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "token "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
+	nextURL := githubAPIURL + "/installation/repositories?per_page=100"
+	var repos []githubInstallationRepo
+	for nextURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "token "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
 
+		resp, err := h.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				return nil, closeErr
+			}
+			return nil, fmt.Errorf("github API error %d", resp.StatusCode)
+		}
+
+		var result struct {
+			Repositories []githubInstallationRepo `json:"repositories"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				return nil, closeErr
+			}
+			return nil, err
+		}
+		nextURL = githubNextLink(resp.Header.Get("Link"))
+		if err := resp.Body.Close(); err != nil {
+			return nil, err
+		}
+		repos = append(repos, result.Repositories...)
+	}
+	return repos, nil
+}
+
+func githubNextLink(linkHeader string) string {
+	for _, part := range strings.Split(linkHeader, ",") {
+		segments := strings.Split(part, ";")
+		if len(segments) < 2 {
+			continue
+		}
+		for _, segment := range segments[1:] {
+			if strings.TrimSpace(segment) == `rel="next"` {
+				return strings.Trim(strings.TrimSpace(segments[0]), "<>")
+			}
+		}
+	}
+	return ""
+}
+
+func (h *IntegrationHandler) ListGitHubInstallationRepositories(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgID := middleware.OrgIDFromContext(ctx)
+
+	link, ok := h.githubInstallationLinkForRequest(w, r, orgID)
+	if !ok {
+		return
+	}
+	if h.githubService == nil || h.repoStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_NOT_CONFIGURED", "github app is not configured")
+		return
+	}
+	token, err := h.githubService.GetInstallationToken(ctx, link.InstallationID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get github installation token", err)
+		return
+	}
+	repos, err := h.listInstallationRepos(ctx, token)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories", err)
+		return
+	}
+
+	user := middleware.UserFromContext(ctx)
+	candidates := make([]models.GitHubRepositoryClaimCandidate, 0, len(repos))
+	for _, ghRepo := range repos {
+		candidate := models.GitHubRepositoryClaimCandidate{
+			GitHubID:       ghRepo.ID,
+			FullName:       ghRepo.FullName,
+			DefaultBranch:  defaultBranchOrMain(ghRepo.DefaultBranch),
+			Private:        ghRepo.Private,
+			CloneURL:       defaultCloneURL(ghRepo.FullName, ghRepo.CloneURL),
+			InstallationID: link.InstallationID,
+			Status:         models.GitHubRepositoryClaimStatusUnclaimed,
+		}
+		if owner, ownerErr := h.repoStore.GetActiveOwnerByGitHubID(ctx, ghRepo.ID); ownerErr == nil {
+			candidate.RepositoryID = &owner.RepositoryID
+			candidate.OwnerOrgID = &owner.OrgID
+			candidate.OwnerOrgName = &owner.OrgName
+			if owner.OrgID == orgID {
+				candidate.Status = models.GitHubRepositoryClaimStatusOwnedByCurrentOrg
+			} else {
+				candidate.Status = models.GitHubRepositoryClaimStatusOwnedByOtherOrg
+				candidate.CanTransfer = user != nil && h.userIsAdminInOrg(ctx, user.ID, owner.OrgID)
+			}
+		} else if errors.Is(ownerErr, pgx.ErrNoRows) {
+			if existing, existingErr := h.repoStore.GetByOrgAndGitHubIDAnyStatus(ctx, orgID, ghRepo.ID); existingErr == nil {
+				candidate.RepositoryID = &existing.ID
+				if !existing.IsActive() {
+					candidate.Status = models.GitHubRepositoryClaimStatusDisconnectedInCurrentOrg
+				}
+			}
+		} else {
+			writeError(w, r, http.StatusInternalServerError, "OWNER_LOOKUP_FAILED", "failed to check repository ownership", ownerErr)
+			return
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.GitHubRepositoryClaimCandidate]{Data: candidates})
+}
+
+type githubRepositoryClaimRequest struct {
+	InstallationID int64   `json:"installation_id"`
+	GitHubIDs      []int64 `json:"github_ids"`
+	AllowTransfer  bool    `json:"allow_transfer"`
+}
+
+func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgID := middleware.OrgIDFromContext(ctx)
+	user := middleware.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	if h.githubService == nil || h.repoStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_NOT_CONFIGURED", "github app is not configured")
+		return
+	}
+	if h.githubAppUserAuth == nil {
+		writeError(w, r, http.StatusBadRequest, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account before claiming repositories")
+		return
+	}
+
+	var req githubRepositoryClaimRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if len(req.GitHubIDs) == 0 {
+		writeError(w, r, http.StatusBadRequest, "NO_REPOSITORIES", "select at least one repository")
+		return
+	}
+
+	link, ok := h.githubInstallationLink(ctx, orgID, req.InstallationID)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "INSTALLATION_NOT_LINKED", "github installation is not linked to this organization")
+		return
+	}
+	if link.IntegrationID == nil {
+		writeError(w, r, http.StatusBadRequest, "GITHUB_INTEGRATION_NOT_CONNECTED", "github integration is not connected for this organization")
+		return
+	}
+
+	appToken, err := h.githubService.GetInstallationToken(ctx, link.InstallationID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get github installation token", err)
+		return
+	}
+	installationRepos, err := h.listInstallationRepos(ctx, appToken)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "LIST_REPOS_FAILED", "failed to list github repositories", err)
+		return
+	}
+	byID := make(map[int64]githubInstallationRepo, len(installationRepos))
+	for _, repo := range installationRepos {
+		byID[repo.ID] = repo
+	}
+
+	userCredential, err := h.githubAppUserAuth.GetValidCredential(ctx, orgID, user.ID)
+	if err != nil || userCredential == nil || userCredential.AccessToken == "" {
+		writeError(w, r, http.StatusBadRequest, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account before claiming repositories")
+		return
+	}
+
+	claimRepos := make([]*models.Repository, 0, len(req.GitHubIDs))
+	transferOwners := make(map[int64]uuid.UUID)
+	conflicts := make([]models.GitHubRepositoryClaimCandidate, 0)
+	for _, githubID := range req.GitHubIDs {
+		ghRepo, exists := byID[githubID]
+		if !exists {
+			writeError(w, r, http.StatusBadRequest, "REPOSITORY_NOT_IN_INSTALLATION", "selected repository is not part of the GitHub installation")
+			return
+		}
+		if ok, accessErr := h.githubUserCanAccessRepo(ctx, userCredential.AccessToken, ghRepo.FullName); accessErr != nil {
+			writeError(w, r, http.StatusBadGateway, "GITHUB_ACCESS_CHECK_FAILED", "failed to verify GitHub repository access", accessErr)
+			return
+		} else if !ok {
+			writeError(w, r, http.StatusForbidden, "GITHUB_REPO_ACCESS_DENIED", "your GitHub account cannot access one or more selected repositories")
+			return
+		}
+
+		if owner, ownerErr := h.repoStore.GetActiveOwnerByGitHubID(ctx, ghRepo.ID); ownerErr == nil && owner.OrgID != orgID {
+			conflict := models.GitHubRepositoryClaimCandidate{
+				GitHubID:       ghRepo.ID,
+				FullName:       ghRepo.FullName,
+				DefaultBranch:  defaultBranchOrMain(ghRepo.DefaultBranch),
+				Private:        ghRepo.Private,
+				CloneURL:       defaultCloneURL(ghRepo.FullName, ghRepo.CloneURL),
+				InstallationID: link.InstallationID,
+				Status:         models.GitHubRepositoryClaimStatusOwnedByOtherOrg,
+				RepositoryID:   &owner.RepositoryID,
+				OwnerOrgID:     &owner.OrgID,
+				OwnerOrgName:   &owner.OrgName,
+			}
+			if !req.AllowTransfer {
+				conflicts = append(conflicts, conflict)
+				continue
+			}
+			if !h.userIsAdminInOrg(ctx, user.ID, owner.OrgID) {
+				conflicts = append(conflicts, conflict)
+				continue
+			}
+			transferOwners[ghRepo.ID] = owner.OrgID
+		} else if ownerErr != nil && !errors.Is(ownerErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "OWNER_LOOKUP_FAILED", "failed to check repository ownership", ownerErr)
+			return
+		}
+
+		claimRepos = append(claimRepos, &models.Repository{
+			OrgID:          orgID,
+			IntegrationID:  *link.IntegrationID,
+			GitHubID:       ghRepo.ID,
+			FullName:       ghRepo.FullName,
+			DefaultBranch:  defaultBranchOrMain(ghRepo.DefaultBranch),
+			Private:        ghRepo.Private,
+			CloneURL:       defaultCloneURL(ghRepo.FullName, ghRepo.CloneURL),
+			InstallationID: link.InstallationID,
+			Status:         string(models.RepositoryStatusActive),
+			Settings:       json.RawMessage(`{}`),
+		})
+	}
+	if len(conflicts) > 0 {
+		writeGitHubRepositoryClaimConflict(w, conflicts)
+		return
+	}
+
+	if err := h.repoStore.ApplyGitHubClaims(ctx, orgID, claimRepos, transferOwners); err != nil {
+		if errors.Is(err, db.ErrActiveGitHubRepositoryOwnershipConflict) {
+			writeGitHubRepositoryClaimConflict(w, h.githubClaimConflictCandidates(ctx, orgID, claimRepos))
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim github repositories", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"claimed": len(claimRepos)}})
+}
+
+func writeGitHubRepositoryClaimConflict(w http.ResponseWriter, conflicts []models.GitHubRepositoryClaimCandidate) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": map[string]any{
+			"code":    "REPOSITORY_OWNERSHIP_CONFLICT",
+			"message": "one or more repositories are already owned by another organization",
+			"details": map[string]any{"repositories": conflicts},
+		},
+	})
+}
+
+func (h *IntegrationHandler) githubClaimConflictCandidates(ctx context.Context, orgID uuid.UUID, repos []*models.Repository) []models.GitHubRepositoryClaimCandidate {
+	conflicts := make([]models.GitHubRepositoryClaimCandidate, 0, len(repos))
+	for _, repo := range repos {
+		owner, err := h.repoStore.GetActiveOwnerByGitHubID(ctx, repo.GitHubID)
+		if err != nil || owner.OrgID == orgID {
+			continue
+		}
+		conflicts = append(conflicts, models.GitHubRepositoryClaimCandidate{
+			GitHubID:       repo.GitHubID,
+			FullName:       repo.FullName,
+			DefaultBranch:  defaultBranchOrMain(repo.DefaultBranch),
+			Private:        repo.Private,
+			CloneURL:       defaultCloneURL(repo.FullName, repo.CloneURL),
+			InstallationID: repo.InstallationID,
+			Status:         models.GitHubRepositoryClaimStatusOwnedByOtherOrg,
+			RepositoryID:   &owner.RepositoryID,
+			OwnerOrgID:     &owner.OrgID,
+			OwnerOrgName:   &owner.OrgName,
+		})
+	}
+	return conflicts
+}
+
+func (h *IntegrationHandler) githubInstallationLinkForRequest(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) (models.GitHubInstallationOrgLink, bool) {
+	raw := r.URL.Query().Get("installation_id")
+	var installationID int64
+	if raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_INSTALLATION_ID", "invalid installation_id")
+			return models.GitHubInstallationOrgLink{}, false
+		}
+		installationID = parsed
+	}
+	link, ok := h.githubInstallationLink(r.Context(), orgID, installationID)
+	if !ok {
+		writeError(w, r, http.StatusNotFound, "INSTALLATION_NOT_LINKED", "github installation is not linked to this organization")
+		return models.GitHubInstallationOrgLink{}, false
+	}
+	return link, true
+}
+
+func (h *IntegrationHandler) githubInstallationLink(ctx context.Context, orgID uuid.UUID, installationID int64) (models.GitHubInstallationOrgLink, bool) {
+	if h.githubInstallations != nil {
+		var (
+			link models.GitHubInstallationOrgLink
+			err  error
+		)
+		if installationID > 0 {
+			link, err = h.githubInstallations.GetOrgLink(ctx, orgID, installationID)
+		} else {
+			link, err = h.githubInstallations.FirstOrgLink(ctx, orgID)
+		}
+		if err == nil {
+			return link, true
+		}
+	}
+
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	if err != nil || len(integrations) == 0 {
+		return models.GitHubInstallationOrgLink{}, false
+	}
+	for _, integration := range integrations {
+		var cfg struct {
+			InstallationID int64  `json:"installation_id"`
+			AccountLogin   string `json:"account_login"`
+		}
+		if integration.Config == nil || json.Unmarshal(integration.Config, &cfg) != nil || cfg.InstallationID == 0 {
+			continue
+		}
+		if installationID > 0 && cfg.InstallationID != installationID {
+			continue
+		}
+		if !h.githubInstallationAllowsConfigFallback(ctx, cfg.InstallationID) {
+			continue
+		}
+		if cfg.AccountLogin == "" {
+			cfg.AccountLogin = "unknown"
+		}
+		return models.GitHubInstallationOrgLink{
+			OrgID:          orgID,
+			IntegrationID:  &integration.ID,
+			InstallationID: cfg.InstallationID,
+			AccountLogin:   cfg.AccountLogin,
+			Status:         "active",
+		}, true
+	}
+
+	if h.repoStore != nil {
+		repoInstallationID, repoErr := h.repoStore.GetAnyInstallationIDByOrg(ctx, orgID)
+		if repoErr == nil && repoInstallationID > 0 && (installationID == 0 || repoInstallationID == installationID) {
+			accountLogin := "unknown"
+			return models.GitHubInstallationOrgLink{
+				OrgID:          orgID,
+				IntegrationID:  &integrations[0].ID,
+				InstallationID: repoInstallationID,
+				AccountLogin:   accountLogin,
+				Status:         "active",
+			}, true
+		}
+	}
+
+	return models.GitHubInstallationOrgLink{}, false
+}
+
+func (h *IntegrationHandler) githubInstallationAllowsConfigFallback(ctx context.Context, installationID int64) bool {
+	if h.githubInstallations == nil || installationID == 0 {
+		return true
+	}
+	installation, err := h.githubInstallations.GetByInstallationID(ctx, installationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return installation.Status == "" || installation.Status == "active"
+}
+
+func (h *IntegrationHandler) userIsAdminInOrg(ctx context.Context, userID, orgID uuid.UUID) bool {
+	if h.memberships == nil {
+		return false
+	}
+	membership, err := h.memberships.Get(ctx, userID, orgID)
+	return err == nil && membership.Role == models.RoleAdmin
+}
+
+func (h *IntegrationHandler) githubUserCanAccessRepo(ctx context.Context, token, fullName string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIURL+"/repos/"+fullName, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound, http.StatusForbidden:
+		return false, nil
+	default:
+		return false, fmt.Errorf("github API returned %d", resp.StatusCode)
+	}
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github API error %d", resp.StatusCode)
+func defaultBranchOrMain(branch string) string {
+	if branch == "" {
+		return "main"
 	}
+	return branch
+}
 
-	var result struct {
-		Repositories []githubInstallationRepo `json:"repositories"`
+func defaultCloneURL(fullName, cloneURL string) string {
+	if cloneURL != "" {
+		return cloneURL
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result.Repositories, nil
+	return "https://github.com/" + fullName + ".git"
 }
 
 func (h *IntegrationHandler) ConnectGitHub(w http.ResponseWriter, r *http.Request) {
@@ -1201,6 +1816,118 @@ func validateOAuthCallback(w http.ResponseWriter, r *http.Request, cookieName st
 	return code, true
 }
 
+type githubSetupStatePayload struct {
+	Nonce     string    `json:"nonce"`
+	UserID    uuid.UUID `json:"user_id"`
+	OrgID     uuid.UUID `json:"org_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (h *IntegrationHandler) setGitHubSetupState(w http.ResponseWriter, r *http.Request) (string, error) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return "", errors.New("authenticated user required for github setup")
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if orgID == uuid.Nil {
+		return "", errors.New("active organization required for github setup")
+	}
+	nonce, err := generateRandomString(16)
+	if err != nil {
+		return "", err
+	}
+	payload := githubSetupStatePayload{
+		Nonce:     nonce,
+		UserID:    user.ID,
+		OrgID:     orgID,
+		ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
+	}
+	encoded, err := h.signGitHubSetupState(payload)
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubIntegrationOAuthStateCookie,
+		Value:    encoded,
+		Path:     "/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return encoded, nil
+}
+
+func (h *IntegrationHandler) validateGitHubSetupState(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	state := r.URL.Query().Get("state")
+	cookie, err := r.Cookie(githubIntegrationOAuthStateCookie)
+	if err != nil || cookie.Value == "" || state == "" || cookie.Value != state {
+		return uuid.Nil, uuid.Nil, false
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubIntegrationOAuthStateCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	payload, err := h.verifyGitHubSetupState(state)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("invalid github setup state")
+		return uuid.Nil, uuid.Nil, false
+	}
+	if time.Now().UTC().After(payload.ExpiresAt) {
+		zerolog.Ctx(r.Context()).Warn().Msg("expired github setup state")
+		return uuid.Nil, uuid.Nil, false
+	}
+	return payload.OrgID, payload.UserID, true
+}
+
+func (h *IntegrationHandler) signGitHubSetupState(payload githubSetupStatePayload) (string, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	bodyEncoded := base64.RawURLEncoding.EncodeToString(body)
+	mac := hmac.New(sha256.New, []byte(h.githubSetupSigningKey()))
+	mac.Write([]byte(bodyEncoded))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return bodyEncoded + "." + sig, nil
+}
+
+func (h *IntegrationHandler) verifyGitHubSetupState(raw string) (githubSetupStatePayload, error) {
+	parts := strings.Split(raw, ".")
+	if len(parts) != 2 {
+		return githubSetupStatePayload{}, errors.New("invalid state format")
+	}
+	mac := hmac.New(sha256.New, []byte(h.githubSetupSigningKey()))
+	mac.Write([]byte(parts[0]))
+	expected := mac.Sum(nil)
+	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return githubSetupStatePayload{}, err
+	}
+	if !hmac.Equal(actual, expected) {
+		return githubSetupStatePayload{}, errors.New("state signature mismatch")
+	}
+	body, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return githubSetupStatePayload{}, err
+	}
+	var payload githubSetupStatePayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return githubSetupStatePayload{}, err
+	}
+	return payload, nil
+}
+
+func (h *IntegrationHandler) githubSetupSigningKey() string {
+	if h.setupSigningKey != "" {
+		return h.setupSigningKey
+	}
+	return "development-github-setup-state"
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1422,43 +2149,62 @@ func (h *IntegrationHandler) exchangeLinearCode(ctx context.Context, code string
 	return &token, nil
 }
 
-func (h *IntegrationHandler) fetchLinearWorkspace(ctx context.Context, accessToken string) (string, string, error) {
-	queryBody := map[string]string{"query": "query ViewerOrg { viewer { organization { id name } } }"}
+// linearViewerInfo packages the post-token-exchange viewer GraphQL result.
+// Returned by fetchLinearViewer so callers can persist all of workspace +
+// agent-user metadata in a single round trip.
+type linearViewerInfo struct {
+	WorkspaceID   string
+	WorkspaceName string
+	// AppUserID and AppUserName describe the agent user Linear provisioned
+	// when the OAuth completed with actor=app. Empty for legacy (read/write
+	// only) installs. The OAuth callback only persists these when the
+	// returned scope string includes the agent scopes; otherwise the token
+	// is just a regular user token even though the GraphQL `viewer` query
+	// happens to return *some* identity.
+	AppUserID   string
+	AppUserName string
+}
+
+func (h *IntegrationHandler) fetchLinearViewer(ctx context.Context, accessToken string) (*linearViewerInfo, error) {
+	queryBody := map[string]string{"query": "query ViewerOrg { viewer { id name organization { id name } } }"}
 	body, err := json.Marshal(queryBody)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal linear viewer query: %w", err)
+		return nil, fmt.Errorf("marshal linear viewer query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearGraphQLURL, bytes.NewBuffer(body))
 	if err != nil {
-		return "", "", fmt.Errorf("create linear viewer request: %w", err)
+		return nil, fmt.Errorf("create linear viewer request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("linear viewer request failed: %w", err)
+		return nil, fmt.Errorf("linear viewer request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", "", fmt.Errorf("linear viewer request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+		return nil, fmt.Errorf("linear viewer request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
 	}
 
 	var viewer linearViewerResponse
 	if err := json.NewDecoder(resp.Body).Decode(&viewer); err != nil {
-		return "", "", fmt.Errorf("decode linear viewer response: %w", err)
+		return nil, fmt.Errorf("decode linear viewer response: %w", err)
 	}
 
-	workspaceID := viewer.Data.Viewer.Organization.ID
-	workspaceName := viewer.Data.Viewer.Organization.Name
-	if workspaceID == "" {
-		return "", "", fmt.Errorf("linear viewer response missing organization id")
+	if viewer.Data.Viewer.Organization.ID == "" {
+		return nil, fmt.Errorf("linear viewer response missing organization id")
 	}
 
-	return workspaceID, workspaceName, nil
+	return &linearViewerInfo{
+		WorkspaceID:   viewer.Data.Viewer.Organization.ID,
+		WorkspaceName: viewer.Data.Viewer.Organization.Name,
+		AppUserID:     viewer.Data.Viewer.ID,
+		AppUserName:   viewer.Data.Viewer.Name,
+	}, nil
 }
 
 // --- Sentry token exchange ---
@@ -1721,4 +2467,90 @@ func (h *IntegrationHandler) validateNotionToken(ctx context.Context, token stri
 	}
 
 	return result.Bot.WorkspaceName, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CircleCI Integration
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ConnectCircleCI accepts a CircleCI personal API token and project slug,
+// validates them against /api/v2/me (cheapest authenticated call), stores the
+// credential, and creates an active integration record. CircleCI uses a
+// paste-the-token flow because the v2 Insights API isn't exposed through
+// CircleCI's OAuth scopes.
+func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		AuthToken   string `json:"auth_token"`
+		ProjectSlug string `json:"project_slug"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.AuthToken = strings.TrimSpace(req.AuthToken)
+	req.ProjectSlug = strings.Trim(strings.TrimSpace(req.ProjectSlug), "/")
+	if req.AuthToken == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TOKEN", "auth_token is required")
+		return
+	}
+	if req.ProjectSlug == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_PROJECT_SLUG", "project_slug is required (e.g. gh/org/repo)")
+		return
+	}
+	if strings.Count(req.ProjectSlug, "/") != 2 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PROJECT_SLUG", "project_slug must look like gh/org/repo")
+		return
+	}
+
+	if err := h.validateCircleCIToken(r.Context(), req.AuthToken); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate CircleCI token: "+err.Error())
+		return
+	}
+
+	cfg := models.CircleCIConfig{
+		AuthToken:   req.AuthToken,
+		ProjectSlug: req.ProjectSlug,
+	}
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save CircleCI credentials", err)
+		return
+	}
+
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderCircleCI)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_CIRCLECI_FAILED", "failed to create CircleCI integration", err)
+		return
+	}
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://circleci.com/api/v2/me", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Circle-Token", token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("invalid or expired token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("circleci API returned %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }

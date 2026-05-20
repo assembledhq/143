@@ -2,11 +2,21 @@ package db
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// ErrWebhookDeliveryReplay is returned by Create when a row with the
+// same (provider, delivery_id) already exists. The schema enforces this
+// via the partial unique index idx_webhook_deliveries_idempotency. Lets
+// the ingestion handler short-circuit replay attempts before they reach
+// downstream dispatchers (which then can't double-emit bootstrap
+// activities or double-enqueue worker jobs).
+var ErrWebhookDeliveryReplay = errors.New("webhook delivery already recorded for (provider, delivery_id)")
 
 type WebhookDeliveryStore struct {
 	db DBTX
@@ -35,7 +45,71 @@ func (s *WebhookDeliveryStore) Create(ctx context.Context, d *models.WebhookDeli
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&d.ID, &d.ReceivedAt, &d.CreatedAt)
+	if err := row.Scan(&d.ID, &d.ReceivedAt, &d.CreatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return s.handleDuplicateDelivery(ctx, d)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *WebhookDeliveryStore) handleDuplicateDelivery(ctx context.Context, d *models.WebhookDelivery) error {
+	if d.DeliveryID == nil {
+		return ErrWebhookDeliveryReplay
+	}
+	existing, err := s.getByProviderDeliveryID(ctx, d.Provider, d.DeliveryID)
+	if err != nil {
+		return err
+	}
+	if existing.OrgID != d.OrgID || existing.IntegrationID != d.IntegrationID {
+		return fmt.Errorf("%w: existing delivery belongs to another integration", ErrWebhookDeliveryReplay)
+	}
+	switch existing.Status {
+	case "received", "failed":
+		*d = existing
+		return nil
+	case "processed", "ignored":
+		*d = existing
+		return ErrWebhookDeliveryReplay
+	default:
+		return fmt.Errorf("%w: existing delivery has terminal status %q", ErrWebhookDeliveryReplay, existing.Status)
+	}
+}
+
+func (s *WebhookDeliveryStore) getByProviderDeliveryID(ctx context.Context, provider string, deliveryID *string) (models.WebhookDelivery, error) {
+	var d models.WebhookDelivery
+	err := s.db.QueryRow(ctx, `
+		SELECT id, org_id, integration_id, provider, delivery_id, event_type,
+		       signature_valid, received_at, processed_at, status, attempts,
+		       error, payload, headers, created_at
+		FROM webhook_deliveries
+		WHERE provider = @provider
+		  AND delivery_id = @delivery_id`,
+		pgx.NamedArgs{
+			"provider":    provider,
+			"delivery_id": deliveryID,
+		}).Scan(
+		&d.ID,
+		&d.OrgID,
+		&d.IntegrationID,
+		&d.Provider,
+		&d.DeliveryID,
+		&d.EventType,
+		&d.SignatureValid,
+		&d.ReceivedAt,
+		&d.ProcessedAt,
+		&d.Status,
+		&d.Attempts,
+		&d.Error,
+		&d.Payload,
+		&d.Headers,
+		&d.CreatedAt,
+	)
+	if err != nil {
+		return models.WebhookDelivery{}, fmt.Errorf("lookup existing webhook delivery: %w", err)
+	}
+	return d, nil
 }
 
 func (s *WebhookDeliveryStore) MarkProcessed(ctx context.Context, d *models.WebhookDelivery, errMsg *string) error {

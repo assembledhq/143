@@ -60,6 +60,22 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		}
 	}
 
+	if token := os.Getenv("CIRCLECI_TOKEN"); token != "" {
+		slug := os.Getenv("CIRCLECI_PROJECT_SLUG")
+		baseURL := os.Getenv("CIRCLECI_BASE_URL")
+		if slug == "" {
+			fmt.Fprintln(logger, "143-tools: CIRCLECI_TOKEN set but CIRCLECI_PROJECT_SLUG is empty — skipping circleci")
+		} else {
+			provider := integration.NewCircleCITestInsights(integration.CircleCIConfig{
+				AuthToken:   token,
+				ProjectSlug: slug,
+				BaseURL:     baseURL,
+			})
+			reg.RegisterCITestInsights(provider)
+			fmt.Fprintf(logger, "143-tools: registered circleci (slug=%s)\n", slug)
+		}
+	}
+
 	owner := os.Getenv("GITHUB_REPO_OWNER")
 	repo := os.Getenv("GITHUB_REPO_NAME")
 	if owner != "" && repo != "" {

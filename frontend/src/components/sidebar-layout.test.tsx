@@ -73,9 +73,9 @@ describe("SidebarLayout", () => {
     expect(handle).not.toBeNull();
 
     expect(() => {
-      fireEvent.mouseDown(handle!, { clientX: 100 });
-      fireEvent.mouseMove(document, { clientX: 140 });
-      fireEvent.mouseUp(document);
+      fireEvent.pointerDown(handle!, { clientX: 100, pointerId: 1, button: 0 });
+      fireEvent.pointerMove(document, { clientX: 140, pointerId: 1 });
+      fireEvent.pointerUp(document, { pointerId: 1 });
     }).not.toThrow();
     expect(sidebar).toHaveStyle({ "--sidebar-w": "360px" });
 
@@ -89,9 +89,9 @@ describe("SidebarLayout", () => {
     const sidebar = container.querySelector("[data-testid='sidebar-pane']");
     expect(handle).not.toBeNull();
 
-    fireEvent.mouseDown(handle!, { clientX: 100 });
-    fireEvent.mouseMove(document, { clientX: 220 });
-    fireEvent.mouseUp(document);
+    fireEvent.pointerDown(handle!, { clientX: 100, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(document, { clientX: 220, pointerId: 1 });
+    fireEvent.pointerUp(document, { pointerId: 1 });
 
     expect(sidebar).toHaveStyle({ "--sidebar-w": "400px" });
     expect(window.localStorage.getItem("143:sidebar-layout-width")).toBe("400");
@@ -104,9 +104,9 @@ describe("SidebarLayout", () => {
     const sidebar = container.querySelector("[data-testid='sidebar-pane']");
     expect(handle).not.toBeNull();
 
-    fireEvent.mouseDown(handle!, { clientX: 300 });
-    fireEvent.mouseMove(document, { clientX: 120 });
-    fireEvent.mouseUp(document);
+    fireEvent.pointerDown(handle!, { clientX: 300, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(document, { clientX: 120, pointerId: 1 });
+    fireEvent.pointerUp(document, { pointerId: 1 });
 
     expect(sidebar).toHaveStyle({ "--sidebar-w": "240px" });
     expect(window.localStorage.getItem("143:sidebar-layout-width")).toBe("240");

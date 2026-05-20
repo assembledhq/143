@@ -28,7 +28,11 @@ func NewSessionIssueLinkStore(db DBTX) *SessionIssueLinkStore {
 const sessionIssueLinkSelectColumns = `sil.id, sil.org_id, sil.session_id, sil.issue_id, sil.role,
 	sil.position, sil.added_by_user_id, sil.created_at,
 	i.title AS issue_title, i.source AS issue_source,
-	COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id,
+	COALESCE(
+		NULLIF(provider_state.state->>'identifier', ''),
+		CASE WHEN i.source = 'linear' THEN substring(i.title from '^([A-Z][A-Z0-9_]{0,9}-[0-9]+):') END,
+		i.external_id
+	) AS external_id,
 	i.description,
 	i.repository_id, i.status AS issue_status,
 	(provider_state.state->>'workspace_slug') AS issue_workspace_slug,
@@ -205,6 +209,37 @@ func (s *SessionIssueLinkStore) ListBySession(ctx context.Context, orgID, sessio
 		return nil, fmt.Errorf("query session issue links: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionIssueLink])
+}
+
+// LookupPrimaryByIssue returns the primary link for a (session, issue)
+// pair. Used by callers that need the link id immediately after creating
+// a session — SessionStore.Create inserts the row but doesn't return its
+// id, and ListBySession + linear-search wastes a round-trip when we
+// already know the issue we want.
+//
+// Returns pgx.ErrNoRows wrapped when the link doesn't exist.
+func (s *SessionIssueLinkStore) LookupPrimaryByIssue(ctx context.Context, orgID, sessionID, issueID uuid.UUID) (models.SessionIssueLink, error) {
+	query := `
+		SELECT ` + sessionIssueLinkSelectColumns + sessionIssueLinkFromClause + `
+		WHERE sil.org_id = @org_id
+		  AND sil.session_id = @session_id
+		  AND sil.issue_id = @issue_id
+		  AND sil.role = 'primary'
+		LIMIT 1`
+
+	row, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+		"issue_id":   issueID,
+	})
+	if err != nil {
+		return models.SessionIssueLink{}, fmt.Errorf("query primary session issue link: %w", err)
+	}
+	link, err := pgx.CollectOneRow(row, pgx.RowToStructByName[models.SessionIssueLink])
+	if err != nil {
+		return models.SessionIssueLink{}, fmt.Errorf("collect primary session issue link: %w", err)
+	}
+	return link, nil
 }
 
 func (s *SessionIssueLinkStore) ListBySessionIDs(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID][]models.SessionIssueLink, error) {

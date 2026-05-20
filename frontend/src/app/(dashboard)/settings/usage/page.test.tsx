@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
+import { api } from '@/lib/api';
 import UsagePage from './page';
 import { UsageDatePicker } from './usage-date-picker';
 import { UsageExportButton } from './usage-export-button';
@@ -9,6 +10,7 @@ import {
   formatMinutes,
   formatTokenCount,
   formatCost,
+  formatEstimatedCost,
   formatNumber,
   getDateRangePreset,
   groupByLocalDay,
@@ -39,6 +41,7 @@ function makeBucket(overrides: Partial<UsageTimeseriesBucket> = {}): UsageTimese
     p95_duration_sec: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
+    total_tokens: 0,
     total_llm_cost_usd: 0,
     ...overrides,
   };
@@ -137,6 +140,16 @@ describe('formatCost', () => {
   it('formats negative costs', () => {
     expect(formatCost(-1.5)).toBe('-$1.50');
     expect(formatCost(-0.005)).toBe('$0.00');
+  });
+});
+
+describe('formatEstimatedCost', () => {
+  it('shows unavailable when tokens exist but no USD cost was computed', () => {
+    expect(formatEstimatedCost(0, 1908300000)).toBe('Unavailable');
+  });
+
+  it('shows sub-cent costs without rounding them down to zero', () => {
+    expect(formatEstimatedCost(0.001, 7000)).toBe('<$0.01');
   });
 });
 
@@ -345,7 +358,94 @@ describe('UsagePage', () => {
     expect(screen.getByText('Last 30d')).toBeInTheDocument();
     expect(screen.getByText('This month')).toBeInTheDocument();
     expect(screen.getByText('Breakdown')).toBeInTheDocument();
-    expect(screen.queryByText('Capacity Breakdown')).not.toBeInTheDocument();
+    expect(screen.getAllByText('By User')).toHaveLength(2);
+  });
+
+  it('defaults the breakdown request to user totals', async () => {
+    const breakdownDimensions: Array<string | null> = [];
+    const timeseriesStackBy: Array<string | null> = [];
+    server.use(
+      http.get('*/api/v1/usage/timeseries', ({ request }) => {
+        timeseriesStackBy.push(new URL(request.url).searchParams.get('stack_by'));
+        return HttpResponse.json({
+          data: {
+            buckets: [],
+            period_start: '2026-03-13T00:00:00Z',
+            period_end: '2026-04-12T00:00:00Z',
+          },
+        });
+      }),
+      http.get('*/api/v1/usage/breakdown', ({ request }) => {
+        breakdownDimensions.push(new URL(request.url).searchParams.get('dimension'));
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+
+    renderWithProviders(<UsagePage />);
+
+    await waitFor(() => {
+      expect(breakdownDimensions).toContain('user');
+    });
+    expect(timeseriesStackBy).toContain(null);
+  });
+
+  it('offers user breakdown and does not expose capacity breakdown', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<UsagePage />);
+
+    await user.click(screen.getByLabelText('Break down by'));
+
+    expect(screen.getAllByText('By User').length).toBeGreaterThan(0);
+    expect(screen.queryByText('By Capacity')).not.toBeInTheDocument();
+  });
+
+  it('keeps the chart request valid for the default user breakdown', async () => {
+    server.use(
+      http.get('*/api/v1/usage/timeseries', ({ request }) => {
+        const stackBy = new URL(request.url).searchParams.get('stack_by');
+        if (stackBy === 'user') {
+          return HttpResponse.json({ error: { code: 'INVALID_PARAM', message: 'stack_by=user is not supported' } }, { status: 400 });
+        }
+        return HttpResponse.json({
+          data: {
+            buckets: [],
+            period_start: '2026-03-13T00:00:00Z',
+            period_end: '2026-04-12T00:00:00Z',
+          },
+        });
+      }),
+      http.get('*/api/v1/usage/breakdown', ({ request }) => {
+        const dimension = new URL(request.url).searchParams.get('dimension');
+        if (dimension === 'user') {
+          return HttpResponse.json({
+            data: [
+              {
+                key: 'user-1',
+                label: 'alice@example.com',
+                total_container_minutes: 60,
+                total_sessions: 3,
+                total_container_starts: 3,
+                peak_concurrent: 1,
+                total_input_tokens: 5000,
+                total_output_tokens: 2000,
+                total_tokens: 7000,
+                total_llm_cost_usd: 0.5,
+                percentage: 100,
+              },
+            ],
+            meta: {},
+          });
+        }
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+
+    renderWithProviders(<UsagePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Failed to load usage data. Please try again later.')).not.toBeInTheDocument();
   });
 
   it('renders the footer disclaimer text', () => {
@@ -410,6 +510,42 @@ describe('UsageExportButton', () => {
     expect(screen.getByText('Breakdown')).toBeInTheDocument();
     expect(screen.getByText('Download')).toBeInTheDocument();
   });
+
+  it('offers user export breakdown and omits capacity export breakdown', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+
+    await user.click(screen.getByText('Export CSV'));
+    const comboboxes = screen.getAllByRole('combobox');
+    await user.click(comboboxes[1]);
+
+    expect(screen.getAllByText('By User').length).toBeGreaterThan(0);
+    expect(screen.queryByText('By Capacity')).not.toBeInTheDocument();
+  });
+
+  it('syncs the default export dimension when the parent prop changes', async () => {
+    const user = userEvent.setup();
+    const getExportUrlSpy = vi.spyOn(api.usage, 'getExportUrl').mockReturnValue('/api/v1/usage/export');
+    const windowOpenSpy = vi.spyOn(window, 'open').mockReturnValue({} as Window);
+
+    const { rerender } = renderWithProviders(
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" dimension="model" />
+    );
+
+    rerender(
+      <UsageExportButton start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" dimension="user" />
+    );
+
+    await user.click(screen.getByText('Export CSV'));
+    await user.click(screen.getByText('Download'));
+
+    expect(getExportUrlSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ dimension: 'user' })
+    );
+    expect(windowOpenSpy).toHaveBeenCalledWith('/api/v1/usage/export', '_blank');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -462,6 +598,34 @@ describe('UsageSummaryCards', () => {
     });
     expect(screen.getByText('10')).toBeInTheDocument();
     expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.getByText('Est. API cost: $5.25')).toBeInTheDocument();
+  });
+
+  it('renders cost unavailable when tokens have no computed USD cost', async () => {
+    server.use(
+      http.get('*/api/v1/usage', () => {
+        return HttpResponse.json({
+          data: {
+            org_id: 'org-1',
+            period_start: '2026-04-01T00:00:00Z',
+            period_end: '2026-04-30T00:00:00Z',
+            total_container_minutes: 90,
+            total_sessions: 10,
+            peak_concurrent: 3,
+            by_capacity: [],
+            total_input_tokens: 2500000,
+            total_output_tokens: 800000,
+            total_llm_cost_usd: 0,
+          },
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageSummaryCards start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Cost unavailable')).toBeInTheDocument();
+    });
   });
 });
 
@@ -482,8 +646,7 @@ describe('UsageBreakdownTable', () => {
       <UsageBreakdownTable
         start="2026-04-01T00:00:00Z"
         end="2026-04-30T00:00:00Z"
-        dimension="user"
-        onDimensionChange={() => {}}
+        dimension="agent"
       />
     );
     await waitFor(() => {
@@ -505,8 +668,10 @@ describe('UsageBreakdownTable', () => {
               peak_concurrent: 1,
               total_input_tokens: 5000,
               total_output_tokens: 2000,
+              total_tokens: 7000,
               total_llm_cost_usd: 0.5,
-              percentage: 100.0,
+              percentage: 60.0,
+              share_of_tokens: 87.5,
             },
           ],
           meta: {},
@@ -517,17 +682,57 @@ describe('UsageBreakdownTable', () => {
       <UsageBreakdownTable
         start="2026-04-01T00:00:00Z"
         end="2026-04-30T00:00:00Z"
-        dimension="user"
-        onDimensionChange={() => {}}
+        dimension="agent"
       />
     );
     await waitFor(() => {
       expect(screen.getByText('alice@example.com')).toBeInTheDocument();
     });
     expect(screen.getByText('1.0h')).toBeInTheDocument();
-    expect(screen.getByText('Tokens/session')).toBeInTheDocument();
+    expect(screen.getByText('20.0m')).toBeInTheDocument();
+    expect(screen.getByText('7.0K')).toBeInTheDocument();
     expect(screen.getByText('2.3K')).toBeInTheDocument();
-    expect(screen.getByText('Share of Hours')).toBeInTheDocument();
+    expect(screen.getByText('Share of Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Minutes / Session')).toBeInTheDocument();
+    expect(screen.getByText('Tokens / Session')).toBeInTheDocument();
+    expect(screen.getByText('87.5%')).toBeInTheDocument();
+  });
+
+  it('does not render unavailable row costs as zero dollars', async () => {
+    server.use(
+      http.get('*/api/v1/usage/breakdown', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              key: 'user-1',
+              label: 'alice@example.com',
+              total_container_minutes: 60,
+              total_sessions: 3,
+              total_container_starts: 3,
+              peak_concurrent: 1,
+              total_input_tokens: 5000,
+              total_output_tokens: 2000,
+              total_tokens: 7000,
+              total_llm_cost_usd: 0,
+              percentage: 60.0,
+              share_of_tokens: 87.5,
+            },
+          ],
+          meta: {},
+        });
+      })
+    );
+    renderWithProviders(
+      <UsageBreakdownTable
+        start="2026-04-01T00:00:00Z"
+        end="2026-04-30T00:00:00Z"
+        dimension="agent"
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('$0.00')).not.toBeInTheDocument();
   });
 });
 
@@ -535,7 +740,7 @@ describe('UsageBreakdownTable', () => {
 // UsageTimeseriesChart
 // ---------------------------------------------------------------------------
 
-import { UsageTimeseriesChart } from './usage-timeseries-chart';
+import { buildUsageChartData, UsageTimeseriesChart } from './usage-timeseries-chart';
 
 describe('UsageTimeseriesChart', () => {
   it('renders loading state', () => {
@@ -550,6 +755,9 @@ describe('UsageTimeseriesChart', () => {
         end="2026-04-30T00:00:00Z"
         metric="total_container_minutes"
         onMetricChange={() => {}}
+        dimension="model"
+        chartMode="totals"
+        onChartModeChange={() => {}}
       />
     );
     expect(screen.getByText('Daily Usage')).toBeInTheDocument();
@@ -573,6 +781,9 @@ describe('UsageTimeseriesChart', () => {
         end="2026-04-30T00:00:00Z"
         metric="total_container_minutes"
         onMetricChange={() => {}}
+        dimension="model"
+        chartMode="totals"
+        onChartModeChange={() => {}}
       />
     );
     await waitFor(() => {
@@ -594,6 +805,7 @@ describe('UsageTimeseriesChart', () => {
                 peak_concurrent: 2,
                 total_input_tokens: 1000,
                 total_output_tokens: 500,
+                total_tokens: 1500,
                 total_llm_cost_usd: 0.5,
               },
               {
@@ -604,6 +816,7 @@ describe('UsageTimeseriesChart', () => {
                 peak_concurrent: 1,
                 total_input_tokens: 500,
                 total_output_tokens: 250,
+                total_tokens: 750,
                 total_llm_cost_usd: 0.25,
               },
             ],
@@ -619,11 +832,61 @@ describe('UsageTimeseriesChart', () => {
         end="2026-04-02T00:00:00Z"
         metric="total_container_minutes"
         onMetricChange={() => {}}
+        dimension="model"
+        chartMode="totals"
+        onChartModeChange={() => {}}
       />
     );
     await waitFor(() => {
       expect(screen.getByText('Daily Usage')).toBeInTheDocument();
     });
+  });
+
+  it('fills missing days in stacked mode', () => {
+    const chartData = buildUsageChartData(
+      [
+        {
+          hour_utc: '2026-04-01T00:00:00Z',
+          series_key: 'codex',
+          series_label: 'Codex',
+          total_container_minutes: 60,
+          total_sessions: 1,
+          total_container_starts: 1,
+          peak_concurrent: 1,
+          avg_duration_sec: 0,
+          p95_duration_sec: 0,
+          total_input_tokens: 1000,
+          total_output_tokens: 500,
+          total_tokens: 1500,
+          total_llm_cost_usd: 0.5,
+        },
+        {
+          hour_utc: '2026-04-03T00:00:00Z',
+          series_key: 'codex',
+          series_label: 'Codex',
+          total_container_minutes: 30,
+          total_sessions: 1,
+          total_container_starts: 1,
+          peak_concurrent: 1,
+          avg_duration_sec: 0,
+          p95_duration_sec: 0,
+          total_input_tokens: 500,
+          total_output_tokens: 250,
+          total_tokens: 750,
+          total_llm_cost_usd: 0.25,
+        },
+      ],
+      '2026-04-01T00:00:00Z',
+      '2026-04-04T00:00:00Z',
+      'total_tokens',
+      'stacked'
+    );
+
+    expect(chartData.rows).toEqual([
+      { day: '2026-04-01', label: 'Apr 1', total: 1500, codex: 1500 },
+      { day: '2026-04-02', label: 'Apr 2', total: 0, codex: 0 },
+      { day: '2026-04-03', label: 'Apr 3', total: 750, codex: 750 },
+    ]);
   });
 });
 
@@ -638,6 +901,7 @@ describe('metricOptions', () => {
     expect(keys).toContain('total_sessions');
     expect(keys).toContain('total_container_starts');
     expect(keys).toContain('peak_concurrent');
+    expect(keys).toContain('total_tokens');
     expect(keys).toContain('total_input_tokens');
     expect(keys).toContain('total_output_tokens');
     expect(keys).toContain('total_llm_cost_usd');

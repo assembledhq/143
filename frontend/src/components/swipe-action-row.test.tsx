@@ -255,6 +255,34 @@ describe('SwipeActionRow', () => {
     expect(container).toHaveAttribute('data-swipe-state', 'committed');
   });
 
+  it('uses a single darker archive tray color while swiping', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 220, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 120, clientY: 24 }],
+    });
+
+    const colorLayers = container!.querySelectorAll('[data-swipe-action-color="true"]');
+    expect(colorLayers).toHaveLength(1);
+    expect(colorLayers[0]).toHaveClass('bg-amber-600/88');
+  });
+
   it('keeps the trailing archive affordance to two text lines while swiping', () => {
     renderWithProviders(
       <SwipeActionRow
@@ -315,6 +343,64 @@ describe('SwipeActionRow', () => {
       fireEvent.touchEnd(surface!);
 
       expect(onAction).toHaveBeenCalledTimes(1);
+      expect(surface!.style.transform).toBe('translateX(-390px)');
+
+      await act(async () => {
+        action.resolve();
+        await action.promise;
+      });
+
+      expect(surface!.style.transform).toBe('translateX(-390px)');
+
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+      });
+
+      expect(surface!.style.transform).toBe('translateX(-0px)');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a revealed row slid left after tapping the action until the action settles', async () => {
+    vi.useFakeTimers();
+    const action = deferred<void>();
+    const onAction = vi.fn(() => action.promise);
+
+    try {
+      renderWithProviders(
+        <SwipeActionRow
+          actionLabel="Archive item"
+          actionText="Archive"
+          onAction={onAction}
+        >
+          <div>Row content</div>
+        </SwipeActionRow>,
+      );
+
+      const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]') as HTMLElement | null;
+      expect(surface).not.toBeNull();
+      const container = surface!.parentElement;
+      expect(container).not.toBeNull();
+      Object.defineProperty(container!, 'offsetWidth', {
+        configurable: true,
+        value: 390,
+      });
+
+      fireEvent.touchStart(surface!, {
+        touches: [{ clientX: 220, clientY: 20 }],
+      });
+      fireEvent.touchMove(surface!, {
+        touches: [{ clientX: 120, clientY: 24 }],
+      });
+      fireEvent.touchEnd(surface!);
+
+      expect(container).toHaveAttribute('data-swipe-state', 'open');
+
+      fireEvent.click(screen.getAllByRole('button', { name: 'Archive item' })[0]);
+
+      expect(onAction).toHaveBeenCalledTimes(1);
+      expect(container).toHaveAttribute('data-swipe-state', 'committed');
       expect(surface!.style.transform).toBe('translateX(-390px)');
 
       await act(async () => {

@@ -26,6 +26,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
@@ -35,13 +37,14 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/preview"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -49,12 +52,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
+	githubInstallationStore := db.NewGitHubInstallationStore(pool)
 	issueStore := db.NewIssueStore(pool)
+	autopilotQueueStore := db.NewAutopilotQueueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
 	sessionIssueLinkStore := db.NewSessionIssueLinkStore(pool)
 	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
@@ -160,15 +166,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
+		handlers.WithGitHubInstallationStore(githubInstallationStore),
+		handlers.WithIntegrationMembershipStore(membershipStore),
+		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 	}
-	// If the GitHub App service is available, let the integration handler
-	// fetch repos directly from the API during the install redirect.
+	// If the GitHub App service is available, let the integration handler list
+	// installation repos for explicit repository claims.
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 		}
+	}
+	if appUserAuthSvc != nil {
+		integrationOpts = append(integrationOpts, handlers.WithGitHubAppUserAuth(appUserAuthSvc))
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -182,6 +194,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
+	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(
@@ -191,11 +204,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
+	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
-	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	sessionHandler := handlers.NewSessionHandler(
@@ -216,6 +230,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
+	sessionHandler.SetReviewLoopStore(reviewLoopStore)
+	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
+
+	// Inbound-agent metrics. Constructed once and shared between the
+	// linear.Service (so HandleAgentMilestone records milestone emits)
+	// and the dispatcher (so webhook deliveries record). Failure here is
+	// non-fatal; nil-safe RecordX helpers degrade to no-ops.
+	linearAgentMetrics, err := metrics.NewLinearAgentMetrics()
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to register linear_agent metrics; continuing without dispatcher/writer metrics")
+	}
 
 	// Linear session-linking: detection, primary resolution + context
 	// snapshotting, attachment/comment writes, state-sync transitions —
@@ -238,7 +263,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			ClientID:     cfg.LinearOAuthClientID,
 			ClientSecret: cfg.LinearOAuthClientSecret,
 		},
-		AppBaseURL: cfg.FrontendURL,
+		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: linearAgentMetrics,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
@@ -261,6 +287,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// disconnected so post-disconnect session creates can't admit
 	// bare-identifier matches via a stale cache.
 	integrationHandler.SetLinearTeamKeyCacheInvalidator(linearService.InvalidateTeamKeyCache)
+	// Auto-enable the inbound agent + auto-pick the org's only repo as the
+	// default mapping when the OAuth callback grants agent scopes. Both are
+	// idempotent and only apply when the admin hasn't already configured
+	// the corresponding field — re-auth never clobbers an explicit choice.
+	linearAgentBootstrap := linearAgentBootstrapAdapter{orgs: orgStore, repos: repoStore, logger: logger}
+	integrationHandler.SetLinearAgentBootstrapper(linearAgentBootstrap.Bootstrap)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
@@ -297,6 +329,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// session-level handler maintains. Without this, question state
 	// diverges from the resumed run on the thread surface.
 	threadSvc.SetQuestionStore(sessionQuestionStore)
+	// Wire durable human-input requests so a free-text answer sent through a
+	// thread composer clears the pending request and passes its id into the
+	// resumed agent run.
+	threadSvc.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
@@ -304,9 +340,62 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// thread tab follow-up get the same fail-soft mid-session linking the
 	// legacy session surface already provides.
 	sessionThreadHandler.SetLinearLinker(linearService)
+	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
+		Sessions: sessionStore,
+		Threads:  threadSvc,
+	})
+	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
+	// Reject unsigned webhook deliveries in production. Local dev keeps
+	// the historical fail-open behavior so loopback test POSTs work
+	// without configuring credentials.
+	ingestionWebhookHandler.SetRequireSecret(cfg.Env == "production")
+	// Shared per-OAuth-app HMAC secret for Linear. Used by the SaaS
+	// deployment where one Linear OAuth app handles every workspace.
+	// Self-hosted deployments leave this empty and store per-org
+	// overrides on LinearConfig.WebhookSecret instead.
+	ingestionWebhookHandler.SetGlobalLinearWebhookSecret(cfg.LinearWebhookSigningSecret)
+
+	// Linear inbound-agent dispatcher. Wired here so HandleLinear can branch
+	// AgentSessionEvent webhooks into the agent path. Behind the feature
+	// flag — see cfg.LinearAgentEnabled. Settings loader resolves
+	// org_settings.linear_agent.enabled per-org so a single org can opt
+	// in even before the org-level default flips. ClientForOrg uses the
+	// existing linear.Service credential resolution so the agent path
+	// uses the same actor=app token the rest of the writes do. Metrics
+	// recorder is shared with linearService.HandleAgentMilestone so a
+	// single OTel meter sees both inbound dispatches and outbound emits.
+	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
+		Logger:         logger,
+		AgentSessions:  linearService.AgentSessionStore(),
+		Activities:     linearService.AgentActivityStore(),
+		Jobs:           jobStore,
+		Metrics:        linearAgentMetrics,
+		FeatureEnabled: cfg.LinearAgentEnabled,
+		Credentials:    credentialStore,
+		SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
+		ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+			return linearService.ClientForOrg(ctx, orgID)
+		},
+	})
+	if linearAgentDispatcher != nil {
+		ingestionWebhookHandler.SetLinearAgentDispatcher(linearAgentDispatcher)
+	}
+
+	// Linear agent settings handler — exposes the team→repo mapping CRUD
+	// and install-status surfaces consumed by the settings UI.
+	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(handlers.LinearAgentSettingsConfig{
+		Mappings:      db.NewLinearTeamRepoMappingStore(pool),
+		Credentials:   credentialStore,
+		Settings:      linearAgentSettingsView,
+		AgentSessions: linearService.AgentSessionStore(),
+		Activities:    linearService.AgentActivityStore(),
+		Orgs:          linearAgentOrgWriterAdapter{orgs: orgStore, repos: repoStore},
+		Logger:        logger,
+	})
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
@@ -431,6 +520,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			sessionFilesSnapshotCache = sc
 		}
 	}
+	sessionComposerHandler := handlers.NewSessionComposerHandlerWithWorkspace(repoStore, sessionStore, prService, fileReader, sessionFilesSnapshotCache, redisClient, logger)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
@@ -545,8 +635,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
+	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
@@ -586,6 +680,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
 		r.Post("/internal/preview/{previewID}/stop", internalPreviewHandler.StopPreview)
@@ -629,14 +724,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// bucket only — exactly the guarantee this public route needs.
 		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
-		// Auth routes (no auth)
-		r.Get("/api/v1/auth/providers", authHandler.Providers)
-		r.Get("/api/v1/auth/github/login", authHandler.Login)
-		r.Get("/api/v1/auth/github/callback", authHandler.Callback)
-		r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
-		r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
-		r.Post("/api/v1/auth/register", authHandler.Register)
-		r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+		// Auth routes (no auth). CSRF still wraps this group so safe public
+		// auth reads warm the double-submit cookie before email login/register.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
+			r.Get("/api/v1/auth/providers", authHandler.Providers)
+			r.Get("/api/v1/auth/github/login", authHandler.Login)
+			r.Get("/api/v1/auth/github/callback", authHandler.Callback)
+			r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
+			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
+			r.Post("/api/v1/auth/register", authHandler.Register)
+			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+		})
 
 		// Protected routes (authenticated)
 		r.Group(func(r chi.Router) {
@@ -663,6 +762,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
+			// GitHub App setup callbacks are validated against a signed setup
+			// intent inside the handler. Keep them outside OrgContext so a
+			// stale active org in another tab cannot block linking to the
+			// intended org recorded in the state token.
+			r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+			r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 			// Available to any authenticated user (no RequireRole) — an invited
 			// user may not yet have a role in the target org when they claim.
 			// Rate-limited per-IP and per-user at 10/minute: the endpoint is a
@@ -694,10 +799,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// process; context.Background() is the right lifetime here.
 			r.With(middleware.CreateOrgRateLimit(context.Background(), 5)).Post("/api/v1/organizations", organizationsHandler.Create)
 
-			// Read-only routes (all roles: admin, member, viewer)
+			// Read-only routes (all roles: admin, builder, member, viewer)
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
-				r.Use(middleware.RequireRole("admin", "member", "viewer"))
+				r.Use(middleware.RequireRole("admin", "builder", "member", "viewer"))
 
 				r.Get("/api/v1/version", healthHandler.Version)
 
@@ -722,6 +827,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/session-composer/slash-commands", sessionComposerHandler.ListSlashCommands)
 				r.Get("/api/v1/session-composer/slash-commands/details", sessionComposerHandler.GetSlashCommandDetail)
 				r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
+				r.Get("/api/v1/autopilot/queue", autopilotHandler.Queue)
 				r.Get("/api/v1/issues", issueHandler.List)
 				r.Get("/api/v1/issues/{id}", issueHandler.Get)
 				r.Get("/api/v1/issues/{id}/priority", priorityHandler.GetPriorityScore)
@@ -738,6 +844,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
 				r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 				r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
+				r.Get("/api/v1/sessions/{id}/human-input-requests", sessionHandler.ListHumanInputRequests)
 				r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
 				r.Get("/api/v1/sessions/{id}/timeline", sessionHandler.GetTimeline)
 				r.Get("/api/v1/sessions/{id}/threads", sessionThreadHandler.ListThreads)
@@ -745,6 +852,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
+				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
+				r.Get("/api/v1/sessions/{id}/review-loops/{loop_id}", reviewLoopHandler.Get)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -760,6 +869,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 				r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
+				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
@@ -792,31 +902,27 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 			})
 
-			// Write routes (admin and member only)
+			// Builder workflow routes. Builders can create and iterate on work,
+			// plus manage their personal coding-agent/auth setup, but they do not
+			// inherit the broader member settings/repo/project mutation surface.
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
-				r.Use(middleware.RequireRole("admin", "member"))
+				r.Use(middleware.RequireRole("admin", "builder", "member"))
 
-				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
-				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
-				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
-
-				// Team roster read — sits in the admin+member group (not the
-				// all-roles read group) so viewers cannot enumerate org members.
-				r.Get("/api/v1/team/members", teamHandler.ListMembers)
-
-				// Coding-agents config reads. Members can view what's configured
-				// (so /settings/agent renders read-only); mutations stay admin-only.
+				// Coding-agents config reads. Builders and members can view what's
+				// configured (so /settings/agent renders read-only when needed);
+				// org-scope mutations stay admin-only.
 				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
 				// Codex / Claude OAuth subscription flows. Org-scope writes are
 				// admin-gated inside each handler (see resolveOAuthScope);
-				// personal-scope writes are available to any member because they
-				// target the caller's own credential rows. Routing both into the
-				// admin+member group lets a single endpoint serve both cases —
-				// the handler decides based on the request's scope param.
+				// personal-scope writes are available to builders and members
+				// because they target the caller's own credential rows. Routing
+				// both into the builder workflow group lets a single endpoint
+				// serve both cases — the handler decides based on the request's
+				// scope param.
 				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
@@ -827,31 +933,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
 				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
 
-				// Unified coding-credentials writes. Personal-scope mutations live in
-				// this group because they target the requester's own credentials and
-				// do not require admin privileges for members. The handler enforces
-				// "admin only when scope=org" via resolveScopeFromBody; per-row Move
-				// and bulk Reorder both rely on that gate, so both can sit here
-				// without allowing members to reorder the org stack.
+				// Unified coding-credentials writes. Personal-scope mutations live
+				// in this group because they target the requester's own credentials
+				// and do not require admin privileges for builders or members. The
+				// handler enforces "admin only when scope=org" via
+				// resolveScopeFromBody; per-row Move and bulk Reorder both rely on
+				// that gate, so both can sit here without allowing non-admins to
+				// reorder the org stack.
 				// See docs/design/future/65-unified-coding-credentials.md.
 				r.Post("/api/v1/coding-credentials", codingCredentialHandler.Create)
 				r.Patch("/api/v1/coding-credentials/{id}", codingCredentialHandler.Update)
 				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
 				r.Patch("/api/v1/coding-credentials/{id}/move", codingCredentialHandler.Move)
 				r.Patch("/api/v1/coding-credentials/reorder", codingCredentialHandler.Reorder)
-
-				// Eval reads — admin+member only so viewers cannot enumerate eval
-				// tasks or runs. Eval writes are gated even more tightly (admin-only)
-				// further down.
-				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
-				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
-				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
-				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
-				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
-				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
-				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
-				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
-				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
 
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
@@ -869,17 +963,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 				r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
+				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
+				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/cancel", sessionHandler.CancelHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
 				r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 				r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
 				r.Post("/api/v1/sessions/{id}/cancel", sessionHandler.CancelSession)
 				r.Post("/api/v1/sessions/{id}/archive", sessionHandler.ArchiveSession)
 				r.Post("/api/v1/sessions/{id}/unarchive", sessionHandler.UnarchiveSession)
-				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
-				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
-				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
-				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
-				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
 				r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 				r.Patch("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.UpdateThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/archive", sessionThreadHandler.ArchiveThread)
@@ -888,12 +979,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
+				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
+				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
 				r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
 				r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
-				r.Post("/api/v1/sessions/{id}/preview/extend", previewHandler.ExtendTTL)
+				r.Patch("/api/v1/sessions/{id}/preview/lifetime", previewHandler.SetLifetime)
 				r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)
 				r.Post("/api/v1/sessions/{id}/preview/inspect", previewHandler.InspectElement)
 				r.Post("/api/v1/sessions/{id}/preview/design-feedback", previewHandler.SubmitDesignFeedback)
@@ -904,6 +997,53 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
 				r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
 				r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
+
+			})
+
+			// PR shipping routes. Builders may create PRs only through handler-
+			// enforced org guardrails such as the pre-PR review requirement.
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.OrgContext)
+				r.Use(middleware.RequireRole("admin", "builder", "member"))
+
+				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/branch", sessionHandler.CreateBranch)
+				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
+			})
+
+			// Member settings / operations routes. Builders do not inherit this
+			// broader org-management surface; PR shipping lives in the guarded
+			// route group above.
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.OrgContext)
+				r.Use(middleware.RequireRole("admin", "member"))
+
+				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
+				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
+
+				// Team roster read — sits in the admin+member group (not the
+				// all-roles read group) so viewers and builders cannot enumerate
+				// org members.
+				r.Get("/api/v1/team/members", teamHandler.ListMembers)
+
+				// Eval reads — admin+member only so viewers/builders cannot
+				// enumerate eval tasks or runs. Eval writes are gated even more
+				// tightly (admin-only) further down.
+				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
+				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
+				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
+				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
+				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
+				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
+				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
+				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
+
+				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
+				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
+				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
+
 				// Automations (write)
 				r.Post("/api/v1/automations", automationHandler.Create)
 				r.Patch("/api/v1/automations/{id}", automationHandler.Update)
@@ -939,7 +1079,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/documents/{docId}/sync", pmDocumentHandler.SyncFromNotion)
 				r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
 				r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
-
 			})
 
 			// Admin-only routes
@@ -1007,14 +1146,26 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
 				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
 				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
+				// Linear agent settings: install status + team→repo mappings.
+				// Admin-only enforced by the surrounding middleware tier.
+				r.Get("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.GetStatus)
+				r.Patch("/api/v1/integrations/linear/agent", linearAgentSettingsHandler.PatchSettings)
+				r.Get("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.ListMappings)
+				r.Post("/api/v1/integrations/linear/agent/mappings", linearAgentSettingsHandler.UpsertMapping)
+				r.Delete("/api/v1/integrations/linear/agent/mappings/{id}", linearAgentSettingsHandler.DeleteMapping)
+				// Operator debug surface — read-only listings of the
+				// inbound agent rows + activity log so an admin can
+				// answer "what did we send for AgentSession X".
+				r.Get("/api/v1/integrations/linear/agent/sessions", linearAgentSettingsHandler.ListSessions)
+				r.Get("/api/v1/integrations/linear/agent/sessions/{id}", linearAgentSettingsHandler.GetSession)
 				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
 				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
 				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
 				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
-				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
-				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
 				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
 				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
+				r.Get("/api/v1/integrations/github/repositories", integrationHandler.ListGitHubInstallationRepositories)
+				r.Post("/api/v1/integrations/github/repositories/claim", integrationHandler.ClaimGitHubInstallationRepositories)
 				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
@@ -1026,6 +1177,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
 				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/circleci/connect", integrationHandler.ConnectCircleCI)
+				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
@@ -1044,9 +1197,133 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
 }
 
+// linearAgentOrgWriterAdapter persists the per-org Enabled flag by
+// loading the existing settings, mutating only the LinearAgent.Enabled
+// field, and writing back the merged JSON. Read-modify-write is fine
+// here because the org settings JSONB is a low-write-volume blob and
+// any concurrent admin edits would land seconds apart at worst.
+type linearAgentOrgWriterAdapter struct {
+	orgs  *db.OrganizationStore
+	repos *db.RepositoryStore
+}
+
+func (a linearAgentOrgWriterAdapter) SetLinearAgentEnabled(ctx context.Context, orgID uuid.UUID, enabled bool) error {
+	settings, err := a.loadLinearAgentSettings(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	settings.Enabled = &enabled
+	// Surgical merge of just the linear_agent sub-key so a concurrent
+	// admin edit to a sibling settings key (e.g. agent_config) isn't
+	// clobbered.
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, settings)
+}
+
+func (a linearAgentOrgWriterAdapter) SetLinearAgentSettings(ctx context.Context, orgID uuid.UUID, settings models.LinearAgentSettings) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	if settings.DefaultRepoID != nil {
+		if a.repos == nil {
+			return fmt.Errorf("repository store unavailable")
+		}
+		repo, err := a.repos.GetByID(ctx, orgID, *settings.DefaultRepoID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", handlers.ErrInvalidDefaultRepo, err)
+		}
+		if repo.Status != "active" {
+			return fmt.Errorf("%w: repository is disconnected", handlers.ErrInvalidDefaultRepo)
+		}
+	}
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, settings)
+}
+
+func (a linearAgentOrgWriterAdapter) loadLinearAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+	if a.orgs == nil {
+		return models.LinearAgentSettings{}, fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return models.LinearAgentSettings{}, fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return models.LinearAgentSettings{}, fmt.Errorf("parse org settings: %w", err)
+	}
+	return parsed.LinearAgent, nil
+}
+
+// linearAgentBootstrapAdapter applies the post-OAuth convenience defaults
+// for the inbound agent feature. Two independent steps, both gated on
+// "admin hasn't expressed an opinion yet" so an idempotent re-auth never
+// overrides an explicit user choice:
+//
+//  1. Flip LinearAgent.Enabled to true when it is still nil. Once the admin
+//     has explicitly disabled (or re-enabled) the agent, that wins.
+//  2. Set LinearAgent.DefaultRepoID to the org's lone connected repo when
+//     the org has exactly one and no default is configured yet. Multi-repo
+//     orgs intentionally fall through — picking arbitrarily would surprise.
+type linearAgentBootstrapAdapter struct {
+	orgs   *db.OrganizationStore
+	repos  *db.RepositoryStore
+	logger zerolog.Logger
+}
+
+func (a linearAgentBootstrapAdapter) Bootstrap(ctx context.Context, orgID uuid.UUID) error {
+	if a.orgs == nil {
+		return fmt.Errorf("organization store unavailable")
+	}
+	org, err := a.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return fmt.Errorf("parse org settings: %w", err)
+	}
+
+	mutated := false
+	if parsed.LinearAgent.Enabled == nil {
+		enabled := true
+		parsed.LinearAgent.Enabled = &enabled
+		mutated = true
+	}
+
+	if parsed.LinearAgent.DefaultRepoID == nil && a.repos != nil {
+		repos, err := a.repos.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+		if err != nil {
+			// Don't fail the whole bootstrap — the enable flip is still
+			// valuable on its own, and the default-repo picker is a pure
+			// convenience.
+			a.logger.Warn().Err(err).Str("org_id", orgID.String()).
+				Msg("linear agent bootstrap: failed to list repos; skipping default-repo auto-set")
+		} else if len(repos) == 1 {
+			repoID := repos[0].ID
+			parsed.LinearAgent.DefaultRepoID = &repoID
+			mutated = true
+		}
+	}
+
+	if !mutated {
+		return nil
+	}
+
+	// Surgical jsonb_set merge — see MergeLinearAgentSettings for why.
+	return a.orgs.MergeLinearAgentSettings(ctx, orgID, parsed.LinearAgent)
+}
+
 func resolveRouterCodingCredentialStore(pool *pgxpool.Pool, cryptoSvc *crypto.Service, shared ...*db.CodingCredentialStore) *db.CodingCredentialStore {
 	if len(shared) > 0 && shared[0] != nil {
 		return shared[0]
 	}
 	return db.NewCodingCredentialStore(pool, cryptoSvc)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -673,22 +674,63 @@ func TestDetectReadiness(t *testing.T) {
 func TestResolveResourceLimits(t *testing.T) {
 	t.Parallel()
 
-	single := models.PreviewConfig{
-		Services: map[string]models.ServiceConfig{"app": {}},
-	}
-	multi := models.PreviewConfig{
-		Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
+	tests := []struct {
+		name     string
+		cfg      models.PreviewConfig
+		expected models.ResourceLimits
+	}{
+		{
+			name: "single service uses small preview tier",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {}},
+			},
+			expected: models.ResourceLimits{MemoryMB: 512, CPUMillis: 500},
+		},
+		{
+			name: "multi service without managed infrastructure uses standard preview tier",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
+			},
+			expected: models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000},
+		},
+		{
+			name: "multi service with managed infrastructure uses heavy preview tier",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"frontend": {}, "server": {}},
+				Infrastructure: map[string]models.InfrastructureConfig{
+					"db": {Template: "postgres-17"},
+				},
+			},
+			expected: models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000},
+		},
 	}
 
-	singleLimits := ResolveResourceLimits(&single)
-	if singleLimits.MemoryMB != 512 || singleLimits.CPUMillis != 500 {
-		t.Errorf("single = %+v, want {512, 500}", singleLimits)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, ResolveResourceLimits(&tt.cfg), "resource tier should match preview topology")
+		})
 	}
+}
 
-	multiLimits := ResolveResourceLimits(&multi)
-	if multiLimits.MemoryMB != 1024 || multiLimits.CPUMillis != 1000 {
-		t.Errorf("multi = %+v, want {1024, 1000}", multiLimits)
+func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"frontend": {},
+			"server":   {},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {Template: "postgres-17"},
+		},
 	}
+	sandboxCfg := agent.DefaultSandboxConfig()
+
+	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+
+	require.Equal(t, 2048, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
+	require.Equal(t, 2.0, sandboxCfg.CPULimit, "sandbox config should convert preview millicores into CPU cores")
 }
 
 func TestLookupInfraTemplate(t *testing.T) {
@@ -782,6 +824,33 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			t.Skip("repo root .143/config.json not found from test working directory")
+		}
+		dir = parent
+	}
+}
+
+func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
+	t.Parallel()
+
+	// Walk up from the package dir to the repo root (where `.143/` lives).
+	dir, err := os.Getwd()
+	require.NoError(t, err, "test should resolve the package working directory")
+	for {
+		candidate := filepath.Join(dir, ".143", "preview-frontend.sh")
+		if _, err := os.Stat(candidate); err == nil {
+			raw, err := os.ReadFile(candidate)
+			require.NoError(t, err, "test should read committed dogfood frontend preview script")
+			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
+			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
+			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
+			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
+			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
+			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Skip("repo root .143/preview-frontend.sh not found from test working directory")
 		}
 		dir = parent
 	}

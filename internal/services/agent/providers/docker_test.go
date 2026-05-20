@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -17,8 +18,10 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -30,6 +33,7 @@ import (
 // mockDockerClient implements DockerClient for testing.
 type mockDockerClient struct {
 	pingFn                 func(ctx context.Context) (types.Ping, error)
+	containerListFn        func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
 	containerCreateFn      func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
 	containerStartFn       func(ctx context.Context, containerID string, options container.StartOptions) error
 	containerStopFn        func(ctx context.Context, containerID string, options container.StopOptions) error
@@ -39,6 +43,8 @@ type mockDockerClient struct {
 	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	containerExecAttachFn  func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	containerExecInspectFn func(ctx context.Context, execID string) (container.ExecInspect, error)
+	imageInspectFn         func(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	imagePullFn            func(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
 	networkInspectFn       func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
 	networkCreateFn        func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
 }
@@ -48,6 +54,13 @@ func (m *mockDockerClient) Ping(ctx context.Context) (types.Ping, error) {
 		return m.pingFn(ctx)
 	}
 	return types.Ping{}, nil
+}
+
+func (m *mockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+	if m.containerListFn != nil {
+		return m.containerListFn(ctx, options)
+	}
+	return nil, nil
 }
 
 func (m *mockDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
@@ -119,6 +132,20 @@ func (m *mockDockerClient) ContainerExecInspect(ctx context.Context, execID stri
 	return container.ExecInspect{ExitCode: 0}, nil
 }
 
+func (m *mockDockerClient) ImageInspect(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
+	if m.imageInspectFn != nil {
+		return m.imageInspectFn(ctx, ref, opts...)
+	}
+	return image.InspectResponse{ID: "test-image-id"}, nil
+}
+
+func (m *mockDockerClient) ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+	if m.imagePullFn != nil {
+		return m.imagePullFn(ctx, ref, options)
+	}
+	return io.NopCloser(strings.NewReader(`{"status":"Pull complete"}` + "\n")), nil
+}
+
 func (m *mockDockerClient) NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
 	if m.networkInspectFn != nil {
 		return m.networkInspectFn(ctx, networkID, options)
@@ -159,6 +186,42 @@ func (c *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 // The data should be in Docker's multiplexed stream format, or empty.
 func newMockHijackedResponse(data string) types.HijackedResponse {
 	conn := newMockConn(data)
+	return types.HijackedResponse{
+		Conn:   conn,
+		Reader: bufio.NewReader(conn),
+	}
+}
+
+type hangingConn struct {
+	net.Conn
+	readDone    chan struct{}
+	closeCalled bool
+	mu          sync.Mutex
+}
+
+func newHangingConn() *hangingConn {
+	return &hangingConn{readDone: make(chan struct{})}
+}
+
+func (c *hangingConn) Read(p []byte) (int, error) {
+	<-c.readDone
+	return 0, io.EOF
+}
+
+func (c *hangingConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *hangingConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeCalled = true
+	return nil
+}
+func (c *hangingConn) LocalAddr() net.Addr                { return nil }
+func (c *hangingConn) RemoteAddr() net.Addr               { return nil }
+func (c *hangingConn) SetDeadline(t time.Time) error      { return nil }
+func (c *hangingConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *hangingConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func newHangingHijackedResponse(conn *hangingConn) types.HijackedResponse {
 	return types.HijackedResponse{
 		Conn:   conn,
 		Reader: bufio.NewReader(conn),
@@ -286,11 +349,11 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 		mock := &mockDockerClient{}
 		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 			createCalled = true
-			require.Equal(t, "busybox:latest", config.Image, "health check should use busybox image")
+			require.Equal(t, "busybox:1.36.1", config.Image, "health check should use the pinned busybox health image")
 			require.Equal(t, []string(config.Cmd), []string{"echo", "runtime-ok"}, "health check should run echo command")
 			require.Equal(t, "runsc", hostConfig.Runtime, "health check should use configured runtime")
-			require.NotNil(t, hostConfig.Resources.PidsLimit)
-			require.Equal(t, int64(64), *hostConfig.Resources.PidsLimit)
+			require.NotNil(t, hostConfig.Resources.PidsLimit, "health check should set a pids limit")
+			require.Equal(t, int64(64), *hostConfig.Resources.PidsLimit, "health check should use the expected pids limit")
 			return container.CreateResponse{ID: "health-check-container"}, nil
 		}
 		mock.containerStartFn = func(ctx context.Context, containerID string, options container.StartOptions) error {
@@ -321,6 +384,82 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 		require.True(t, createCalled, "ContainerCreate should have been called")
 		require.True(t, startCalled, "ContainerStart should have been called")
 		require.True(t, removeCalled, "ContainerRemove should have been called for cleanup")
+	})
+
+	t.Run("pulls missing health check image before container create", func(t *testing.T) {
+		t.Parallel()
+
+		var inspectCalls, pullCalls int
+		var createCalled bool
+
+		mock := &mockDockerClient{}
+		mock.imageInspectFn = func(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
+			inspectCalls++
+			require.Equal(t, "busybox:1.36.1", ref, "HealthCheck should inspect the pinned busybox health image")
+			if inspectCalls == 1 {
+				return image.InspectResponse{}, cerrdefs.ErrNotFound
+			}
+			return image.InspectResponse{ID: "pulled-health-image"}, nil
+		}
+		mock.imagePullFn = func(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+			pullCalls++
+			require.Equal(t, "busybox:1.36.1", ref, "HealthCheck should pull the pinned busybox health image when missing")
+			return io.NopCloser(strings.NewReader(`{"status":"Pull complete"}` + "\n")), nil
+		}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createCalled = true
+			require.Equal(t, "busybox:1.36.1", config.Image, "HealthCheck should create the test container from the pulled image")
+			return container.CreateResponse{ID: "health-check-container"}, nil
+		}
+		mock.containerInspectFn = func(ctx context.Context, containerID string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					State: &container.State{Running: false, ExitCode: 0},
+				},
+			}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runsc"))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "HealthCheck should succeed after pulling a missing health image")
+		require.Equal(t, 2, inspectCalls, "HealthCheck should inspect before and after pulling")
+		require.Equal(t, 1, pullCalls, "HealthCheck should pull the missing health image once")
+		require.True(t, createCalled, "HealthCheck should create the runtime test container after pulling")
+	})
+
+	t.Run("pulls missing health check image before quota probe", func(t *testing.T) {
+		t.Parallel()
+
+		var inspectCalls, pullCalls int
+		var quotaProbeCreated bool
+
+		mock := &mockDockerClient{}
+		mock.imageInspectFn = func(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
+			inspectCalls++
+			require.Equal(t, "busybox:1.36.1", ref, "HealthCheck should inspect the pinned busybox health image")
+			if inspectCalls == 1 {
+				return image.InspectResponse{}, cerrdefs.ErrNotFound
+			}
+			return image.InspectResponse{ID: "pulled-health-image"}, nil
+		}
+		mock.imagePullFn = func(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+			pullCalls++
+			require.Equal(t, "busybox:1.36.1", ref, "HealthCheck should pull the pinned busybox health image when missing")
+			return io.NopCloser(strings.NewReader(`{"status":"Pull complete"}` + "\n")), nil
+		}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			quotaProbeCreated = true
+			require.Equal(t, "busybox:1.36.1", config.Image, "quota probe should use the pulled health-check image")
+			require.Equal(t, "1G", hostConfig.StorageOpt["size"], "quota probe should request the test storage quota")
+			return container.CreateResponse{ID: "quota-check"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"), WithRequireDiskQuota(true))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "HealthCheck should succeed after pulling a missing quota probe image")
+		require.Equal(t, 2, inspectCalls, "HealthCheck should inspect before and after pulling")
+		require.Equal(t, 1, pullCalls, "HealthCheck should pull the missing health image once")
+		require.True(t, quotaProbeCreated, "HealthCheck should create the quota probe after pulling")
 	})
 
 	t.Run("returns error when container create fails", func(t *testing.T) {
@@ -364,6 +503,135 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 		require.Contains(t, err.Error(), "failed to start test container")
 		require.True(t, removeCalled, "ContainerRemove should be called for cleanup even on start failure")
 	})
+
+	t.Run("requires disk quota support when configured", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedStorageOpt map[string]string
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			require.Equal(t, "busybox:1.36.1", config.Image, "quota probe should use the pinned health-check image")
+			capturedStorageOpt = hostConfig.StorageOpt
+			return container.CreateResponse{ID: "quota-check"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"), WithRequireDiskQuota(true))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "HealthCheck should pass when the quota probe container can be created")
+		require.Equal(t, "1G", capturedStorageOpt["size"], "HealthCheck should create a tiny quota probe when disk quota enforcement is required")
+	})
+
+	t.Run("fails health check when required disk quota is unsupported", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{}, fmt.Errorf("storage-opt is supported only for overlay over xfs with pquota")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"), WithRequireDiskQuota(true))
+
+		err := p.HealthCheck(context.Background())
+		require.ErrorIs(t, err, ErrDiskQuotaUnsupported, "HealthCheck should fail when required disk quota support is missing")
+	})
+}
+
+func TestDockerProvider_ListManagedSandboxes(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	var capturedOptions container.ListOptions
+	mock := &mockDockerClient{
+		containerListFn: func(_ context.Context, options container.ListOptions) ([]container.Summary, error) {
+			capturedOptions = options
+			return []container.Summary{
+				{
+					ID:      "container-1",
+					Created: createdAt.Add(-time.Hour).Unix(),
+					Labels: map[string]string{
+						SandboxLabelManaged:   "true",
+						SandboxLabelType:      "sandbox",
+						SandboxLabelSessionID: "session-1",
+						SandboxLabelOrgID:     "org-1",
+						SandboxLabelPurpose:   "agent_run",
+						SandboxLabelCreatedAt: createdAt.Format(time.RFC3339Nano),
+					},
+				},
+				{
+					ID:      "container-2",
+					Created: createdAt.Add(-2 * time.Hour).Unix(),
+					Labels: map[string]string{
+						sandboxLabelLegacySandbox:   "true",
+						sandboxLabelLegacySessionID: "session-2",
+						sandboxLabelLegacyOrgID:     "org-2",
+						sandboxLabelLegacyPurpose:   "preview",
+					},
+				},
+				{
+					ID:      "container-3",
+					Created: createdAt.Add(-3 * time.Hour).Unix(),
+					Image:   "ghcr.io/assembledhq/143-sandbox:legacy",
+					Labels:  map[string]string{},
+					NetworkSettings: &container.NetworkSettingsSummary{
+						Networks: map[string]*network.EndpointSettings{
+							"143-sandbox": {},
+						},
+					},
+				},
+				{
+					ID:      "container-4",
+					Created: createdAt.Add(-4 * time.Hour).Unix(),
+					Image:   "143-sandbox-dns:local",
+					Labels:  map[string]string{},
+					NetworkSettings: &container.NetworkSettingsSummary{
+						Networks: map[string]*network.EndpointSettings{
+							"143-sandbox": {},
+						},
+					},
+				},
+				{
+					ID:      "container-5",
+					Created: createdAt.Add(-5 * time.Hour).Unix(),
+					Image:   "ghcr.io/assembledhq/143-sandbox:legacy",
+					Labels:  map[string]string{},
+					NetworkSettings: &container.NetworkSettingsSummary{
+						Networks: map[string]*network.EndpointSettings{
+							"other-network": {},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+
+	containers, err := p.ListManagedSandboxes(context.Background())
+	require.NoError(t, err, "ListManagedSandboxes should return Docker-managed sandbox containers")
+	require.True(t, capturedOptions.All, "ListManagedSandboxes should include stopped containers")
+	require.Empty(t, capturedOptions.Filters.Get("label"), "ListManagedSandboxes should filter in-process so both current and legacy label schemes are eligible")
+	require.Equal(t, []agent.ManagedSandboxContainer{
+		{
+			ID:        "container-1",
+			SessionID: "session-1",
+			OrgID:     "org-1",
+			Purpose:   "agent_run",
+			CreatedAt: createdAt,
+		},
+		{
+			ID:        "container-2",
+			SessionID: "session-2",
+			OrgID:     "org-2",
+			Purpose:   "preview",
+			CreatedAt: createdAt.Add(-2 * time.Hour),
+		},
+		{
+			ID:        "container-3",
+			SessionID: "",
+			OrgID:     "",
+			Purpose:   "",
+			CreatedAt: createdAt.Add(-3 * time.Hour),
+		},
+	}, containers, "ListManagedSandboxes should map Docker summaries into GC metadata, include legacy image-based sandboxes only on the sandbox network, skip DNS sidecars, and fall back to Docker creation time")
 }
 
 func TestDockerProvider_EnsureNetwork(t *testing.T) {
@@ -469,6 +737,59 @@ func TestDockerProvider_Name(t *testing.T) {
 	require.Equal(t, "docker", p.Name(), "provider name should be 'docker'")
 }
 
+func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockDockerClient{}
+	mock.containerListFn = func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		require.Contains(t, options.Filters.Get("network"), "143-sandbox", "CountLiveSandboxes should scope counting to the local sandbox network")
+		return []container.Summary{
+			{
+				ID:     "labeled-sandbox",
+				Image:  "busybox:1.36.1",
+				Labels: map[string]string{"143.sandbox": "true"},
+			},
+			{
+				ID:     "legacy-sandbox",
+				Image:  "ghcr.io/assembledhq/143-sandbox:latest",
+				Labels: map[string]string{},
+			},
+			{
+				ID:     "dns-sidecar",
+				Image:  "143-sandbox-dns:local",
+				Labels: map[string]string{},
+			},
+			{
+				ID:     "worker",
+				Image:  "ghcr.io/assembledhq/143:latest",
+				Labels: map[string]string{},
+			},
+		}, nil
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+
+	count, err := p.CountLiveSandboxes(context.Background())
+
+	require.NoError(t, err, "CountLiveSandboxes should return the Docker count without error")
+	require.Equal(t, 2, count, "CountLiveSandboxes should include labeled and legacy sandbox containers but skip sidecars")
+}
+
+func TestDockerProvider_CountLiveSandboxesListError(t *testing.T) {
+	t.Parallel()
+
+	listErr := errors.New("daemon unavailable")
+	mock := &mockDockerClient{}
+	mock.containerListFn = func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		return nil, listErr
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+
+	count, err := p.CountLiveSandboxes(context.Background())
+
+	require.ErrorIs(t, err, listErr, "CountLiveSandboxes should wrap Docker list failures")
+	require.Equal(t, 0, count, "CountLiveSandboxes should not return a partial count on list failure")
+}
+
 func TestDockerProvider_Create(t *testing.T) {
 	t.Parallel()
 
@@ -530,7 +851,56 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "runsc", sb.Metadata["runtime"], "sandbox metadata should include runtime")
 	})
 
-	t.Run("falls back when StorageOpt unsupported", func(t *testing.T) {
+	t.Run("labels managed sandbox containers with tracing metadata", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedLabels map[string]string
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedLabels = config.Labels
+			return container.CreateResponse{ID: "labeled"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.SessionID = "session-123"
+		cfg.OrgID = "org-456"
+		cfg.Purpose = "agent_run"
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err, "Create should succeed for a labeled sandbox")
+
+		require.Equal(t, "143", capturedLabels["managed-by"], "sandbox containers should retain the legacy managed-by label")
+		require.Equal(t, "true", capturedLabels[sandboxLabelLegacySandbox], "sandbox containers should be labeled for live capacity checks")
+		require.Equal(t, "session-123", capturedLabels[sandboxLabelLegacySessionID], "legacy sandbox labels should include the session id when present")
+		require.Equal(t, "org-456", capturedLabels[sandboxLabelLegacyOrgID], "legacy sandbox labels should include the org id when present")
+		require.Equal(t, "agent_run", capturedLabels[sandboxLabelLegacyPurpose], "legacy sandbox labels should include the sandbox purpose")
+		require.Equal(t, "true", capturedLabels[SandboxLabelManaged], "sandbox containers should be labeled as 143-managed")
+		require.Equal(t, "sandbox", capturedLabels[SandboxLabelType], "sandbox containers should carry a type label for host-local GC")
+		require.Equal(t, "session-123", capturedLabels[SandboxLabelSessionID], "sandbox labels should include the session id when present")
+		require.Equal(t, "org-456", capturedLabels[SandboxLabelOrgID], "sandbox labels should include the org id when present")
+		require.Equal(t, "agent_run", capturedLabels[SandboxLabelPurpose], "sandbox labels should include the sandbox purpose")
+		require.NotEmpty(t, capturedLabels[SandboxLabelCreatedAt], "sandbox labels should include an RFC3339 creation timestamp for GC age decisions")
+	})
+
+	t.Run("returns error when required StorageOpt unsupported", func(t *testing.T) {
+		t.Parallel()
+
+		callCount := 0
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			callCount++
+			return container.CreateResponse{}, fmt.Errorf("--storage-opt is supported only for overlay over xfs with 'pquota' mount option")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRequireDiskQuota(true))
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.ErrorIs(t, err, ErrDiskQuotaUnsupported, "Create should fail closed when disk quota is required but Docker rejects StorageOpt")
+		require.Equal(t, 1, callCount, "Create should not retry without StorageOpt when disk quota is required")
+	})
+
+	t.Run("falls back when StorageOpt unsupported and quota is not required", func(t *testing.T) {
 		t.Parallel()
 
 		callCount := 0
@@ -760,7 +1130,9 @@ func TestDockerProvider_Create(t *testing.T) {
 		t.Parallel()
 
 		mock := &mockDockerClient{}
+		var createdCfg *container.Config
 		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createdCfg = config
 			return container.CreateResponse{ID: "traced"}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
@@ -775,6 +1147,10 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "sess-123", sb.SessionID, "SessionID should be copied from config")
 		require.Equal(t, "org-456", sb.OrgID, "OrgID should be copied from config")
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
+		require.Equal(t, "true", createdCfg.Labels["143.sandbox"], "created containers should be labeled as 143 sandboxes for capacity and observability")
+		require.Equal(t, "sess-123", createdCfg.Labels["143.session_id"], "created containers should carry session ID labels")
+		require.Equal(t, "org-456", createdCfg.Labels["143.org_id"], "created containers should carry org ID labels")
+		require.Equal(t, "agent_run", createdCfg.Labels["143.purpose"], "created containers should carry purpose labels")
 	})
 
 	t.Run("bootstrap runs as sandbox user with no sudo or chown", func(t *testing.T) {
@@ -968,6 +1344,7 @@ func TestDockerProvider_Snapshot(t *testing.T) {
 		tarCmd := gotCmd[2]
 		require.Contains(t, tarCmd, "'home/sandbox/backend'", "tar should include the WorkDir relative path")
 		require.Contains(t, tarCmd, "'home/sandbox/.claude'", "tar should include the .claude dir under HomeDir")
+		require.Contains(t, tarCmd, "'home/sandbox/.claude.json'", "tar should include Claude Code's top-level config file under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.codex'", "tar should include the .codex dir under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.gemini'", "tar should include the .gemini dir under HomeDir")
 		require.NotContains(t, tarCmd, "2>/dev/null", "tar stderr must not be silenced — we capture it for diagnostics")
@@ -1609,6 +1986,8 @@ func TestDockerHandle_Close_Idempotent(t *testing.T) {
 
 	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
 		Cmd:              "agent",
+		TTY:              true,
+		OpenStdin:        true,
 		CancellationSpec: agent.DefaultCancellationSpec,
 	})
 	require.NoError(t, err)
@@ -1716,6 +2095,85 @@ func TestDockerHandle_Kill_ShimSendsSIGKILL(t *testing.T) {
 	}
 	require.True(t, sawSIGKILL,
 		"Kill on a shim handle must exec-send SIGKILL to the pidfile-tracked child, not just close the connection")
+}
+
+func TestDockerHandle_LogsInteractiveLifecycle(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-logged"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newMockHijackedResponse(""), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, logger)
+	sb := &agent.Sandbox{ID: "container-logged", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox", SessionID: "session-logged", OrgID: "org-logged"}
+
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err, "interactive command should start")
+	require.NoError(t, h.Interrupt(context.Background(), agent.DefaultCancellationSpec), "interrupt should log graceful cancellation")
+	require.NoError(t, h.Kill(context.Background()), "kill should force-stop the handle")
+
+	got := logs.String()
+	require.Contains(t, got, "started interactive command in sandbox", "start log should identify the interactive exec")
+	require.Contains(t, got, `"interrupt_sent":true`, "interrupt log should expose graceful cancellation delivery")
+	require.Contains(t, got, "force-stopping interactive command", "kill log should identify force-stop escalation")
+	require.Contains(t, got, `"kill_sent":true`, "force-stop log should expose kill delivery")
+	require.Contains(t, got, `"exec_closed":true`, "force-stop log should expose transport closure")
+	require.Contains(t, got, `"force_stop_timeout":false`, "force-stop log should expose bounded cleanup outcome")
+	require.Contains(t, got, "exec-logged", "logs should include the Docker exec id")
+	require.Contains(t, got, "container-logged", "logs should include the container id")
+	require.Contains(t, got, "session-logged", "logs should include the session id")
+}
+
+func TestDockerHandle_KillReturnsWhenExecWaitHangs(t *testing.T) {
+	t.Parallel()
+
+	conn := newHangingConn()
+	defer close(conn.readDone)
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-hanging"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newHangingHijackedResponse(conn), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "container-hanging", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		TTY:              true,
+		OpenStdin:        true,
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err, "interactive command should start")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = h.Kill(ctx)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "Kill should report that the exec transport did not close inside the bounded window")
+	require.Less(t, elapsed, 500*time.Millisecond, "Kill should not block indefinitely when Docker exec wait hangs")
+	conn.mu.Lock()
+	closeCalled := conn.closeCalled
+	conn.mu.Unlock()
+	require.True(t, closeCalled, "Kill should still close the Docker exec transport before returning")
 }
 
 func TestDockerProvider_ConnectionInfo(t *testing.T) {
@@ -2049,26 +2507,95 @@ func TestDockerProvider_ShellInjection(t *testing.T) {
 		require.NotContains(t, shellCmd, "cat /workspace/foo;", "bare semicolon should not appear outside quotes")
 	})
 
-	t.Run("WriteFile escapes malicious path", func(t *testing.T) {
+	t.Run("WriteFile streams tar without shell interpolation", func(t *testing.T) {
 		t.Parallel()
 
 		var capturedCmd []string
+		conn := newCapturingConn()
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = config.Cmd
 			return container.ExecCreateResponse{ID: "exec-inject"}, nil
 		}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
 			return container.ExecInspect{ExitCode: 0}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
-		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 
-		_ = p.WriteFile(context.Background(), sb, "/workspace/$(rm -rf /)", []byte("data"))
+		err := p.WriteFile(context.Background(), sb, "/home/sandbox/.143/attachments/turn-1/$(touch pwned).txt", []byte("data"))
+		require.NoError(t, err, "WriteFile should stream the tar payload successfully")
 
-		shellCmd := capturedCmd[2]
-		require.Contains(t, shellCmd, "'/workspace/$(rm -rf /)'", "path with command substitution should be single-quoted")
+		require.Equal(t, []string{"tar", "xf", "-", "-C", "/home/sandbox"}, capturedCmd, "WriteFile should exec tar directly without a shell")
+
+		tr := tar.NewReader(bytes.NewReader(conn.Captured()))
+		var foundFile bool
+		for {
+			hdr, readErr := tr.Next()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			require.NoError(t, readErr, "tar payload should be readable")
+			require.NotEqual(t, "home/", hdr.Name, "tar payload should not rewrite the root-owned /home directory")
+			require.NotEqual(t, "home/sandbox/", hdr.Name, "tar payload should not rewrite the existing sandbox home directory")
+			if hdr.Name != ".143/attachments/turn-1/$(touch pwned).txt" {
+				continue
+			}
+			foundFile = true
+			body, readErr := io.ReadAll(tr)
+			require.NoError(t, readErr, "tar file body should be readable")
+			require.Equal(t, []byte("data"), body, "tar payload should contain the requested file bytes")
+		}
+		require.True(t, foundFile, "tar payload should preserve the literal destination path")
+	})
+
+	t.Run("WriteFile to tmp does not rewrite tmp directory metadata", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedCmd []string
+		conn := newCapturingConn()
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			capturedCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "exec-tmp-write"}, nil
+		}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return types.HijackedResponse{Conn: conn, Reader: bufio.NewReader(conn)}, nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+		err := p.WriteFile(context.Background(), sb, "/tmp/143-pr-commit-msg", []byte("commit message"))
+		require.NoError(t, err, "WriteFile should support existing absolute directories such as /tmp")
+		require.Equal(t, []string{"tar", "xf", "-", "-C", "/tmp"}, capturedCmd, "WriteFile should extract directly into /tmp instead of rewriting /tmp metadata")
+
+		tr := tar.NewReader(bytes.NewReader(conn.Captured()))
+		var foundFile bool
+		for {
+			hdr, readErr := tr.Next()
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			require.NoError(t, readErr, "tar payload should be readable")
+			require.NotEqual(t, "tmp/", hdr.Name, "tar payload must not include the existing /tmp directory")
+			require.NotEqual(t, "tmp/143-pr-commit-msg", hdr.Name, "tar payload must be relative to /tmp, not rooted at /")
+			if hdr.Name != "143-pr-commit-msg" {
+				continue
+			}
+			foundFile = true
+			body, readErr := io.ReadAll(tr)
+			require.NoError(t, readErr, "tar file body should be readable")
+			require.Equal(t, []byte("commit message"), body, "tar payload should contain the requested file bytes")
+		}
+		require.True(t, foundFile, "tar payload should contain the tmp target file")
 	})
 }
 

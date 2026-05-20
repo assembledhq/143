@@ -5,7 +5,7 @@ import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -20,8 +20,9 @@ import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
+import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/session-linear-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { SessionListItem, User } from "@/lib/types";
+import type { ListResponse, SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
@@ -53,6 +54,64 @@ const filterTabs = [
   { value: "archived", label: "Archived" },
 ];
 
+const newSessionOptionId = "new-session";
+const sessionSidebarOptionFrameClass = "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150";
+const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none";
+
+function SessionSidebarOptionFrame({
+  id,
+  ariaLabel,
+  ariaSelected,
+  className,
+  children,
+  optionRef,
+  onClick,
+}: {
+  id: string;
+  ariaLabel?: string;
+  ariaSelected: boolean;
+  className?: string;
+  children: ReactNode;
+  optionRef?: (node: HTMLDivElement | null) => void;
+  onClick?: MouseEventHandler<HTMLDivElement>;
+}) {
+  return (
+    <div
+      ref={optionRef}
+      id={id}
+      role="option"
+      aria-label={ariaLabel}
+      aria-selected={ariaSelected}
+      data-active={ariaSelected ? "true" : undefined}
+      className={cn(sessionSidebarOptionFrameClass, className)}
+      onClick={onClick}
+    >
+      {children}
+    </div>
+  );
+}
+
+function SessionSidebarLinkSurface({
+  href,
+  ariaCurrent,
+  className,
+  children,
+}: {
+  href: string;
+  ariaCurrent?: "page";
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={ariaCurrent}
+      className={cn(sessionSidebarLinkSurfaceClass, className)}
+    >
+      {children}
+    </Link>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Unread indicator logic
@@ -126,13 +185,7 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
   const linearLabel =
     session.linear_identifier_hint ??
     session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
-  if (!linearLabel) return null;
-
-  return (
-    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground">
-      {linearLabel}
-    </span>
-  );
+  return <SharedSessionLinearBadge label={linearLabel} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,13 +238,14 @@ export function SessionSidebar() {
     isResolved,
     setPeopleFilter,
   } = usePeopleFilter();
+  const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
   const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const optionRefs = useRef(new Map<string, HTMLDivElement>());
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeSessionFocus, setActiveSessionFocus] = useState<{ id: string; pathname: string } | null>(null);
   const searchRef = useRef(search);
   const skipNextSearchParamWriteRef = useRef(false);
   // Debounce the search query so rapid typing doesn't fire a request per
@@ -237,6 +291,7 @@ export function SessionSidebar() {
   const { data: membersData } = useQuery({
     queryKey: ["team", "members"],
     queryFn: () => api.team.listMembers(),
+    enabled: canListTeamMembers,
   });
   const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 
@@ -316,9 +371,28 @@ export function SessionSidebar() {
     queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
   };
 
+  const removeSessionFromCachedLists = (sessionId: string) => {
+    queryClient.setQueriesData<ListResponse<SessionListItem>>(
+      { queryKey: queryKeys.sessions.all },
+      (current) => {
+        if (!current || !Array.isArray(current.data)) {
+          return current;
+        }
+        const nextData = current.data.filter((session) => session.id !== sessionId);
+        if (nextData.length === current.data.length) {
+          return current;
+        }
+        return { ...current, data: nextData };
+      },
+    );
+  };
+
   const archiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.archive(sessionId),
-    onSuccess: invalidateSessions,
+    onSuccess: (_response, sessionId) => {
+      removeSessionFromCachedLists(sessionId);
+      invalidateSessions();
+    },
     onError: () => {
       toast.error("Failed to archive session");
     },
@@ -326,7 +400,10 @@ export function SessionSidebar() {
 
   const unarchiveMutation = useMutation({
     mutationFn: (sessionId: string) => api.sessions.unarchive(sessionId),
-    onSuccess: invalidateSessions,
+    onSuccess: (_response, sessionId) => {
+      removeSessionFromCachedLists(sessionId);
+      invalidateSessions();
+    },
     onError: () => {
       toast.error("Failed to unarchive session");
     },
@@ -339,8 +416,15 @@ export function SessionSidebar() {
     return merged.filter((s) => sessionTitle(s).toLowerCase().includes(q));
   }, [firstPage, extraPages, search]);
 
+  const isNewSession = pathname === "/sessions/new";
+  const activeSessionId = activeSessionFocus?.id ?? null;
+  const hasNavigatedFromNewSessionDraft = isNewSession && activeSessionFocus?.pathname === pathname;
+
   const currentActiveSessionId = useMemo(() => {
     if (displayedSessions.length === 0) {
+      return null;
+    }
+    if (isNewSession && !hasNavigatedFromNewSessionDraft) {
       return null;
     }
     if (activeSessionId && displayedSessions.some((session) => session.id === activeSessionId)) {
@@ -350,7 +434,7 @@ export function SessionSidebar() {
       return selectedId;
     }
     return displayedSessions[0]?.id ?? null;
-  }, [activeSessionId, displayedSessions, selectedId]);
+  }, [activeSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, selectedId]);
   // Hide optimistic rows whose real session is already in the list — prevents
   // the double-render flash between "optimistic added" and "server refetch
   // lands". Resolved-but-not-yet-visible rows stay until the real row arrives.
@@ -379,9 +463,11 @@ export function SessionSidebar() {
   // doesn't reset the scope back to "Mine".
   const filterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, repo, search || null);
 
-  const isNewSession = pathname === "/sessions/new";
   const showDefaultEmptyState =
     currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
+  const activeOptionId = isNewSession && !currentActiveSessionId
+    ? newSessionOptionId
+    : currentActiveSessionId;
 
   const focusSearch = useCallback(() => {
     const input = searchInputRef.current;
@@ -399,21 +485,25 @@ export function SessionSidebar() {
     const boundedIndex = Math.min(Math.max(index, 0), displayedSessions.length - 1);
     const next = displayedSessions[boundedIndex];
     if (!next) return;
-    setActiveSessionId(next.id);
+    setActiveSessionFocus({ id: next.id, pathname });
     focusList();
     requestAnimationFrame(() => {
       optionRefs.current.get(next.id)?.scrollIntoView({ block: "nearest" });
     });
-  }, [displayedSessions, focusList]);
+  }, [displayedSessions, focusList, pathname]);
 
   const moveActiveSession = useCallback((delta: number) => {
     if (displayedSessions.length === 0) return;
+    if (isNewSession && !hasNavigatedFromNewSessionDraft) {
+      setActiveByIndex(delta >= 0 ? 0 : displayedSessions.length - 1);
+      return;
+    }
     const currentIndex = currentActiveSessionId
       ? displayedSessions.findIndex((session) => session.id === currentActiveSessionId)
       : -1;
     const baseIndex = currentIndex >= 0 ? currentIndex : 0;
     setActiveByIndex(baseIndex + delta);
-  }, [currentActiveSessionId, displayedSessions, setActiveByIndex]);
+  }, [currentActiveSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, setActiveByIndex]);
 
   const activeSession = useMemo(
     () => displayedSessions.find((session) => session.id === currentActiveSessionId) ?? null,
@@ -566,28 +656,30 @@ export function SessionSidebar() {
           onValueChange={(v) => setActiveFilter(v === "all" ? null : v)}
           className="gap-0"
         >
-          <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
-            {filterTabs.map((tab) => {
-              const count = getCountForTab(tab.value, counts);
-              const label = renderCount(count, counts);
-              // Active uses the existing attention-grabbing pill; All/Archived get a
-              // muted inline number so totals are visible without being loud.
-              // Zero buckets render nothing — a "0" badge is noise.
-              const isActivePill = tab.value === "active" && count !== undefined && count > 0;
-              const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
-              return (
-                <TabsTrigger key={tab.value} value={tab.value}>
-                  {tab.label}
-                  {isActivePill && (
-                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
-                  )}
-                  {isMutedNumber && (
-                    <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
+          <div className="overflow-x-auto overflow-y-hidden pb-1">
+            <TabsList variant="line" size="sm">
+              {filterTabs.map((tab) => {
+                const count = getCountForTab(tab.value, counts);
+                const label = renderCount(count, counts);
+                // Active uses the existing attention-grabbing pill; All/Archived get a
+                // muted inline number so totals are visible without being loud.
+                // Zero buckets render nothing — a "0" badge is noise.
+                const isActivePill = tab.value === "active" && count !== undefined && count > 0;
+                const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
+                return (
+                  <TabsTrigger key={tab.value} value={tab.value}>
+                    {tab.label}
+                    {isActivePill && (
+                      <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
+                    )}
+                    {isMutedNumber && (
+                      <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
+                    )}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          </div>
         </Tabs>
       </div>
 
@@ -598,24 +690,48 @@ export function SessionSidebar() {
         tabIndex={0}
         aria-label="Sessions"
         aria-activedescendant={
-          currentActiveSessionId ? `session-sidebar-option-${currentActiveSessionId}` : undefined
+          activeOptionId ? `session-sidebar-option-${activeOptionId}` : undefined
         }
         className="flex-1 overflow-y-auto px-2 pt-1 pb-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         onKeyDown={handleListKeyDown}
       >
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
-          <Link
-            href={`/sessions/new${filterSuffix}`}
-            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
-              <p className="text-xs text-muted-foreground/50 italic">
-                New session
-              </p>
-            </div>
-          </Link>
+          <div className="mb-2 border-b border-border/60 pb-2">
+            <SessionSidebarOptionFrame
+              id={`session-sidebar-option-${newSessionOptionId}`}
+              ariaLabel="New session draft"
+              ariaSelected={!currentActiveSessionId}
+              className={!currentActiveSessionId ? "border-primary/20 bg-background shadow-sm ring-1 ring-primary/10" : undefined}
+            >
+              <SessionSidebarLinkSurface
+                href={`/sessions/new${filterSuffix}`}
+                ariaCurrent="page"
+                className={
+                  !currentActiveSessionId
+                    ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                }
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span
+                    className={cn(
+                      "inline-flex rounded-full h-2 w-2 shrink-0",
+                      !currentActiveSessionId ? "bg-primary/55" : "border border-muted-foreground/30",
+                    )}
+                  />
+                  <p
+                    className={cn(
+                      "text-xs font-medium",
+                      !currentActiveSessionId ? "text-foreground" : "text-muted-foreground",
+                    )}
+                  >
+                    New session
+                  </p>
+                </div>
+              </SessionSidebarLinkSurface>
+            </SessionSidebarOptionFrame>
+          </div>
         )}
 
         {(currentFilter === "all" || currentFilter === "active") &&
@@ -670,20 +786,17 @@ export function SessionSidebar() {
                 }
               }}
             >
-              <div
-                ref={(node) => {
+              <SessionSidebarOptionFrame
+                id={`session-sidebar-option-${session.id}`}
+                ariaSelected={currentActiveSessionId === session.id}
+                optionRef={(node) => {
                   if (node) {
                     optionRefs.current.set(session.id, node);
                   } else {
                     optionRefs.current.delete(session.id);
                   }
                 }}
-                id={`session-sidebar-option-${session.id}`}
-                role="option"
-                aria-selected={currentActiveSessionId === session.id}
-                data-active={currentActiveSessionId === session.id ? "true" : undefined}
                 className={cn(
-                  "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",
                   currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
                   isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
@@ -694,15 +807,14 @@ export function SessionSidebar() {
                   router.push(sessionHref);
                 }}
               >
-                <Link
+                <SessionSidebarLinkSurface
                   href={sessionHref}
-                  aria-current={isSelected ? "page" : undefined}
-                  className={cn(
-                    "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                  ariaCurrent={isSelected ? "page" : undefined}
+                  className={
                     isSelected
                       ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
                       : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
-                  )}
+                  }
                 >
                   <span
                     aria-hidden="true"
@@ -762,8 +874,8 @@ export function SessionSidebar() {
                       )}
                     </div>
                   </div>
-                </Link>
-              </div>
+                </SessionSidebarLinkSurface>
+              </SessionSidebarOptionFrame>
             </SwipeActionRow>
           );
         })}

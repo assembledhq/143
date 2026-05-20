@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis repair-deploy-sudoers deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -314,6 +314,13 @@ secrets-rotate:
 #   make provision-db     HOST=87.99.157.55
 #   make provision-redis  HOST=10.0.0.50
 #
+# DB-only env vars:
+#   DB_BIND_IP                   — required for db role. Set to the db node's
+#                                  primary private IP so same-datacenter nodes
+#                                  keep a DB path if Tailscale is unavailable.
+#                                  DB Tailscale enrollment advertises DB_BIND_IP/32
+#                                  automatically when TS_AUTH_KEY_DB is present.
+#
 # Worker-only env vars (per-host identity, written to /opt/143/.env.local
 # and preserved across deploys):
 #   WORKER_PRIVATE_IP            — auto-detected via SSH if unset. Multi-homed
@@ -325,8 +332,23 @@ secrets-rotate:
 #                                  unique across the full RFC1918 space.
 #   PREVIEW_INTERNAL_BASE_URL    — defaults to "http://${WORKER_PRIVATE_IP}:8080"
 #
+# Optional Tailscale provisioning env vars:
+#   TS_AUTH_KEY_<ROLE>           — role-specific auth keys: TS_AUTH_KEY_APP,
+#                                  TS_AUTH_KEY_DB, TS_AUTH_KEY_WORKER,
+#                                  TS_AUTH_KEY_REDIS.
+#   TS_TAG_<ROLE>                — role-specific tags. Defaults to tag:prod-<role>.
+#   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
+#   TS_WORKER_HOSTS              — comma-separated tailnet workers. Entries can be
+#                                  "<host>" or "<node-id>:<host>". Mapped
+#                                  workers always accept advertised routes.
+#
 # Example with overrides:
 #   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
+#   make provision-app HOST=<public-ip>
+#   make provision-db HOST=<public-ip>
+#   make provision-worker HOST=<public-ip>
+#   make tailscale-enroll ROLE=app HOST=<existing-app-public-ip>
+#   make tailscale-enroll ROLE=redis HOST=<existing-redis-public-ip>
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -360,11 +382,27 @@ REPROVISION ?=
 # Per-host worker identity (forwarded as env vars to provision.sh / deploy.sh
 # so users can write `make provision-worker HOST=… WORKER_PRIVATE_IP=…` instead
 # of prefixing the env var on the command line). Empty by default; provision.sh
-# auto-detects WORKER_PRIVATE_IP via SSH when unset and derives NODE_ID and
-# PREVIEW_INTERNAL_BASE_URL from it.
+# auto-detects WORKER_PRIVATE_IP and DOCKER_GID via SSH when unset and derives
+# NODE_ID and PREVIEW_INTERNAL_BASE_URL from it.
 export WORKER_PRIVATE_IP
+export WORKER_PRIVATE_IP_SOURCE
 export NODE_ID
 export PREVIEW_INTERNAL_BASE_URL
+export DOCKER_GID
+export DB_BIND_IP
+export TS_AUTH_KEY_APP
+export TS_AUTH_KEY_DB
+export TS_AUTH_KEY_WORKER
+export TS_AUTH_KEY_REDIS
+export TS_TAG_APP
+export TS_TAG_DB
+export TS_TAG_WORKER
+export TS_TAG_REDIS
+export TS_WORKER_HOSTS
+export TS_AUTH_KEY
+export TS_TAG
+export TS_HOSTNAME
+export TS_ADVERTISE_ROUTES
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
@@ -399,6 +437,13 @@ provision-redis:
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh redis $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
+tailscale-enroll:
+	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make tailscale-enroll ROLE=<app|db|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	@test "$(ROLE)" = "app" -o "$(ROLE)" = "db" -o "$(ROLE)" = "redis" || { echo "ROLE must be app, db, or redis. Use provision-worker for new tailnet workers."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make tailscale-enroll ROLE=<app|db|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	./deploy/scripts/provision.sh $(ROLE) $(HOST) $(SSH_KEY) --tailscale-only
+
 # Refresh deploy's narrow sudoers grant on an existing host without tearing
 # down containers. Use when deploy fails on a legacy host with
 # "sudo: a password is required" from a deploy-time helper.
@@ -410,12 +455,26 @@ repair-deploy-sudoers:
 	$(check-ssh-key)
 	bash ./deploy/scripts/repair-deploy-sudoers.sh $(ROLE) $(HOST) $(SSH_KEY)
 
+# Re-apply canonical worker host invariants without tearing down containers.
+# Repairs sandbox network/firewall/resolv.conf, sandbox-auth socket dir, and
+# worker sysctl drift. Requires the host to already have /opt/143/deploy staged.
+# Usage:
+#   make repair-worker-host HOST=87.99.158.39
+repair-worker-host:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-worker-host HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	ssh -i $(SSH_KEY) -o BatchMode=yes -o StrictHostKeyChecking=accept-new deploy@$(HOST) 'sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox'
+
+TAG ?= latest
+ROLES ?= app,worker
+
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
 #   make deploy-app
 #   make deploy-app    HOST=87.99.150.138
+#   make deploy-app    TAG=<sha>
 
 # Shell snippet to read FLEET_HOSTS from env var or .env.production.enc via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);
@@ -433,7 +492,7 @@ endef
 define resolve-host
 if [ -n "$(HOST)" ]; then \
 	echo "Deploying $(1) → $(HOST)"; \
-	./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY); \
+	./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG); \
 else \
 	$(read-fleet-hosts); \
 	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^$(1):' | cut -d: -f2)"; \
@@ -443,7 +502,7 @@ else \
 	fi; \
 	for h in $$HOSTS; do \
 		echo "Deploying $(1) → $$h"; \
-		./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY); \
+		./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG); \
 	done; \
 fi
 endef
@@ -488,11 +547,15 @@ deploy-redis:
 	$(check-ssh-key)
 	@$(call resolve-host,redis)
 
-# Deploy all nodes in the fleet.
+# Deploy app+worker nodes in the fleet by default.
 # Uses FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
+# For explicit maintenance deploys of every role:
+#   make deploy-fleet ROLES=all
+# For a specific image tag:
+#   make deploy-fleet TAG=<sha> ROLES=app,worker
 deploy-fleet:
 	$(check-ssh-key)
-	./deploy/scripts/deploy-fleet.sh $(SSH_KEY)
+	./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet

@@ -1,101 +1,100 @@
-# 143 — AI coding agents, built for teams
+# 143
 
-**Transparent automations. Cloud agents. Eval-driven loops.**
+Open-source autopilot for coding agents.
 
-[Getting Started](#getting-started) · [Development Setup](docs/contributing/development-setup.md) · [Architecture](docs/design/overall.md) · [143.dev](https://www.143.dev)
+143 gives engineering teams one shared place to run coding agents in the cloud, connect them to the tools that hold product context, and turn the result into reviewable GitHub PRs.
 
----
+[143.dev](https://www.143.dev) · [Getting started](#getting-started) · [Development setup](docs/contributing/development-setup.md) · [Architecture](docs/design/overall.md) · [Self-hosting](docs/self-hosting/README.md)
 
-## Why 143
+## What is this?
 
-Most coding agent tools are built for solo developers. But most professional engineering teams need a high level of visibility. When someone sets up an automation to improve test coverage or scan for security vulnerabilities, the whole team should be able to access and have visibility by default. When a coding agent opens a PR, everyone should be able to see the prompt that drove it.
+Most coding tools are built around one developer at a time. That works fine for local autocomplete, but it gets awkward once agents start doing real work: every engineer has their own setup, their own automations, their own prompt history, and their own pile of context.
 
-143 is built from the ground up for teams (engineers and non-engineers alike). It was born from the experience of working on a small team where nobody had visibility into what others were doing, knowledge stayed siloed, and non-technical teammates had a hard time contributing code even when they knew exactly what needed to change.
+143 is built for the team version of that workflow.
 
-### Built for teams
+You connect your repos, pick the coding agents your team wants to use, and wire in the tools that already describe what needs to be built or fixed. From there, engineers can start one-off sessions, set up recurring automations, let Autopilot work through Linear or Sentry issues, and review the branches and PRs that come out the other side.
 
-By default, every automation, prompt, and agent run is visible to your entire team. When someone configures an automation to fix flaky tests or audit API endpoints, the rest of the team can see exactly what's been set up, what's running, and what it produced. This means non-engineers can contribute code too — they write prompts, the agent writes code, and the whole team can review both the prompt and the output in the open.
+The important part is that the work is visible by default. Runs, prompts, outputs, previews, audit logs, and usage are shared at the organization level, so the team can see what the agents are doing instead of guessing from a surprise PR.
 
-### Cloud agents you already use
+## Why it is interesting
 
-The big labs are constantly one-upping each other with newer and better models and agent harnesses. 143 has no vendor lock-in: use Claude Code, Codex, or whatever comes next. When a better model drops, you can swap it in and keep going.
+143 is trying to make coding agents feel less like personal sidecars and more like shared engineering infrastructure.
 
-143 runs your agents in the cloud so your whole team can use them without local setup. You can spin up the same workflow across branches, get preview environments automatically, and let anyone on the team kick off runs.
+- **Team-owned agent work.** Automations, sessions, Autopilot runs, and history live in one workspace instead of on individual laptops.
+- **Context from the tools you already use.** Linear, Sentry, Slack, Notion, and GitHub can all feed the agent useful context. Setup happens once for the organization.
+- **Cloud execution.** Agents run in isolated cloud sandboxes, so teammates can kick off work from a browser, Slack, or mobile without keeping a local machine awake.
+- **PRs and previews, not mystery patches.** Agent output becomes a branch or pull request with a live preview when the repo supports it.
+- **Bring the agent you prefer.** 143 is designed around coding-agent adapters. Today that means tools like Claude Code, Codex, Gemini CLI, Amp, and Pi; the point is not to bet the product on one model vendor.
+- **Open source by default.** You can use the hosted service or run it yourself. The repo is MIT licensed.
 
-### Loops: eval-driven improvement
+## What you can use it for
 
-Based on Karpathy's autoresearch concept, you can define an eval and have your coding agents hill-climb toward better results. Want to improve API latency? Define a latency benchmark, and 143 will run your coding agent in a loop — each iteration measuring against the eval, learning what worked, and pushing further.
+Teams are using 143 for work that benefits from repeatability and shared visibility:
 
-This works for anything measurable: test coverage, bundle size, response times, error rates. Define the target, and let the agents grind toward it.
+- recurring automations like fixing flaky tests, adding missing coverage, or running maintenance work;
+- Autopilot runs for Linear and Sentry issues;
+- manual cloud sessions when you want an agent to work on a branch while you are away from your desk;
+- multi-agent session tabs when you want to compare approaches or continue work with a different agent;
+- review/fix loops where an agent reviews its own change, applies fixes, and only then hands the PR to a human;
+- builder workflows where non-engineers can request scoped changes with extra review gates before a human reviewer sees the PR;
+- usage tracking, token and runtime analytics, and audit logs for settings changes.
+
+You do not need to use all of that at once. A common first setup is simply: connect GitHub, choose a coding agent, connect Linear or Sentry, and start with one issue-to-PR flow.
 
 ## How it works
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Your Team (engineers + non-engineers)                  │
-│  Configure automations, projects, loops via 143 UI      │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  143 Orchestrator                                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
-│  │ Automations │  │  Sessions   │  │   Loops     │     │
-│  │ (recurring) │  │ (one-shot)  │  │ (eval-driven│     │
-│  └──────┬──────┘  └──────┬──────┘  │  iteration) │     │
-│         │                │         └──────┬──────┘     │
-│         └────────────────┼────────────────┘             │
-│                          ▼                              │
-│  ┌──────────────────────────────────────────────┐       │
-│  │  Cloud Sandboxes (gVisor-isolated Docker)    │       │
-│  │  ┌────────────┐ ┌───────┐ ┌────────────────┐│       │
-│  │  │ Claude Code│ │ Codex │ │ Any future agent││       │
-│  │  └────────────┘ └───────┘ └────────────────┘│       │
-│  └──────────────────────┬───────────────────────┘       │
-│                         ▼                               │
-│  Validate (CI + security scan + quality checks)         │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-    GitHub PRs   Preview Envs   Eval Results
-    (for review) (for testing)  (feed back into loops)
-```
+At a high level:
 
-1. **Configure** — set up automations, projects, or loops — shared with the team by default
-2. **Execute** — coding agents run in isolated Docker containers in the cloud
-3. **Validate** — CI, security scanning (gitleaks, semgrep), and quality checks
-4. **Ship** — open GitHub PRs with full context and preview environments
-5. **Loop** — for eval-driven tasks, measure results and iterate automatically
+1. Connect GitHub repositories and the tools that carry product or production context.
+2. Start a session manually, schedule an automation, or let Autopilot pick up an issue.
+3. 143 creates an isolated sandbox, checks out the repo, and runs the selected coding agent.
+4. The agent produces a diff, can run repo-defined checks, and can start a preview if the repo has preview config.
+5. 143 publishes a branch or opens a GitHub PR for normal human review and CI.
 
-## Using 143
-
-User-facing docs live in [`docs/guides/`](docs/guides/). If you're running your own 143 instance instead of using the hosted version, see [`docs/self-hosting/`](docs/self-hosting/).
-
-## Built for production
-
-Every agent runs in a gVisor-isolated container with a read-only filesystem and network access limited to LLM APIs and package registries. PRs go through security scanning (gitleaks, semgrep), correctness checks, and your CI before a human ever sees them. Your code never leaves infrastructure you control.
-
-The architecture is symmetric — there's no primary node. A Postgres-backed job queue handles scheduling and leader election, so scaling out means running more copies of the same binary behind a load balancer.
+The backend is Go, Postgres, and a Postgres-backed job queue. The frontend is Next.js. Worker nodes run agent sandboxes with Docker/gVisor. The detailed system design lives in [docs/design/overall.md](docs/design/overall.md).
 
 ## Getting Started
 
-Requires Go 1.24+, Node.js 18+, and PostgreSQL 17. The setup script installs anything missing via Homebrew (macOS) or apt (Linux).
+For local development you need:
+
+- Go 1.24+
+- Node.js 18+
+- PostgreSQL 17
+
+The setup script installs missing dependencies on macOS with Homebrew or on Linux with apt, creates the local database, installs dependencies, copies `.env.example` to `.env`, and runs migrations.
 
 ```bash
-git clone https://github.com/assembledhq/143.git && cd 143 && ./setup.sh
+git clone https://github.com/assembledhq/143.git
+cd 143
+./setup.sh
 make dev
 ```
 
-See the [development setup guide](docs/contributing/development-setup.md) for detailed instructions, make commands, environment configuration, and secrets management.
+`make dev` starts Postgres, the Go API server, and the Next.js frontend through Docker Compose.
+
+For webhook or GitHub OAuth work, use the ngrok flow instead:
+
+```bash
+make dev-ngrok NGROK_DOMAIN=yourname.ngrok.dev
+```
+
+See the [development setup guide](docs/contributing/development-setup.md) for the full local setup, environment variables, and useful Make targets.
+
+## Self-hosting
+
+143 is free to run yourself. Self-hosting means bringing your own infrastructure, GitHub App, domain, worker capacity, and LLM/coding-agent credentials.
+
+Start with [docs/self-hosting/](docs/self-hosting/README.md). The hosted version at [143.dev](https://www.143.dev) is the managed path; hosted billing is based on container runtime minutes, and 143 does not mark up LLM usage.
 
 ## Contributing
 
-Read through the [design docs](docs/design/overall.md) to understand the architecture, then pick an issue and open a PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+If you want to work on the product, read the [development setup guide](docs/contributing/development-setup.md) and the [design overview](docs/design/overall.md). The design docs are intentionally part of the repo because a lot of the product decisions are architectural, not just UI copy.
 
-## Why "143"
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the project rules.
 
-In 1943, Lockheed's Skunk Works team designed and built the XP-80 Shooting Star — America's first operational jet fighter — in just 143 days. A small, autonomous team with full ownership, no bureaucracy, and a bias toward shipping.
+## Why "143"?
+
+In 1943, the Lockheed Skunk Works team built the XP-80 Shooting Star in 143 days. The name is a nod to small teams with enough ownership to move quickly.
 
 ## License
 

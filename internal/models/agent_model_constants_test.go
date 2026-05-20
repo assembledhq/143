@@ -46,10 +46,36 @@ func TestCodexModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{CodexModelGPT55, CodexModelGPT54, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
+		[]string{CodexModelGPT55, CodexModelGPT55Fast, CodexModelGPT54, CodexModelGPT54Fast, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
 		AvailableCodexModels,
-		"AvailableCodexModels should include the latest Codex model family",
+		"AvailableCodexModels should include the latest Codex model family and fast tiers",
 	)
+}
+
+func TestCodexRuntimeModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		model        string
+		expected     string
+		priorityTier bool
+	}{
+		{name: "gpt 5.5 fast maps to gpt 5.5 priority", model: CodexModelGPT55Fast, expected: CodexModelGPT55, priorityTier: true},
+		{name: "gpt 5.4 fast maps to gpt 5.4 priority", model: CodexModelGPT54Fast, expected: CodexModelGPT54, priorityTier: true},
+		{name: "regular gpt 5.5 stays unchanged", model: CodexModelGPT55, expected: CodexModelGPT55},
+		{name: "unknown model stays unchanged", model: "custom-model", expected: "custom-model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec := CodexRuntimeModel(tt.model)
+			require.Equal(t, tt.expected, spec.Model, "CodexRuntimeModel should return the executable model id")
+			require.Equal(t, tt.priorityTier, spec.PriorityTier, "CodexRuntimeModel should report whether priority service tier is required")
+		})
+	}
 }
 
 func TestLLMModelConstants(t *testing.T) {

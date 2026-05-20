@@ -22,4 +22,13 @@ describe("SessionKeyboardHelpOverlay", () => {
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
+
+  it("hides PR shortcuts when the viewer cannot ship PRs", () => {
+    renderWithProviders(
+      <SessionKeyboardHelpOverlay open onOpenChange={vi.fn()} canShipPR={false} />,
+    );
+
+    expect(screen.queryByText("Ship PR")).not.toBeInTheDocument();
+    expect(screen.queryByText("p c")).not.toBeInTheDocument();
+  });
 });

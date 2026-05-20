@@ -162,7 +162,7 @@ transforms:
 
       # Add server identity
       .server = get_env_var("SERVER_ROLE") ?? "unknown"
-      .hostname = get_hostname()
+      .hostname = get_hostname() ?? "unknown"
 
   # Drop health check requests after JSON parsing so we can match on structured fields.
   # Filtering on .path avoids accidentally dropping app logs that mention health endpoints.
@@ -210,9 +210,9 @@ Add the `vector` service and `vector-buffer` volume to the existing compose file
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
       - vector-buffer:/var/lib/vector  # persist disk buffer across restarts
-    command: ["vector", "--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
+    command: ["--config", "/etc/vector/vector.yaml"]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8686/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -243,9 +243,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
       - vector-buffer:/var/lib/vector
-    command: ["vector", "--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
+    command: ["--config", "/etc/vector/vector.yaml"]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8686/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -259,6 +259,11 @@ services:
 volumes:
   vector-buffer:
 ```
+
+The healthcheck uses `127.0.0.1` instead of `localhost` because the Vector API
+binds to IPv4 `0.0.0.0:8686`; some minimal container environments resolve
+`localhost` to IPv6 first, which can report `connection refused` even though
+Vector is running normally.
 
 Then in each server's compose file:
 
@@ -349,8 +354,14 @@ Provisioning workflow:
 2. The provisioned platform health dashboard lives at `deploy/grafana/provisioning/dashboards/platform-health.json` and covers job queue health, session/agent outcomes, API latency and traffic, and sandbox/runtime health from structured log signals.
 3. The Grafana dashboard provider uses `disableDeletion: false`, so removed dashboard JSON files are deleted from Grafana after provisioning resync.
 4. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
-5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules/`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys.
+5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys. App, worker, and logging deploys wait for Vector's Docker healthcheck to leave the initial `starting` state before deciding whether log collection is healthy.
 6. Scheduler heartbeat alerts should wait for dedicated heartbeat signals so the rules are not guesswork.
+
+Vector's API is enabled in `deploy/vector.yaml` via top-level `api.enabled` and
+`api.address`; do not pass API settings as CLI flags in compose. Deploy
+verification fails closed if the Vector container is missing, crash-looping,
+`Restarting`, `unhealthy`, or otherwise not healthy, and prints recent Vector
+logs for diagnosis.
 
 ## LogsQL Query Examples
 

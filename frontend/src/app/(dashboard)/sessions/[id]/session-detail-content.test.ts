@@ -1,11 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  filterThreadLogsForLoadedMessages,
+  flattenThreadMessageWindows,
   formatDuration,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
+  hasCleanReviewLoopForSnapshot,
+  invalidateSessionHumanInputRequests,
   trackInFlightAgentUpdate,
 } from "./session-detail-content";
-import type { SessionThread } from "@/lib/types";
+import type { SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
@@ -98,6 +102,102 @@ describe("getInitialComposerSelectedModel", () => {
 
   it("uses the default composer selection when the created thread has no override", () => {
     expect(getInitialComposerSelectedModel(baseThread)).toBe("");
+  });
+});
+
+describe("hasCleanReviewLoopForSnapshot", () => {
+  const baseLoop: SessionReviewLoop = {
+    id: "loop-1",
+    org_id: "org-1",
+    session_id: "session-1",
+    status: "clean",
+    source: "manual",
+    agent_type: "codex",
+    max_passes: 2,
+    completed_passes: 1,
+    review_required: false,
+    started_at: "2026-01-01T00:00:00.000Z",
+    completed_at: "2026-01-01T00:01:00.000Z",
+  };
+
+  it("requires a clean review loop on the current session snapshot", () => {
+    expect(hasCleanReviewLoopForSnapshot([
+      { ...baseLoop, latest_checkpoint_key: "snap-older" },
+      { ...baseLoop, id: "loop-2", status: "failed", latest_checkpoint_key: "snap-current" },
+    ], "snap-current")).toBe(false);
+
+    expect(hasCleanReviewLoopForSnapshot([
+      { ...baseLoop, latest_checkpoint_key: "snap-current" },
+    ], "snap-current")).toBe(true);
+  });
+
+  it("does not allow missing snapshot or missing review checkpoint", () => {
+    expect(hasCleanReviewLoopForSnapshot([{ ...baseLoop, latest_checkpoint_key: undefined }], "snap-current")).toBe(false);
+    expect(hasCleanReviewLoopForSnapshot([{ ...baseLoop, latest_checkpoint_key: "snap-current" }], undefined)).toBe(false);
+  });
+});
+
+describe("invalidateSessionHumanInputRequests", () => {
+  it("invalidates the shared prefix so thread-scoped all-status queries refresh", () => {
+    const queryClient = {
+      invalidateQueries: vi.fn(),
+    };
+
+    invalidateSessionHumanInputRequests(queryClient, "session-1");
+
+    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["session", "session-1", "human-input-requests"],
+    });
+  });
+});
+
+describe("thread message windows", () => {
+  function message(id: number, turn: number): SessionMessage {
+    return {
+      id,
+      session_id: "session-1",
+      org_id: "org-1",
+      thread_id: "thread-1",
+      turn_number: turn,
+      role: "user",
+      content: `message ${id}`,
+      created_at: start,
+    };
+  }
+
+  function log(id: number, turn: number): SessionLog {
+    return {
+      id,
+      session_id: "session-1",
+      thread_id: "thread-1",
+      level: "output",
+      message: `log ${id}`,
+      turn_number: turn,
+      created_at: start,
+      metadata: null,
+    };
+  }
+
+  it("flattens newest-first window pages into chronological transcript order", () => {
+    const pages: ThreadMessageWindowResponse[] = [
+      {
+        data: [message(3, 2), message(4, 2)],
+        meta: { has_older: true, next_older_cursor: "3", thread_status: "idle" },
+      },
+      {
+        data: [message(1, 1), message(2, 1)],
+        meta: { has_older: false, thread_status: "idle" },
+      },
+    ];
+
+    expect(flattenThreadMessageWindows(pages).map((item) => item.id)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("keeps thread logs only for turns represented by loaded message windows", () => {
+    expect(filterThreadLogsForLoadedMessages(
+      [log(10, 1), log(20, 2), log(30, 3)],
+      [message(1, 1), message(2, 3)],
+    ).map((item) => item.id)).toEqual([10, 30]);
   });
 });
 

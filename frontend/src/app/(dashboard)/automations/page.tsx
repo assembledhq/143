@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { useAuth } from "@/hooks/use-auth";
 
 function formatSchedule(a: Automation): string {
   const tz = a.timezone || "UTC";
@@ -32,7 +33,7 @@ function formatSchedule(a: Automation): string {
   return `${intervalText} at ${formatRunAtWithTimezone(a.interval_run_at, tz)}`;
 }
 
-function AutomationCard({ automation }: { automation: Automation }) {
+function AutomationCard({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const queryClient = useQueryClient();
 
   const pauseMutation = useMutation({
@@ -76,11 +77,12 @@ function AutomationCard({ automation }: { automation: Automation }) {
       <div className="flex items-start gap-3 p-4 sm:gap-4">
         <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
           <div className="flex items-start gap-2.5">
-            {automation.enabled ? (
-              <RefreshCw className="h-4 w-4 text-blue-500 shrink-0" />
-            ) : (
-              <Pause className="h-4 w-4 text-muted-foreground shrink-0" />
-            )}
+            <span
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+              aria-label={`Automation icon for ${automation.name}`}
+            >
+              {automation.icon_value || "⚙️"}
+            </span>
             <div className="min-w-0 flex-1 space-y-2">
               <div className="space-y-1 sm:flex sm:items-start sm:justify-between sm:gap-3 sm:space-y-0">
                 <h3 className="break-words text-sm font-medium leading-5 text-foreground">
@@ -105,45 +107,47 @@ function AutomationCard({ automation }: { automation: Automation }) {
           </div>
         </Link>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 self-start shrink-0"
-              aria-label={`More options for ${automation.name}`}
-            >
-              <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {automation.enabled ? (
-              <DropdownMenuItem
-                onClick={() => pauseMutation.mutate()}
-                disabled={pauseMutation.isPending}
+        {canManage && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 self-start shrink-0"
+                aria-label={`More options for ${automation.name}`}
               >
-                <Pause className="h-3.5 w-3.5 mr-2" />
-                Pause
-              </DropdownMenuItem>
-            ) : (
+                <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {automation.enabled ? (
+                <DropdownMenuItem
+                  onClick={() => pauseMutation.mutate()}
+                  disabled={pauseMutation.isPending}
+                >
+                  <Pause className="h-3.5 w-3.5 mr-2" />
+                  Pause
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem
+                  onClick={() => resumeMutation.mutate()}
+                  disabled={resumeMutation.isPending}
+                >
+                  <Play className="h-3.5 w-3.5 mr-2" />
+                  Resume
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem
-                onClick={() => resumeMutation.mutate()}
-                disabled={resumeMutation.isPending}
+                onClick={handleDelete}
+                disabled={deleteMutation.isPending}
+                className="text-destructive focus:text-destructive"
               >
-                <Play className="h-3.5 w-3.5 mr-2" />
-                Resume
+                <Trash2 className="h-3.5 w-3.5 mr-2" />
+                Delete
               </DropdownMenuItem>
-            )}
-            <DropdownMenuItem
-              onClick={handleDelete}
-              disabled={deleteMutation.isPending}
-              className="text-destructive focus:text-destructive"
-            >
-              <Trash2 className="h-3.5 w-3.5 mr-2" />
-              Delete
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
       {mutationError && (
         <p className="px-4 pb-3 text-xs text-destructive" role="alert">
@@ -155,6 +159,8 @@ function AutomationCard({ automation }: { automation: Automation }) {
 }
 
 export default function AutomationsPage() {
+  const { user } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
   const { data, isLoading } = useQuery({
     queryKey: ["automations"],
     queryFn: () => api.automations.list(),
@@ -171,14 +177,14 @@ export default function AutomationsPage() {
         <PageHeader
           title="Automations"
           description="Recurring agents that run on a schedule for your team."
-          action={
+          action={canManage ? (
             <Button asChild size="sm">
               <Link href="/automations/new">
                 <Plus className="h-4 w-4 mr-1.5" />
                 New
               </Link>
             </Button>
-          }
+          ) : undefined}
         />
 
         {isLoading && (
@@ -191,12 +197,12 @@ export default function AutomationsPage() {
           <div className="text-center py-16 space-y-3">
             <RefreshCw className="h-8 w-8 mx-auto text-muted-foreground/40" />
             <p className="text-sm text-muted-foreground">No automations yet</p>
-            <Button asChild variant="outline" size="sm">
+            {canManage && <Button asChild variant="outline" size="sm">
               <Link href="/automations/new">
                 <Plus className="h-4 w-4 mr-1.5" />
                 Create your first automation
               </Link>
-            </Button>
+            </Button>}
           </div>
         )}
 
@@ -207,7 +213,7 @@ export default function AutomationsPage() {
             </h2>
             <div className="space-y-2">
               {enabled.map((a) => (
-                <AutomationCard key={a.id} automation={a} />
+                <AutomationCard key={a.id} automation={a} canManage={canManage} />
               ))}
             </div>
           </section>
@@ -220,7 +226,7 @@ export default function AutomationsPage() {
             </h2>
             <div className="space-y-2">
               {paused.map((a) => (
-                <AutomationCard key={a.id} automation={a} />
+                <AutomationCard key={a.id} automation={a} canManage={canManage} />
               ))}
             </div>
           </section>

@@ -458,7 +458,7 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
             const prev = p.trail[i - 1];
             const cur = p.trail[i];
             const progress = i / p.trail.length;
-            const trailAlpha = progress * p.opacity * 0.6;
+            const trailAlpha = progress * p.opacity * 0.75;
             const trailWidth = 0.8 + progress * 2.5;
 
             ctx.beginPath();
@@ -473,7 +473,7 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
 
         // Draw plane
         const heading = p.baseHeading;
-        drawP80(ctx, p.x, p.y, p.size, heading, 0.5, p.opacity, theme);
+        drawP80(ctx, p.x, p.y, p.size, heading, 0.72, p.opacity, theme);
       }
 
       planesRef.current = alive;

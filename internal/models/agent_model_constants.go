@@ -78,7 +78,9 @@ var AvailableGeminiCLIModels = []string{
 
 const (
 	CodexModelGPT55           = "gpt-5.5"
+	CodexModelGPT55Fast       = "gpt-5.5-fast"
 	CodexModelGPT54           = "gpt-5.4"
+	CodexModelGPT54Fast       = "gpt-5.4-fast"
 	CodexModelGPT54Mini       = "gpt-5.4-mini"
 	CodexModelGPT53Codex      = "gpt-5.3-codex"
 	CodexModelGPT52Codex      = "gpt-5.2-codex"
@@ -88,12 +90,35 @@ const (
 
 var AvailableCodexModels = []string{
 	CodexModelGPT55,
+	CodexModelGPT55Fast,
 	CodexModelGPT54,
+	CodexModelGPT54Fast,
 	CodexModelGPT54Mini,
 	CodexModelGPT53Codex,
 	CodexModelGPT52Codex,
 	CodexModelGPT5Codex,
 	CodexModelGPT53CodexSpark,
+}
+
+// CodexRuntimeSpec is the resolved execution spec for a Codex model alias.
+type CodexRuntimeSpec struct {
+	// Model is the base model ID that Codex CLI accepts.
+	Model string
+	// PriorityTier indicates whether the priority service tier should be requested.
+	PriorityTier bool
+}
+
+// CodexRuntimeModel translates 143's selectable fast aliases into the base
+// model ID Codex CLI accepts plus a priority-service-tier flag.
+func CodexRuntimeModel(model string) CodexRuntimeSpec {
+	switch model {
+	case CodexModelGPT55Fast:
+		return CodexRuntimeSpec{Model: CodexModelGPT55, PriorityTier: true}
+	case CodexModelGPT54Fast:
+		return CodexRuntimeSpec{Model: CodexModelGPT54, PriorityTier: true}
+	default:
+		return CodexRuntimeSpec{Model: model}
+	}
 }
 
 // AgentTypeForModel returns the AgentType whose curated model list contains

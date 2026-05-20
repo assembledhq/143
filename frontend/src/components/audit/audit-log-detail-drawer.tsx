@@ -8,6 +8,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
+import { formatAuditDetailValue } from "@/lib/audit-details";
 import type { AuditLog, User } from "@/lib/types";
 import { getActorName, getActionLabel } from "./audit-log-entry";
 
@@ -60,7 +61,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
                     <div key={key} className="flex gap-2 text-xs">
                       <span className="font-medium text-muted-foreground min-w-[100px] shrink-0">{key}</span>
                       <span className="text-foreground break-all font-mono text-xs">
-                        {typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)}
+                        {formatAuditDetailValue(key, value)}
                       </span>
                     </div>
                   );
@@ -140,10 +141,9 @@ function isChangesMap(value: unknown): value is ChangesMap {
   );
 }
 
-function formatDiffValue(v: unknown): string {
+function formatDiffValue(field: string, v: unknown): string {
   if (v === null || v === undefined || v === "") return "—";
-  if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
+  return formatAuditDetailValue(field, v);
 }
 
 function ChangesBlock({ changes }: { changes: ChangesMap }) {
@@ -154,9 +154,9 @@ function ChangesBlock({ changes }: { changes: ChangesMap }) {
         {Object.entries(changes).map(([field, { before, after }]) => (
           <div key={field} className="flex flex-wrap items-baseline gap-2">
             <span className="font-mono text-muted-foreground">{field}</span>
-            <span className="font-mono text-foreground/70 line-through">{formatDiffValue(before)}</span>
+            <span className="font-mono text-foreground/70 line-through">{formatDiffValue(field, before)}</span>
             <span className="text-muted-foreground/50">→</span>
-            <span className="font-mono text-foreground">{formatDiffValue(after)}</span>
+            <span className="font-mono text-foreground">{formatDiffValue(field, after)}</span>
           </div>
         ))}
       </div>

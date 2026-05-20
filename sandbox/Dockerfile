@@ -100,7 +100,7 @@ RUN --mount=type=cache,target=/root/.npm \
       "@openai/codex@${CODEX_CLI_VERSION}" \
       "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
       "@sourcegraph/amp@${AMP_CLI_VERSION}" \
-      "@mariozechner/pi-coding-agent@${PI_CLI_VERSION}" && \
+      "@earendil-works/pi-coding-agent@${PI_CLI_VERSION}" && \
     rm /tmp/versions.json
 
 # Copy 143-tools binary from Go builder.

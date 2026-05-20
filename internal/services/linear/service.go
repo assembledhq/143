@@ -110,6 +110,23 @@ type Service struct {
 	// cross-pod invalidation) wasn't worth the wiring for a 60s ceiling.
 	teamKeyCache *teamKeyAllowlistCache
 
+	// agentSessions is the bridge from a 143 sessions row to the Linear
+	// AgentSession that triggered it (when applicable). Populated by phase
+	// 1 of the inbound agent feature; nil when the feature is dark.
+	// HandleMilestone consults it inside the locked tx to decide whether
+	// to fan out an AgentActivity emit alongside the durable attachment +
+	// rolling comment writes. nil-safe: when unset the agent fan-out is
+	// silently skipped.
+	agentSessions *db.LinearAgentSessionStore
+	// agentActivities backs the at-most-once activity log used by the
+	// AgentActivityWriter. Same nil-safety contract as agentSessions.
+	agentActivities *db.LinearAgentActivityLogStore
+	// agentMetrics is the per-emit observability recorder. Optional —
+	// nil means "no metrics", and the writer's nil-safe recordEmit
+	// silently no-ops. Threaded through the Service so HandleAgentMilestone
+	// and the worker handler share a single recorder per process.
+	agentMetrics AgentActivityMetricsRecorder
+
 	// credentialsWriter persists rotated tokens after a successful refresh.
 	// Optional: when nil, GetValidToken still refreshes in-memory but logs a
 	// warning that the new token will not survive the process. Production
@@ -238,6 +255,15 @@ type Client interface {
 	UpdateIssueState(ctx context.Context, issueID, stateID string) error
 	IssueRecentHumanEdits(ctx context.Context, issueID string, since time.Time) (bool, error)
 	HasGitHubIntegrationAttachment(ctx context.Context, issueID string) (bool, error)
+
+	// Linear Agent Interaction surface — only used by sessions whose origin
+	// is an inbound Linear assignment / @-mention. The same Client
+	// implementation backs both flows; tests that don't exercise the agent
+	// path can return canned errors from these methods.
+	AgentActivityCreate(ctx context.Context, in AgentActivityInput) (AgentActivityResult, error)
+	AgentSessionUpdate(ctx context.Context, in AgentSessionUpdateInput) error
+	AgentSessionGet(ctx context.Context, agentSessionID string) (*FetchedAgentSession, error)
+	FetchComment(ctx context.Context, commentID string) (*FetchedComment, error)
 }
 
 // ClientFactory creates a per-org Linear API client from an access token
@@ -250,20 +276,29 @@ type ClientFactory func(ctx context.Context, accessToken string) (Client, error)
 // keep this superset-ish so the session-bootstrap context contract has
 // everything it needs in one round trip.
 type FetchedIssue struct {
-	ID               string
-	Identifier       string
-	Title            string
-	Description      string
-	URL              string
-	StateName        string
-	StateType        string
-	StateID          string
-	Priority         string
-	AssigneeName     string
-	TeamID           string
-	TeamKey          string
-	TeamName         string
-	WorkspaceSlug    string
+	ID            string
+	Identifier    string
+	Title         string
+	Description   string
+	URL           string
+	StateName     string
+	StateType     string
+	StateID       string
+	Priority      string
+	AssigneeName  string
+	TeamID        string
+	TeamKey       string
+	TeamName      string
+	WorkspaceSlug string
+	// ProjectID is the Linear project id when the issue belongs to one.
+	// Empty when the issue is not in a project. Used by the inbound agent
+	// repo resolver to pick a per-project mapping over the team default.
+	ProjectID string
+	// Labels is the issue's full label set (verbatim names; case
+	// preserved). Powers the `repo:<full-name>` override in the inbound
+	// agent resolver. Bounded to 50 by the GraphQL query — issues with
+	// more labels than that are not a realistic use case.
+	Labels           []string
 	RepositoryID     *uuid.UUID
 	Comments         []FetchedComment
 	Attachments      []FetchedAttachment
@@ -272,8 +307,15 @@ type FetchedIssue struct {
 }
 
 // FetchedComment is a single Linear comment trimmed to fields the agent
-// context package and operator UI need.
+// context package and operator UI need. Used both by FetchIssue (which
+// returns recent comments inline) and by FetchComment (single-id
+// resolver) — the same shape works for both because the agent path
+// only cares about author + body + when.
 type FetchedComment struct {
+	// ID is set on FetchComment results; FetchIssue's inline comments
+	// leave it empty for backwards compatibility.
+	ID        string    `json:"id,omitempty"`
+	IssueID   string    `json:"issue_id,omitempty"`
 	Author    string    `json:"author"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
@@ -374,6 +416,16 @@ type Config struct {
 	// allocates a fresh cache local to the Service — fine for tests and for
 	// MODE=api / MODE=worker single-Service processes.
 	TeamKeyCache *teamKeyAllowlistCache
+
+	// AgentSessions and AgentActivities wire the inbound agent feature.
+	// Both nil ↔ feature-flag-off / dark launch — the milestone fan-out
+	// silently no-ops, the dispatcher refuses to construct, and the
+	// existing outbound flow stays unaffected.
+	AgentSessions   *db.LinearAgentSessionStore
+	AgentActivities *db.LinearAgentActivityLogStore
+	// AgentMetrics is the per-emit observability recorder shared with
+	// the inbound dispatcher. Optional; nil means "no metrics".
+	AgentMetrics AgentActivityMetricsRecorder
 }
 
 func NewService(cfg Config) *Service {
@@ -408,9 +460,25 @@ func NewService(cfg Config) *Service {
 		orgSettingsLoader:  cfg.OrgSettingsLoader,
 		pool:               cfg.Pool,
 		appBaseURL:         strings.TrimRight(cfg.AppBaseURL, "/"),
+		agentSessions:      cfg.AgentSessions,
+		agentActivities:    cfg.AgentActivities,
+		agentMetrics:       cfg.AgentMetrics,
 	}
 	svc.refreshMuRegistry.Store(&sync.Map{})
 	return svc
+}
+
+// AgentSessionStore exposes the agent-session store so handlers and worker
+// glue can construct the dispatcher / repo resolver without re-deriving
+// the wiring path. Returns nil when the agent feature is dark.
+func (s *Service) AgentSessionStore() *db.LinearAgentSessionStore {
+	return s.agentSessions
+}
+
+// AgentActivityStore exposes the activity log store. Same nil contract as
+// AgentSessionStore.
+func (s *Service) AgentActivityStore() *db.LinearAgentActivityLogStore {
+	return s.agentActivities
 }
 
 // maxProviderStateLockedDuration bounds how long a single milestone or
@@ -573,6 +641,22 @@ func (s *Service) Enabled(ctx context.Context, orgID uuid.UUID) bool {
 // was enqueued. Bare `errors.Is(err, ErrIntegrationNotFound)` works through
 // the wrap added by integrationFor.
 var ErrIntegrationNotFound = errors.New("linear integration not found")
+
+// ClientForOrg returns a fully-resolved Linear API client backed by the
+// org's stored credential. Public so the inbound-agent dispatcher and
+// the settings loader can build clients without re-deriving the token
+// resolution logic. Returns an error when no integration / credential
+// is configured.
+func (s *Service) ClientForOrg(ctx context.Context, orgID uuid.UUID) (Client, error) {
+	if s == nil {
+		return nil, errors.New("linear service unavailable")
+	}
+	_, token, err := s.integrationFor(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return s.clientFactory(ctx, token)
+}
 
 // integrationFor returns the integration row + a Linear access token that is
 // valid right now. It delegates to GetValidToken, which transparently
@@ -854,7 +938,7 @@ func (s *Service) upsertLinearIssue(ctx context.Context, orgID, integrationID uu
 		OccurrenceCount:     1,
 		Severity:            "medium",
 		Tags:                tags,
-		Fingerprint:         "linear:" + fetched.ID,
+		Fingerprint:         models.IssueFingerprint(models.IssueSourceLinear, fetched.ID),
 	}
 	if err := s.issues.Upsert(ctx, issue); err != nil {
 		return uuid.Nil, err

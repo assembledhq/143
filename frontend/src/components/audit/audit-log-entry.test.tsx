@@ -38,6 +38,18 @@ describe('AuditLogEntry', () => {
     expect(screen.getByText('created session')).toBeInTheDocument();
   });
 
+  it('labels team role changes without saying member role', () => {
+    render(
+      <AuditLogEntry
+        entry={makeEntry({ action: 'team.member_role_changed' })}
+        members={mockMembers}
+      />
+    );
+
+    expect(screen.getByText('changed user role')).toBeInTheDocument();
+    expect(screen.queryByText('changed member role')).not.toBeInTheDocument();
+  });
+
   it('renders agent actor type label for non-user actors', () => {
     render(
       <AuditLogEntry
@@ -72,6 +84,25 @@ describe('AuditLogEntry', () => {
     await user.click(screen.getByRole('button'));
     expect(screen.getByText('changed:')).toBeInTheDocument();
     expect(screen.getByText('value')).toBeInTheDocument();
+  });
+
+  it('renders role detail values with user-facing labels', async () => {
+    const user = userEvent.setup();
+    render(
+      <AuditLogEntry
+        entry={makeEntry({
+          action: 'team.member_role_changed',
+          details: { previous_role: 'member', new_role: 'viewer' },
+        })}
+        members={mockMembers}
+      />
+    );
+
+    await user.click(screen.getByRole('button'));
+
+    expect(screen.getByText('Engineer')).toBeInTheDocument();
+    expect(screen.getByText('Viewer')).toBeInTheDocument();
+    expect(screen.queryByText('member')).not.toBeInTheDocument();
   });
 
   it('calls onSelect instead of expanding when provided', async () => {

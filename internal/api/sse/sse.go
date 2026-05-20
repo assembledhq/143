@@ -18,6 +18,10 @@ const (
 	EventStatus EventType = "status"
 	// EventDone is sent when the session reaches a terminal status.
 	EventDone EventType = "done"
+	// EventHumanInputCreated is sent when an agent creates a durable human-input request.
+	EventHumanInputCreated EventType = "session_human_input.created"
+	// EventHumanInputUpdated is sent when a durable human-input request is answered or cancelled.
+	EventHumanInputUpdated EventType = "session_human_input.updated"
 )
 
 // Writer wraps an http.ResponseWriter that supports SSE streaming.

@@ -16,6 +16,7 @@ type SessionComposerAttachmentMenuProps = {
   onUploadFiles: () => void;
   onAddImageURL: () => void;
   onAddLinearIssue: () => void;
+  showLinearIssue?: boolean;
   buttonAriaLabel: string;
   buttonTitle?: string;
   buttonClassName?: string;
@@ -27,6 +28,7 @@ export function SessionComposerAttachmentMenu({
   onUploadFiles,
   onAddImageURL,
   onAddLinearIssue,
+  showLinearIssue = true,
   buttonAriaLabel,
   buttonTitle,
   buttonClassName,
@@ -55,10 +57,12 @@ export function SessionComposerAttachmentMenu({
           <LinkIcon data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
           Add image URL
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={onAddLinearIssue}>
-          <LinearIcon className="mr-2 h-4 w-4" />
-          Add linear issue
-        </DropdownMenuItem>
+        {showLinearIssue ? (
+          <DropdownMenuItem onClick={onAddLinearIssue}>
+            <LinearIcon className="mr-2 h-4 w-4" />
+            Add linear issue
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

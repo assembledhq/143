@@ -3,6 +3,8 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/google/uuid"
 )
 
 // AutonomyLevel controls when the system auto-triggers agent runs.
@@ -249,6 +251,7 @@ type OrgSettings struct {
 	PRAuthorship               PRAuthorship         `json:"pr_authorship,omitempty"`
 	PRDraftDefault             bool                 `json:"pr_draft_default,omitempty"`
 	AutoArchiveOnPRClose       bool                 `json:"auto_archive_on_pr_close,omitempty"`
+	BuilderPermissions         BuilderPermissions   `json:"builder_permissions,omitempty"`
 
 	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
 	// as the soft runtime budget for run_agent and continue_session jobs.
@@ -262,6 +265,26 @@ type OrgSettings struct {
 	// adopt visibility (attachment + rolling comment) before they are ready
 	// for state automation. See design 62 §"Per-org configuration UI".
 	LinearAutomation LinearAutomationSettings `json:"linear_automation,omitempty"`
+
+	// LinearAgent controls the inbound agent feature: assign / @-mention the
+	// @143 user in Linear and a coding session is created. Distinct from
+	// LinearAutomation, which is purely outbound. The feature is opt-in;
+	// nothing happens to a Linear-connected org until an admin enables it.
+	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
+}
+
+// BuilderPermissions controls the narrower builder role's access to
+// publishing actions. Pointer fields preserve absent-vs-explicit-false.
+type BuilderPermissions struct {
+	RequireReviewBeforePR *bool `json:"require_review_before_pr,omitempty"`
+}
+
+// EffectiveRequireReviewBeforePR applies the default builder guardrail.
+func (p BuilderPermissions) EffectiveRequireReviewBeforePR() bool {
+	if p.RequireReviewBeforePR == nil {
+		return true
+	}
+	return *p.RequireReviewBeforePR
 }
 
 // LinearAutomationSettings captures org-level defaults plus per-team
@@ -365,6 +388,104 @@ var DefaultLinearReviewStateNames = []string{
 	"In Review", "Code Review", "PR Open", "Pull Request Open",
 }
 
+// LinearAgentSettings controls the inbound Linear agent feature: assign /
+// @-mention the @143 user and a 143 session is created. Pointer-typed
+// flags follow the same nil-vs-explicit convention as LinearAutomationSettings
+// — nil means "apply design default", non-nil means "respect the user".
+//
+// The feature is opt-in by default. An org can have Linear connected for
+// outbound write-back without enabling the agent for inbound triggering;
+// the two are independent.
+type LinearAgentSettings struct {
+	// Enabled gates the entire feature. nil/false means "ignore Linear
+	// AgentSessionEvent webhooks for this org" — the dispatcher records the
+	// delivery for audit and returns 200 immediately without doing any work.
+	// True means the dispatcher will resolve a repo and kick off a session.
+	//
+	// Pointer so a future migration that flips the default doesn't silently
+	// retro-enable orgs that explicitly turned the feature off.
+	Enabled *bool `json:"enabled,omitempty"`
+	// DefaultRepoID is the org-wide fallback repo for AgentSessions whose
+	// Linear team has no entry in linear_team_repo_mappings. Empty means
+	// "no fallback" — the dispatcher emits a `response` activity asking the
+	// admin to configure a mapping and closes the AgentSession with
+	// state=complete (an actionable user message, not an error).
+	DefaultRepoID *uuid.UUID `json:"default_repo_id,omitempty"`
+	// AppUserHandle is the @-handle the @143 agent user goes by in Linear.
+	// Cosmetic — only used for UI copy. Defaults to "143".
+	AppUserHandle string `json:"app_user_handle,omitempty"`
+	// AllowRevisionPerPrompt controls whether `prompted` events on a 143
+	// session that has reached terminal state spawn a revision session
+	// (true) or are quietly ignored with a `response` activity explaining
+	// the prior session has ended (false). Default true; the explicit knob
+	// exists so heavy users can opt out of the implicit "every late comment
+	// reopens the work" behavior.
+	AllowRevisionPerPrompt *bool `json:"allow_revision_per_prompt,omitempty"`
+	// PerTeamEnabled overrides the org-level Enabled flag at team granularity.
+	// Keyed by Linear team key (e.g. "ACS"). Missing key → inherit
+	// org-level Enabled. nil entry → inherit. Non-nil entry → respect.
+	PerTeamEnabled map[string]*bool `json:"per_team_enabled,omitempty"`
+	// AllowLabelRepoOverride lets any Linear member with label-write access
+	// redirect an AgentSession to a different repo via a
+	// `repo:<full-name>` label on the issue. Opt-in (default false) because
+	// it weakens the org's "Linear team → repo" routing guarantees:
+	// without this flag, repo selection follows the configured
+	// linear_team_repo_mappings (admin-controlled) and the org default;
+	// with it, any Linear contributor who can apply labels can route work
+	// to any repo the org owns. Orgs whose Linear membership equals their
+	// 143 admin set can safely enable it.
+	AllowLabelRepoOverride *bool `json:"allow_label_repo_override,omitempty"`
+}
+
+// EffectiveAllowLabelRepoOverride resolves the org-level
+// allow-label-repo-override flag, applying the design default (false —
+// opt-in) when no explicit value was set.
+func (s LinearAgentSettings) EffectiveAllowLabelRepoOverride() bool {
+	if s.AllowLabelRepoOverride == nil {
+		return false
+	}
+	return *s.AllowLabelRepoOverride
+}
+
+// EffectiveEnabled resolves the org-level Enabled flag, applying the design
+// default (false — opt-in) when no explicit value was set.
+func (s LinearAgentSettings) EffectiveEnabled() bool {
+	if s.Enabled == nil {
+		return false
+	}
+	return *s.Enabled
+}
+
+// EnabledFor resolves the effective Enabled flag for the given Linear team
+// key, falling back to the org default when the team has no override.
+func (s LinearAgentSettings) EnabledFor(teamKey string) bool {
+	if s.PerTeamEnabled != nil {
+		if override, ok := s.PerTeamEnabled[teamKey]; ok && override != nil {
+			return *override
+		}
+	}
+	return s.EffectiveEnabled()
+}
+
+// EffectiveAllowRevisionPerPrompt resolves the org-level
+// allow-revision-per-prompt flag, applying the design default (true) when
+// no explicit value was set.
+func (s LinearAgentSettings) EffectiveAllowRevisionPerPrompt() bool {
+	if s.AllowRevisionPerPrompt == nil {
+		return true
+	}
+	return *s.AllowRevisionPerPrompt
+}
+
+// EffectiveAppUserHandle returns the configured agent user handle, falling
+// back to "143" when unset.
+func (s LinearAgentSettings) EffectiveAppUserHandle() string {
+	if s.AppUserHandle == "" {
+		return "143"
+	}
+	return s.AppUserHandle
+}
+
 // Agent autonomy mode constants.
 const (
 	AgentAutonomyConservative = "conservative"
@@ -442,8 +563,13 @@ const (
 	// stay strictly above it so the reaper doesn't kill legitimate
 	// long-running sessions before the orchestrator's own timeout fires.
 	MaxMaxSessionDurationSeconds = 2 * 60 * 60
+	// MaxAbsoluteRuntimeCeilingSeconds is the largest valid absolute runtime
+	// ceiling after automatic extensions. The worker watchdog adds its own
+	// cleanup buffer on top of this, so org settings must not promise a longer
+	// handler runtime than workers will keep renewing.
+	MaxAbsoluteRuntimeCeilingSeconds = MaxMaxSessionDurationSeconds + 15*60
 
-	DefaultNoProgressTimeoutSeconds        = 5 * 60
+	DefaultNoProgressTimeoutSeconds        = 15 * 60
 	DefaultGracefulShutdownWindowSeconds   = 30
 	DefaultCheckpointFinalizeWindowSeconds = 30
 	DefaultAutomaticExtensionSeconds       = 10 * 60
@@ -652,6 +778,8 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds < s.MaxSessionDurationSeconds {
 		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = s.MaxSessionDurationSeconds
+	} else if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds > MaxAbsoluteRuntimeCeilingSeconds {
+		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = MaxAbsoluteRuntimeCeilingSeconds
 	}
 
 	// Linear automation defaults: ensure ReviewStateNamePreferences has a

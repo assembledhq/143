@@ -224,16 +224,19 @@ EXPOSE 8080
 CMD ["./server"]
 ```
 
-**Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all three agent CLIs (Claude Code, Codex, Gemini) at pinned versions from `sandbox/versions.json` via `sandbox/install-agents.sh`. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
+**Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all five agent CLIs (Claude Code, Codex, Gemini CLI, Amp, and Pi) at pinned versions from `sandbox/versions.json`; Pi now tracks the upstream `@earendil-works/pi-coding-agent` package scope there. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
 
 This image is used by the Docker sandbox provider. It runs under **gVisor** (`runsc` runtime) by default for syscall-level isolation. The same image works with both `runsc` (gVisor) and `runc` (standard Docker) — no image changes needed when switching runtimes.
 
 ### Deploy-Time Host Hardening
 
+Routine fleet deploys roll only the user-facing runtime roles, `app` and `worker`. Stateful/supporting roles (`db`, `redis`, `logging`) are deployed explicitly with `make deploy-db`, `make deploy-redis`, `make deploy-logging`, or `make deploy-fleet ROLES=all` during maintenance. `make deploy-fleet TAG=<image-tag> ROLES=<roles>` is the operator-facing shape for deploying a specific image tag to a selected role set. This keeps frequent application deploys from recreating Postgres, Redis, Grafana, or other non-runtime services.
+
 Fleet deploys attempt to keep host hardening in place as they roll services:
 
 - Docker `json-file` log rotation is installed through `deploy/scripts/install-log-rotation.sh`, which merges the desired `log-driver` and `log-opts` into `/etc/docker/daemon.json` and restarts Docker only when the file changes.
-- The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access.
+- App-role deploys skip Docker-daemon-mutating hardening checks by default because a Docker restart recycles Caddy and briefly unbinds ports `80`/`443`, which Cloudflare surfaces as origin downtime. Operators can opt in for explicit maintenance with `ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1`.
+- The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access. Worker cloud-init installs the same grant on first boot, because those hosts can start successfully from user-data before any operator runs SSH provisioning.
 - Existing hosts that predate a sudoers entry are repaired through `deploy/scripts/repair-deploy-sudoers.sh` when root SSH is available.
 - If a routine deploy cannot repair sudoers from CI, Docker log-rotation update failure is warning-only. The service rollout continues, and operators can run `make repair-deploy-sudoers ROLE=<role> HOST=<host>` later from a machine with root SSH access.
 
@@ -517,6 +520,7 @@ All configuration via environment variables:
 | `SANDBOX_CPU_LIMIT` | No | `2` | CPU cores per sandbox |
 | `SANDBOX_MEMORY_LIMIT` | No | `4096` | Memory MB per sandbox |
 | `SANDBOX_REQUIRE_GVISOR` | No | `true` | If true, server refuses to start without gVisor in production |
+| `SANDBOX_HEALTH_CHECK_IMAGE` | No | `busybox:1.36.1` | Small image used for worker startup runtime probes; lazy-pulled if missing and overrideable for private mirrors |
 | `SANDBOX_IMAGE_DIGEST` | No | - | Expected digest for sandbox image verification |
 | `MAX_CONCURRENT_RUNS` | No | `3` | Max concurrent agent runs per org |
 | `E2B_API_KEY` | No | - | E2B API key (required if `SANDBOX_PROVIDER=e2b`) |

@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { ChevronDown, Loader2, Minus, Plus } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,6 +24,7 @@ import {
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
@@ -48,15 +49,25 @@ import {
   minuteOptions,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 export default function NewAutomationPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { user, isLoading } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "member";
   const initialTemplate = getAutomationTemplate(searchParams.get("template") ?? "");
+
+  useEffect(() => {
+    if (!isLoading && !canManage) {
+      router.replace("/automations");
+    }
+  }, [canManage, isLoading, router]);
 
   // Form state
   const [name, setName] = useState(initialTemplate?.name ?? "");
   const [goal, setGoal] = useState(initialTemplate?.goal ?? "");
+  const [iconValue, setIconValue] = useState("⚙️");
   const [scope, setScope] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [intervalValue, setIntervalValue] = useState(initialTemplate?.defaultInterval ?? 1);
@@ -73,6 +84,7 @@ export default function NewAutomationPage() {
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [model, setModel] = useState<string | undefined>(undefined);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(1);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
   const [redirecting, setRedirecting] = useState(false);
@@ -99,6 +111,14 @@ export default function NewAutomationPage() {
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
+  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  let prePRReviewDescription = "Off for agents without native review support.";
+  if (supportsNativeReviewLoop) {
+    prePRReviewDescription = effectivePrePRReviewLoops === 0
+      ? "Off"
+      : "Runs the coding agent's review/fix loop before opening a PR.";
+  }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
@@ -116,6 +136,8 @@ export default function NewAutomationPage() {
       api.automations.create({
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         repository_id: repoId,
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
@@ -124,6 +146,7 @@ export default function NewAutomationPage() {
         timezone,
         model,
         identity_scope: identityScope,
+        pre_pr_review_loops: effectivePrePRReviewLoops,
         ...(showReasoningSelector && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
@@ -133,6 +156,10 @@ export default function NewAutomationPage() {
       router.push(`/automations/${res.data.id}`);
     },
   });
+
+  if (!isLoading && !canManage) {
+    return null;
+  }
 
   if (repos.length === 0 && reposData) {
     return (
@@ -230,14 +257,27 @@ export default function NewAutomationPage() {
 
         {/* Main form */}
         <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-          <div className="space-y-1.5">
-            <Label htmlFor="name">Name</Label>
-            <Input
-              id="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Find flaky tests"
-            />
+          <div
+            data-testid="automation-identity-row"
+            className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
+          >
+            <div className="space-y-1.5">
+              <Label>Emoji</Label>
+              <AutomationEmojiPicker
+                value={iconValue}
+                onChange={setIconValue}
+                className="w-16"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="name">Name</Label>
+              <Input
+                id="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Find flaky tests"
+              />
+            </div>
           </div>
 
           <div className="space-y-1.5">
@@ -312,6 +352,49 @@ export default function NewAutomationPage() {
             </Select>
             <p className="text-xs text-muted-foreground">
               Choose whether this automation runs with organization credentials and opens PRs as 143-bot, or uses the creator&apos;s coding-agent preferences and GitHub identity.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Decrease review passes"
+                onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+                disabled={!supportsNativeReviewLoop}
+              >
+                <Minus className="h-4 w-4" />
+              </Button>
+              <Input
+                id="pre-pr-review-loops"
+                aria-label="Review passes"
+                type="number"
+                min={0}
+                max={5}
+                value={effectivePrePRReviewLoops}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+                }}
+                disabled={!supportsNativeReviewLoop}
+                className="w-20 text-center"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Increase review passes"
+                onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+                disabled={!supportsNativeReviewLoop}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {prePRReviewDescription}
             </p>
           </div>
 

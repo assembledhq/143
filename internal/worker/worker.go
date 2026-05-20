@@ -29,8 +29,13 @@ type JobHandler func(ctx context.Context, jobType string, payload json.RawMessag
 // than a bare time.Duration) is used so callers can request an explicit
 // zero-delay retry without colliding with the "unset, use backoff" sentinel.
 type RetryableError struct {
-	Err        error
-	RetryAfter *time.Duration
+	Err error
+	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
+	// when the job row is older than maxRetryableDuration. Use this only when a
+	// successful retry is expected immediately after the current attempt repaired
+	// durable state, not for capacity/backlog gates.
+	BypassMaxRetryDuration bool
+	RetryAfter             *time.Duration
 }
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
@@ -45,6 +50,16 @@ type FatalError struct {
 
 func (e *FatalError) Error() string { return e.Err.Error() }
 func (e *FatalError) Unwrap() error { return e.Err }
+
+// HandoffError indicates the handler transferred durable ownership of the
+// running job to another fenced owner. The worker must skip all terminal job
+// writes because the new owner will renew and complete the same lock token.
+type HandoffError struct {
+	Err error
+}
+
+func (e *HandoffError) Error() string { return e.Err.Error() }
+func (e *HandoffError) Unwrap() error { return e.Err }
 
 type jobContextKey string
 
@@ -78,6 +93,8 @@ type jobLeaseStore interface {
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
 const maxRetryableDuration = 8 * time.Minute
 
+var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCeilingSeconds)*time.Second + 2*time.Minute
+
 type Worker struct {
 	jobs          jobLeaseStore
 	logger        zerolog.Logger
@@ -86,7 +103,11 @@ type Worker struct {
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	renewInterval time.Duration
-	wakeCh        chan struct{}
+	// maxLongRunningJobDuration is a worker-level lease-renewal watchdog for
+	// session jobs. Handler-owned contexts should normally stop first; this
+	// outer guard prevents a wedged handler from renewing a job forever.
+	maxLongRunningJobDuration time.Duration
+	wakeCh                    chan struct{}
 
 	draining           atomic.Bool
 	activeJobs         atomic.Int32
@@ -95,14 +116,15 @@ type Worker struct {
 
 func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
 	return &Worker{
-		jobs:          db.NewJobStore(pool),
-		logger:        logger,
-		nodeID:        nodeID,
-		handlers:      make(map[string]JobHandler),
-		pollInterval:  5 * time.Second,
-		leaseDuration: defaultLeaseDuration,
-		renewInterval: defaultRenewInterval,
-		wakeCh:        make(chan struct{}, 1),
+		jobs:                      db.NewJobStore(pool),
+		logger:                    logger,
+		nodeID:                    nodeID,
+		handlers:                  make(map[string]JobHandler),
+		pollInterval:              5 * time.Second,
+		leaseDuration:             defaultLeaseDuration,
+		renewInterval:             defaultRenewInterval,
+		maxLongRunningJobDuration: defaultMaxLongRunningJobDuration,
+		wakeCh:                    make(chan struct{}, 1),
 	}
 }
 
@@ -174,12 +196,20 @@ func (w *Worker) poll(ctx context.Context) {
 
 	handlerCtx := withJobOrgID(ctx, job.OrgID)
 	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
+	handlerCtx = jobctx.WithJobID(handlerCtx, job.ID)
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)
+	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(job.OwnerKind))
+	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != w.nodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
 	}
 	handlerCtx, cancelHandler := context.WithCancel(handlerCtx)
 	defer cancelHandler()
+	if isLongRunningSessionJob(job.JobType) && w.maxLongRunningJobDuration > 0 {
+		var cancelWatchdog context.CancelFunc
+		handlerCtx, cancelWatchdog = context.WithTimeout(handlerCtx, w.maxLongRunningJobDuration)
+		defer cancelWatchdog()
+	}
 
 	var lostOwnership atomic.Bool
 	renewDone := make(chan struct{})
@@ -204,6 +234,12 @@ func (w *Worker) poll(ctx context.Context) {
 		return
 	}
 
+	var handoff *HandoffError
+	if errors.As(err, &handoff) {
+		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job handed off to durable owner")
+		return
+	}
+
 	var fatal *FatalError
 	if errors.As(err, &fatal) {
 		w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed (fatal, skipping retries)")
@@ -214,7 +250,7 @@ func (w *Worker) poll(ctx context.Context) {
 
 	var retryable *RetryableError
 	if errors.As(err, &retryable) {
-		if time.Since(job.CreatedAt) > maxRetryableDuration {
+		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
 			w.logger.Error().Err(err).
 				Str("job_id", job.ID.String()).
 				Dur("age", time.Since(job.CreatedAt)).

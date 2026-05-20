@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +28,42 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type fakeGitHubAppService struct {
+	token string
+	err   error
+}
+
+func (f *fakeGitHubAppService) GetInstallationToken(context.Context, int64) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.token, nil
+}
+
+type fakeGitHubAppUserAuth struct {
+	credential *models.GitHubAppUserConfig
+	err        error
+}
+
+func (f fakeGitHubAppUserAuth) GetValidCredential(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.credential, nil
+}
+
+type fakeGitHubMembershipStore struct {
+	membership models.OrganizationMembership
+	err        error
+}
+
+func (f fakeGitHubMembershipStore) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	if f.err != nil {
+		return models.OrganizationMembership{}, f.err
+	}
+	return f.membership, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -219,6 +258,8 @@ func TestIntegrationHandler_ListIntegrations_DerivesGitHubAppInstalled_FromRepoF
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	handler.repoStore = db.NewRepositoryStore(mock)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
 
 	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 		AddRow(uuid.New(), orgID, "github", []byte(`{}`), "active", nil, now)
@@ -288,6 +329,7 @@ func TestIntegrationHandler_DisconnectIntegration_DisconnectsGitHubRepos(t *test
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	handler.repoStore = db.NewRepositoryStore(mock)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
 
 	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 		AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now)
@@ -300,6 +342,9 @@ func TestIntegrationHandler_DisconnectIntegration_DisconnectsGitHubRepos(t *test
 	mock.ExpectExec("UPDATE repositories SET status = 'disconnected', updated_at = now\\(\\) WHERE org_id = @org_id AND integration_id = @integration_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectExec("UPDATE github_installation_org_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/disconnect", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -380,7 +425,9 @@ func TestIntegrationHandler_StartLinearOAuth_RedirectsToLinearAuthorize(t *testi
 	require.Equal(t, "linear-client-id", parsed.Query().Get("client_id"), "redirect should include configured client id")
 	require.Equal(t, "code", parsed.Query().Get("response_type"), "redirect should request auth code flow")
 	require.Equal(t, "http://localhost:8080/api/v1/integrations/linear/callback", parsed.Query().Get("redirect_uri"), "redirect should include API callback URL")
-	require.Equal(t, "read,write", parsed.Query().Get("scope"), "redirect must request only the scopes Linear accepts; offline_access is not a valid Linear scope and Linear returns refresh_token automatically")
+	require.Equal(t, strings.Join(models.LinearAgentRequiredScopes, ","), parsed.Query().Get("scope"),
+		"redirect must include the agent scopes (app:assignable, app:mentionable) so Linear provisions the @143 agent user; "+
+			"offline_access is intentionally NOT in the list — Linear rejects it as invalid (see PR #816) and returns refresh_token automatically without any special scope")
 	require.NotEmpty(t, parsed.Query().Get("state"), "redirect should include oauth state")
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
@@ -495,6 +542,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExp
 	var capturedConfigBytes []byte
 	configCapture := pgxmock.QueryMatcherFunc(func(_ string, _ string) error { return nil })
 	_ = configCapture
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -506,6 +554,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExp
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
@@ -537,11 +586,91 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_PersistsRefreshTokenAndExp
 	require.WithinDuration(t, time.Now().Add(2*time.Hour), persisted.ExpiresAt, 30*time.Second, "ExpiresAt must reflect expires_in=7200")
 }
 
+func TestIntegrationHandler_HandleLinearOAuthCallback_PreservesWebhookSecretOnReauth(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	credentialID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			respBody := `{"access_token":"lin_at_new","refresh_token":"lin_rt_new","token_type":"Bearer","scope":"read,write","expires_in":7200}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		case "https://api.linear.app/graphql":
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`))}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	existingConfig := crypto.DevEncrypt([]byte(`{"webhook_secret":"lin_whsec_existing","access_token":"lin_at_old"}`))
+	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}).
+			AddRow(credentialID, orgID, string(models.ProviderLinear), "", existingConfig, "active", nil, nil, nil, now, now))
+
+	var capturedConfigBytes []byte
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(credentialID))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should redirect after successful Linear OAuth")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback should read existing credential before upserting the refreshed config")
+
+	plaintext, err := crypto.DevDecrypt(capturedConfigBytes)
+	require.NoError(t, err, "captured bytes should be DevEncrypt'd")
+	var persisted models.LinearConfig
+	require.NoError(t, json.Unmarshal(plaintext, &persisted), "persisted config should decode as LinearConfig")
+	require.Equal(t, "lin_whsec_existing", persisted.WebhookSecret, "Linear webhook secret must survive OAuth reauthorization")
+	require.Equal(t, "lin_at_new", persisted.AccessToken, "OAuth callback should still persist the new access token")
+}
+
 // capturingArg returns a pgxmock argument matcher that records the value
 // it sees into the supplied byte slice pointer. Used for asserting on
 // encrypted config payloads that we want to decrypt and inspect.
 func capturingArg(dest *[]byte) pgxmock.Argument {
 	return capturingArgImpl{dest: dest}
+}
+
+func expectNoExistingCredentialLookup(mock pgxmock.PgxPoolIface) {
+	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}))
+}
+
+func expectLinearWorkspaceIDPersist(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec("UPDATE integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
 type capturingArgImpl struct {
@@ -598,6 +727,71 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
 	handler.client = &http.Client{Transport: transport}
 
+	expectNoExistingCredentialLookup(mock)
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "HandleLinearOAuthCallback should redirect after successful OAuth")
+	require.Equal(t, "http://localhost:3000/integrations?linear=connected", w.Header().Get("Location"), "HandleLinearOAuthCallback should redirect to integrations page with success state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_HandleLinearOAuthCallback_FailsWhenWorkspaceIDPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			respBody := `{"access_token":"linear-access-token","token_type":"Bearer","scope":"read"}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(respBody)),
+			}, nil
+		case "https://api.linear.app/graphql":
+			respBody := `{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(respBody)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -610,6 +804,10 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
 
+	mock.ExpectExec("UPDATE integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("duplicate workspace binding"))
+
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
 	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -617,8 +815,8 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 
 	handler.HandleLinearOAuthCallback(w, req)
 
-	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "HandleLinearOAuthCallback should redirect after successful OAuth")
-	require.Equal(t, "http://localhost:3000/integrations?linear=connected", w.Header().Get("Location"), "HandleLinearOAuthCallback should redirect to integrations page with success state")
+	require.Equal(t, http.StatusInternalServerError, w.Code, "callback should fail when workspace_id cannot be persisted")
+	require.Contains(t, w.Body.String(), "CONNECT_LINEAR_FAILED", "response should make the Linear connection failure explicit")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -678,6 +876,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue(t *
 		return nil
 	})
 
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -688,6 +887,7 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue(t *
 	mock.ExpectQuery("INSERT INTO integrations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
 	// Worker enqueue always fires now: redirect must not block on inline
 	// refresh, so the worker job is the durable fallback.
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -710,6 +910,89 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_AsyncRefreshAndEnqueue(t *
 		t.Fatal("inline RefreshTeamKeys goroutine never ran within 2s")
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "exactly one INSERT INTO jobs should fire as the durable fallback")
+}
+
+func TestIntegrationHandler_HandleLinearOAuthCallback_RetriesTransientTeamKeyIntegrationMiss(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"access_token":"linear-access-token","token_type":"Bearer","scope":"read"}`)),
+			}, nil
+		case "https://api.linear.app/graphql":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+	handler.SetLinearJobStore(db.NewJobStore(mock))
+
+	inlineCalls := make(chan uuid.UUID, 2)
+	var refreshAttempts atomic.Int32
+	handler.SetLinearTeamKeyRefresher(func(_ context.Context, gotOrg uuid.UUID) error {
+		inlineCalls <- gotOrg
+		if refreshAttempts.Add(1) == 1 {
+			return errors.New("lookup linear integration: linear integration not found")
+		}
+		return nil
+	})
+
+	expectNoExistingCredentialLookup(mock)
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+	expectLinearWorkspaceIDPersist(mock)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should redirect even when the inline refresh has to retry")
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-inlineCalls:
+			require.Equal(t, orgID, got, "inline refresher retry should keep the callback org id")
+		case <-time.After(2 * time.Second):
+			t.Fatal("inline RefreshTeamKeys retry never ran within 2s")
+		}
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "worker fallback should still enqueue exactly once")
 }
 
 func TestIntegrationHandler_HandleLinearOAuthCallback_StateMismatch(t *testing.T) {
@@ -748,6 +1031,112 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_MissingCode(t *testing.T) 
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "MISSING_CODE")
+}
+
+// TestIntegrationHandler_HandleLinearOAuthCallback_BootstrapperFiresWhenAgentScopesGranted
+// pins the contract that the OAuth callback invokes the agent bootstrapper
+// (auto-enable + auto-default-repo) exactly when the returned token carries
+// the agent scopes. The bootstrapper is best-effort: a failure from it must
+// not break the OAuth redirect, since the admin can always configure
+// manually from Settings → Integrations → Linear → Agent.
+func TestIntegrationHandler_HandleLinearOAuthCallback_BootstrapperFiresWhenAgentScopesGranted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		scope          string
+		bootstrapErr   error
+		expectFired    bool
+		expectRedirect int
+	}{
+		{
+			name:           "agent scopes granted → bootstrapper fires",
+			scope:          "read,write,app:assignable,app:mentionable",
+			expectFired:    true,
+			expectRedirect: http.StatusTemporaryRedirect,
+		},
+		{
+			name:           "legacy scopes only → bootstrapper does not fire",
+			scope:          "read,write",
+			expectFired:    false,
+			expectRedirect: http.StatusTemporaryRedirect,
+		},
+		{
+			name:           "agent scopes granted, bootstrapper errors → callback still redirects",
+			scope:          "read,write,app:assignable,app:mentionable",
+			bootstrapErr:   errors.New("boom"),
+			expectFired:    true,
+			expectRedirect: http.StatusTemporaryRedirect,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now().UTC()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := db.NewIntegrationStore(mock)
+			credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+			tokenBody := `{"access_token":"lin_at","token_type":"Bearer","scope":"` + tt.scope + `"}`
+			viewerBody := `{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"},"id":"appuser-1","name":"143"}}}`
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.String() {
+				case "https://api.linear.app/oauth/token":
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(tokenBody))}, nil
+				case "https://api.linear.app/graphql":
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(viewerBody))}, nil
+				default:
+					return nil, errors.New("unexpected request URL")
+				}
+			})
+
+			handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+			handler.client = &http.Client{Transport: transport}
+
+			var fired bool
+			var firedOrgID uuid.UUID
+			handler.SetLinearAgentBootstrapper(func(_ context.Context, gotOrg uuid.UUID) error {
+				fired = true
+				firedOrgID = gotOrg
+				return tt.bootstrapErr
+			})
+
+			expectNoExistingCredentialLookup(mock)
+			mock.ExpectQuery("INSERT INTO org_credentials").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+			mock.ExpectQuery("INSERT INTO integrations").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+			expectLinearWorkspaceIDPersist(mock)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+			req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			w := httptest.NewRecorder()
+
+			handler.HandleLinearOAuthCallback(w, req)
+
+			require.Equal(t, tt.expectRedirect, w.Code, "OAuth callback should redirect regardless of bootstrap outcome — bootstrapper is best-effort")
+			require.Equal(t, tt.expectFired, fired, "bootstrapper firing must be gated on HasAgentScopes()")
+			if tt.expectFired {
+				require.Equal(t, orgID, firedOrgID, "bootstrapper must receive the callback's org id")
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestIntegrationHandler_ConnectLinear_CreatesIntegrationWhenMissing(t *testing.T) {
@@ -1127,6 +1516,7 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_SavesCredentialAndIntegrat
 	)
 	handler.client = &http.Client{Transport: transport}
 
+	expectNoExistingCredentialLookup(mock)
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1149,6 +1539,77 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_SavesCredentialAndIntegrat
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
 	require.Equal(t, "http://localhost:3000/integrations?sentry=connected", w.Header().Get("Location"))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_HandleSentryOAuthCallback_PreservesWebhookSecretOnReauth(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	credentialID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.String() == "https://sentry.io/oauth/token/":
+			respBody := `{"access_token":"sentry-access-token-new","refresh_token":"sentry-refresh-token-new","token_type":"bearer","scope":"org:read project:read event:read"}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		case req.URL.String() == "https://sentry.io/api/0/organizations/":
+			respBody := `[{"slug":"acme-corp","name":"Acme Corp"}]`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(respBody))}, nil
+		default:
+			return nil, errors.New("unexpected request URL: " + req.URL.String())
+		}
+	})
+
+	handler := NewIntegrationHandler(
+		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
+		WithSentryOAuth("sentry-client-id", "sentry-client-secret"),
+	)
+	handler.client = &http.Client{Transport: transport}
+
+	existingConfig := crypto.DevEncrypt([]byte(`{"webhook_secret":"sentry_whsec_existing","access_token":"sentry-access-token-old"}`))
+	mock.ExpectQuery("SELECT id, org_id, provider, label, config").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}).
+			AddRow(credentialID, orgID, string(models.ProviderSentry), "", existingConfig, "active", nil, nil, nil, now, now))
+
+	var capturedConfigBytes []byte
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&capturedConfigBytes), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(credentialID))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/sentry/callback?code=sentry-auth-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "sentry_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleSentryOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should redirect after successful Sentry OAuth")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback should read existing credential before upserting the refreshed config")
+
+	plaintext, err := crypto.DevDecrypt(capturedConfigBytes)
+	require.NoError(t, err, "captured bytes should be DevEncrypt'd")
+	var persisted models.SentryConfig
+	require.NoError(t, json.Unmarshal(plaintext, &persisted), "persisted config should decode as SentryConfig")
+	require.Equal(t, "sentry_whsec_existing", persisted.WebhookSecret, "Sentry webhook secret must survive OAuth reauthorization")
+	require.Equal(t, "sentry-access-token-new", persisted.AccessToken, "OAuth callback should still persist the new access token")
 }
 
 func TestIntegrationHandler_HandleSentryOAuthCallback_StateMismatch(t *testing.T) {
@@ -1414,6 +1875,8 @@ func TestIntegrationHandler_StartGitHubOAuth_NotConfigured(t *testing.T) {
 func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T) {
 	t.Parallel()
 
+	orgID := uuid.New()
+	userID := uuid.New()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
@@ -1426,6 +1889,9 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/login", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	handler.StartGitHubOAuth(w, req)
@@ -1444,6 +1910,46 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 
 	setCookie := w.Result().Header.Get("Set-Cookie")
 	require.Contains(t, setCookie, "github_integration_oauth_state=", "state cookie must be set so the callback can validate it")
+}
+
+func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T) {
+	t.Parallel()
+
+	handler := NewIntegrationHandler(nil, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	requested := make([]string, 0, 2)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requested = append(requested, req.URL.String())
+		switch len(requested) {
+		case 1:
+			require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100", req.URL.String(), "first page should request installation repositories")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Link": []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
+				},
+				Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":1,"full_name":"org/one"}]}`)),
+			}, nil
+		case 2:
+			require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100&page=2", req.URL.String(), "second page should follow GitHub Link header")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"repositories":[{"id":2,"full_name":"org/two"}]}`)),
+			}, nil
+		default:
+			require.Fail(t, "listInstallationRepos should not request more than two pages")
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	repos, err := handler.listInstallationRepos(context.Background(), "installation-token")
+
+	require.NoError(t, err, "listInstallationRepos should read every GitHub page")
+	require.Equal(t, []githubInstallationRepo{
+		{ID: 1, FullName: "org/one"},
+		{ID: 2, FullName: "org/two"},
+	}, repos, "listInstallationRepos should concatenate paginated repositories")
+	require.Len(t, requested, 2, "listInstallationRepos should request exactly two pages")
 }
 
 func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegration(t *testing.T) {
@@ -1588,6 +2094,7 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 	t.Parallel()
 
 	orgID := uuid.New()
+	userID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now().UTC()
 
@@ -1599,9 +2106,21 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 	handler := NewIntegrationHandler(
 		store, nil, "", "", "http://localhost:8080", "http://localhost:3000",
 		WithGitHubIntegrationOAuth("gh-id", "gh-secret"),
+		WithIntegrationMembershipStore(fakeGitHubMembershipStore{membership: models.OrganizationMembership{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   models.RoleAdmin,
+		}}),
 	)
+	state, err := handler.signGitHubSetupState(githubSetupStatePayload{
+		Nonce:     "nonce",
+		UserID:    userID,
+		OrgID:     orgID,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	require.NoError(t, err, "test should create a valid setup state")
 
-	// When installation_id and setup_action=install are present, the callback
+	// When installation_id and setup_action=update are present, the callback
 	// handler should delegate to HandleGitHubAppInstalled instead of trying
 	// to exchange a code. Expect the ensureIntegration + UpdateConfig queries.
 	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
@@ -1617,15 +2136,87 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_DelegatesToAppInstalled(t 
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=install&state=test-state", nil)
+		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=update&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: githubIntegrationOAuthStateCookie, Value: state})
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	w := httptest.NewRecorder()
 
 	handler.HandleGitHubOAuthCallback(w, req)
 
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
-	require.Equal(t, "http://localhost:3000/integrations?github=connected", w.Header().Get("Location"))
+	require.Equal(t, "http://localhost:3000/settings/integrations?github=connected&select_repos=1", w.Header().Get("Location"))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_HandleGitHubAppInstalled_RejectsMissingInstallationIDBeforeCreatingIntegration(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithIntegrationMembershipStore(fakeGitHubMembershipStore{membership: models.OrganizationMembership{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   models.RoleAdmin,
+		}}),
+	)
+	state, err := handler.signGitHubSetupState(githubSetupStatePayload{
+		Nonce:     "nonce",
+		UserID:    userID,
+		OrgID:     orgID,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	require.NoError(t, err, "test should create a valid setup state")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/github/installed?setup_action=install&state="+url.QueryEscape(state), nil)
+	req.AddCookie(&http.Cookie{Name: githubIntegrationOAuthStateCookie, Value: state})
+	w := httptest.NewRecorder()
+
+	handler.HandleGitHubAppInstalled(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "setup callback should reject missing installation id")
+	require.Contains(t, w.Body.String(), "MISSING_INSTALLATION_ID", "response should identify missing installation id")
+	require.NoError(t, mock.ExpectationsWereMet(), "missing installation id should not create an integration")
+}
+
+func TestIntegrationHandler_HandleGitHubOAuthCallback_RejectsInvalidAppSetupState(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubIntegrationOAuth("gh-id", "gh-secret"),
+	)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/integrations/github/callback?code=some-code&installation_id=12345&setup_action=install&state=missing-cookie", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleGitHubOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "app setup callback should reject missing setup state")
+	require.Contains(t, w.Body.String(), "INVALID_GITHUB_SETUP_STATE", "response should identify invalid setup state")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid setup state should not touch the database")
 }
 
 func TestIntegrationHandler_ConnectGitHub_CreatesIntegration(t *testing.T) {
@@ -1662,6 +2253,204 @@ func TestIntegrationHandler_ConnectGitHub_CreatesIntegration(t *testing.T) {
 	require.Equal(t, models.IntegrationProviderGitHub, resp.Data.Provider)
 	require.Equal(t, models.IntegrationStatusActive, resp.Data.Status)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ClaimGitHubInstallationRepositories_RequiresUserAuth(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubApp(&fakeGitHubAppService{token: "installation-token"}, db.NewRepositoryStore(mock)),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/repositories/claim", strings.NewReader(`{"installation_id":12345,"github_ids":[67890]}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "admin@example.com", Name: "Admin", Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ClaimGitHubInstallationRepositories(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "claim should reject requests when GitHub user auth is not wired")
+	require.Contains(t, w.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "claim should return an actionable GitHub user auth error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_GitHubInstallationLink_FallsBackToRepoInstallationForExplicitID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+	)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+	handler.repoStore = db.NewRepositoryStore(mock)
+
+	mock.ExpectQuery("SELECT l.id, l.org_id, l.integration_id, l.installation_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "created_at", "updated_at"}))
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", json.RawMessage(`{}`), "active", nil, now))
+	mock.ExpectQuery("SELECT installation_id FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"installation_id"}).AddRow(int64(12345)))
+
+	link, ok := handler.githubInstallationLink(context.Background(), orgID, 12345)
+
+	require.True(t, ok, "githubInstallationLink should synthesize a link from legacy repository installation data")
+	require.Equal(t, orgID, link.OrgID, "fallback link should remain scoped to the requesting org")
+	require.NotNil(t, link.IntegrationID, "fallback link should preserve the active integration id for claims")
+	require.Equal(t, integrationID, *link.IntegrationID, "fallback link should use the active GitHub integration")
+	require.Equal(t, int64(12345), link.InstallationID, "fallback link should use the requested installation id")
+	require.Equal(t, "unknown", link.AccountLogin, "fallback link should have a stable account label when config is missing it")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_GitHubInstallationLink_DoesNotFallBackToDeletedInstallationConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+	)
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+
+	mock.ExpectQuery("SELECT l.id, l.org_id, l.integration_id, l.installation_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "created_at", "updated_at"}))
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", json.RawMessage(`{"installation_id":12345,"account_login":"acme"}`), "active", nil, now))
+	mock.ExpectQuery("SELECT installation_id, account_id, account_login, account_type, repository_selection, status, created_at, updated_at").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "created_at", "updated_at"}).
+			AddRow(int64(12345), int64(987), "acme", nil, nil, "deleted", now, now))
+
+	link, ok := handler.githubInstallationLink(context.Background(), orgID, 12345)
+
+	require.False(t, ok, "githubInstallationLink should not synthesize a link for a deleted GitHub installation")
+	require.Equal(t, models.GitHubInstallationOrgLink{}, link, "deleted installation fallback should return an empty link")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ClaimGitHubInstallationRepositories_MapsUniqueOwnershipRaceToConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	integrationID := uuid.New()
+	otherOrgID := uuid.New()
+	otherRepoID := uuid.New()
+	now := time.Now().UTC()
+
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithGitHubApp(&fakeGitHubAppService{token: "installation-token"}, db.NewRepositoryStore(mock)),
+		WithGitHubAppUserAuth(fakeGitHubAppUserAuth{credential: &models.GitHubAppUserConfig{AccessToken: "ghu_user"}}),
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case githubAPIURL + "/installation/repositories?per_page=100":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"repositories":[{
+					"id":67890,
+					"full_name":"acme/api",
+					"default_branch":"main",
+					"private":true,
+					"clone_url":"https://github.com/acme/api.git"
+				}]}`)),
+			}, nil
+		case githubAPIURL + "/repos/acme/api":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL: " + req.URL.String())
+		}
+	})}
+
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", json.RawMessage(`{"installation_id":12345,"account_login":"acme"}`), "active", nil, now))
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}))
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO repositories").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(&pgconn.PgError{Code: "23505", ConstraintName: "idx_repositories_active_github_id"})
+	mock.ExpectRollback()
+	mock.ExpectQuery("SELECT r.id AS repository_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"repository_id", "org_id", "org_name", "github_id", "full_name", "status"}).
+			AddRow(otherRepoID, otherOrgID, "Platform", int64(67890), "acme/api", "active"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/repositories/claim", strings.NewReader(`{"github_ids":[67890]}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "admin@example.com", Name: "Admin", Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ClaimGitHubInstallationRepositories(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "claim should map concurrent active-owner uniqueness violations to a conflict")
+	require.Contains(t, w.Body.String(), "REPOSITORY_OWNERSHIP_CONFLICT", "claim conflict should return the ownership conflict code")
+	require.Contains(t, w.Body.String(), "Platform", "claim conflict should include the current owner when it can be reloaded")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestIntegrationHandler_ConnectGitHub_ReturnsExisting(t *testing.T) {
@@ -2029,4 +2818,137 @@ func TestIntegrationHandler_ConnectNotion_InvalidJSON(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "INVALID_JSON")
+}
+
+func TestIntegrationHandler_ConnectCircleCI_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "https://circleci.com/api/v2/me", req.URL.String())
+		require.Equal(t, "cci_token", req.Header.Get("Circle-Token"))
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"id":"abc","login":"octocat"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(
+		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: transport}
+
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	body := `{"auth_token":"cci_token","project_slug":"gh/octocat/hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	require.Contains(t, w.Body.String(), `"provider":"circleci"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ConnectCircleCI_MissingProjectSlug(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"auth_token":"tok"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "MISSING_PROJECT_SLUG",
+		"a token alone is not enough — CircleCI needs the VCS-prefixed project slug")
+}
+
+func TestIntegrationHandler_ConnectCircleCI_RejectsMalformedSlug(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"auth_token":"tok","project_slug":"octocat/hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_PROJECT_SLUG",
+		"two-segment slugs miss the VCS prefix CircleCI requires (gh/org/repo)")
+}
+
+func TestIntegrationHandler_ConnectCircleCI_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"message":"Permission denied"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"auth_token":"bad","project_slug":"gh/octocat/hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/circleci/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectCircleCI(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN")
 }

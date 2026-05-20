@@ -66,11 +66,15 @@ type AuthSession struct {
 }
 
 type Integration struct {
-	ID                 uuid.UUID           `db:"id" json:"id"`
-	OrgID              uuid.UUID           `db:"org_id" json:"org_id"`
-	Provider           IntegrationProvider `db:"provider" json:"provider"`
-	Config             json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
-	GitHubAppInstalled *bool               `db:"-" json:"github_app_installed,omitempty"`
+	ID                          uuid.UUID           `db:"id" json:"id"`
+	OrgID                       uuid.UUID           `db:"org_id" json:"org_id"`
+	Provider                    IntegrationProvider `db:"provider" json:"provider"`
+	Config                      json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
+	GitHubAppInstalled          *bool               `db:"-" json:"github_app_installed,omitempty"`
+	GitHubInstallationID        *int64              `db:"-" json:"github_installation_id,omitempty"`
+	GitHubAccountLogin          *string             `db:"-" json:"github_account_login,omitempty"`
+	GitHubRepoSelectionRequired *bool               `db:"-" json:"github_repo_selection_required,omitempty"`
+	GitHubActiveRepoCount       *int                `db:"-" json:"github_active_repo_count,omitempty"`
 	// AuthError is a derived view of the auth-failure markers stamped into
 	// config jsonb when a provider rejects our access token (currently only
 	// Linear). Populated by ListIntegrations / Get* paths via deriveIntegrationStatus
@@ -80,6 +84,43 @@ type Integration struct {
 	Status       IntegrationStatus     `db:"status" json:"status"`
 	LastSyncedAt *time.Time            `db:"last_synced_at" json:"last_synced_at,omitempty"`
 	CreatedAt    time.Time             `db:"created_at" json:"created_at"`
+}
+
+type GitHubInstallation struct {
+	InstallationID      int64     `db:"installation_id" json:"installation_id"`
+	AccountID           int64     `db:"account_id" json:"account_id"`
+	AccountLogin        string    `db:"account_login" json:"account_login"`
+	AccountType         *string   `db:"account_type" json:"account_type,omitempty"`
+	RepositorySelection *string   `db:"repository_selection" json:"repository_selection,omitempty"`
+	Status              string    `db:"status" json:"status"`
+	CreatedAt           time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type GitHubInstallationOrgLink struct {
+	ID             uuid.UUID  `db:"id" json:"id"`
+	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
+	IntegrationID  *uuid.UUID `db:"integration_id" json:"integration_id,omitempty"`
+	InstallationID int64      `db:"installation_id" json:"installation_id"`
+	AccountLogin   string     `db:"account_login" json:"account_login"`
+	LinkedByUserID *uuid.UUID `db:"linked_by_user_id" json:"linked_by_user_id,omitempty"`
+	Status         string     `db:"status" json:"status"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+type GitHubRepositoryClaimCandidate struct {
+	GitHubID       int64                       `json:"github_id"`
+	FullName       string                      `json:"full_name"`
+	DefaultBranch  string                      `json:"default_branch"`
+	Private        bool                        `json:"private"`
+	CloneURL       string                      `json:"clone_url"`
+	InstallationID int64                       `json:"installation_id"`
+	Status         GitHubRepositoryClaimStatus `json:"status"`
+	RepositoryID   *uuid.UUID                  `json:"repository_id,omitempty"`
+	OwnerOrgID     *uuid.UUID                  `json:"owner_org_id,omitempty"`
+	OwnerOrgName   *string                     `json:"owner_org_name,omitempty"`
+	CanTransfer    bool                        `json:"can_transfer"`
 }
 
 // IntegrationAuthError is the user-facing shape of an auth failure: a
@@ -298,10 +339,13 @@ type Session struct {
 	// PRPushState drives the "Push changes" button's state machine for sessions
 	// that already have an open PR. Independent from PRCreationState so a single
 	// session can show "PR opened" while a follow-up push is mid-flight.
-	PRPushState          PRPushState `db:"pr_push_state" json:"pr_push_state"`
-	PRPushError          *string     `db:"pr_push_error" json:"pr_push_error,omitempty"`
-	DiffCollectedAt      *time.Time  `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
-	LatestDiffSnapshotID *uuid.UUID  `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	PRPushState          PRPushState         `db:"pr_push_state" json:"pr_push_state"`
+	PRPushError          *string             `db:"pr_push_error" json:"pr_push_error,omitempty"`
+	BranchCreationState  BranchCreationState `db:"branch_creation_state" json:"branch_creation_state"`
+	BranchCreationError  *string             `db:"branch_creation_error" json:"branch_creation_error,omitempty"`
+	BranchURL            *string             `db:"branch_url" json:"branch_url,omitempty"`
+	DiffCollectedAt      *time.Time          `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
+	LatestDiffSnapshotID *uuid.UUID          `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
 	// HasUnpushedChanges is a derived read-model field: true when the most
 	// recent persisted session HEAD differs from the open PR's tracked head
 	// commit, which means "Push changes" is actionable.
@@ -513,6 +557,7 @@ type SessionResult struct {
 	ConfidenceReasoning *string         `json:"confidence_reasoning,omitempty"`
 	RiskFactors         []string        `json:"risk_factors,omitempty"`
 	TokenUsage          json.RawMessage `json:"token_usage,omitempty"`
+	ModelUsed           *string         `json:"model_used,omitempty"`
 	ResultSummary       *string         `json:"result_summary,omitempty"`
 	Diff                *string         `json:"diff,omitempty"`
 	Error               *string         `json:"error,omitempty"`
@@ -785,6 +830,7 @@ const (
 	JobTypePMContextRefresh = "pm_context_refresh"
 	JobTypeProjectCycle     = "project_cycle"
 	JobTypeAutomationRun    = "automation_run"
+	JobTypeStartPreview     = "start_preview"
 )
 
 // Job represents an async work queue item.
@@ -804,6 +850,7 @@ type Job struct {
 	LeaseExpiresAt *time.Time      `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
 	LockToken      *uuid.UUID      `db:"lock_token" json:"lock_token,omitempty"`
 	RunOwnerID     *string         `db:"run_owner_id" json:"run_owner_id,omitempty"`
+	OwnerKind      JobOwnerKind    `db:"owner_kind" json:"owner_kind"`
 	LastError      *string         `db:"last_error" json:"last_error,omitempty"`
 	DedupeKey      *string         `db:"dedupe_key" json:"dedupe_key,omitempty"`
 	// TargetNodeID, when set, restricts the job to be claimed by this

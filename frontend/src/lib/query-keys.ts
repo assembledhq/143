@@ -18,11 +18,15 @@ export const queryKeys = {
     timeline: (id: string) => ["session", id, "timeline"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
+    humanInputRequests: (id: string, status?: string | null, threadId?: string | null) =>
+      ["session", id, "human-input-requests", status ?? null, threadId ?? null] as const,
+    composerFiles: (id: string, query: string) => ["session", id, "composer", "files", query] as const,
     threads: (id: string) => ["session", id, "threads"] as const,
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
+    reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
   },
   repositories: {
     all: ["repositories"] as const,
@@ -51,7 +55,13 @@ export const queryKeys = {
   },
   integrations: {
     all: ["integrations"] as const,
+    githubRepositories: (installationId?: number | null) => ["integrations", "github", "repositories", installationId ?? null] as const,
+    linearAgentStatus: ["integrations", "linear", "agent"] as const,
+    linearAgentMappings: ["integrations", "linear", "agent", "mappings"] as const,
     slackChannels: ["slack-channels"] as const,
+  },
+  autopilot: {
+    queue: (params: Record<string, string | number | null | undefined>) => ["autopilot", "queue", params] as const,
   },
   pm: {
     status: ["pm", "status"] as const,
@@ -70,9 +80,9 @@ export const queryKeys = {
   usage: {
     summary: (params: { start: string; end: string }) =>
       ["usage", "summary", params] as const,
-    timeseries: (params: { start: string; end: string; group_by?: string; user_id?: string; capacity?: string }) =>
+    timeseries: (params: { start: string; end: string; group_by?: string; stack_by?: string; user_id?: string; capacity?: string; agent?: string; model?: string; reasoning?: string }) =>
       ["usage", "timeseries", params] as const,
-    breakdown: (params: { start: string; end: string; dimension?: string; sort?: string }) =>
+    breakdown: (params: { start: string; end: string; dimension?: string; sort?: string; agent?: string; model?: string; reasoning?: string }) =>
       ["usage", "breakdown", params] as const,
   },
   evals: {

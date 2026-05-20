@@ -1,0 +1,6 @@
+Based on your latest review, are there remaining issues you should fix in this sandbox before this work is considered clean? Apply the nit policy from the review instruction and use your coding judgment when deciding whether remaining nits require another fix pass.
+
+Answer with one of:
+
+- REVIEW_CLEAN
+- NEEDS_FIX_PASS

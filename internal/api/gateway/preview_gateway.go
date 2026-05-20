@@ -342,7 +342,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 
 	// Intercept heartbeat pings before recording activity so the heartbeat
 	// URL does not overwrite last_path (which is used for navigation restore).
-	if r.URL.Path == "/__143_heartbeat" {
+	if r.URL.Path == previewHeartbeatPath {
 		// Still record access for idle timeout tracking.
 		if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
@@ -355,13 +355,50 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
 	}
-	if r.URL.Path != "" && r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/__143_") {
+	if shouldRecordPreviewLastPath(r) {
 		if err := g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record last path")
 		}
 	}
 
 	g.proxyToWorker(w, r, orgID, previewID)
+}
+
+const (
+	previewPlatformPathPrefix = "/__143_"
+	previewHeartbeatPath      = previewPlatformPathPrefix + "heartbeat"
+)
+
+func shouldRecordPreviewLastPath(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+
+	requestPath := r.URL.Path
+	if requestPath == "" || requestPath == "/" {
+		return false
+	}
+	if strings.HasPrefix(requestPath, previewPlatformPathPrefix) {
+		return false
+	}
+
+	// Browser navigations advertise Sec-Fetch-Dest: document. Framework
+	// internals, assets, EventSource/HMR, and fetch/XHR requests do not.
+	if fetchDest := r.Header.Get("Sec-Fetch-Dest"); fetchDest != "" {
+		return fetchDest == "document"
+	}
+
+	return acceptsHTMLDocument(r.Header.Get("Accept"))
+}
+
+func acceptsHTMLDocument(accept string) bool {
+	for _, rawPart := range strings.Split(accept, ",") {
+		mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(rawPart, ";", 2)[0]))
+		if mediaType == "text/html" || mediaType == "application/xhtml+xml" {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
@@ -621,8 +658,14 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
 	z := html.NewTokenizer(bytes.NewReader(body))
 	offset := -1
+	consumed := 0
 	for {
-		switch z.Next() {
+		tokenType := z.Next()
+		raw := z.Raw()
+		tokenStart := consumed
+		consumed += len(raw)
+
+		switch tokenType {
 		case html.ErrorToken:
 			// End of input or parse error — no matching end tag found.
 			if offset == -1 {
@@ -632,16 +675,11 @@ func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
 		case html.EndTagToken:
 			name, _ := z.TagName()
 			if string(name) == "head" {
-				// Offset is the position immediately before the `<` that
-				// started this token. Compute from remaining bytes.
-				raw := z.Raw()
-				tokenStart := len(body) - len(z.Buffered()) - len(raw)
 				return spliceAt(body, tokenStart, scriptBlock)
 			}
 			if string(name) == "body" && offset == -1 {
 				// Remember body offset as a fallback if no </head> appears.
-				raw := z.Raw()
-				offset = len(body) - len(z.Buffered()) - len(raw)
+				offset = tokenStart
 			}
 		}
 	}
@@ -674,9 +712,33 @@ func (g *Gateway) injectSecurityHeaders(h http.Header) {
 }
 
 func stripSensitiveResponseHeaders(h http.Header) {
-	// Remove Set-Cookie from sandbox responses. Our own session cookie is
-	// set directly in the exchange handler, not via proxy responses.
+	// Let sandbox apps manage their own preview-domain auth state (for example
+	// session_token and csrf_token) while protecting the gateway-owned preview
+	// access cookie from being replaced by the sandbox response.
+	setCookies := h.Values("Set-Cookie")
+	if len(setCookies) == 0 {
+		return
+	}
+
 	h.Del("Set-Cookie")
+	for _, raw := range setCookies {
+		switch setCookieName(raw) {
+		case "__Host-preview_session", "preview_session":
+			continue
+		default:
+			h.Add("Set-Cookie", raw)
+		}
+	}
+}
+
+func setCookieName(raw string) string {
+	parts := strings.SplitN(raw, ";", 2)
+	first := strings.TrimSpace(parts[0])
+	kv := strings.SplitN(first, "=", 2)
+	if len(kv) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(kv[0])
 }
 
 func stripPreviewCookie(req *http.Request) {

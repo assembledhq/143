@@ -128,6 +128,27 @@ func TestWithLockToken_RoundTrip(t *testing.T) {
 	require.Equal(t, want, got, "LockTokenFromContext should return the stored token")
 }
 
+func TestWithJobID_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := uuid.New()
+	ctx := jobctx.WithJobID(context.Background(), want)
+
+	got, ok := jobctx.JobIDFromContext(ctx)
+	require.True(t, ok, "WithJobID should store the job id in context")
+	require.Equal(t, want, got, "JobIDFromContext should return the stored job id")
+}
+
+func TestWithOwnerKind_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithOwnerKind(context.Background(), "session_executor")
+
+	got, ok := jobctx.OwnerKindFromContext(ctx)
+	require.True(t, ok, "WithOwnerKind should store the owner kind in context")
+	require.Equal(t, "session_executor", got, "OwnerKindFromContext should return the stored owner kind")
+}
+
 func TestWithDeadTargetNode_RoundTrip(t *testing.T) {
 	t.Parallel()
 

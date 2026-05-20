@@ -34,7 +34,7 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -95,6 +95,9 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // pr_creation_error
 		"idle",         // pr_push_state
 		(*string)(nil), // pr_push_error
+		"idle",         // branch_creation_state
+		(*string)(nil), // branch_creation_error
+		(*string)(nil), // branch_url
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
 		false,          // has_unpushed_changes
@@ -935,7 +938,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -945,6 +948,38 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	modelUsed := "gpt-5.4"
+	now := time.Now()
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+model_used = COALESCE\(@model_used, model_used\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
+			),
+		)
+
+	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{
+		ModelUsed: &modelUsed,
+	})
+	require.NoError(t, err, "UpdateResult should persist model_used when provided")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing.T) {
@@ -1035,7 +1070,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(context.DeadlineExceeded)
 
 		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", &models.SessionResult{})
@@ -1077,7 +1112,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
+				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
 		err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{})
@@ -1543,7 +1578,7 @@ func TestSessionStore_UpdateTurnComplete(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")
@@ -2257,7 +2292,7 @@ func TestSessionStore_ListOrphanedContainers(t *testing.T) {
 	// turn_holding_container is intentionally NOT part of the WHERE —
 	// crashed-turn rows (stuck with the flag TRUE) must be reachable so
 	// the reconciler can clear them via its IsAlive + CAS pipeline.
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND NOT EXISTS`).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND status <> 'running'\s+AND COALESCE\(recovery_state, ''\) NOT IN \('queued', 'recovering'\)\s+AND NOT EXISTS`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
@@ -2285,6 +2320,43 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	_, err = store.ListOrphanedContainers(context.Background(), uuid.Nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "list orphaned containers")
+}
+
+func TestSessionStore_ListReferencedContainerIDs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"container_id"}).
+				AddRow("container-a").
+				AddRow("container-b"),
+		)
+
+	ids, err := store.ListReferencedContainerIDs(context.Background())
+	require.NoError(t, err, "ListReferencedContainerIDs should not return an error")
+	require.Equal(t, []string{"container-a", "container-b"}, ids, "ListReferencedContainerIDs should return every non-null session container id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_ListReferencedContainerIDs_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ListReferencedContainerIDs(context.Background())
+	require.Error(t, err, "ListReferencedContainerIDs should surface query failures")
+	require.Contains(t, err.Error(), "list referenced container ids", "ListReferencedContainerIDs should wrap query failures with context")
 }
 
 // TestSessionStore_ListContainerHoldingSessions is the rehydrate-side

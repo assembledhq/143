@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,7 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
@@ -25,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -41,9 +46,12 @@ import (
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
+	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
+	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/assembledhq/143/internal/telemetry"
 	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
@@ -56,6 +64,11 @@ const (
 )
 
 func main() {
+	if isSessionExecutorInvocation(os.Args) {
+		runSessionExecutorMain()
+		return
+	}
+
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
 	cfg.LogStatus(logger)
@@ -68,6 +81,9 @@ func main() {
 
 	if err := cfg.ValidateSecrets(); err != nil {
 		logger.Fatal().Err(err).Msg("security configuration check failed")
+	}
+	if err := validateSessionExecutorStartupConfig(cfg); err != nil {
+		logger.Fatal().Err(err).Msg("worker session executor configuration is invalid")
 	}
 
 	sentryReporter, err := observability.NewSentryReporter(observability.SentryConfig{
@@ -223,6 +239,7 @@ func main() {
 	var pvProvider preview.PreviewCapableProvider
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
+	var sandboxCapacity *agent.SandboxCapacityGate
 	if cfg.Mode != "api" {
 		apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 		if dockerErr == nil {
@@ -231,11 +248,28 @@ func main() {
 
 			// Build sandbox+preview provider so worker-capable modes can start,
 			// stop, and hydrate previews locally.
-			sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
+			sandboxExec := providers.NewDockerProvider(
+				apiDockerCli,
+				logger,
+				providers.WithResolvConf(cfg.SandboxResolvConf),
+				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+			)
 			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
+			maxActiveSandboxes := resolveWorkerMaxActiveSandboxes(cfg.WorkerProcessCount, cfg.WorkerMaxActiveSandboxes)
+			sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+				Counter:   sandboxExec,
+				MaxActive: maxActiveSandboxes,
+				NodeID:    cfg.NodeID,
+				Logger:    logger,
+			})
+			logger.Info().
+				Int("max_active_sandboxes", maxActiveSandboxes).
+				Int("worker_process_count", cfg.WorkerProcessCount).
+				Msg("sandbox capacity gate enabled")
 		} else {
 			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		}
@@ -296,7 +330,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, sandboxCapacity, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -319,6 +353,7 @@ func main() {
 	// in api-only mode where buildServices never runs.
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
+	var jobStore *db.JobStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
 	// in api-only mode where buildServices never runs.
@@ -331,7 +366,7 @@ func main() {
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
-		jobStore := db.NewJobStore(pool)
+		jobStore = db.NewJobStore(pool)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
@@ -349,6 +384,7 @@ func main() {
 		pmDocumentStore := db.NewPMDocumentStore(pool)
 		automationStore := db.NewAutomationStore(pool)
 		automationRunStore := db.NewAutomationRunStore(pool)
+		previewStore := db.NewPreviewStore(pool)
 		// Reuse the snapshot store built for the API so both paths agree on
 		// SnapshotStorageDir without duplicating configuration.
 		snapshotStore := apiSnapshotStore
@@ -391,6 +427,7 @@ func main() {
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		}
 
@@ -404,9 +441,23 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				if previewManager != nil && pvProvider != nil {
+					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
+						Manager:         previewManager,
+						Previews:        previewStore,
+						Sessions:        sessionStore,
+						Repositories:    repoStore,
+						FileReader:      fileReader,
+						SandboxProvider: apiSandboxProvider,
+						SandboxCapacity: sandboxCapacity,
+						Snapshots:       snapshotStore,
+						NodeID:          cfg.NodeID,
+						Logger:          logger,
+					})
+				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
 				// the API having to poll Postgres.
@@ -430,6 +481,22 @@ func main() {
 			WebhookDays: cfg.DataRetentionWebhookDays,
 			LogsDays:    cfg.DataRetentionLogsDays,
 			JobsDays:    cfg.DataRetentionJobsDays,
+		}
+
+		if sandboxCapacity != nil && services.SandboxGC != nil {
+			sandboxCapacity.SetPressureCleaner(services.SandboxGC)
+		}
+
+		// Run a Docker-first startup cleanup before workers accept jobs. Any
+		// DB-unreferenced sandbox already present on this host cannot belong to
+		// an in-flight turn in this process, so it should not consume local
+		// admission capacity through the normal GC grace window.
+		if services.SandboxGC != nil {
+			startupGCCtx, startupGCCancel := context.WithTimeout(ctx, 2*time.Minute)
+			if gcErr := services.SandboxGC.ReapStartup(startupGCCtx, time.Now()); gcErr != nil {
+				logger.Warn().Err(gcErr).Msg("startup: Docker-first sandbox cleanup failed; pressure cleanup and periodic GC will retry")
+			}
+			startupGCCancel()
 		}
 
 		// Reconcile containers that leaked when the last server exited mid-turn
@@ -472,6 +539,16 @@ func main() {
 			}
 		}
 
+		// Plumb stores into LinearAgentDeps now that the Stores struct is
+		// fully constructed. buildServices runs before stores is built, so
+		// the deps struct it produces leaves Stores nil; setting it here
+		// closes the loop without forcing buildServices to take stores as
+		// an argument (which would entangle two otherwise-independent
+		// build phases).
+		if services.LinearAgentDeps != nil {
+			services.LinearAgentDeps.Stores = stores
+		}
+
 		processWorkers = startProcessWorkers(
 			ctx,
 			pool,
@@ -486,9 +563,11 @@ func main() {
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
 			previewRoutingReady.Load,
+			sandboxCapacity,
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
+		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 
@@ -497,6 +576,7 @@ func main() {
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+			agent.WithRuntimeJobTerminalizer(jobStore),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -518,6 +598,9 @@ func main() {
 		// the provider doesn't expose stats.
 		if workerServices != nil && workerServices.RuntimeSampler != nil {
 			go workerServices.RuntimeSampler.Run(ctx)
+		}
+		if workerServices != nil && workerServices.SandboxGC != nil {
+			go workerServices.SandboxGC.Run(ctx)
 		}
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
@@ -615,6 +698,9 @@ func main() {
 		// = 15m), so the worst-case outcome is a delayed resume rather than
 		// a permanently stuck row.
 		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
+		if jobStore != nil && cfg.NodeID != "" {
+			waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)
+		}
 	drained:
 		drainCancel()
 
@@ -689,6 +775,7 @@ func startProcessWorkers(
 	previewCapable bool,
 	previewInternalBaseURL string,
 	previewRoutingReady func() bool,
+	sandboxCapacity *agent.SandboxCapacityGate,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -705,13 +792,23 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady, sandboxCapacity))
 
 	for i, w := range workers {
 		go w.Start(ctx)
 		logger.Info().Int("worker_index", i).Msg("worker started with registered handlers")
 	}
 	return workers
+}
+
+func resolveWorkerMaxActiveSandboxes(workerProcessCount, configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	if workerProcessCount > 0 {
+		return workerProcessCount
+	}
+	return 2
 }
 
 // buildBaseMetadata returns the node metadata fields that must appear on every
@@ -732,7 +829,7 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[s
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool) func() map[string]any {
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
@@ -741,6 +838,17 @@ func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, 
 		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
+		if sandboxCapacity != nil {
+			snapshotCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			snapshot := sandboxCapacity.Snapshot(snapshotCtx)
+			cancel()
+			metadata["live_sandbox_count"] = snapshot.Live
+			metadata["reserved_sandbox_count"] = snapshot.Reserved
+			metadata["max_active_sandboxes"] = snapshot.MaxActive
+			if snapshot.CountError != "" {
+				metadata["live_sandbox_count_error"] = snapshot.CountError
+			}
+		}
 		return metadata
 	}
 }
@@ -759,6 +867,28 @@ func totalActiveRunAgentJobs(workers []*worker.Worker) int {
 		total += w.ActiveRunAgentCount()
 	}
 	return total
+}
+
+func waitForDBOwnedJobsToDrain(ctx context.Context, jobStore *db.JobStore, nodeID string, logger zerolog.Logger) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		running, err := jobStore.CountRunningOwnedByNode(ctx, nodeID)
+		if err == nil && running == 0 {
+			return
+		}
+		if err != nil {
+			logger.Warn().Err(err).Str("node_id", nodeID).Msg("failed to verify DB-owned running jobs during drain")
+		} else {
+			logger.Info().Str("node_id", nodeID).Int("db_running_jobs", running).Msg("waiting for DB-owned running jobs to drain")
+		}
+		select {
+		case <-ctx.Done():
+			logger.Warn().Str("node_id", nodeID).Msg("DB-owned running jobs did not drain before shutdown timeout")
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // postPRSnapshotDrainer is the narrow surface drainPostPRUploads needs from
@@ -813,6 +943,51 @@ func canBuildServices(cfg *config.Config, logger zerolog.Logger) bool {
 	return true
 }
 
+func validateSessionExecutorStartupConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
+	if cfg.Env == "production" && (cfg.Mode == "worker" || cfg.Mode == "all") && cfg.SessionExecutorImage == "" {
+		return fmt.Errorf("SESSION_EXECUTOR_IMAGE is required in production %s mode", cfg.Mode)
+	}
+	return nil
+}
+
+func configureSessionExecutorDispatch(
+	svc *worker.Services,
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	dockerCli *dockerclient.Client,
+	jobStore *db.JobStore,
+	logger zerolog.Logger,
+) {
+	if svc == nil || cfg == nil {
+		return
+	}
+	if cfg.SessionExecutorImage == "" {
+		logger.Warn().Msg("SESSION_EXECUTOR_IMAGE is empty; using inline run_agent/continue_session execution outside production")
+		return
+	}
+
+	svc.RequireSessionExecutorDispatcher = true
+	svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
+		Executors: db.NewSessionExecutorStore(pool),
+		Jobs:      jobStore,
+		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
+			Image:       cfg.SessionExecutorImage,
+			NetworkMode: cfg.SessionExecutorDockerNetwork,
+			Binds: []string{
+				"/var/run/docker.sock:/var/run/docker.sock",
+				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+			},
+			Env: os.Environ(),
+		}),
+		NodeID:   cfg.NodeID,
+		Image:    cfg.SessionExecutorImage,
+		BuildSHA: version.BuildSHA,
+	}
+}
+
 // buildServices constructs the full set of Phase 3+ worker services.
 func buildServices(
 	cfg *config.Config,
@@ -846,6 +1021,9 @@ func buildServices(
 	cancelRegistry *agent.CancelRegistry,
 	threadCancelRegistry *agent.ThreadCancelRegistry,
 	orgSettingsCache *agent.OrgSettingsCache,
+	sandboxCapacity *agent.SandboxCapacityGate,
+	redisClient *cache.Client,
+	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -860,7 +1038,18 @@ func buildServices(
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
 		return nil
 	}
-	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime), providers.WithResolvConf(cfg.SandboxResolvConf))
+	sandboxProvider := providers.NewDockerProvider(
+		dockerCli,
+		logger,
+		providers.WithRuntime(cfg.SandboxRuntime),
+		providers.WithResolvConf(cfg.SandboxResolvConf),
+		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+	)
+	mentionIndexCache := workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{
+		Redis:  redisClient,
+		Logger: logger,
+	})
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
 	// that the runsc runtime is functional. Retry a few times because Docker and
@@ -881,9 +1070,27 @@ func buildServices(
 			}
 		}
 		if healthErr != nil {
+			if errors.Is(healthErr, providers.ErrDiskQuotaUnsupported) {
+				logger.Error().Err(healthErr).Msg("sandbox disk quota is required but Docker storage cannot enforce it — all Phase 3+ services disabled")
+				return nil
+			}
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
-				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"), providers.WithResolvConf(cfg.SandboxResolvConf))
+				sandboxProvider = providers.NewDockerProvider(
+					dockerCli,
+					logger,
+					providers.WithRuntime("runc"),
+					providers.WithResolvConf(cfg.SandboxResolvConf),
+					providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
+					providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+				)
+				healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				fallbackErr := sandboxProvider.HealthCheck(healthCtx)
+				healthCancel()
+				if fallbackErr != nil {
+					logger.Error().Err(fallbackErr).Msg("fallback runc sandbox health check failed — Phase 3+ services disabled")
+					return nil
+				}
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
 				return nil
@@ -922,7 +1129,9 @@ func buildServices(
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
+	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -943,6 +1152,15 @@ func buildServices(
 	identityResolver.SetIntegrations(integrationStore)
 	var sandboxAuthServer *sandboxauth.Server
 	if cfg.SandboxAuthSocketDir != "" {
+		if cfg.Env == "production" {
+			if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
+				logger.Error().
+					Err(err).
+					Str("socket_dir", cfg.SandboxAuthSocketDir).
+					Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+				return nil
+			}
+		}
 		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
 		logger.Info().
 			Str("socket_dir", cfg.SandboxAuthSocketDir).
@@ -952,40 +1170,47 @@ func buildServices(
 			Msg("sandbox auth: SANDBOX_AUTH_SOCKET_DIR is empty; per-session credential socket disabled — sandbox `git push` will require GITHUB_TOKEN env fallback")
 	}
 
+	uploadStore := buildUploadStore(context.Background(), cfg, logger)
+
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:          sandboxProvider,
-		Adapters:          agentAdapters,
-		Env:               agentEnv,
-		Sessions:          sessionStore,
-		SessionLogs:       sessionLogStore,
-		SessionQuestions:  sessionQuestionStore,
-		SessionMessages:   sessionMessageStore,
-		SessionThreads:    sessionThreadStore,
-		SessionIssueLinks: db.NewSessionIssueLinkStore(pool),
-		IssueSnapshots:    db.NewSessionTurnIssueSnapshotStore(pool),
-		DecisionLog:       pmDecisionLogStore,
-		ProjectTasks:      projectTaskUpdater,
-		AutomationRuns:    automationRunUpdater,
-		Issues:            issueStore,
-		Repositories:      repoStore,
-		Orgs:              orgStore,
-		Jobs:              jobStore,
-		GitHub:            ghSvc,
-		CodexAuth:         codexAuthSvc,
-		ClaudeCodeAuth:    claudeCodeAuthSvc,
-		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
-		CodingCredentials: codingCredentialStore,
-		Snapshots:         snapshotStore,
-		UsageTracker:      usageTracker,
-		Cancels:           cancelRegistry,
-		ThreadCancels:     threadCancelRegistry,
-		OrgSettingsCache:  orgSettingsCache,
-		IdentityResolver:  identityResolver,
-		SandboxAuth:       sandboxAuthServer,
-		Users:             userStore,
-		NodeID:            cfg.NodeID,
-		Logger:            logger,
+		Provider:           sandboxProvider,
+		Adapters:           agentAdapters,
+		Env:                agentEnv,
+		Sessions:           sessionStore,
+		SessionLogs:        sessionLogStore,
+		SessionQuestions:   sessionQuestionStore,
+		HumanInputRequests: sessionHumanInputStore,
+		SessionMessages:    sessionMessageStore,
+		SessionThreads:     sessionThreadStore,
+		SessionIssueLinks:  db.NewSessionIssueLinkStore(pool),
+		IssueSnapshots:     db.NewSessionTurnIssueSnapshotStore(pool),
+		DecisionLog:        pmDecisionLogStore,
+		ProjectTasks:       projectTaskUpdater,
+		AutomationRuns:     automationRunUpdater,
+		Issues:             issueStore,
+		Repositories:       repoStore,
+		Orgs:               orgStore,
+		Jobs:               jobStore,
+		GitHub:             ghSvc,
+		CodexAuth:          codexAuthSvc,
+		ClaudeCodeAuth:     claudeCodeAuthSvc,
+		Credentials:        credentialStore,
+		UserCredentials:    userCredentialStore,
+		CodingCredentials:  codingCredentialStore,
+		Snapshots:          snapshotStore,
+		Uploads:            uploadStore,
+		FileReader:         fileReader,
+		MentionIndexes:     mentionIndexCache,
+		UsageTracker:       usageTracker,
+		SandboxCapacity:    sandboxCapacity,
+		Cancels:            cancelRegistry,
+		ThreadCancels:      threadCancelRegistry,
+		OrgSettingsCache:   orgSettingsCache,
+		IdentityResolver:   identityResolver,
+		SandboxAuth:        sandboxAuthServer,
+		Users:              userStore,
+		NodeID:             cfg.NodeID,
+		Logger:             logger,
 	})
 
 	// PR service.
@@ -1039,6 +1264,21 @@ func buildServices(
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
+	threadSvc := threadservice.NewService(
+		sessionThreadStore,
+		sessionStore,
+		sessionMessageStore,
+		sessionLogStore,
+		jobStore,
+		logger,
+	)
+	reviewLoopSvc := reviewloopservice.NewService(
+		reviewLoopStore,
+		reviewloopservice.RuntimeAdapter{
+			Sessions: sessionStore,
+			Threads:  threadSvc,
+		},
+	)
 
 	logger.Info().
 		Int("adapters", len(agentAdapters)).
@@ -1062,6 +1302,15 @@ func buildServices(
 	// post-link milestones (PR open / PR merged / etc.). Constructed via
 	// the shared Build helper so the API server (router.go) and the worker
 	// (here) wire the service identically.
+	//
+	// Inbound-agent metrics shared between Service.HandleAgentMilestone
+	// and (in MODE=all) the API router's dispatcher. Failure to register
+	// the OTel instruments is non-fatal — nil-safe RecordX helpers
+	// degrade to no-ops.
+	workerLinearAgentMetrics, mErr := metrics.NewLinearAgentMetrics()
+	if mErr != nil {
+		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
 		Logger:             logger,
@@ -1078,7 +1327,8 @@ func buildServices(
 			ClientID:     cfg.LinearOAuthClientID,
 			ClientSecret: cfg.LinearOAuthClientSecret,
 		},
-		AppBaseURL: cfg.FrontendURL,
+		AppBaseURL:   cfg.FrontendURL,
+		AgentMetrics: workerLinearAgentMetrics,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 	// Wire the linear service into the agent env so sandbox-bound
@@ -1107,11 +1357,26 @@ func buildServices(
 		}
 	}
 
+	var sandboxGC *agent.SandboxGC
+	if cfg.SandboxGCInterval > 0 {
+		if gcProvider, ok := any(sandboxProvider).(agent.SandboxGCProvider); ok {
+			sandboxGC = agent.NewSandboxGC(gcProvider, sessionStore, containerUsageStore, agent.SandboxGCConfig{
+				Interval:                cfg.SandboxGCInterval,
+				UnreferencedGracePeriod: cfg.SandboxGCGrace,
+				HardMaxAge:              cfg.SandboxGCHardMax,
+			}, logger)
+		} else {
+			logger.Info().Msg("sandbox provider does not support managed-container listing; sandbox GC disabled")
+		}
+	}
+
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		PR:              prService,
 		Failure:         failureSvc,
 		SandboxProvider: sandboxProvider,
+		ProjectTasks:    projectTaskUpdater,
+		AutomationRuns:  automationRunUpdater,
 		Prioritization:  prioritizationSvc,
 		PM:              pmSvc,
 		SlackSummarizer: slackSummarizer,
@@ -1119,7 +1384,42 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
+		SandboxGC:       sandboxGC,
+	}
+	configureSessionExecutorDispatch(svc, cfg, pool, dockerCli, jobStore, logger)
+
+	// Linear inbound-agent worker wiring. The process-wide
+	// LINEAR_AGENT_ENABLED flag gates the webhook dispatcher, not the
+	// worker handler: disabling the flag must stop new inbound events while
+	// still allowing already-enqueued linear_agent_event jobs to drain.
+	if linearService != nil {
+		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+		repoResolver := linear.NewAgentRepoResolver(
+			db.NewLinearTeamRepoMappingStore(pool),
+			linearAgentSettingsView,
+			repoStore,
+		)
+		svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps{
+			Stores:         nil, // populated below in BuildStores
+			Linear:         linearService,
+			RepoResolver:   repoResolver,
+			ProviderState:  db.NewLinearProviderStateStore(pool),
+			SettingsLoader: linearAgentSettingsView.LoadAgentSettings,
+			OrgSettingsLoader: func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+				org, err := orgStore.GetByID(ctx, orgID)
+				if err != nil {
+					return models.OrgSettings{}, err
+				}
+				return models.ParseOrgSettings(org.Settings)
+			},
+			ClientForOrg: func(ctx context.Context, orgID uuid.UUID) (linear.Client, error) {
+				return linearService.ClientForOrg(ctx, orgID)
+			},
+			Metrics: workerLinearAgentMetrics,
+			Logger:  logger,
+		}
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the
@@ -1129,6 +1429,19 @@ func buildServices(
 		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
 	}
 	return svc
+}
+
+func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Logger) storage.UploadStore {
+	if cfg.UploadS3Bucket == "" {
+		return storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.UploadS3Region))
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
+		return storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+	}
+	logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured for worker attachment reads")
+	return storage.NewS3UploadStore(s3.NewFromConfig(awsCfg), cfg.UploadS3Bucket, cfg.UploadS3Prefix)
 }
 
 func wireWorkerPRService(

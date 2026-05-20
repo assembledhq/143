@@ -157,7 +157,7 @@ var sessionTestCols = []string{
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
 	// Migration 102 — Linear session-linking columns. Migration 100 — git
 	// identity audit columns. Mocks must include both so SessionStore.GetByID's
 	// row decode finds every selected field.
@@ -216,6 +216,9 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  "idle",
 		"pr_push_error":                  (*string)(nil),
+		"branch_creation_state":          "idle",
+		"branch_creation_error":          (*string)(nil),
+		"branch_url":                     (*string)(nil),
 		"has_unpushed_changes":           false,
 		"linear_private":                 false,
 		"linear_state_sync_disabled":     false,
@@ -365,7 +368,14 @@ func TestGetStatus_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mgr := newTestManager(mock, &mockProvider{})
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store:                 store,
+		Provider:              &mockProvider{},
+		Logger:                zerolog.Nop(),
+		WorkerNodeID:          "worker-1",
+		PreviewOriginTemplate: "https://{id}.preview.143.dev",
+	})
 
 	orgID := uuid.New()
 	previewID := uuid.New()
@@ -398,6 +408,7 @@ func TestGetStatus_Success(t *testing.T) {
 	resp, err := mgr.GetStatus(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.Equal(t, previewID, resp.Instance.ID)
+	require.Equal(t, "https://"+previewID.String()+".preview.143.dev", resp.PreviewOrigin, "status response should expose the runtime preview origin")
 	require.Len(t, resp.Services, 1)
 	require.Len(t, resp.Infrastructure, 0)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -757,38 +768,83 @@ func TestValidateBootstrapTokenUnscoped_NotFound(t *testing.T) {
 }
 
 // =============================================================================
-// ExtendTTL tests
+// SetLifetime tests
 // =============================================================================
 
-func TestExtendTTL_Success(t *testing.T) {
+func TestSetLifetime_Success(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		duration time.Duration
+	}{
+		{name: "keeps preview for thirty minutes", duration: 30 * time.Minute},
+		{name: "shortens preview to five minutes", duration: 5 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+
+			orgID := uuid.New()
+			previewID := uuid.New()
+			sessionID := uuid.New()
+			userID := uuid.New()
+			now := time.Now()
+
+			mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(previewInstanceTestCols).
+						AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+				)
+
+			mock.ExpectExec("UPDATE preview_instances SET expires_at").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			expiresAt, err := mgr.SetLifetime(context.Background(), orgID, previewID, tt.duration)
+			require.NoError(t, err, "SetLifetime should accept bounded durations")
+			require.True(t, expiresAt.After(time.Now()), "SetLifetime should return a future expiry")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSetLifetime_RejectsDurationAboveDefaultHardTTL(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "pgxmock pool should be created")
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
 
-	orgID := uuid.New()
-	previewID := uuid.New()
-	sessionID := uuid.New()
-	userID := uuid.New()
-	now := time.Now()
+	_, err = mgr.SetLifetime(context.Background(), uuid.New(), uuid.New(), DefaultHardTTL+time.Second)
+	require.Error(t, err, "SetLifetime should reject durations above the per-adjustment limit")
+	require.Contains(t, err.Error(), "cannot exceed", "SetLifetime error should explain the per-adjustment cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "SetLifetime should reject before querying the database")
+}
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
-		)
+func TestSetLifetime_RejectsDurationBelowMinLifetimeTTL(t *testing.T) {
+	t.Parallel()
 
-	mock.ExpectExec("UPDATE preview_instances SET expires_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
 
-	err = mgr.ExtendTTL(context.Background(), orgID, previewID)
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	mgr := newTestManager(mock, &mockProvider{})
+
+	_, err = mgr.SetLifetime(context.Background(), uuid.New(), uuid.New(), MinLifetimeTTL-time.Second)
+	require.Error(t, err, "SetLifetime should reject durations below the minimum")
+	require.Contains(t, err.Error(), "at least", "SetLifetime error should explain the minimum duration")
+	require.NoError(t, mock.ExpectationsWereMet(), "SetLifetime should reject before querying the database")
 }
 
 // =============================================================================

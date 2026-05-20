@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutopilotPage from "./page";
 import type {
@@ -12,6 +12,7 @@ import type {
   PMStatus,
   Repository,
   SingleResponse,
+  AutopilotQueueResponse,
 } from "@/lib/types";
 
 const mockReplace = vi.fn();
@@ -148,7 +149,7 @@ describe("AutopilotPage", () => {
     });
   });
 
-  it("shows the first-analysis state when setup is complete but no plan exists", async () => {
+  it("shows the queue when setup is complete but no plan exists", async () => {
     mockSettings({
       default_agent_type: "codex",
       product_context: {
@@ -197,8 +198,10 @@ describe("AutopilotPage", () => {
 
     renderWithProviders(<AutopilotPage />);
 
-    expect(await screen.findByText("Run first analysis")).toBeInTheDocument();
-    expect(screen.getByText("Ready for your first analysis")).toBeInTheDocument();
+    expect(await screen.findByText("Run analysis")).toBeInTheDocument();
+    expect((await screen.findAllByText("TypeError: Cannot read properties of undefined")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Missing retry copy in payment flow")).toBeInTheDocument();
+    expect(screen.getByText("Auto-runnable now")).toBeInTheDocument();
     // Direction shows in config footer
     expect(screen.getByText(/Payments hardening this quarter/)).toBeInTheDocument();
   });
@@ -274,14 +277,224 @@ describe("AutopilotPage", () => {
 
     renderWithProviders(<AutopilotPage />);
 
-    // Analysis headline (full analysis as title since it's < 80 chars with no sentence break)
-    expect(await screen.findByText("3 payment failures appear linked by one auth middleware issue.")).toBeInTheDocument();
+    expect((await screen.findAllByText("TypeError: Cannot read properties of undefined")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Priority fit")).toBeInTheDocument();
     // Config footer rows
     expect(screen.getByText("Impact 35 · Severity 25 · Recency 20 · Revenue 20")).toBeInTheDocument();
     expect(screen.getByText("1 attached")).toBeInTheDocument();
-    // Evidence metrics
-    expect(screen.getByText("84%")).toBeInTheDocument();
-    expect(screen.getByText("14")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText(/2 issues ranked/)).toBeInTheDocument();
+  });
+
+  it("loads additional queue pages when more issues are available", async () => {
+    mockSettings({
+      default_agent_type: "codex",
+      product_context: {
+        philosophy: "Ship reliability first.",
+        direction: "Payments hardening this quarter.",
+        focus_areas: ["auth"],
+        avoid_areas: [],
+      },
+    });
+    mockStatus({
+      is_running: false,
+      issues_reviewed: 0,
+      success_rate: 0,
+      success_count: 0,
+      total_delegated: 0,
+    });
+    mockLatestPlan(null);
+    mockDocuments([]);
+    mockIntegrations([
+      {
+        id: "github-1",
+        org_id: "org-1",
+        provider: "github",
+        status: "active",
+        created_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockRepositories([
+      {
+        id: "repo-1",
+        org_id: "org-1",
+        integration_id: "integration-1",
+        github_id: 1,
+        full_name: "acme/app",
+        default_branch: "main",
+        private: true,
+        clone_url: "https://github.com/acme/app.git",
+        installation_id: 1,
+        status: "active",
+        settings: {},
+        created_at: "2026-03-20T00:00:00Z",
+        updated_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockAgentReadiness();
+    server.use(
+      http.get("/api/v1/autopilot/queue", ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get("cursor");
+        const baseRow: AutopilotQueueResponse["data"][number] = {
+          id: "issue-page-1",
+          rank: 1,
+          source: { type: "linear", key: "VIR-100" },
+          title: "First page issue",
+          repo: { id: "repo-1", name: "acme/app" },
+          issue_status: "triaged",
+          customer_impact: { label: "High", count: 12 },
+          implementation_ease: "High",
+          low_hanging_fruit: {
+            label: "High",
+            reasons: ["straightforward implementation"],
+            cluster_size: 1,
+          },
+          display_run_state: "not_started",
+          available_action: "start_run",
+        };
+        if (cursor === "50") {
+          return HttpResponse.json({
+            data: [{ ...baseRow, id: "issue-page-2", rank: 51, source: { type: "sentry", key: "SENTRY-999" }, title: "Late issue after page boundary" }],
+            meta: {
+              summary: {
+                autorunnable_count: 2,
+                needs_review_count: 0,
+                open_pr_count: 0,
+                active_run_count: 0,
+                ranked_issue_count: 51,
+              },
+            },
+          } satisfies AutopilotQueueResponse);
+        }
+        return HttpResponse.json({
+          data: [baseRow],
+          meta: {
+            next_cursor: "50",
+            summary: {
+              top_issue_id: "issue-page-1",
+              autorunnable_count: 2,
+              needs_review_count: 0,
+              open_pr_count: 0,
+              active_run_count: 0,
+              ranked_issue_count: 51,
+            },
+          },
+        } satisfies AutopilotQueueResponse);
+      })
+    );
+
+    renderWithProviders(<AutopilotPage />);
+
+    expect((await screen.findAllByText("First page issue")).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+    expect(await screen.findByText("Late issue after page boundary")).toBeInTheDocument();
+  });
+
+  it("renders compact issue sources and consistent scoring badges", async () => {
+    mockSettings({
+      default_agent_type: "codex",
+      product_context: {
+        philosophy: "Ship reliability first.",
+        direction: "Payments hardening this quarter.",
+        focus_areas: ["auth"],
+        avoid_areas: [],
+      },
+    });
+    mockStatus({
+      is_running: false,
+      issues_reviewed: 0,
+      success_rate: 0,
+      success_count: 0,
+      total_delegated: 0,
+    });
+    mockLatestPlan(null);
+    mockDocuments([]);
+    mockIntegrations([
+      {
+        id: "github-1",
+        org_id: "org-1",
+        provider: "github",
+        status: "active",
+        created_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockRepositories([
+      {
+        id: "repo-1",
+        org_id: "org-1",
+        integration_id: "integration-1",
+        github_id: 1,
+        full_name: "acme/app",
+        default_branch: "main",
+        private: true,
+        clone_url: "https://github.com/acme/app.git",
+        installation_id: 1,
+        status: "active",
+        settings: {},
+        created_at: "2026-03-20T00:00:00Z",
+        updated_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockAgentReadiness();
+    server.use(
+      http.get("/api/v1/autopilot/queue", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "issue-linear",
+              rank: 1,
+              source: { type: "linear", key: "737e9a4c-8d01-4d77-b64f-77a4743e7b20" },
+              title: "VIR-22: Create a branch instead of needing to push a PR",
+              issue_status: "triaged",
+              customer_impact: { label: "Low", count: 0 },
+              implementation_ease: "Medium",
+              low_hanging_fruit: {
+                label: "High",
+                reasons: ["eligible for automation"],
+                cluster_size: 1,
+              },
+              display_run_state: "not_started",
+              available_action: "blocked",
+              action_disabled_reason: "Select a repository before starting a run.",
+            },
+            {
+              id: "issue-manual",
+              rank: 2,
+              source: { type: "manual", key: "Manual-20260422232356-60685fba36584d41ad1cc22b32f9f11e" },
+              title: "Internal product note",
+              issue_status: "open",
+              customer_impact: { label: "Medium", count: 3 },
+              implementation_ease: "Low",
+              low_hanging_fruit: {
+                label: "Low",
+                reasons: [],
+                cluster_size: 1,
+              },
+              display_run_state: "not_started",
+              available_action: "blocked",
+              action_disabled_reason: "Select a repository before starting a run.",
+            },
+          ],
+          meta: {
+            summary: {
+              top_issue_id: "issue-linear",
+              autorunnable_count: 0,
+              needs_review_count: 0,
+              open_pr_count: 0,
+              active_run_count: 0,
+              ranked_issue_count: 2,
+            },
+          },
+        } satisfies AutopilotQueueResponse))
+    );
+
+    renderWithProviders(<AutopilotPage />);
+
+    expect(await screen.findByText("VIR-22")).toBeInTheDocument();
+    expect(screen.getAllByText("Low").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Medium").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Internal")).toBeInTheDocument();
+    expect(screen.queryByText(/737e9a4c/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/60685fba/)).not.toBeInTheDocument();
   });
 });

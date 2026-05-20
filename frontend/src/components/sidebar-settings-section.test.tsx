@@ -3,6 +3,14 @@ import { renderWithProviders, screen } from '@/test/test-utils';
 import { SidebarSettingsSection } from './sidebar-settings-section';
 
 describe('SidebarSettingsSection', () => {
+  it('uses the same touch target sizing as other mobile nav tabs', () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/sessions" userRole="admin" variant="mobile" />
+    );
+
+    expect(screen.getByRole('button', { name: /Settings/ })).toHaveClass('px-2.5', 'py-3', 'text-sm');
+  });
+
   it('shows admin-only entries when role is admin', () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings" userRole="admin" />
@@ -65,6 +73,32 @@ describe('SidebarSettingsSection', () => {
       'Evals',
       'General',
       'Team',
+      'Usage',
+      'Audit log',
+    ]) {
+      expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+    }
+  });
+
+  it('shows only builder-safe settings entries for builders', () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/settings/account" userRole="builder" />
+    );
+
+    for (const visible of [
+      'Account',
+      'Coding agents',
+    ]) {
+      expect(screen.getByText(visible)).toBeInTheDocument();
+    }
+
+    for (const hidden of [
+      'Integrations',
+      'Evals',
+      'Team',
+      'LLM',
+      'Autopilot',
+      'General',
       'Usage',
       'Audit log',
     ]) {

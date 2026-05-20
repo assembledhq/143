@@ -4,11 +4,12 @@ import { useState, useCallback, useMemo } from "react";
 import dynamic from "next/dynamic";
 import { useQueryState, parseAsString } from "nuqs";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { UsageSummaryCards } from "./usage-summary-cards";
 import { UsageDatePicker, type DatePreset } from "./usage-date-picker";
-import { UsageBreakdownTable } from "./usage-breakdown-table";
+import { UsageBreakdownTable, type UsageBreakdownDimension } from "./usage-breakdown-table";
 import { UsageExportButton } from "./usage-export-button";
 import { getDateRangePreset, formatDateForApi, nextDayIso, type MetricKey } from "./usage-helpers";
 
@@ -25,9 +26,12 @@ const UsageTimeseriesChart = dynamic(
 
 export default function UsagePage() {
   const [preset, setPreset] = useState<DatePreset>("30d");
-  const [metric, setMetric] = useState<MetricKey>("total_container_minutes");
-  const [dimension, setDimension] = useState<"user" | "capacity">("user");
-  const [selectedUserId, setSelectedUserId] = useQueryState("user", parseAsString);
+  const [metric, setMetric] = useState<MetricKey>("total_tokens");
+  const [dimension, setDimension] = useState<UsageBreakdownDimension>("user");
+  const [chartMode, setChartMode] = useState<"totals" | "stacked">("totals");
+  const [selectedAgent, setSelectedAgent] = useQueryState("agent", parseAsString);
+  const [selectedModel, setSelectedModel] = useQueryState("model", parseAsString);
+  const [selectedReasoning, setSelectedReasoning] = useQueryState("reasoning", parseAsString);
   const [selectedDay, setSelectedDay] = useQueryState("day", parseAsString);
 
   // Memoize date range so query keys stay stable across renders. Truncate
@@ -47,14 +51,15 @@ export default function UsagePage() {
     ? nextDayIso(selectedDay)
     : end;
 
-  const handleRowClick = useCallback(
-    (key: string) => {
-      if (dimension === "user") {
-        setSelectedUserId((prev) => (prev === key ? null : key));
-      }
-    },
-    [dimension, setSelectedUserId]
-  );
+  const handleRowClick = useCallback(({ dimension: rowDimension, key }: { dimension: UsageBreakdownDimension; key: string }) => {
+    if (rowDimension === "agent") {
+      setSelectedAgent((prev) => (prev === key ? null : key));
+    } else if (rowDimension === "model") {
+      setSelectedModel((prev) => (prev === key ? null : key));
+    } else if (rowDimension === "reasoning") {
+      setSelectedReasoning((prev) => (prev === key ? null : key));
+    }
+  }, [setSelectedAgent, setSelectedModel, setSelectedReasoning]);
 
   const handleDayClick = useCallback(
     (day: string) => {
@@ -67,17 +72,26 @@ export default function UsagePage() {
     (p: DatePreset) => {
       setPreset(p);
       setSelectedDay(null);
-      setSelectedUserId(null);
+      setSelectedAgent(null);
+      setSelectedModel(null);
+      setSelectedReasoning(null);
     },
-    [setSelectedDay, setSelectedUserId]
+    [setSelectedAgent, setSelectedDay, setSelectedModel, setSelectedReasoning]
   );
+
+  const filters = {
+    agent: selectedAgent,
+    model: selectedModel,
+    reasoning: selectedReasoning,
+  };
+  const exportDimension = dimension === "capacity" ? "user" : dimension;
 
   return (
     <PageContainer size="wide">
       <div className="space-y-6">
         <PageHeader
           title="Usage & Billing"
-          description="Monitor container usage and LLM token consumption across your organization."
+          description="Understand container, token, and cost trends across coding runtimes."
         />
 
         <UsageSummaryCards start={start} end={end} />
@@ -98,18 +112,72 @@ export default function UsagePage() {
                 Clear day filter
               </Button>
             )}
-            {selectedUserId && (
+            {(selectedAgent || selectedModel || selectedReasoning) && (
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-8 text-xs text-muted-foreground"
-                onClick={() => setSelectedUserId(null)}
+                onClick={() => {
+                  setSelectedAgent(null);
+                  setSelectedModel(null);
+                  setSelectedReasoning(null);
+                }}
               >
-                Clear user filter
+                Clear filters
               </Button>
             )}
-            <UsageExportButton start={start} end={end} />
+            <UsageExportButton start={start} end={end} dimension={exportDimension} filters={filters} />
           </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={dimension}
+            onValueChange={(v) => {
+              const nextDimension = v as UsageBreakdownDimension;
+              setDimension(nextDimension);
+              if (nextDimension === "user") {
+                setChartMode("totals");
+              }
+            }}
+          >
+            <SelectTrigger className="h-8 w-40 text-xs" aria-label="Break down by">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="user" className="text-xs">By User</SelectItem>
+              <SelectItem value="agent" className="text-xs">By Agent</SelectItem>
+              <SelectItem value="model" className="text-xs">By Model</SelectItem>
+              <SelectItem value="reasoning" className="text-xs">By Reasoning</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={selectedAgent ?? "any"} onValueChange={(v) => setSelectedAgent(v === "any" ? null : v)}>
+            <SelectTrigger className="h-8 w-32 text-xs" aria-label="Agent filter">
+              <SelectValue placeholder="Agent" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any" className="text-xs">Any agent</SelectItem>
+              <SelectItem value="codex" className="text-xs">Codex</SelectItem>
+              <SelectItem value="claude_code" className="text-xs">Claude Code</SelectItem>
+              <SelectItem value="gemini_cli" className="text-xs">Gemini CLI</SelectItem>
+              <SelectItem value="amp" className="text-xs">Amp</SelectItem>
+              <SelectItem value="pi" className="text-xs">Pi</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={selectedReasoning ?? "any"} onValueChange={(v) => setSelectedReasoning(v === "any" ? null : v)}>
+            <SelectTrigger className="h-8 w-36 text-xs" aria-label="Reasoning filter">
+              <SelectValue placeholder="Reasoning" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any" className="text-xs">Any reasoning</SelectItem>
+              <SelectItem value="default" className="text-xs">Default</SelectItem>
+              <SelectItem value="low" className="text-xs">Low</SelectItem>
+              <SelectItem value="medium" className="text-xs">Medium</SelectItem>
+              <SelectItem value="high" className="text-xs">High</SelectItem>
+              <SelectItem value="xhigh" className="text-xs">XHigh</SelectItem>
+              <SelectItem value="max" className="text-xs">Max</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         <UsageTimeseriesChart
@@ -117,7 +185,10 @@ export default function UsagePage() {
           end={end}
           metric={metric}
           onMetricChange={setMetric}
-          userId={selectedUserId}
+          dimension={dimension}
+          chartMode={chartMode}
+          onChartModeChange={setChartMode}
+          filters={filters}
           onDayClick={handleDayClick}
         />
 
@@ -125,9 +196,9 @@ export default function UsagePage() {
           start={breakdownStart}
           end={breakdownEnd}
           dimension={dimension}
-          onDimensionChange={setDimension}
+          filters={filters}
           onRowClick={handleRowClick}
-          selectedKey={dimension === "user" ? selectedUserId : undefined}
+          selectedKey={dimension === "agent" ? selectedAgent : dimension === "model" ? selectedModel : dimension === "reasoning" ? selectedReasoning : undefined}
         />
 
         <p className="text-xs text-muted-foreground text-center pb-4">

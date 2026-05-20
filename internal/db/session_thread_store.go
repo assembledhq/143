@@ -34,7 +34,7 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	confidence_score, result_summary,
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
 	failure_explanation, failure_category,
-	started_at, completed_at, created_at,
+	started_at, completed_at, created_at, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
 
 // ErrThreadLimitReached is returned when the maximum number of threads per session
@@ -286,6 +286,34 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		return fmt.Errorf("thread not found")
 	}
 	return nil
+}
+
+// FailRunningBySession fails every currently running thread for a terminalized
+// session. It is used by reaper paths that fail the parent session outside the
+// normal orchestrator/handler completion flow.
+func (s *SessionThreadStore) FailRunningBySession(ctx context.Context, orgID, sessionID uuid.UUID, result *models.SessionResult) (int64, error) {
+	var failureExplanation *string
+	var failureCategory *string
+	if result != nil {
+		failureExplanation = result.Error
+		failureCategory = result.FailureCategory
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_threads
+		SET status = 'failed',
+		    completed_at = now(),
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category
+		WHERE org_id = @org_id AND session_id = @session_id AND status = 'running'`, pgx.NamedArgs{
+		"org_id":              orgID,
+		"session_id":          sessionID,
+		"failure_explanation": failureExplanation,
+		"failure_category":    failureCategory,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("fail running session threads: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // ListStuckRunningThreads returns threads stuck in status='running' whose

@@ -114,6 +114,7 @@ type envCodingCredentialProvider struct {
 	errs            map[models.ProviderName]error
 	rateLimitedIDs  []uuid.UUID
 	authRejectedIDs []uuid.UUID
+	rateLimits      []models.CodingCredentialRateLimit
 }
 
 func (m *envCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
@@ -208,6 +209,17 @@ func (m *envCodingCredentialProvider) MarkAuthRejected(id uuid.UUID) {
 	m.authRejectedIDs = append(m.authRejectedIDs, id)
 }
 
+func (m *envCodingCredentialProvider) MarkRateLimitedForScope(_ context.Context, _ models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {
+	m.rateLimitedIDs = append(m.rateLimitedIDs, id)
+	m.rateLimits = append(m.rateLimits, limit)
+	return nil
+}
+
+func (m *envCodingCredentialProvider) MarkAuthRejectedForScope(_ context.Context, _ models.Scope, id uuid.UUID) error {
+	m.authRejectedIDs = append(m.authRejectedIDs, id)
+	return nil
+}
+
 type envOrgStore struct {
 	org   models.Organization
 	err   error
@@ -253,11 +265,12 @@ func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, scope models.
 }
 
 type envSandboxProvider struct {
-	execExitCode   int
-	execErr        error
-	writeErrByPath map[string]error
-	writes         map[string][]byte
-	commands       []string
+	execExitCode    int
+	execErr         error
+	execStdoutByCmd map[string]string
+	writeErrByPath  map[string]error
+	writes          map[string][]byte
+	commands        []string
 }
 
 func (m *envSandboxProvider) Name() string { return "env-sandbox" }
@@ -270,13 +283,22 @@ func (m *envSandboxProvider) CloneRepo(_ context.Context, _ *Sandbox, _, _, _ st
 	return nil
 }
 
-func (m *envSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, _, stderr io.Writer) (int, error) {
+func (m *envSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	m.commands = append(m.commands, cmd)
 	if m.execErr != nil {
 		return 0, m.execErr
 	}
+	if stdout != nil {
+		if out := m.execStdoutByCmd[cmd]; out != "" {
+			if _, err := io.WriteString(stdout, out); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if m.execExitCode != 0 && stderr != nil {
-		_, _ = io.WriteString(stderr, "mkdir failed")
+		if _, err := io.WriteString(stderr, "mkdir failed"); err != nil {
+			return 0, err
+		}
 	}
 	return m.execExitCode, nil
 }
@@ -1056,6 +1078,20 @@ func TestAgentEnvCheckAuth(t *testing.T) {
 	require.Contains(t, err.Error(), "PI_API_KEY", "CheckAuth should explain the missing Pi credential")
 
 	require.NoError(t, env.CheckAuth(models.AgentTypePi, map[string]string{"PI_API_KEY": "pi-key"}), "CheckAuth should accept Pi runs with PI_API_KEY configured")
+
+	until := time.Date(2026, 5, 13, 15, 50, 0, 0, time.UTC)
+	err = env.CheckAuth(models.AgentTypeClaudeCode, map[string]string{
+		internalAuthBlockedKey:                              "all Claude Code auths are rate limited until 8:50 AM",
+		internalAuthBlockedProviderKey:                      string(models.ProviderAnthropic),
+		internalAuthBlockedRateLimitedUntilKey:              until.Format(time.RFC3339Nano),
+		internalAuthBlockedFallbackCandidatesUnavailableKey: "true",
+	})
+	require.Error(t, err, "CheckAuth should reject internally blocked credential stacks")
+	var authErr *AuthError
+	require.ErrorAs(t, err, &authErr, "CheckAuth should return structured AuthError metadata")
+	require.Equal(t, models.ProviderAnthropic, authErr.Provider, "AuthError should preserve the blocked provider")
+	require.Equal(t, until, *authErr.RateLimitedUntil, "AuthError should preserve the blocked reset time")
+	require.True(t, authErr.FallbackCandidatesUnavailable, "AuthError should report unavailable fallback candidates")
 }
 
 // TestAgentEnvShedAfterPick verifies that the shed-on-failure wiring forwards
@@ -1511,6 +1547,123 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentEnvInjectClaudeCodeAuthRequiresSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	credID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+	coding := &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       credID,
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "claude-access",
+						RefreshToken: "claude-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Logger:            zerolog.Nop(),
+	})
+
+	injected, err := env.InjectClaudeCodeAuth(ctx, orgID, sandbox)
+
+	require.False(t, injected, "Claude auth injection should not report success when sandbox provider is missing")
+	require.Error(t, err, "Claude auth injection should return a configuration error instead of panicking")
+	require.Contains(t, err.Error(), "sandbox provider", "Claude auth injection error should identify the missing dependency")
+}
+
+func TestAgentEnvInjectClaudeCodeAuthWithEnvSetsPermissionModeFromModelAndVersion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	tests := []struct {
+		name     string
+		model    string
+		expected string
+	}{
+		{
+			name:     "supported sonnet model enables auto",
+			model:    models.ClaudeCodeModelSonnet46,
+			expected: ClaudeCodePermissionModeAuto,
+		},
+		{
+			name:     "unsupported haiku model keeps accept edits",
+			model:    models.ClaudeCodeModelHaiku45,
+			expected: ClaudeCodePermissionModeAcceptEdits,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			credID := uuid.New()
+			sandbox := &Sandbox{HomeDir: "/home/test"}
+			provider := &envSandboxProvider{
+				execStdoutByCmd: map[string]string{"claude --version": "2.1.139\n"},
+			}
+			coding := &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderAnthropicSubscription: {
+						{
+							ID:       credID,
+							OrgID:    orgID,
+							Provider: models.ProviderAnthropicSubscription,
+							Status:   models.CodingCredentialStatusActive,
+							Config: models.AnthropicSubscriptionConfig{
+								AccessToken:  "claude-access",
+								RefreshToken: "claude-refresh",
+								ExpiresAt:    time.Now().Add(time.Hour),
+								AccountType:  "claude_max",
+							},
+						},
+					},
+				},
+			}
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: coding,
+				Provider:          provider,
+				Logger:            zerolog.Nop(),
+			})
+
+			injected, err := env.InjectClaudeCodeAuthWithEnv(ctx, orgID, sandbox, map[string]string{
+				models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode): tt.model,
+			})
+
+			require.NoError(t, err, "Claude auth injection should succeed")
+			require.True(t, injected, "Claude auth injection should write the subscription credentials")
+			require.Equal(t, tt.expected, sandbox.Metadata[SandboxMetadataClaudeCodePermissionMode], "permission mode should reflect model and CLI compatibility")
+			require.Equal(t, "2.1.139", sandbox.Metadata[SandboxMetadataClaudeCodeVersion], "CLI version should be cached after detection")
+		})
+	}
+}
+
+func TestAgentEnvPrepareClaudeCodeAPIKeyFallbackRequiresSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	env := NewAgentEnv(AgentEnvDeps{Logger: zerolog.Nop()})
+
+	err := env.PrepareClaudeCodeAPIKeyFallback(context.Background(), &Sandbox{HomeDir: "/home/test"}, map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+	})
+
+	require.Error(t, err, "Claude API-key fallback preparation should return a configuration error instead of panicking")
+	require.Contains(t, err.Error(), "sandbox provider", "Claude fallback error should identify the missing dependency")
 }
 
 // TestAgentEnvInjectCodexAuth_ErrorClassification verifies that

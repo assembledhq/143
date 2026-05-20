@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,8 +60,11 @@ func maybeWrapCodexAuthInvalid(source any, err error) error {
 // descriptive failure on the plan record so the UI can show actionable guidance
 // ("PM paused: configure Codex") instead of an opaque parse error.
 type AuthError struct {
-	AgentType models.AgentType
-	Detail    string
+	AgentType                     models.AgentType
+	Detail                        string
+	Provider                      models.ProviderName
+	RateLimitedUntil              *time.Time
+	FallbackCandidatesUnavailable bool
 }
 
 func (e *AuthError) Error() string {
@@ -88,6 +92,7 @@ type AgentEnv struct {
 	orgs              OrgStore
 	orgSettingsCache  *OrgSettingsCache
 	codexAuth         CodexAuthProvider
+	claudeCodeAuth    ClaudeCodeAuthProvider
 	// linearTokens, when set, supplies the LINEAR_ACCESS_TOKEN env var via a
 	// refresh-aware resolver. Without it, the sandbox falls back to reading
 	// the raw credential row (legacy path; the access token may have aged
@@ -107,8 +112,10 @@ type AgentEnv struct {
 	// the same scope race to write the slot, which is acceptable per the
 	// design's eventual-consistency note (`docs/design/future/65-…` § health
 	// cache).
-	recentPicks   map[pickKey]pickRecord
-	recentPicksMu sync.Mutex
+	recentPicks        map[pickKey]pickRecord
+	recentPicksMu      sync.Mutex
+	credentialBlocks   map[pickKey]credentialBlock
+	credentialBlocksMu sync.Mutex
 }
 
 type pickKey struct {
@@ -121,6 +128,23 @@ type pickRecord struct {
 	credID     uuid.UUID
 	credential *models.DecryptedCodingCredential
 	at         time.Time
+}
+
+type credentialBlock struct {
+	detail                        string
+	provider                      models.ProviderName
+	rateLimitedUntil              *time.Time
+	fallbackCandidatesUnavailable bool
+	at                            time.Time
+}
+
+// CredentialFailureSignal is the normalized credential-level failure parsed
+// from an agent runtime result.
+type CredentialFailureSignal struct {
+	RateLimited      bool
+	AuthRejected     bool
+	RateLimitedUntil time.Time
+	Message          string
 }
 
 // pickTrackerTTL bounds how long after a pick a Shed call still applies.
@@ -155,6 +179,7 @@ type AgentEnvDeps struct {
 	Orgs              OrgStore                 // optional — enables agent_config overrides
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
 	CodexAuth         CodexAuthProvider        // optional — enables ChatGPT OAuth for Codex
+	ClaudeCodeAuth    ClaudeCodeAuthProvider   // optional — enables Claude subscription OAuth for Claude Code
 	// LinearTokens optionally supplies a refresh-aware Linear access token
 	// for the sandbox env. When set, the orchestrator injects the result of
 	// GetValidAccessToken (rotating expired tokens transparently). Without
@@ -162,7 +187,7 @@ type AgentEnvDeps struct {
 	// tests and pre-refresh-flow installs, but those env vars can be stale
 	// for any session that starts within refreshWindow of expiry.
 	LinearTokens LinearTokenResolver
-	Provider     SandboxProvider // required for InjectCodexAuth
+	Provider     SandboxProvider // required for sandbox credential file injection
 	Logger       zerolog.Logger
 }
 
@@ -187,10 +212,12 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 		orgs:              deps.Orgs,
 		orgSettingsCache:  deps.OrgSettingsCache,
 		codexAuth:         deps.CodexAuth,
+		claudeCodeAuth:    deps.ClaudeCodeAuth,
 		linearTokens:      deps.LinearTokens,
 		provider:          deps.Provider,
 		logger:            deps.Logger,
 		recentPicks:       make(map[pickKey]pickRecord),
+		credentialBlocks:  make(map[pickKey]credentialBlock),
 	}
 }
 
@@ -217,6 +244,13 @@ type CodingCredentialShedder interface {
 	MarkAuthRejected(id uuid.UUID)
 }
 
+// CodingCredentialPersistentShedder is implemented by the unified store when
+// runtime credential failures should be persisted across workers.
+type CodingCredentialPersistentShedder interface {
+	MarkRateLimitedForScope(ctx context.Context, scope models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error
+	MarkAuthRejectedForScope(ctx context.Context, scope models.Scope, id uuid.UUID) error
+}
+
 // CodexAuthRefresher is the optional capability implemented by the Codex auth
 // service. Unified subscription resolution chooses a concrete credential id;
 // this interface lets auth.json injection refresh that exact row before
@@ -239,6 +273,13 @@ type CodexAuthRefresher interface {
 type CodingCredentialMultiPicker interface {
 	PickRunnableMulti(ctx context.Context, scope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error)
 }
+
+const (
+	internalAuthBlockedKey                              = "__143_AUTH_BLOCKED_DETAIL"
+	internalAuthBlockedProviderKey                      = "__143_AUTH_BLOCKED_PROVIDER"
+	internalAuthBlockedRateLimitedUntilKey              = "__143_AUTH_BLOCKED_RATE_LIMITED_UNTIL"
+	internalAuthBlockedFallbackCandidatesUnavailableKey = "__143_AUTH_BLOCKED_FALLBACK_CANDIDATES_UNAVAILABLE"
+)
 
 // codingShedder type-asserts the configured CodingCredentialProvider into the
 // shed-capable interface. Returns nil when the provider does not implement
@@ -290,14 +331,6 @@ func (e *AgentEnv) recordPickWithCredential(orgID uuid.UUID, userID *uuid.UUID, 
 		e.evictOldestPickLocked()
 	}
 	e.recentPicks[key] = pickRecord{credID: credID, credential: cred, at: now}
-}
-
-func (e *AgentEnv) lookupRecentPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (uuid.UUID, bool) {
-	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
-	if !ok {
-		return uuid.Nil, false
-	}
-	return rec.credID, true
 }
 
 func (e *AgentEnv) lookupRecentCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.DecryptedCodingCredential, bool) {
@@ -365,15 +398,32 @@ func (e *AgentEnv) evictOldestPickLocked() {
 //
 // userID may be nil for org-scope picks.
 func (e *AgentEnv) ShedRateLimited(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	e.ShedRateLimitedWithSignal(context.Background(), orgID, userID, provider, CredentialFailureSignal{})
+}
+
+func (e *AgentEnv) ShedRateLimitedWithSignal(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, signal CredentialFailureSignal) {
 	shedder := e.codingShedder()
 	if shedder == nil {
 		return
 	}
-	credID, ok := e.lookupRecentPick(orgID, userID, provider)
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
 	if !ok {
 		return
 	}
-	shedder.MarkRateLimited(credID)
+	limit := models.CodingCredentialRateLimit{Until: signal.RateLimitedUntil, Message: signal.Message}
+	if limit.Until.IsZero() {
+		limit.Until = time.Now().Add(75 * time.Second)
+	}
+	if persistent, ok := shedder.(CodingCredentialPersistentShedder); ok && rec.credential != nil {
+		if err := persistent.MarkRateLimitedForScope(ctx, rec.credential.Scope(), rec.credID, limit); err != nil {
+			e.logger.Warn().Err(err).
+				Str("cred_id", rec.credID.String()).
+				Str("provider", string(provider)).
+				Msg("failed to persist coding credential rate-limit marker")
+		}
+		return
+	}
+	shedder.MarkRateLimited(rec.credID)
 }
 
 // ShedAuthRejected surfaces a 401 / token_expired from an upstream provider
@@ -385,22 +435,36 @@ func (e *AgentEnv) ShedRateLimited(orgID uuid.UUID, userID *uuid.UUID, provider 
 //
 // userID may be nil for org-scope picks.
 func (e *AgentEnv) ShedAuthRejected(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	e.ShedAuthRejectedWithContext(context.Background(), orgID, userID, provider)
+}
+
+func (e *AgentEnv) ShedAuthRejectedWithContext(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
 	shedder := e.codingShedder()
 	if shedder == nil {
 		return
 	}
-	credID, ok := e.lookupRecentPick(orgID, userID, provider)
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
 	if !ok {
 		return
 	}
-	shedder.MarkAuthRejected(credID)
+	if persistent, ok := shedder.(CodingCredentialPersistentShedder); ok && rec.credential != nil {
+		if err := persistent.MarkAuthRejectedForScope(ctx, rec.credential.Scope(), rec.credID); err != nil {
+			e.logger.Warn().Err(err).
+				Str("cred_id", rec.credID.String()).
+				Str("provider", string(provider)).
+				Msg("failed to persist coding credential auth rejection")
+		}
+		return
+	}
+	shedder.MarkAuthRejected(rec.credID)
 }
 
 // integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
 type integrationCredentials struct {
-	Sentry *models.SentryConfig
-	Linear *models.LinearConfig
-	Notion *models.NotionConfig
+	Sentry   *models.SentryConfig
+	Linear   *models.LinearConfig
+	Notion   *models.NotionConfig
+	CircleCI *models.CircleCIConfig
 }
 
 // fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
@@ -426,6 +490,11 @@ func (e *AgentEnv) fetchIntegrationCredentials(ctx context.Context, orgID uuid.U
 	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil && cred != nil {
 		if cfg, ok := cred.Config.(models.NotionConfig); ok {
 			ic.Notion = &cfg
+		}
+	}
+	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderCircleCI); err == nil && cred != nil {
+		if cfg, ok := cred.Config.(models.CircleCIConfig); ok {
+			ic.CircleCI = &cfg
 		}
 	}
 	return ic
@@ -454,6 +523,8 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			if ac.BaseURL != "" {
 				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
 			}
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAnthropic); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypeCodex:
 		// Codex CLI authenticates via ~/.codex/auth.json (injected by
@@ -473,6 +544,8 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			if oc.BaseURL != "" {
 				merged["OPENAI_BASE_URL"] = oc.BaseURL
 			}
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderOpenAI); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 		// Skip Codex CLI's internal bwrap (bubblewrap) sandboxing. The
 		// container is already isolated by Docker + gVisor (dropped caps,
@@ -489,16 +562,22 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			if gc.Model != "" {
 				merged["GEMINI_MODEL"] = gc.Model
 			}
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderGemini); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypeAmp:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
 			merged["AMP_API_KEY"] = amp.APIKey
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAmp); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypePi:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderPi)
 		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
 			merged["PI_API_KEY"] = pi.APIKey
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderPi); ok {
+			setAuthBlockedEnv(merged, block)
 		}
 	}
 
@@ -546,6 +625,14 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			merged["NOTION_ACCESS_TOKEN"] = ic.Notion.AccessToken
 		}
 	}
+	if ic.CircleCI != nil {
+		if ic.CircleCI.AuthToken != "" {
+			merged["CIRCLECI_TOKEN"] = ic.CircleCI.AuthToken
+		}
+		if ic.CircleCI.ProjectSlug != "" {
+			merged["CIRCLECI_PROJECT_SLUG"] = ic.CircleCI.ProjectSlug
+		}
+	}
 
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
 	// Scoped to Amp and Pi only — these are non-secret runtime defaults
@@ -576,6 +663,20 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 // Resolve has run (which layers agent_config overrides on top of resolved
 // provider creds) and after any per-run ModelOverride has been applied.
 func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) error {
+	if detail := env[internalAuthBlockedKey]; detail != "" {
+		authErr := &AuthError{
+			AgentType:                     agentType,
+			Detail:                        detail,
+			Provider:                      models.ProviderName(env[internalAuthBlockedProviderKey]),
+			FallbackCandidatesUnavailable: env[internalAuthBlockedFallbackCandidatesUnavailableKey] == "true",
+		}
+		if rawUntil := env[internalAuthBlockedRateLimitedUntilKey]; rawUntil != "" {
+			if until, err := time.Parse(time.RFC3339Nano, rawUntil); err == nil {
+				authErr.RateLimitedUntil = &until
+			}
+		}
+		return authErr
+	}
 	switch agentType {
 	case models.AgentTypeAmp:
 		if env["AMP_API_KEY"] == "" {
@@ -593,6 +694,19 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 		}
 	}
 	return nil
+}
+
+func setAuthBlockedEnv(env map[string]string, block credentialBlock) {
+	env[internalAuthBlockedKey] = block.detail
+	if block.provider != "" {
+		env[internalAuthBlockedProviderKey] = string(block.provider)
+	}
+	if block.rateLimitedUntil != nil {
+		env[internalAuthBlockedRateLimitedUntilKey] = block.rateLimitedUntil.Format(time.RFC3339Nano)
+	}
+	if block.fallbackCandidatesUnavailable {
+		env[internalAuthBlockedFallbackCandidatesUnavailableKey] = "true"
+	}
 }
 
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
@@ -726,10 +840,13 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			// pickErr discriminates between "no candidate exists" (config
 			// error) and "every candidate is currently shed" (transient) via
 			// db.ErrCodingCredentialNotFound vs db.ErrAllCredentialsShed.
-			// The runtime has no retry hook today, so both fall through the
-			// same way — the wrapped error makes the distinction visible in
-			// logs.
+			// When the whole stack is rate-limited, record a structured block
+			// so CheckAuth can produce a clear user-facing continue-session
+			// failure instead of a generic missing-key error.
 			e.logger.Warn().Err(pickErr).Str("provider", string(requestedProvider)).Msg("coding credential picker found no eligible credential")
+			if isAllCredentialsShedError(pickErr) {
+				e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(requestedProvider, rowsByProvider, providers))
+			}
 			return nil, nil, true
 		}
 		if picked == nil {
@@ -764,6 +881,92 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 		}
 	}
 	return nil, nil, true
+}
+
+func (e *AgentEnv) recordCredentialBlock(orgID uuid.UUID, userID *uuid.UUID, block credentialBlock) {
+	if block.detail == "" || block.provider == "" {
+		return
+	}
+	key := pickKey{orgID: orgID, provider: block.provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.credentialBlocksMu.Lock()
+	defer e.credentialBlocksMu.Unlock()
+	if e.credentialBlocks == nil {
+		e.credentialBlocks = make(map[pickKey]credentialBlock)
+	}
+	block.at = time.Now()
+	e.credentialBlocks[key] = block
+}
+
+func isAllCredentialsShedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "all eligible coding credentials are currently shed")
+}
+
+func (e *AgentEnv) lookupCredentialBlock(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (credentialBlock, bool) {
+	key := pickKey{orgID: orgID, provider: provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.credentialBlocksMu.Lock()
+	defer e.credentialBlocksMu.Unlock()
+	block, ok := e.credentialBlocks[key]
+	if !ok {
+		return credentialBlock{}, false
+	}
+	if time.Since(block.at) > pickTrackerTTL {
+		delete(e.credentialBlocks, key)
+		return credentialBlock{}, false
+	}
+	return block, true
+}
+
+func rateLimitBlockForProvider(provider models.ProviderName, rowsByProvider map[models.ProviderName][]models.DecryptedCodingCredential, providers []models.ProviderName) credentialBlock {
+	var earliest *time.Time
+	rateLimitedCandidates := 0
+	now := time.Now()
+	for _, p := range providers {
+		for _, cred := range rowsByProvider[p] {
+			if cred.RateLimitedUntil == nil || !cred.RateLimitedUntil.After(now) {
+				continue
+			}
+			rateLimitedCandidates++
+			if earliest == nil || cred.RateLimitedUntil.Before(*earliest) {
+				t := *cred.RateLimitedUntil
+				earliest = &t
+			}
+		}
+	}
+	label := agentLabelForProvider(provider)
+	block := credentialBlock{
+		provider:                      provider,
+		rateLimitedUntil:              earliest,
+		fallbackCandidatesUnavailable: rateLimitedCandidates > 1,
+	}
+	if earliest != nil {
+		block.detail = fmt.Sprintf("all %s auths are rate limited until %s. Try again then or add another %s auth.", label, earliest.Format(time.Kitchen), label)
+		return block
+	}
+	block.detail = fmt.Sprintf("all %s auths are temporarily unavailable. Try again shortly or add another %s auth.", label, label)
+	return block
+}
+
+func agentLabelForProvider(provider models.ProviderName) string {
+	switch provider {
+	case models.ProviderOpenAI:
+		return "Codex"
+	case models.ProviderAnthropic:
+		return "Claude Code"
+	case models.ProviderGemini:
+		return "Gemini"
+	case models.ProviderAmp:
+		return "Amp"
+	case models.ProviderPi:
+		return "Pi"
+	default:
+		return string(provider)
+	}
 }
 
 func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, bool) {
@@ -1160,6 +1363,197 @@ func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox 
 		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
+}
+
+// InjectClaudeCodeAuth writes ~/.claude/.credentials.json when a Claude Code
+// subscription credential is selected. API-key credentials intentionally return
+// false so callers can use ANTHROPIC_API_KEY after removing any stale file.
+func (e *AgentEnv) InjectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+	return e.InjectClaudeCodeAuthWithEnv(ctx, orgID, sandbox, nil)
+}
+
+func (e *AgentEnv) InjectClaudeCodeAuthWithEnv(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, env map[string]string) (bool, error) {
+	return e.InjectClaudeCodeAuthForUserWithEnv(ctx, orgID, nil, sandbox, env)
+}
+
+func (e *AgentEnv) InjectClaudeCodeAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+	return e.InjectClaudeCodeAuthForUserWithEnv(ctx, orgID, userID, sandbox, nil)
+}
+
+func (e *AgentEnv) InjectClaudeCodeAuthForUserWithEnv(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox, env map[string]string) (bool, error) {
+	if e == nil {
+		return false, nil
+	}
+	model := ""
+	if env != nil {
+		model = env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
+	}
+	if e.codingCredentials != nil {
+		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
+			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, picked, model)
+		}
+		_, picked, handled := e.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
+			models.ProviderAnthropic,
+			models.ProviderAnthropicSubscription,
+		})
+		if handled {
+			if picked == nil {
+				return false, nil
+			}
+			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, *picked, model)
+		}
+	}
+
+	if e.claudeCodeAuth == nil {
+		return false, nil
+	}
+	sub, _, err := e.claudeCodeAuth.GetValidToken(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get claude code subscription token: %w", err)
+	}
+	if sub == nil {
+		return false, nil
+	}
+	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub, model)
+}
+
+func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential, model string) (bool, error) {
+	if picked.Provider != models.ProviderAnthropicSubscription {
+		return false, nil
+	}
+	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+		return false, nil
+	}
+	sub := models.AnthropicSubscription{
+		AccessToken:   cfg.AccessToken,
+		RefreshToken:  cfg.RefreshToken,
+		ExpiresAt:     cfg.ExpiresAt,
+		AccountType:   cfg.AccountType,
+		RateLimitTier: cfg.RateLimitTier,
+		Scopes:        cfg.Scopes,
+	}
+	if sub.NeedsRefresh(codexSubscriptionRefreshWindow) {
+		refresher, ok := e.claudeCodeAuth.(ClaudeCodeAuthRefresher)
+		if ok {
+			scope := models.Scope{OrgID: orgID, UserID: picked.UserID}
+			refreshed, err := refresher.RefreshTokenByID(ctx, scope, picked.ID)
+			if err == nil && refreshed != nil {
+				sub = *refreshed
+			} else if sub.IsExpired() {
+				if err != nil {
+					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+				}
+				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+			} else if err != nil {
+				e.logger.Warn().
+					Err(err).
+					Str("cred_id", picked.ID.String()).
+					Msg("unified claude subscription refresh failed; using cached token")
+			}
+		} else if sub.IsExpired() {
+			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+		}
+	}
+	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, sub, model)
+}
+
+func (e *AgentEnv) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription, model string) (bool, error) {
+	if e.provider == nil {
+		return false, fmt.Errorf("sandbox provider is required to write claude credentials")
+	}
+	oauthPayload := map[string]interface{}{
+		"accessToken":  sub.AccessToken,
+		"refreshToken": sub.RefreshToken,
+		"expiresAt":    sub.ExpiresAt.UnixMilli(),
+	}
+	if len(sub.Scopes) > 0 {
+		oauthPayload["scopes"] = sub.Scopes
+	}
+	if sub.AccountType != "" {
+		oauthPayload["subscriptionType"] = sub.AccountType
+	}
+	if sub.RateLimitTier != "" {
+		oauthPayload["rateLimitTier"] = sub.RateLimitTier
+	}
+	credsJSON, err := json.Marshal(map[string]interface{}{"claudeAiOauth": oauthPayload})
+	if err != nil {
+		return false, fmt.Errorf("marshal claude credentials: %w", err)
+	}
+
+	authDir := path.Join(sandbox.HomeDir, ".claude")
+	credsPath := authDir + "/.credentials.json"
+	prepCmd := fmt.Sprintf(
+		"mkdir -p '%s' && install -m 600 /dev/null '%s'",
+		shellEscapeSingleQuote(authDir),
+		shellEscapeSingleQuote(credsPath),
+	)
+
+	var prepOut, prepErr bytes.Buffer
+	exitCode, err := e.provider.Exec(ctx, sandbox, prepCmd, &prepOut, &prepErr)
+	if err != nil {
+		return false, fmt.Errorf("prepare claude credentials file: %w", err)
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf("prepare claude credentials file: exited with code %d: %s", exitCode, prepErr.String())
+	}
+
+	if err := e.provider.WriteFile(ctx, sandbox, credsPath, credsJSON); err != nil {
+		return false, fmt.Errorf("write claude credentials: %w", err)
+	}
+
+	e.logger.Debug().
+		Str("org_id", orgID.String()).
+		Msg("injected claude subscription credentials into sandbox")
+
+	version := e.detectClaudeCodeVersion(ctx, sandbox)
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, sub.AccountType, model, version))
+
+	return true, nil
+}
+
+func (e *AgentEnv) PrepareClaudeCodeAPIKeyFallback(ctx context.Context, sandbox *Sandbox, env map[string]string) error {
+	if env["ANTHROPIC_API_KEY"] == "" {
+		return errClaudeCodeFallbackUnavailable
+	}
+	if err := e.RemoveClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
+		return err
+	}
+	version := e.detectClaudeCodeVersion(ctx, sandbox)
+	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, version))
+	return nil
+}
+
+func (e *AgentEnv) detectClaudeCodeVersion(ctx context.Context, sandbox *Sandbox) string {
+	if e == nil {
+		return ""
+	}
+	return detectClaudeCodeVersion(ctx, sandbox, e.provider, e.logger)
+}
+
+func (e *AgentEnv) RemoveClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
+	if e == nil || e.provider == nil {
+		return fmt.Errorf("sandbox provider is required to remove claude credentials")
+	}
+	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
+	if _, err := e.provider.ReadFile(ctx, sandbox, credsPath); err != nil {
+		if isSandboxFileMissing(err) {
+			return nil
+		}
+		return fmt.Errorf("check stale claude credentials: %w", err)
+	}
+
+	cmd := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(credsPath))
+	var stdout, stderr bytes.Buffer
+	exitCode, err := e.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale claude credentials: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale claude credentials: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
 }
 
 func (e *AgentEnv) unifiedCodingCredentialIsAPIKey(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) bool {

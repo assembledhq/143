@@ -113,10 +113,15 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 
 	var cmd string
 	effortArg := ""
+	permissionModeArg := claudeCodePermissionModeArg(sandbox)
 	if prompt.ReasoningEffort != "" {
-		effortArg = fmt.Sprintf(" --effort %s", prompt.ReasoningEffort)
+		effortArg = fmt.Sprintf(" --effort %s", shellEscapeSingle(string(prompt.ReasoningEffort)))
 	}
 	if prompt.Continuation && prompt.ResumeSessionID != "" {
+		settingsArg, envPrefix, err := prepareClaudeHumanInputHooks(ctx, provider, sandbox, prompt)
+		if err != nil {
+			return nil, err
+		}
 		// Subsequent turn with a known session ID: deterministic resume by
 		// session id captured from a prior turn's `result` event. We avoid
 		// `--continue`, which resumes whatever Claude session is newest in
@@ -124,8 +129,11 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		// are present.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --verbose%s --resume %s \"%s\"",
+			"%sclaude --print --output-format stream-json --verbose%s%s%s --resume %s \"%s\"",
+			envPrefix,
 			effortArg,
+			settingsArg,
+			permissionModeArg,
 			shellEscapeSingle(prompt.ResumeSessionID),
 			msg,
 		)
@@ -136,14 +144,21 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		// in that case so the agent has the full context). Write the prompt
 		// under $HOME (not WorkDir, which would pollute git status) and pipe
 		// it into claude via stdin.
-		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptContent := composeFreshExecPrompt(prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
+		settingsArg, envPrefix, err := prepareClaudeHumanInputHooks(ctx, provider, sandbox, prompt)
+		if err != nil {
+			return nil, err
+		}
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --verbose%s < %s",
+			"%sclaude --print --output-format stream-json --verbose%s%s%s < %s",
+			envPrefix,
 			effortArg,
+			settingsArg,
+			permissionModeArg,
 			promptPath,
 		)
 	}
@@ -219,6 +234,249 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	return result, nil
 }
 
+func claudeCodePermissionModeArg(sandbox *agent.Sandbox) string {
+	mode := agent.ClaudeCodePermissionModeAcceptEdits
+	if sandbox != nil && sandbox.Metadata != nil && sandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode] == agent.ClaudeCodePermissionModeAuto {
+		mode = agent.ClaudeCodePermissionModeAuto
+	}
+	return " --permission-mode " + mode
+}
+
+func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, prompt *agent.AgentPrompt) (string, string, error) {
+	hookPath := fmt.Sprintf("%s/.143-claude-human-input-hook.mjs", sandbox.HomeDir)
+	settingsPath := fmt.Sprintf("%s/.143-claude-settings.json", sandbox.HomeDir)
+
+	if err := provider.WriteFile(ctx, sandbox, hookPath, []byte(claudeHumanInputHookScript)); err != nil {
+		return "", "", fmt.Errorf("write Claude human input hook: %w", err)
+	}
+
+	preToolHooks := make([]map[string]any, 0, len(claudeHumanInputHookMatchers))
+	for _, matcher := range claudeHumanInputHookMatchers {
+		preToolHooks = append(preToolHooks, map[string]any{
+			"matcher": matcher,
+			"hooks": []map[string]any{
+				{
+					"type":    "command",
+					"command": fmt.Sprintf("node '%s'", shellEscapeSingle(hookPath)),
+				},
+			},
+		})
+	}
+
+	settings := map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": preToolHooks,
+		},
+	}
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal Claude settings: %w", err)
+	}
+	if err := provider.WriteFile(ctx, sandbox, settingsPath, settingsJSON); err != nil {
+		return "", "", fmt.Errorf("write Claude settings: %w", err)
+	}
+
+	envPrefix := fmt.Sprintf(
+		"CLAUDE_143_HUMAN_INPUT_TOOLS='%s' ",
+		shellEscapeSingle(strings.Join(claudeHumanInputHookMatchers, ",")),
+	)
+	if prompt != nil && prompt.HumanInputAnswer != nil {
+		answerPath := fmt.Sprintf("%s/.143-claude-human-input-answer.json", sandbox.HomeDir)
+		answerJSON, err := json.Marshal(prompt.HumanInputAnswer)
+		if err != nil {
+			return "", "", fmt.Errorf("marshal Claude human input answer: %w", err)
+		}
+		if err := provider.WriteFile(ctx, sandbox, answerPath, answerJSON); err != nil {
+			return "", "", fmt.Errorf("write Claude human input answer: %w", err)
+		}
+		envPrefix += fmt.Sprintf("CLAUDE_143_HUMAN_INPUT_ANSWER='%s' ", shellEscapeSingle(answerPath))
+	}
+
+	return fmt.Sprintf(" --settings '%s'", shellEscapeSingle(settingsPath)), envPrefix, nil
+}
+
+var claudeHumanInputHookMatchers = []string{
+	"AskUserQuestion",
+}
+
+const claudeHumanInputHookScript = `#!/usr/bin/env node
+import fs from "node:fs";
+
+const stdin = await new Promise((resolve) => {
+  let data = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { data += chunk; });
+  process.stdin.on("end", () => resolve(data));
+});
+
+let event = {};
+try {
+  event = stdin.trim() ? JSON.parse(stdin) : {};
+} catch {
+  event = {};
+}
+
+const toolName = event.tool_name || event.toolName || event.name || "";
+const interceptedTools = new Set(
+  String(process.env.CLAUDE_143_HUMAN_INPUT_TOOLS || "")
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean)
+);
+if (!interceptedTools.has(toolName)) {
+  process.exit(0);
+}
+
+function output(payload) {
+  process.stdout.write(JSON.stringify(payload));
+}
+
+function selectedLabels(answer, input) {
+  const selected = new Set(answer.selected_choice_ids || answer.SelectedChoiceIDs || []);
+  const questions = Array.isArray(input.questions) ? input.questions : [];
+  const labels = [];
+  for (const question of questions) {
+    const options = Array.isArray(question.options) ? question.options : [];
+    for (const option of options) {
+      const label = typeof option === "string" ? option : String(option.label || option.value || option.id || "");
+      const id = String((typeof option === "string" ? option : option.id || option.value || label) || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      if (selected.has(id) || selected.has(label)) {
+        labels.push(label);
+      }
+    }
+  }
+  return labels;
+}
+
+function normalizedString(value) {
+  return String(value || "").trim();
+}
+
+function collectEventRequestIDs(event, input) {
+  return new Set([
+    event.tool_use_id,
+    event.toolUseID,
+    event.tool_call_id,
+    event.toolCallID,
+    event.request_id,
+    event.requestID,
+    event.provider_request_id,
+    event.providerRequestID,
+    event.id,
+    input.tool_use_id,
+    input.toolUseID,
+    input.tool_call_id,
+    input.toolCallID,
+    input.request_id,
+    input.requestID,
+    input.provider_request_id,
+    input.providerRequestID,
+    input.id
+  ].map(normalizedString).filter(Boolean));
+}
+
+function answerProviderRequestID(answer) {
+  return normalizedString(
+    answer.provider_request_id ||
+    answer.ProviderRequestID ||
+    answer.providerRequestID
+  );
+}
+
+function deferForHumanInput(reason) {
+  output({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "defer",
+      permissionDecisionReason: reason || "143.dev will ask the user."
+    }
+  });
+}
+
+const answerPath = process.env.CLAUDE_143_HUMAN_INPUT_ANSWER;
+if (!answerPath) {
+  deferForHumanInput("143.dev will ask the user.");
+  process.exit(0);
+}
+
+let answer = {};
+let answerLoaded = false;
+try {
+  answer = JSON.parse(fs.readFileSync(answerPath, "utf8"));
+  answerLoaded = true;
+} catch {
+  answer = {};
+}
+
+const input = event.tool_input || event.toolInput || {};
+if (!answerLoaded) {
+  deferForHumanInput("143.dev will ask the user.");
+  process.exit(0);
+}
+
+const expectedRequestID = answerProviderRequestID(answer);
+if (expectedRequestID && !collectEventRequestIDs(event, input).has(expectedRequestID)) {
+  deferForHumanInput("143.dev will ask the user.");
+  process.exit(0);
+}
+
+const updatedInput = { ...input };
+const answerText = answer.answer_text || answer.AnswerText || null;
+const selected = answer.selected_choice_ids || answer.SelectedChoiceIDs || [];
+const payload = answer.answer_payload || answer.AnswerPayload || {};
+const status = answer.status || answer.Status || "";
+const rawDecision = payload.decision || answer.decision || answer.Decision || selected[0] || "";
+const decision = String(rawDecision || "").toLowerCase();
+const cancelled = status === "cancelled" || payload.cancelled === true || decision === "cancel" || decision === "cancelled";
+const denied = cancelled || decision === "deny" || decision === "denied" || decision === "reject" || decision === "rejected";
+if (answerText) {
+  updatedInput.answer = answerText;
+}
+if (selected.length) {
+  updatedInput.selected_choice_ids = selected;
+}
+const labels = selectedLabels(answer, input);
+if (labels.length) {
+  updatedInput.selected_options = labels;
+}
+if (payload.edited_input && typeof payload.edited_input === "object") {
+  Object.assign(updatedInput, payload.edited_input);
+}
+if (payload.edited_command && typeof payload.edited_command === "string") {
+  updatedInput.command = payload.edited_command;
+}
+
+try {
+  fs.rmSync(answerPath, { force: true });
+} catch {
+  // Best effort: if the sandbox filesystem refuses deletion, still apply the
+  // matching answer so the resumed Claude turn can complete.
+}
+
+if (denied) {
+  output({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: answerText || "143.dev denied this request."
+    }
+  });
+  process.exit(0);
+}
+
+output({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "allow",
+    permissionDecisionReason: "143.dev supplied the human answer.",
+    updatedInput
+  }
+});
+`
+
 // parseClaudeStreamLine processes a single non-empty stdout line from the
 // Claude Code CLI's `--output-format stream-json` output.
 //
@@ -275,6 +533,16 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			Timestamp: time.Now(),
 			Level:     "info",
 			Message:   summary,
+		}
+		if req, ok := normalizeClaudeDeferredToolUse(event); ok {
+			result.RequiresHumanInput = true
+			logCh <- agent.LogEntry{
+				Timestamp:  time.Now(),
+				Level:      "human_input",
+				Message:    req.Body,
+				Metadata:   claudeHumanInputMetadata(req),
+				HumanInput: &req,
+			}
 		}
 		if summary != "" {
 			*summaryParts = append(*summaryParts, summary)
@@ -451,16 +719,18 @@ func WithSandboxProvider(ctx context.Context, p agent.SandboxProvider) context.C
 // Anthropic-API-shaped block array, with tool results echoed back via
 // `user` events and a terminal `result` event carrying the summary.
 type claudeStreamEvent struct {
-	Type         string             `json:"type"`
-	Subtype      string             `json:"subtype,omitempty"`
-	Content      string             `json:"content,omitempty"`
-	Message      *claudeMessageBody `json:"message,omitempty"`
-	SessionID    string             `json:"session_id,omitempty"`
-	Result       json.RawMessage    `json:"result,omitempty"`
-	Usage        json.RawMessage    `json:"usage,omitempty"`
-	TotalCostUSD *float64           `json:"total_cost_usd,omitempty"`
-	CostUSD      *float64           `json:"cost_usd,omitempty"`
-	IsError      bool               `json:"is_error,omitempty"`
+	Type            string                 `json:"type"`
+	Subtype         string                 `json:"subtype,omitempty"`
+	Content         string                 `json:"content,omitempty"`
+	Message         *claudeMessageBody     `json:"message,omitempty"`
+	SessionID       string                 `json:"session_id,omitempty"`
+	Result          json.RawMessage        `json:"result,omitempty"`
+	Usage           json.RawMessage        `json:"usage,omitempty"`
+	TotalCostUSD    *float64               `json:"total_cost_usd,omitempty"`
+	CostUSD         *float64               `json:"cost_usd,omitempty"`
+	IsError         bool                   `json:"is_error,omitempty"`
+	StopReason      string                 `json:"stop_reason,omitempty"`
+	DeferredToolUse *claudeDeferredToolUse `json:"deferred_tool_use,omitempty"`
 }
 
 // claudeMessageBody is the inner Anthropic Messages API payload carried by
@@ -482,6 +752,212 @@ type claudeContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
+}
+
+type claudeDeferredToolUse struct {
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+func normalizeClaudeDeferredToolUse(event claudeStreamEvent) (agent.HumanInputRequest, bool) {
+	if event.DeferredToolUse == nil {
+		return agent.HumanInputRequest{}, false
+	}
+	tool := *event.DeferredToolUse
+	rawPayload, _ := json.Marshal(tool)
+	if strings.EqualFold(tool.Name, "AskUserQuestion") {
+		return normalizeClaudeAskUserQuestion(tool, rawPayload), true
+	}
+	title := fmt.Sprintf("Approve %s?", tool.Name)
+	if tool.Name == "" {
+		title = "Approve agent action?"
+	}
+	var contextText *string
+	if len(tool.Input) > 0 {
+		preview := strings.TrimSpace(string(tool.Input))
+		if len(preview) > 1200 {
+			preview = preview[:1200] + "..."
+		}
+		if preview != "" {
+			contextText = &preview
+		}
+	}
+	return agent.HumanInputRequest{
+		ProviderRequestID: tool.ID,
+		Kind:              models.HumanInputRequestKindToolApproval,
+		Title:             title,
+		Body:              "Claude needs approval before it can continue.",
+		Context:           contextText,
+		Choices: []models.HumanInputChoice{
+			{ID: "approve", Label: "Approve", Kind: "positive"},
+			{ID: "deny", Label: "Deny", Kind: "negative"},
+		},
+		ResponseSchema:  json.RawMessage(claudeToolApprovalResponseSchema),
+		ProviderPayload: rawPayload,
+	}, true
+}
+
+const claudeToolApprovalResponseSchema = `{
+  "type": "object",
+  "required": ["decision"],
+  "properties": {
+    "decision": { "type": "string", "enum": ["approve", "deny"] },
+    "reason": { "type": "string" },
+    "edited_command": { "type": "string" },
+    "edited_input": { "type": "object" },
+    "cancelled": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}`
+
+func normalizeClaudeAskUserQuestion(tool claudeDeferredToolUse, rawPayload json.RawMessage) agent.HumanInputRequest {
+	var input struct {
+		Questions []struct {
+			Header      string            `json:"header"`
+			Question    string            `json:"question"`
+			MultiSelect bool              `json:"multiSelect"`
+			Options     []json.RawMessage `json:"options"`
+		} `json:"questions"`
+		Context string `json:"context"`
+	}
+	_ = json.Unmarshal(tool.Input, &input)
+
+	title := "Claude needs input"
+	body := "Claude is waiting for input."
+	var contextText *string
+	if strings.TrimSpace(input.Context) != "" {
+		trimmed := strings.TrimSpace(input.Context)
+		contextText = &trimmed
+	}
+
+	kind := models.HumanInputRequestKindFreeText
+	var choices []models.HumanInputChoice
+	seenChoiceIDs := map[string]int{}
+	for i, question := range input.Questions {
+		if i == 0 {
+			if strings.TrimSpace(question.Header) != "" {
+				title = strings.TrimSpace(question.Header)
+			}
+			if strings.TrimSpace(question.Question) != "" {
+				body = strings.TrimSpace(question.Question)
+			}
+		}
+		if len(question.Options) == 0 {
+			continue
+		}
+		if question.MultiSelect {
+			kind = models.HumanInputRequestKindMultiChoice
+		} else if kind != models.HumanInputRequestKindMultiChoice {
+			kind = models.HumanInputRequestKindSingleChoice
+		}
+		for _, rawOption := range question.Options {
+			choice := normalizeClaudeQuestionOption(rawOption, seenChoiceIDs)
+			if choice.ID != "" && choice.Label != "" {
+				choices = append(choices, choice)
+			}
+		}
+	}
+
+	return agent.HumanInputRequest{
+		ProviderRequestID: tool.ID,
+		Kind:              kind,
+		Title:             title,
+		Body:              body,
+		Context:           contextText,
+		Choices:           choices,
+		ProviderPayload:   rawPayload,
+	}
+}
+
+func normalizeClaudeQuestionOption(raw json.RawMessage, seen map[string]int) models.HumanInputChoice {
+	var label string
+	var description string
+	var id string
+	var preview string
+	var kind string
+	var destructive bool
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		label = strings.TrimSpace(asString)
+		id = slugChoiceID(label)
+	} else {
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err == nil {
+			label = firstStringValue(obj, "label", "title", "name", "value", "id")
+			id = firstStringValue(obj, "id", "value")
+			description = firstStringValue(obj, "description", "detail", "subtitle")
+			preview = firstStringValue(obj, "preview", "command", "diff")
+			kind = firstStringValue(obj, "kind", "type")
+			if v, ok := obj["destructive"].(bool); ok {
+				destructive = v
+			}
+		}
+		if id == "" {
+			id = slugChoiceID(label)
+		} else {
+			id = slugChoiceID(id)
+		}
+	}
+	if label == "" {
+		label = id
+	}
+	if id == "" {
+		id = "choice"
+	}
+	if seen[id] > 0 {
+		seen[id]++
+		id = fmt.Sprintf("%s-%d", id, seen[id])
+	} else {
+		seen[id] = 1
+	}
+	return models.HumanInputChoice{
+		ID:          id,
+		Label:       label,
+		Description: description,
+		Preview:     preview,
+		Kind:        kind,
+		Destructive: destructive,
+	}
+}
+
+func firstStringValue(obj map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := obj[key]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func slugChoiceID(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func claudeHumanInputMetadata(req agent.HumanInputRequest) map[string]interface{} {
+	return map[string]interface{}{
+		"provider":            string(models.AgentTypeClaudeCode),
+		"provider_request_id": req.ProviderRequestID,
+		"request_kind":        string(req.Kind),
+		"title":               req.Title,
+	}
 }
 
 // claudeToolUseMetadata builds the metadata map for a tool_use log entry,

@@ -501,6 +501,24 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			},
 			expectedCode: http.StatusOK,
 		},
+		{
+			name:        "successfully changes role to builder",
+			memberID:    memberID.String(),
+			body:        map[string]string{"role": "builder"},
+			currentUser: adminUser,
+			users: &mockTeamUserStore{
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com", Name: "Bob"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, role string) (string, error) {
+					require.Equal(t, "builder", role, "ChangeRole should pass the builder role through to the membership store")
+					return "member", nil
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
 	}
 
 	for _, tt := range tests {
@@ -679,6 +697,34 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, memberID, resp.Data.ID)
 	require.Equal(t, "viewer", resp.Data.Role)
+}
+
+func TestTeamHandler_CreateInvitation_AcceptsBuilderRole(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin", Name: "Admin User"}
+	createdRoles := make([]string, 0, 1)
+
+	h := newTeamHandler(nil, &mockTeamMembershipStore{}, nil, &mockTeamInvitationStore{
+		createFn: func(_ context.Context, inv *models.Invitation) error {
+			createdRoles = append(createdRoles, inv.Role)
+			inv.ID = uuid.New()
+			inv.Status = "pending"
+			inv.CreatedAt = time.Now()
+			return nil
+		},
+	}, nil)
+
+	body, _ := json.Marshal(map[string]string{"email": "builder@example.com", "role": "builder"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	req = req.WithContext(teamCtx(orgID, adminUser))
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "CreateInvitation should accept builder as a valid membership role")
+	require.Equal(t, []string{"builder"}, createdRoles, "CreateInvitation should persist the requested builder role")
 }
 
 // RemoveMember succeeds even when CountForUser fails afterward — the removal
@@ -1127,6 +1173,32 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 			users: &mockTeamUserStore{
 				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
 					return models.User{}, pgx.ErrNoRows
+				},
+			},
+			expectedCode: http.StatusCreated,
+		},
+		{
+			name: "github invitation keeps email as durable notification address and requires github acceptance",
+			body: map[string]string{"email": "new@b.com", "github_username": "octocat", "role": "member"},
+			users: &mockTeamUserStore{
+				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
+					return models.User{}, pgx.ErrNoRows
+				},
+				isGitHubLoginMemberOfOrgFn: func(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+					return false, nil
+				},
+			},
+			invitations: &mockTeamInvitationStore{
+				createFn: func(_ context.Context, inv *models.Invitation) error {
+					require.NotNil(t, inv.Email, "CreateInvitation should preserve the notification email on github invites")
+					require.Equal(t, "new@b.com", *inv.Email, "CreateInvitation should store the durable notification email")
+					require.NotNil(t, inv.GitHubUsername, "CreateInvitation should store the required GitHub username")
+					require.Equal(t, "octocat", *inv.GitHubUsername, "CreateInvitation should store the normalized GitHub username")
+					require.Equal(t, models.InvitationAcceptanceMethodGitHub, inv.AcceptanceMethod, "CreateInvitation should require GitHub acceptance when a GitHub username is present")
+					inv.ID = uuid.New()
+					inv.Status = "pending"
+					inv.CreatedAt = time.Now()
+					return nil
 				},
 			},
 			expectedCode: http.StatusCreated,

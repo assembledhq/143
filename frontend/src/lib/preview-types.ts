@@ -136,10 +136,22 @@ export interface PreviewInfrastructure {
   created_at: string;
 }
 
+export interface PreviewLog {
+  id: string;
+  preview_instance_id: string;
+  org_id: string;
+  level: string;
+  step: string;
+  message: string;
+  metadata?: unknown;
+  created_at: string;
+}
+
 export interface PreviewStatusResponse {
   instance: PreviewInstance;
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
+  preview_origin?: string;
 }
 
 // Console messages

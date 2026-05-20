@@ -6,6 +6,7 @@ package jobctx
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -16,6 +17,9 @@ const (
 	hooksKey ctxKey = iota
 	lockTokenKey
 	deadTargetNodeKey
+	jobCreatedAtKey
+	jobIDKey
+	ownerKindKey
 )
 
 // DeadLetterHook runs synchronously on the worker's poll goroutine when
@@ -43,6 +47,24 @@ func LockTokenFromContext(ctx context.Context) (uuid.UUID, bool) {
 	return token, ok
 }
 
+func WithJobID(ctx context.Context, id uuid.UUID) context.Context {
+	return context.WithValue(ctx, jobIDKey, id)
+}
+
+func JobIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	id, ok := ctx.Value(jobIDKey).(uuid.UUID)
+	return id, ok
+}
+
+func WithOwnerKind(ctx context.Context, ownerKind string) context.Context {
+	return context.WithValue(ctx, ownerKindKey, ownerKind)
+}
+
+func OwnerKindFromContext(ctx context.Context) (string, bool) {
+	ownerKind, ok := ctx.Value(ownerKindKey).(string)
+	return ownerKind, ok && ownerKind != ""
+}
+
 func WithDeadTargetNode(ctx context.Context, nodeID string) context.Context {
 	return context.WithValue(ctx, deadTargetNodeKey, nodeID)
 }
@@ -50,6 +72,21 @@ func WithDeadTargetNode(ctx context.Context, nodeID string) context.Context {
 func DeadTargetNodeFromContext(ctx context.Context) (string, bool) {
 	nodeID, ok := ctx.Value(deadTargetNodeKey).(string)
 	return nodeID, ok && nodeID != ""
+}
+
+// WithJobCreatedAt records the wall-clock time the job row was first
+// enqueued. Handlers can read it via JobCreatedAtFromContext to enforce
+// their own deadlines without depending on the global maxRetryableDuration
+// (which is intentionally coarse). Handlers that drop a job early via
+// returning nil still benefit from this so retries that consume no Attempts
+// (RetryableError) don't loop indefinitely.
+func WithJobCreatedAt(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, jobCreatedAtKey, t)
+}
+
+func JobCreatedAtFromContext(ctx context.Context) (time.Time, bool) {
+	t, ok := ctx.Value(jobCreatedAtKey).(time.Time)
+	return t, ok && !t.IsZero()
 }
 
 // RegisterDeadLetterHook queues a hook on the context's registry. When the

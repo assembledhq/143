@@ -193,10 +193,21 @@ describe('SessionSidebar', () => {
 
   it('archives a session from the swipe action', async () => {
     let archiveCalls = 0;
-    serveSessions([
-      makeSession({ id: 's1', result_summary: 'Swipe me' }),
-    ]);
+    let resolveArchiveRefetch: (() => void) | undefined;
     server.use(
+      http.get('/api/v1/sessions', () => {
+        if (archiveCalls === 0) {
+          return HttpResponse.json({
+            data: [makeSession({ id: 's1', result_summary: 'Swipe me' })],
+            meta: {},
+          });
+        }
+        return new Promise((resolve) => {
+          resolveArchiveRefetch = () => {
+            resolve(HttpResponse.json({ data: [], meta: {} }));
+          };
+        });
+      }),
       http.post('/api/v1/sessions/s1/archive', () => {
         archiveCalls += 1;
         return HttpResponse.json({ status: 'archived' });
@@ -216,6 +227,62 @@ describe('SessionSidebar', () => {
 
     await waitFor(() => {
       expect(archiveCalls).toBe(1);
+    });
+    expect(screen.queryByText('Swipe me')).not.toBeInTheDocument();
+    resolveArchiveRefetch?.();
+  });
+
+  it('keeps a committed mobile archive row displaced until the backend removes it', async () => {
+    let archiveCalls = 0;
+    let archiveSettled = false;
+    let resolveArchive: (() => void) | undefined;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        if (archiveSettled) {
+          return HttpResponse.json({ data: [], meta: {} });
+        }
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Swipe pending' })],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        archiveCalls += 1;
+        return new Promise((resolve) => {
+          resolveArchive = () => {
+            archiveSettled = true;
+            resolve(HttpResponse.json({ status: 'archived' }));
+          };
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    const row = await screen.findByText('Swipe pending');
+    const surface = row.closest('[data-swipe-surface="true"]') as HTMLElement | null;
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+    Object.defineProperty(container!, 'offsetWidth', {
+      configurable: true,
+      value: 390,
+    });
+
+    fireEvent.touchStart(surface!, { touches: [{ clientX: 320, clientY: 24 }] });
+    fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
+    fireEvent.touchEnd(surface!);
+
+    await waitFor(() => {
+      expect(archiveCalls).toBe(1);
+    });
+    expect(screen.getByText('Swipe pending')).toBeInTheDocument();
+    expect(container).toHaveAttribute('data-swipe-state', 'committed');
+    expect(surface!.style.transform).toBe('translateX(-390px)');
+
+    resolveArchive?.();
+
+    await waitFor(() => {
+      expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
     });
   });
 
@@ -245,6 +312,26 @@ describe('SessionSidebar', () => {
     expect(screen.queryByRole('link', { name: 'Open session details for No extra open button' })).not.toBeInTheDocument();
   });
 
+  it('uses the line tab variant for the session status filters', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Status filter tabs' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Status filter tabs');
+
+    const tabList = screen.getByRole('tablist');
+    expect(tabList).toHaveAttribute('data-variant', 'line');
+    expect(tabList.className).toContain('justify-start');
+
+    // The scroll/clip wrapper lives on the parent div so the active-tab
+    // underline (positioned just below the trigger) isn't clipped.
+    const scrollWrapper = tabList.parentElement;
+    expect(scrollWrapper?.className).toContain('overflow-x-auto');
+    expect(scrollWrapper?.className).toContain('overflow-y-hidden');
+    expect(scrollWrapper?.className).toContain('pb-1');
+  });
+
   it('navigates when the selected row shell is tapped', async () => {
     mockSelectedSegment = 's1';
     serveSessions([
@@ -267,6 +354,29 @@ describe('SessionSidebar', () => {
     fireEvent.click(selectedRow!);
 
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
+  });
+
+  it('uses the same row padding frame for the new-session draft and normal sessions', async () => {
+    mockPathname = '/sessions/new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Existing session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const draftOption = await screen.findByRole('option', { name: 'New session draft' });
+    const normalOption = (await screen.findByText('Existing session')).closest('[role="option"]');
+    expect(normalOption).not.toBeNull();
+
+    expect(draftOption).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+
+    const draftLink = draftOption.querySelector('a');
+    const normalLink = normalOption!.querySelector('a');
+    expect(draftLink).not.toBeNull();
+    expect(normalLink).not.toBeNull();
+    expect(draftLink!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+    expect(normalLink!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
   });
 
   it('clears search on Escape key', async () => {
@@ -866,6 +976,88 @@ describe('SessionSidebar', () => {
     expect(screen.getByRole('link', { name: 'New session' })).toHaveAttribute(
       'href',
       '/sessions/new?people=all&status=active&repo=repo-1&search=Linked',
+    );
+  });
+
+  it('selects the new-session draft row without highlighting a saved session', async () => {
+    mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Saved session below draft' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Saved session below draft');
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute(
+      'aria-activedescendant',
+      'session-sidebar-option-new-session',
+    );
+
+    const draftOption = screen.getByRole('option', { name: 'New session draft' });
+    expect(draftOption).toHaveAttribute('aria-selected', 'true');
+    expect(draftOption).toHaveClass('p-1');
+
+    const savedOption = screen.getByText('Saved session below draft').closest('[role="option"]');
+    expect(savedOption).toHaveAttribute('aria-selected', 'false');
+    expect(savedOption?.className).not.toContain('ring-ring/20');
+  });
+
+  it('clears stale saved-session focus when navigating into the new-session draft', async () => {
+    const user = userEvent.setup();
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'First saved session' }),
+      makeSession({ id: 's2', result_summary: 'Second saved session' }),
+    ]);
+
+    const { rerender } = renderWithProviders(<SessionSidebar />);
+    await screen.findByText('First saved session');
+
+    await user.keyboard('j');
+    expect(screen.getByText('Second saved session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+
+    mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
+    rerender(<SessionSidebar />);
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute(
+      'aria-activedescendant',
+      'session-sidebar-option-new-session',
+    );
+    expect(screen.getByRole('option', { name: 'New session draft' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByText('Second saved session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'false',
+    );
+  });
+
+  it('removes draft selected styling after keyboard navigation moves to a saved session', async () => {
+    const user = userEvent.setup();
+    mockPathname = '/sessions/new';
+    mockSelectedSegment = 'new';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Keyboard-selected saved session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Keyboard-selected saved session');
+
+    await user.keyboard('j');
+
+    const draftOption = screen.getByRole('option', { name: 'New session draft' });
+    expect(draftOption).toHaveAttribute('aria-selected', 'false');
+    expect(draftOption.querySelector('a')?.className).not.toContain('ring-primary/10');
+    expect(screen.getByText('Keyboard-selected saved session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
     );
   });
 

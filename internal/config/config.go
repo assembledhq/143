@@ -21,8 +21,8 @@ import (
 // login-page banner that advertises credentials that won't actually sign in
 // — LogStatus warns about this at boot.
 const (
-	defaultDemoEmail    = "dogfood@143.dev"
-	defaultDemoPassword = "preview-dogfood"
+	defaultDemoEmail    = "preview-admin@143.dev"
+	defaultDemoPassword = "preview"
 )
 
 type Config struct {
@@ -47,12 +47,23 @@ type Config struct {
 	// login-page banner when DemoMode is on. Defaults must match the seeded
 	// admin in .143/seed.sql and the constants below — override via env
 	// only if you also regenerate the bcrypt hash in the seed.
-	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"dogfood@143.dev"`
-	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview-dogfood"`
+	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
+	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
 	// WorkerProcessCount controls how many worker loops run inside a single
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
 	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
+	// WorkerMaxActiveSandboxes controls the live container admission cap for
+	// this worker node. 0 derives from the final WorkerProcessCount; values >0
+	// are explicit per-node caps.
+	WorkerMaxActiveSandboxes int `env:"WORKER_MAX_ACTIVE_SANDBOXES" envDefault:"0"`
+	// SessionExecutorImage is the server image used for executor containers.
+	// Production worker compose defaults this to the same 143-server tag as
+	// the worker so executor code and worker dispatcher code roll together.
+	SessionExecutorImage string `env:"SESSION_EXECUTOR_IMAGE"`
+	// SessionExecutorDockerNetwork optionally attaches executor containers to
+	// the same Docker network as worker-side dependencies such as chrome.
+	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
@@ -82,6 +93,26 @@ type Config struct {
 	// Linear OAuth
 	LinearOAuthClientID     string `env:"LINEAR_OAUTH_CLIENT_ID"`
 	LinearOAuthClientSecret string `env:"LINEAR_OAUTH_CLIENT_SECRET"`
+
+	// LinearWebhookSigningSecret is the per-OAuth-app HMAC secret Linear
+	// shows once in the OAuth application dashboard. The same secret signs
+	// every webhook delivery from every workspace the app is installed in —
+	// it is a property of the OAuth app, not of the install. In the SaaS /
+	// multi-tenant deployment this lives here next to the OAuth client
+	// credentials. Self-hosted deployments may instead store a per-org
+	// override in LinearConfig.WebhookSecret; verifyProviderSignature falls
+	// back to this global secret when the per-org override is empty so both
+	// deployment shapes work simultaneously.
+	LinearWebhookSigningSecret string `env:"LINEAR_WEBHOOK_SIGNING_SECRET"`
+
+	// LinearAgentEnabled is a process-wide kill switch for the Linear agent
+	// feature (issue assignment / @-mention triggers a 143 session). When
+	// false, the dispatcher records the webhook delivery for audit and
+	// returns 200 immediately without doing any work — even if individual
+	// orgs have opted in via org_settings.linear_agent.enabled. Lets us
+	// disable the inbound path globally during incidents without poking
+	// every org's settings. Defaults to false so phase-1 ships dark.
+	LinearAgentEnabled bool `env:"LINEAR_AGENT_ENABLED" envDefault:"false"`
 
 	// Sentry OAuth
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`
@@ -134,6 +165,15 @@ type Config struct {
 	// Sandbox
 	SandboxRuntime       string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
+	// SandboxHealthCheckImage is the small image used by worker startup to
+	// prove Docker can launch a container under the configured runtime. Worker
+	// hosts lazy-pull it if missing so fresh hosts do not depend on image cache
+	// state; override this to use a private mirror.
+	SandboxHealthCheckImage string `env:"SANDBOX_HEALTH_CHECK_IMAGE" envDefault:"busybox:1.36.1"`
+	// SandboxRequireDiskQuota fails sandbox startup when Docker cannot enforce
+	// SANDBOX_DISK_LIMIT_GB via StorageOpt. Production worker deploys set this
+	// true by default; local dev can leave it false for ext4 Docker installs.
+	SandboxRequireDiskQuota bool `env:"SANDBOX_REQUIRE_DISK_QUOTA" envDefault:"false"`
 	// SandboxResolvConf, when set, is bind-mounted read-only at /etc/resolv.conf
 	// inside every sandbox container. Required under runsc on user-defined
 	// networks because gVisor's netstack can't reach Docker's embedded DNS at
@@ -225,6 +265,13 @@ type Config struct {
 	// histograms. Operators use these to size SANDBOX_* limits against actual
 	// consumption rather than allocation. Set to 0 to disable sampling.
 	RuntimeStatsInterval time.Duration `env:"RUNTIME_STATS_INTERVAL" envDefault:"30s"`
+	// SandboxGCInterval controls worker-local cleanup of provider-labeled
+	// sandbox containers. The GC destroys old managed containers that no
+	// session row references and hard-expires idle referenced containers only
+	// after a DB finalize CAS wins. Set to 0 to disable.
+	SandboxGCInterval time.Duration `env:"SANDBOX_GC_INTERVAL" envDefault:"5m"`
+	SandboxGCGrace    time.Duration `env:"SANDBOX_GC_GRACE"    envDefault:"30m"`
+	SandboxGCHardMax  time.Duration `env:"SANDBOX_GC_HARD_MAX" envDefault:"24h"`
 
 	// Redis (optional)
 	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
@@ -270,6 +317,9 @@ func Load() *Config {
 	}
 	if cfg.WorkerProcessCount <= 0 {
 		cfg.WorkerProcessCount = 2
+	}
+	if cfg.WorkerMaxActiveSandboxes < 0 {
+		cfg.WorkerMaxActiveSandboxes = 0
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.

@@ -664,7 +664,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	rows := []models.DecryptedCodingCredential{
 		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Codex", Config: models.OpenAIConfig{APIKey: "sk-openai-123456"}, Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAIChatGPT, Config: models.OpenAIChatGPTConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
-		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "max"}, Priority: 1, Status: models.CodingCredentialStatusActive, LastVerifiedAt: &verifiedAt, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "max"}, Priority: 1, Status: models.CodingCredentialStatusActive, LastVerifiedAt: &verifiedAt, RateLimitedUntil: ptrTime(now.Add(time.Hour)), RateLimitMessage: ptrString("try again at 8:50 AM"), CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gemini-key"}, Priority: 2, Status: models.CodingCredentialStatusPendingAuth, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-key"}, Priority: 3, Status: "disabled", CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderPi, Config: models.PiConfig{APIKey: "pi-key"}, Priority: 4, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
@@ -677,10 +677,13 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.True(t, personal[0].IsDefault, "first runnable personal row should be marked default")
 	require.False(t, personal[1].IsDefault, "invalid personal row should not be marked default")
 	require.Len(t, orgRows, 4, "summariesForScope should keep only org rows for org scope")
-	require.True(t, orgRows[0].IsDefault, "first runnable org row should be marked default")
+	require.False(t, orgRows[0].IsDefault, "rate-limited org row should not be marked default")
 	require.Equal(t, models.AgentTypeClaudeCode, orgRows[0].Agent, "anthropic subscription should map to Claude Code")
 	require.Equal(t, models.CodingAuthTypeSubscription, orgRows[0].AuthType, "subscription provider should map to subscription auth")
-	require.Equal(t, models.CodingAuthStatusHealthy, orgRows[0].Status, "verified active row should be healthy")
+	require.Equal(t, models.CodingAuthStatusRateLimited, orgRows[0].Status, "future rate-limited active row should be rate limited")
+	require.Equal(t, rows[2].RateLimitedUntil, orgRows[0].RateLimitedUntil, "summary should expose rate-limit reset time")
+	require.Equal(t, rows[2].RateLimitMessage, orgRows[0].RateLimitMessage, "summary should expose rate-limit message")
+	require.True(t, orgRows[3].IsDefault, "first non-rate-limited runnable org row should be marked default")
 	require.Equal(t, models.CodingAuthStatusNeedsReauth, orgRows[1].Status, "pending_auth row should need reauth")
 	require.Equal(t, "max", orgRows[0].UsageNote, "subscription usage note should prefer account type")
 	require.Equal(t, "Gemini CLI API key", defaultLabelFor(models.AgentTypeGeminiCLI, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover gemini")
@@ -699,6 +702,14 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 
 	_, _, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: "unknown", AuthType: models.CodingAuthTypeAPIKey, APIKey: "key"})
 	require.Error(t, err, "codingCredentialConfigFromInput should reject unsupported agents")
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}
+
+func ptrString(s string) *string {
+	return &s
 }
 
 func TestCodingCredentialHandlerUpdateRejectsPendingAuthPromotion(t *testing.T) {

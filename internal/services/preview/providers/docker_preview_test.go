@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +46,22 @@ type mockDockerPreviewClient struct {
 	imagePullPopulates bool
 	imagePullBody      string
 	imagePullMu        sync.Mutex
+}
+
+func successfulPreviewDialer(_ context.Context, _ string) (net.Conn, error) {
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, nil
+}
+
+func previewReachableClient() *mockDockerPreviewClient {
+	return &mockDockerPreviewClient{inspectResp: container.InspectResponse{
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"143-sandbox": {IPAddress: "172.30.0.2"},
+			},
+		},
+	}}
 }
 
 func (m *mockDockerPreviewClient) ContainerCreate(_ context.Context, _ *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, _ *ocispec.Platform, _ string) (container.CreateResponse, error) {
@@ -1025,7 +1042,7 @@ func TestStartPreview_StandardMode_NotifiesObserverPerService(t *testing.T) {
 			return 1, nil
 		},
 	}
-	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
 	obs := &recordingObserver{}
 
 	cfg := &models.PreviewConfig{
@@ -1075,7 +1092,7 @@ func TestStartPreview_ProgressiveMode_NotifiesObserver(t *testing.T) {
 			return 1, nil
 		},
 	}
-	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
 	obs := &recordingObserver{}
 
 	cfg := &models.PreviewConfig{
@@ -1139,7 +1156,7 @@ func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
 			return 1, nil
 		},
 	}
-	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
 
 	cfg := &models.PreviewConfig{
 		Name:    "test-app",
@@ -1155,6 +1172,65 @@ func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+func TestStartPreview_FailsWhenPrimaryPortNotExternallyReachable(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	dialErr := errors.New("tcp timeout")
+	d := NewDockerPreviewProvider(
+		&mockDockerPreviewClient{inspectResp: container.InspectResponse{
+			NetworkSettings: &container.NetworkSettings{
+				Networks: map[string]*network.EndpointSettings{
+					"143-sandbox": {IPAddress: "172.30.0.9"},
+				},
+			},
+		}},
+		exec,
+		zerolog.Nop(),
+		WithPreviewDialer(func(_ context.Context, _ string) (net.Conn, error) {
+			return nil, dialErr
+		}),
+	)
+	obs := &recordingObserver{}
+
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	close(release)
+
+	require.Error(t, err, "StartPreview should fail when worker cannot dial the sandbox primary port")
+	require.Nil(t, handle, "failed preview should not return a handle")
+	require.ErrorIs(t, err, preview.ErrServiceNotReady, "external reachability failures should classify as service readiness failures")
+	require.Contains(t, err.Error(), "external reachability check failed", "error should explain the worker-to-sandbox dial failure")
+	require.Contains(t, err.Error(), "172.30.0.9:3000", "error should include the target address")
+
+	failed := obs.failed()
+	require.Len(t, failed, 1, "observer should receive the primary service reachability failure")
+	require.Equal(t, "web", failed[0].name, "observer should identify the unreachable primary service")
+	require.Contains(t, failed[0].errMsg, "external reachability check failed", "observer error should explain reachability failure")
 }
 
 func TestStopPreview_TerminatesServiceProcessesBeforeCleanup(t *testing.T) {

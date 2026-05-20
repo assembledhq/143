@@ -16,6 +16,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 type wakeTestStore struct {
@@ -70,6 +71,16 @@ func TestRetryableError(t *testing.T) {
 
 	require.Equal(t, "capacity reached", retryable.Error(), "Error should return the wrapped error message")
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
+}
+
+func TestHandoffError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("executor owns job")
+	handoff := &HandoffError{Err: cause}
+
+	require.Equal(t, "executor owns job", handoff.Error(), "Error should return the wrapped error message")
+	require.ErrorIs(t, handoff.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
 func TestWorker_Poll(t *testing.T) {
@@ -194,6 +205,32 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "retryable max duration bypass retries old job",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				oldCreatedAt := time.Now().Add(-maxRetryableDuration - time.Minute)
+				retryAfter := time.Second
+				handlerErr := &RetryableError{
+					Err:                    errors.New("stale orphan cleared"),
+					RetryAfter:             &retryAfter,
+					BypassMaxRetryDuration: true,
+				}
+
+				w.Register("stale_retry_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "stale_retry_job", json.RawMessage(`{}`), oldCreatedAt, lockToken)
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
 			name: "fatal failure dead-letters immediately",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
@@ -236,6 +273,24 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "handoff error skips terminal write",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				handlerErr := &HandoffError{Err: errors.New("session executor owns the job")}
+
+				w.Register("run_agent", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "run_agent", json.RawMessage(`{}`), now, lockToken)
+			},
+		},
+		{
 			name: "draining worker skips claiming new jobs",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
@@ -255,11 +310,11 @@ func TestWorker_Poll(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
-						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", nil, nil, nil, now, now, nil,
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -280,6 +335,48 @@ func TestWorker_Poll(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestWorker_Poll_LongRunningSessionJobContextHasWatchdog(t *testing.T) {
+	t.Parallel()
+
+	w, mock := newTestWorker(t)
+	defer mock.Close()
+
+	w.renewInterval = time.Hour
+	w.maxLongRunningJobDuration = 20 * time.Millisecond
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	orgID := uuid.New()
+	handlerCancelled := make(chan struct{})
+
+	w.Register("run_agent", func(ctx context.Context, jobType string, got json.RawMessage) error {
+		<-ctx.Done()
+		close(handlerCancelled)
+		return nil
+	})
+
+	expectClaim(mock, jobID, orgID, "run_agent", json.RawMessage(`{}`), time.Now(), lockToken)
+	mock.ExpectExec("UPDATE jobs\\s+SET status = 'succeeded'").
+		WithArgs(jobID, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	w.poll(context.Background())
+
+	select {
+	case <-handlerCancelled:
+	default:
+		t.Fatal("long-running session job handler should be cancelled by the worker watchdog")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestDefaultMaxLongRunningJobDuration_CoversConfiguredRuntimeCeiling(t *testing.T) {
+	t.Parallel()
+
+	expectedMinimum := time.Duration(models.MaxAbsoluteRuntimeCeilingSeconds)*time.Second + agent.HandlerCleanupBuffer
+	require.GreaterOrEqual(t, defaultMaxLongRunningJobDuration, expectedMinimum, "worker watchdog should not fire before the largest valid handler runtime")
 }
 
 func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
@@ -763,11 +860,11 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-			"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
-			lockToken.String(), "test-node", nil, nil, target, createdAt, createdAt, nil,
+			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, createdAt, createdAt, nil,
 		))
 }

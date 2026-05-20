@@ -6,19 +6,30 @@ import NewAutomationPage from "./page";
 import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
 const pushMock = vi.fn();
+const replaceMock = vi.fn();
 const searchParams = new URLSearchParams("template=security-sweep");
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: pushMock,
-    replace: vi.fn(),
+    replace: replaceMock,
   }),
   useSearchParams: () => searchParams,
+}));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { role: currentUserRole.value },
+    isLoading: false,
+  }),
 }));
 
 describe("NewAutomationPage", () => {
   beforeEach(() => {
     pushMock.mockReset();
+    replaceMock.mockReset();
+    currentUserRole.value = "member";
   });
 
   it("allows the timezone selector to wrap cleanly on mobile layouts", async () => {
@@ -104,6 +115,42 @@ describe("NewAutomationPage", () => {
     ).toContain(
       "Review the repository for concrete, actionable security risk",
     );
+  });
+
+  it("keeps the emoji selector small on the same row as the name field", async () => {
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await screen.findByDisplayValue("Security sweep");
+
+    const identityRow = screen.getByTestId("automation-identity-row");
+    expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
+    expect(screen.getByRole("button", { name: "Automation emoji" })).toHaveClass("w-16");
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
   });
 
   it("inserts selected @ mentions into the automation goal", async () => {
@@ -224,6 +271,16 @@ describe("NewAutomationPage", () => {
     expect(goalInput).toHaveValue("/review ");
   });
 
+  it("redirects builders away from the new automation form", async () => {
+    currentUserRole.value = "builder";
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(replaceMock).toHaveBeenCalledWith("/automations");
+    });
+  });
+
   it("submits the selected base branch from the branch picker", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
@@ -316,6 +373,72 @@ describe("NewAutomationPage", () => {
     });
   }, 20000);
 
+  it("submits pre-PR review disabled when the default agent does not support native review", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "gemini_cli" },
+        },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({ pre_pr_review_loops: 0 });
+    });
+  });
+
   it("submits a personal automation identity scope when selected", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
@@ -380,7 +503,7 @@ describe("NewAutomationPage", () => {
     await waitFor(() => {
       expect(requestBody).toMatchObject({ identity_scope: "personal" });
     });
-  });
+  }, 20000);
 
   it("submits an explicit reasoning override for supported automation agents", async () => {
     const user = userEvent.setup();

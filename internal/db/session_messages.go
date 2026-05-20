@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -19,6 +20,22 @@ func NewSessionMessageStore(db DBTX) *SessionMessageStore {
 }
 
 const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, created_at`
+
+const DefaultSessionMessageWindowLimit = 60
+const MaxSessionMessageWindowLimit = 200
+
+type SessionMessageWindowOptions struct {
+	BeforeID int64
+	Limit    int
+}
+
+type SessionMessageWindow struct {
+	Messages                 []models.SessionMessage
+	NextOlderCursor          string
+	HasOlder                 bool
+	LatestAssistantMessageID int64
+	LiveEdgeMessageID        int64
+}
 
 func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
 	query := `
@@ -84,4 +101,91 @@ func (s *SessionMessageStore) ListByThread(ctx context.Context, orgID, threadID 
 		return nil, fmt.Errorf("query thread messages: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
+}
+
+func (s *SessionMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts SessionMessageWindowOptions) (SessionMessageWindow, error) {
+	limit := normalizeSessionMessageWindowLimit(opts.Limit)
+	query := `
+		SELECT ` + sessionMessageSelectColumns + `
+		FROM session_messages
+		WHERE org_id = @org_id AND thread_id = @thread_id
+		  AND (@before_id::bigint = 0 OR id < @before_id)
+		ORDER BY id DESC
+		LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":    orgID,
+		"thread_id": threadID,
+		"before_id": opts.BeforeID,
+		"limit":     limit + 1,
+	})
+	if err != nil {
+		return SessionMessageWindow{}, fmt.Errorf("query thread message window: %w", err)
+	}
+	descMessages, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
+	if err != nil {
+		return SessionMessageWindow{}, fmt.Errorf("collect thread message window: %w", err)
+	}
+
+	hasOlder := len(descMessages) > limit
+	if hasOlder {
+		descMessages = descMessages[:limit]
+	}
+
+	window := SessionMessageWindow{HasOlder: hasOlder}
+	liveEdgeMessageID, latestAssistantMessageID, err := s.getThreadMessageAnchorMetadata(ctx, orgID, threadID)
+	if err != nil {
+		return SessionMessageWindow{}, err
+	}
+	window.LiveEdgeMessageID = liveEdgeMessageID
+	window.LatestAssistantMessageID = latestAssistantMessageID
+
+	messages := make([]models.SessionMessage, len(descMessages))
+	for i := range descMessages {
+		messages[len(descMessages)-1-i] = descMessages[i]
+	}
+	window.Messages = messages
+	if hasOlder && len(messages) > 0 {
+		window.NextOlderCursor = fmt.Sprintf("%d", messages[0].ID)
+	}
+
+	return window, nil
+}
+
+func (s *SessionMessageStore) getThreadMessageAnchorMetadata(ctx context.Context, orgID, threadID uuid.UUID) (int64, int64, error) {
+	query := `
+		SELECT
+			max(id) AS live_edge_message_id,
+			max(id) FILTER (WHERE role = 'assistant') AS latest_assistant_message_id
+		FROM session_messages
+		WHERE org_id = @org_id AND thread_id = @thread_id`
+
+	var liveEdge sql.NullInt64
+	var latestAssistant sql.NullInt64
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":    orgID,
+		"thread_id": threadID,
+	}).Scan(&liveEdge, &latestAssistant); err != nil {
+		return 0, 0, fmt.Errorf("query thread message anchor metadata: %w", err)
+	}
+
+	var liveEdgeID int64
+	if liveEdge.Valid {
+		liveEdgeID = liveEdge.Int64
+	}
+	var latestAssistantID int64
+	if latestAssistant.Valid {
+		latestAssistantID = latestAssistant.Int64
+	}
+	return liveEdgeID, latestAssistantID, nil
+}
+
+func normalizeSessionMessageWindowLimit(limit int) int {
+	if limit <= 0 {
+		return DefaultSessionMessageWindowLimit
+	}
+	if limit > MaxSessionMessageWindowLimit {
+		return MaxSessionMessageWindowLimit
+	}
+	return limit
 }

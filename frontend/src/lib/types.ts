@@ -48,6 +48,19 @@ export interface UserSettings {
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
 }
 
+export interface ThreadMessageWindowMeta {
+  next_older_cursor?: string;
+  has_older: boolean;
+  latest_assistant_message_id?: number;
+  live_edge_message_id?: number;
+  thread_status: string;
+}
+
+export interface ThreadMessageWindowResponse {
+  data: SessionMessage[];
+  meta: ThreadMessageWindowMeta;
+}
+
 export type UserSettingsUpdateRequest = UserSettings;
 
 export interface AuthProviders {
@@ -84,6 +97,10 @@ export interface Integration {
   org_id: string;
   provider: string;
   github_app_installed?: boolean;
+  github_installation_id?: number;
+  github_account_login?: string;
+  github_repo_selection_required?: boolean;
+  github_active_repo_count?: number;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -98,6 +115,46 @@ export interface Integration {
   status: string;
   last_synced_at?: string;
   created_at: string;
+}
+
+export type GitHubRepositoryClaimStatus =
+  | "unclaimed"
+  | "owned_by_current_org"
+  | "owned_by_other_org"
+  | "disconnected_in_current_org";
+
+export interface GitHubRepositoryClaimCandidate {
+  github_id: number;
+  full_name: string;
+  default_branch: string;
+  private: boolean;
+  clone_url: string;
+  installation_id: number;
+  status: GitHubRepositoryClaimStatus;
+  repository_id?: string;
+  owner_org_id?: string;
+  owner_org_name?: string;
+  can_transfer: boolean;
+}
+
+export interface LinearAgentStatus {
+  enabled: boolean;
+  agent_scopes_granted: boolean;
+  app_user_name?: string;
+  has_linear_integration: boolean;
+  default_repo_id?: string;
+}
+
+export interface LinearTeamRepoMapping {
+  id: string;
+  org_id: string;
+  linear_team_id: string;
+  linear_project_id?: string;
+  repository_id: string;
+  default_branch?: string;
+  priority: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Issue {
@@ -123,6 +180,80 @@ export interface Issue {
   complexity_label?: string;
   created_at: string;
   updated_at: string;
+}
+
+export type AutopilotRunState =
+  | 'not_started'
+  | 'queued'
+  | 'running'
+  | 'awaiting_input'
+  | 'needs_review'
+  | 'pr_open'
+  | 'merged'
+  | 'failed'
+  | 'skipped';
+
+export type AutopilotQueueAction =
+  | 'start_run'
+  | 'view_run'
+  | 'review'
+  | 'open_pr'
+  | 'retry'
+  | 'blocked';
+
+export interface AutopilotQueueRow {
+  id: string;
+  rank: number;
+  source: { type: string; key: string };
+  title: string;
+  repo?: { id: string; name: string };
+  issue_status: string;
+  customer_impact: { label: string; count: number };
+  implementation_ease: string;
+  low_hanging_fruit: {
+    label: string;
+    reasons: string[];
+    cluster_size: number;
+  };
+  display_run_state: AutopilotRunState;
+  latest_session?: {
+    id: string;
+    title: string;
+    updated_at: string;
+  };
+  latest_agent_run?: {
+    id: string;
+    status: string;
+    trigger_mode: 'auto' | 'manual';
+    started_at?: string;
+  };
+  latest_pr?: {
+    id: string;
+    number: number;
+    url: string;
+    status: string;
+    merged_at?: string;
+  };
+  available_action: AutopilotQueueAction;
+  action_disabled_reason?: string | null;
+}
+
+export interface AutopilotQueueSummary {
+  top_issue_id?: string;
+  autorunnable_count: number;
+  needs_review_count: number;
+  open_pr_count: number;
+  active_run_count: number;
+  ranked_issue_count: number;
+  analyzed_at?: string;
+}
+
+export interface AutopilotQueueResponse {
+  data: AutopilotQueueRow[];
+  meta: {
+    next_cursor?: string;
+    summary: AutopilotQueueSummary;
+  };
 }
 
 export interface Session {
@@ -164,8 +295,12 @@ export interface Session {
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_push_error?: string;
+  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_error?: string;
+  branch_url?: string;
   has_unpushed_changes?: boolean;
   target_branch?: string;
+  working_branch?: string;
   repository_id?: string;
   linked_issues?: Array<{
     id: string;
@@ -265,6 +400,54 @@ export interface SessionThreadFileEvent {
   observed_at: string;
 }
 
+export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
+export type ReviewLoopSource = 'manual' | 'automation';
+export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
+export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
+
+export interface SessionReviewLoop {
+  id: string;
+  org_id: string;
+  session_id: string;
+  automation_run_id?: string;
+  thread_id?: string;
+  status: ReviewLoopStatus;
+  source: ReviewLoopSource;
+  agent_type: string;
+  max_passes: number;
+  completed_passes: number;
+  review_required: boolean;
+  bypassed_by_user_id?: string;
+  bypass_reason?: string;
+  loop_start_checkpoint_key?: string;
+  latest_checkpoint_key?: string;
+  latest_summary?: string;
+  started_by_user_id?: string;
+  started_at: string;
+  completed_at?: string;
+  passes?: SessionReviewLoopPass[];
+}
+
+export interface SessionReviewLoopPass {
+  id: string;
+  org_id: string;
+  loop_id: string;
+  session_id: string;
+  pass_index: number;
+  review_message_id?: number;
+  decision_message_id?: number;
+  fix_message_id?: number;
+  status: ReviewLoopPassStatus;
+  agent_decision?: ReviewLoopDecision;
+  review_output?: string;
+  fix_summary?: string;
+  review_started_at?: string;
+  review_completed_at?: string;
+  fix_started_at?: string;
+  fix_completed_at?: string;
+  summary?: string;
+}
+
 export interface ForkResult {
   job_id: string;
 }
@@ -298,12 +481,13 @@ export interface SessionLog {
 }
 
 export interface SessionTimelineEntry {
-  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message';
+  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message' | 'human_input';
   created_at: string;
   message?: SessionMessage;
   log?: SessionLog;
   tool_use?: SessionLog;
   tool_result?: SessionLog;
+  human_input_request?: HumanInputRequest;
   turn_number?: number;
 }
 
@@ -375,6 +559,49 @@ export interface SessionQuestion {
   answered_at: string | null;
   answered_by: string | null;
   created_at: string;
+}
+
+export type HumanInputRequestKind = "free_text" | "single_choice" | "multi_choice" | "tool_approval" | "action_choice";
+export type HumanInputRequestStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded";
+
+export interface HumanInputChoice {
+  id: string;
+  label: string;
+  description?: string;
+  preview?: string;
+  kind?: string;
+  destructive?: boolean;
+}
+
+export interface HumanInputRequest {
+  id: string;
+  org_id: string;
+  session_id: string;
+  thread_id?: string | null;
+  turn_number: number;
+  agent_type: string;
+  provider_request_id?: string | null;
+  request_kind: HumanInputRequestKind;
+  status: HumanInputRequestStatus;
+  title: string;
+  body: string;
+  context?: string | null;
+  blocks_phase?: string | null;
+  choices: HumanInputChoice[];
+  response_schema?: unknown;
+  provider_payload?: unknown;
+  answer_text?: string | null;
+  answer_payload?: unknown;
+  answered_by?: string | null;
+  answered_at?: string | null;
+  expires_at?: string | null;
+  created_at: string;
+}
+
+export interface HumanInputAnswerBody {
+  answer_text?: string;
+  selected_choice_ids?: string[];
+  answer_payload?: unknown;
 }
 
 export interface PullRequest {
@@ -544,6 +771,9 @@ export interface OrgSettings {
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
+  builder_permissions?: {
+    require_review_before_pr?: boolean;
+  };
 }
 
 export interface ProductContext {
@@ -749,6 +979,7 @@ export interface InvitationResponse {
   id: string;
   email?: string | null;
   github_username?: string | null;
+  acceptance_method: 'email' | 'github' | 'either';
   role: string;
   status: string;
   invited_by: {
@@ -830,6 +1061,8 @@ export interface CodingAuth {
   status: CodingAuthStatus;
   is_default: boolean;
   last_verified_at?: string;
+  rate_limited_until?: string;
+  rate_limit_message?: string;
   last_used_at?: string;
   usage_note?: string;
   created_by?: string;
@@ -859,6 +1092,8 @@ export interface CodingCredentialSummary {
   is_default: boolean;
   usage_note?: string;
   last_verified_at?: string;
+  rate_limited_until?: string;
+  rate_limit_message?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -1349,6 +1584,11 @@ export interface UsageTimeseriesBucket {
   user_id?: string;
   user_name?: string;
   capacity_tier?: string;
+  agent_type?: string;
+  model_used?: string;
+  reasoning_effort?: string;
+  series_key?: string;
+  series_label?: string;
   total_container_minutes: number;
   total_sessions: number;
   total_container_starts: number;
@@ -1357,6 +1597,7 @@ export interface UsageTimeseriesBucket {
   p95_duration_sec: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
 }
 
@@ -1375,8 +1616,12 @@ export interface UsageBreakdownRow {
   peak_concurrent: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_tokens: number;
   total_llm_cost_usd: number;
   percentage: number;
+  share_of_sessions?: number;
+  share_of_token_cost?: number;
+  share_of_tokens?: number;
 }
 
 // Automation types
@@ -1391,6 +1636,8 @@ export interface Automation {
   name: string;
   goal: string;
   scope?: string;
+  icon_type: 'emoji';
+  icon_value: string;
   agent_type?: string;
   model_override?: string;
   reasoning_effort?: Session["reasoning_effort"];
@@ -1398,6 +1645,7 @@ export interface Automation {
   max_concurrent: number;
   base_branch: string;
   identity_scope: AutomationIdentityScope;
+  pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';

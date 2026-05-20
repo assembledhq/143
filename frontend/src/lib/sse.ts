@@ -82,6 +82,10 @@ export const SSE_EVENT = {
   STATUS: "status",
   /** Sent when the session reaches a terminal status, carries a Session object. */
   DONE: "done",
+  /** Sent when an agent creates a durable human-input request. */
+  HUMAN_INPUT_CREATED: "session_human_input.created",
+  /** Sent when a durable human-input request is answered or cancelled. */
+  HUMAN_INPUT_UPDATED: "session_human_input.updated",
   /** Sent when a pull request health snapshot is updated. */
   PULL_REQUEST_UPDATED: "pull_request.updated",
   /** Sent when an eval batch or one of its runs changes state. */
@@ -97,6 +101,8 @@ export interface SSEEventPayloads {
   [SSE_EVENT.LOG]: SessionLog;
   [SSE_EVENT.STATUS]: Session;
   [SSE_EVENT.DONE]: Session;
+  [SSE_EVENT.HUMAN_INPUT_CREATED]: SessionLog;
+  [SSE_EVENT.HUMAN_INPUT_UPDATED]: SessionLog;
   [SSE_EVENT.PULL_REQUEST_UPDATED]: PullRequestUpdatedEvent;
   [SSE_EVENT.EVAL_BATCH_UPDATED]: EvalBatchUpdatedEvent;
   [SSE_EVENT.EVAL_BOOTSTRAP_UPDATED]: EvalBootstrapUpdatedEvent;

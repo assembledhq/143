@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,8 +15,80 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
+
+func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "orchestrator.go should be readable for lifecycle ordering regression test")
+
+	body := string(src)
+	runStart := strings.Index(body, "func (o *Orchestrator) RunAgent(")
+	continueStart := strings.Index(body, "func (o *Orchestrator) ContinueSession(")
+	require.NotEqual(t, -1, runStart, "RunAgent should exist")
+	require.NotEqual(t, -1, continueStart, "ContinueSession should exist")
+	require.Less(t, runStart, continueStart, "RunAgent should appear before ContinueSession in orchestrator.go")
+
+	runBody := body[runStart:continueStart]
+	hold := strings.Index(runBody, "o.sessions.AcquireTurnHold")
+	usage := strings.Index(runBody, "o.usageTracker.ContainerStarted")
+	require.NotEqual(t, -1, hold, "RunAgent should publish the turn hold")
+	require.NotEqual(t, -1, usage, "RunAgent should record container usage")
+	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
+}
+
+func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	reader := &blockingMentionIndexFileReader{release: release}
+	o := &Orchestrator{
+		fileReader:     reader,
+		mentionIndexes: workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{}),
+	}
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	liveSandbox := &Sandbox{ID: "container-1", WorkDir: "/workspace"}
+
+	done := make(chan struct{})
+	go func() {
+		o.warmMentionIndexFromSandboxAsync(context.Background(), session, liveSandbox, "snapshot-1", zerolog.Nop())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(25 * time.Millisecond):
+		close(release)
+		require.Fail(t, "async mention-index warmup should return before the workspace traversal completes")
+		return
+	}
+	close(release)
+}
+
+type blockingMentionIndexFileReader struct {
+	release chan struct{}
+}
+
+func (r *blockingMentionIndexFileReader) ListDir(ctx context.Context, _, _, _ string) ([]sandbox.FileEntry, error) {
+	select {
+	case <-r.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (r *blockingMentionIndexFileReader) ReadFile(context.Context, string, string, string) (string, bool, error) {
+	return "", false, errors.New("not used")
+}
+
+func (r *blockingMentionIndexFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
+	return sandbox.FileContextResult{}, errors.New("not used")
+}
 
 type testInternalSessionLogStore struct {
 	logs             []models.SessionLog
@@ -824,7 +898,7 @@ func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, &threadID, 2, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, &threadID, 2, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
 	require.NotNil(t, logs.logs[0].ThreadID, "persisted log should preserve the thread id")
@@ -855,7 +929,7 @@ func TestStreamLogs_PersistsMetadataAsJSON(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, nil, 1, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, nil, 1, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should persist the log entry")
 	require.NotNil(t, logs.logs[0].Metadata, "non-nil metadata should be marshaled and persisted")
@@ -885,10 +959,40 @@ func TestStreamLogs_DropsUnmarshalableMetadata(t *testing.T) {
 	}
 	close(logCh)
 
-	orch.streamLogs(context.Background(), sessionID, orgID, nil, 1, logCh, nil)
+	orch.streamLogs(context.Background(), sessionID, orgID, models.AgentTypeClaudeCode, nil, 1, logCh, nil)
 
 	require.Len(t, logs.logs, 1, "streamLogs should still persist the log entry when metadata fails to marshal")
 	require.Nil(t, logs.logs[0].Metadata, "unmarshalable metadata should be dropped to nil rather than blocking the log")
+}
+
+func TestHumanInputRequestFromQuestionLog(t *testing.T) {
+	t.Parallel()
+
+	req := humanInputRequestFromQuestionLog(LogEntry{
+		Level:   "question",
+		Message: "Which approach should Claude use?",
+		Metadata: map[string]interface{}{
+			"title":        "Choose approach",
+			"context":      "Migration touches settings.",
+			"blocks_phase": "implementation",
+			"options": []interface{}{
+				map[string]interface{}{"label": "Reuse table", "description": "Keep the current schema."},
+				"Create table",
+			},
+		},
+	})
+
+	require.Equal(t, models.HumanInputRequestKindFreeText, req.Kind, "legacy question logs should remain free-text compatible")
+	require.Equal(t, "Choose approach", req.Title, "metadata title should become request title")
+	require.Equal(t, "Which approach should Claude use?", req.Body, "log message should become request body")
+	require.NotNil(t, req.Context, "metadata context should be preserved")
+	require.Equal(t, "Migration touches settings.", *req.Context, "metadata context should round-trip")
+	require.NotNil(t, req.BlocksPhase, "metadata phase should be preserved")
+	require.Equal(t, "implementation", *req.BlocksPhase, "metadata phase should round-trip")
+	require.Equal(t, []models.HumanInputChoice{
+		{ID: "reuse-table", Label: "Reuse table", Description: "Keep the current schema."},
+		{ID: "create-table", Label: "Create table"},
+	}, req.Choices, "metadata options should become normalized choice rows")
 }
 
 func TestPrepareSandboxGitHubAuth_LegacyAddsCoAuthorTrailer(t *testing.T) {

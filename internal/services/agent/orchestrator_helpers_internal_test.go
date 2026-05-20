@@ -3,16 +3,33 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecoverSessionLogsCheckpointRecoveryDecisionFields(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "test should read orchestrator.go")
+
+	src := string(body)
+	require.Contains(t, src, `Bool("checkpoint_available", false)`, "no-checkpoint recovery logs should expose checkpoint availability")
+	require.Contains(t, src, `Bool("checkpoint_available", true)`, "checkpoint recovery logs should expose checkpoint availability")
+	require.Contains(t, src, `Bool("restart_from_scratch", true)`, "no-checkpoint recovery logs should expose restart-from-scratch decisions")
+	require.Contains(t, src, `Bool("restart_from_scratch", false)`, "checkpoint recovery logs should expose restart-from-scratch decisions")
+	require.Contains(t, src, `Str("checkpoint_capability", string(session.CheckpointCapability))`, "recovery logs should expose checkpoint capability")
+}
 
 type helperSessionIssueLinkStore struct {
 	links []models.SessionIssueLink
@@ -191,10 +208,10 @@ func TestUnprocessedUserMessages_NoMessages(t *testing.T) {
 func TestDrainAcceptableStatus(t *testing.T) {
 	t.Parallel()
 
-	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance"} {
+	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance", "completed", "failed", "cancelled", "pr_created"} {
 		require.True(t, drainAcceptableStatus(status), "status %q should accept a drain enqueue", status)
 	}
-	for _, status := range []string{"completed", "failed", "cancelled", "skipped", "pr_created", "pending", ""} {
+	for _, status := range []string{"skipped", "pending", ""} {
 		require.False(t, drainAcceptableStatus(status), "status %q should not accept a drain enqueue", status)
 	}
 }
@@ -700,10 +717,16 @@ func (s *snapshotSessionStubProvider) ExecStream(context.Context, *Sandbox, stri
 // snapshotSessionRecordingStore is a SnapshotStore that records every
 // Save call so tests can assert that we did NOT save a corrupt archive.
 type snapshotSessionRecordingStore struct {
-	saves []string
+	saves     []string
+	saveCalls int
+	saveFn    func(ctx context.Context, key string, reader io.Reader) error
 }
 
 func (s *snapshotSessionRecordingStore) Save(ctx context.Context, key string, reader io.Reader) error {
+	s.saveCalls++
+	if s.saveFn != nil {
+		return s.saveFn(ctx, key, reader)
+	}
 	if _, err := io.Copy(io.Discard, reader); err != nil {
 		return err
 	}
@@ -768,6 +791,90 @@ func TestSnapshotSessionOnTurnSuccess_SnapshotsWhenAgentExitedClean(t *testing.T
 	require.NotNil(t, session.SnapshotKey)
 	require.Equal(t, key, *session.SnapshotKey)
 	require.Equal(t, int64(len("archive-bytes")), size)
+}
+
+func TestSnapshotSessionOnTurnSuccess_LogsSnapshotSize(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("archive-bytes"))), nil
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	var logs bytes.Buffer
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.New(&logs),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	result := &AgentResult{ExitCode: 0}
+
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, &Sandbox{ID: "sandbox-1"}, result, zerolog.Nop())
+	require.NoError(t, err, "snapshotSessionOnTurnSuccess should save the clean snapshot")
+	require.Equal(t, int64(len("archive-bytes")), size, "snapshotSessionOnTurnSuccess should report the exact archive size")
+
+	var event struct {
+		Message           string `json:"message"`
+		SessionID         string `json:"session_id"`
+		OrgID             string `json:"org_id"`
+		SnapshotKey       string `json:"snapshot_key"`
+		SnapshotSizeBytes int64  `json:"snapshot_size_bytes"`
+	}
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "snapshot success log should be valid JSON")
+	require.Equal(t, "session snapshot saved", event.Message, "snapshot success log should use the dashboard event name")
+	require.Equal(t, session.ID.String(), event.SessionID, "snapshot success log should include the session id")
+	require.Equal(t, session.OrgID.String(), event.OrgID, "snapshot success log should include the org id")
+	require.Equal(t, key, event.SnapshotKey, "snapshot success log should include the saved object key")
+	require.Equal(t, size, event.SnapshotSizeBytes, "snapshot success log should expose the exact byte count for Grafana")
+}
+
+func TestSnapshotSessionOnTurnSuccess_RetriesGitPackChurnSnapshotFailures(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("archive-bytes"))), nil
+		},
+	}
+	attempts := 0
+	var store *snapshotSessionRecordingStore
+	store = &snapshotSessionRecordingStore{
+		saveFn: func(ctx context.Context, key string, reader io.Reader) error {
+			if _, err := io.Copy(io.Discard, reader); err != nil {
+				return err
+			}
+			attempts++
+			if attempts < 3 {
+				return errors.New(
+					"buffer snapshot snapshots/org/session/workspace.tar.zst: snapshot tar exited with code 1: " +
+						"tar: home/sandbox/143/.git/objects/pack/pack-123.pack: File removed before we read it",
+				)
+			}
+			store.saves = append(store.saves, key)
+			return nil
+		},
+	}
+	o := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	sandbox := &Sandbox{ID: "sandbox-1"}
+	result := &AgentResult{ExitCode: 0}
+
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, sandbox, result, zerolog.Nop())
+	require.NoError(t, err, "retryable git pack churn should not abort the turn snapshot")
+	require.Equal(t, 3, provider.calls(), "each retry should rebuild the snapshot from a fresh provider stream")
+	require.Equal(t, 3, store.saveCalls, "storage save should be retried for the recognized tar churn signature")
+	require.Equal(t, []string{key}, store.saves, "the snapshot should eventually persist after the retryable churn clears")
+	require.NotNil(t, session.SnapshotKey, "successful retry should still advance the session snapshot key")
+	require.Equal(t, key, *session.SnapshotKey)
+	require.Equal(t, int64(len("archive-bytes")), size, "successful attempt should report the final archive size")
 }
 
 func TestSnapshotSessionOnTurnSuccess_PassesNilResultThrough(t *testing.T) {
@@ -900,9 +1007,23 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 		{
 			name:             "codex api key rate limit error sheds rate limited",
 			agentType:        models.AgentTypeCodex,
-			result:           &AgentResult{Error: "rate limit hit"},
+			result:           &AgentResult{Error: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:50 AM."},
 			wantRateLimited:  true,
 			wantAuthRejected: false,
+		},
+		{
+			name:             "gemini quota error sheds rate limited",
+			agentType:        models.AgentTypeGeminiCLI,
+			result:           &AgentResult{Error: "quota exceeded: retry-after=90"},
+			wantRateLimited:  true,
+			wantAuthRejected: false,
+		},
+		{
+			name:             "amp invalid token sheds auth rejected",
+			agentType:        models.AgentTypeAmp,
+			result:           &AgentResult{Error: "401 Unauthorized: invalid token"},
+			wantRateLimited:  false,
+			wantAuthRejected: true,
 		},
 		{
 			name:             "nil result is a silent no-op",
@@ -948,7 +1069,7 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 			}
 
 			o := &Orchestrator{env: env, logger: zerolog.Nop()}
-			o.shedOnRunResult(tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
+			o.shedOnRunResult(context.Background(), tc.agentType, orgID, &userID, tc.result, tc.runErr, zerolog.Nop())
 
 			require.Equal(t, tc.wantRateLimited, len(coding.rateLimitedIDs) > 0,
 				"rate-limit shedding state mismatch for %q", tc.name)
@@ -1000,6 +1121,8 @@ func TestIsRateLimitedError(t *testing.T) {
 		{"snake-case rate_limit code", `{"code":"rate_limit_exceeded"}`, true},
 		{"http 429 status", "got status 429 from upstream", true},
 		{"too many requests phrase", "Error: too many requests; retry later", true},
+		{"quota exceeded phrase", "quota exceeded for this account", true},
+		{"codex usage limit phrase", "you've hit your usage limit. try again at 8:50 am.", true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -1024,9 +1147,14 @@ func TestIsAuthRejectedError(t *testing.T) {
 		{"empty string is not auth rejected", "", false},
 		{"unrelated error is not auth rejected", "context canceled", false},
 		{"refresh token reused", `error code: refresh_token_reused`, true},
+		{"codex token revoked", `auth error code: token_revoked`, true},
+		{"codex token invalidated", `auth error code: token_invalidated`, true},
+		{"codex access refresh failed", "your access token could not be refreshed because you have since logged out", true},
 		{"invalid grant", `oauth: invalid_grant`, true},
 		{"invalid api key human form", "the provider returned: invalid api key", true},
 		{"invalid api key snake-case", `{"error":"invalid_api_key"}`, true},
+		{"invalid token with auth context", "401 unauthorized: provider returned invalid token", true},
+		{"invalid token count is not auth rejected", "invalid token count for request", false},
 		{"401 unauthorized", "received 401 unauthorized from upstream", true},
 		{"401 unauthenticated", "401 unauthenticated: token expired and refresh failed", true},
 		{"authentication_error code", `{"type":"authentication_error"}`, true},
@@ -1036,6 +1164,38 @@ func TestIsAuthRejectedError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, isAuthRejectedError(tc.in))
+		})
+	}
+}
+
+func TestParseCredentialFailureSignalRateLimitMetadata(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 13, 8, 0, 0, 0, time.Local)
+	cases := []struct {
+		name      string
+		errorText string
+		wantUntil time.Time
+	}{
+		{
+			name:      "retry after seconds",
+			errorText: "quota exceeded retry-after=90",
+			wantUntil: now.Add(90 * time.Second),
+		},
+		{
+			name:      "codex try again wall clock",
+			errorText: "You've hit your usage limit. try again at 8:50 AM.",
+			wantUntil: time.Date(now.Year(), now.Month(), now.Day(), 8, 50, 0, 0, now.Location()),
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			signal := parseCredentialFailureSignal(&AgentResult{Error: tc.errorText}, now)
+			require.True(t, signal.RateLimited, "signal should classify rate limits")
+			require.Equal(t, tc.wantUntil, signal.RateLimitedUntil, "signal should preserve reset metadata")
+			require.Equal(t, tc.errorText, signal.Message, "signal should preserve the original message")
 		})
 	}
 }

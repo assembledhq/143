@@ -114,7 +114,7 @@ var sessionColumnsForFiles = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -202,6 +202,9 @@ func setupSessionMockFull(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID,
 				(*string)(nil), // pr_creation_error
 				"idle",         // pr_push_state
 				(*string)(nil), // pr_push_error
+				"idle",         // branch_creation_state
+				(*string)(nil), // branch_creation_error
+				(*string)(nil), // branch_url
 				nil,            // diff_collected_at
 				nil,            // latest_diff_snapshot_id
 				false,          // has_unpushed_changes
@@ -645,6 +648,51 @@ func TestSessionFileHandler_SnapshotFallback(t *testing.T) {
 		require.Len(t, resp.Data.Lines, 3)
 
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("prefers the live container when both a container and snapshot are available", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		containerID := "container-live"
+		key := snapshotKey
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, &containerID, &key)
+
+		cache := stageSnapshotForHandlerTest(t, key, "workspace", map[string]string{
+			"src/main.go": "snapshot-body",
+		})
+
+		handler := newTestSessionFileHandlerWithCache(t, mock, &mockFileReader{
+			readContextFn: func(_ context.Context, gotContainerID, _, filePath string, _, _, _ int) (sandbox.FileContextResult, error) {
+				require.Equal(t, containerID, gotContainerID, "file browsing should prefer the live container when it exists")
+				require.Equal(t, "src/main.go", filePath, "file browsing should request the same path from the live container")
+				return sandbox.FileContextResult{
+					Lines:      []sandbox.FileLine{{Number: 1, Content: "live-body"}},
+					StartLine:  1,
+					EndLine:    1,
+					TotalLines: 1,
+				}, nil
+			},
+		}, cache)
+
+		url := fmt.Sprintf("/api/v1/sessions/%s/files/context?path=src/main.go&line=1", sessionID)
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+
+		w := httptest.NewRecorder()
+		withSessionRoute(handler.GetFileContext).ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "live container reads should win over stale snapshots")
+
+		var resp models.SingleResponse[sandbox.FileContextResult]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err, "response should decode")
+		require.Equal(t, []sandbox.FileLine{{Number: 1, Content: "live-body"}}, resp.Data.Lines, "file browsing should return live workspace content when both sources exist")
+		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
 	})
 
 	t.Run("GetFileContent serves from snapshot", func(t *testing.T) {

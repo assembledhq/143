@@ -2,6 +2,8 @@
 
 A preview is a live, iframed view of your app running inside a 143 session. When an agent edits your frontend, you see the result next to the diff instead of having to pull the branch locally.
 
+This guide is specifically about the `preview` section inside `.143/config.json`. For the repo-level file overview, including `bootstrap` and `validation`, see [Repo config](./repo-config.md).
+
 This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/implemented/44-sandbox-preview-server.md`](design/implemented/44-sandbox-preview-server.md).
 
 ## Dogfood preview
@@ -14,10 +16,18 @@ This guide covers how to add preview support to a repo. For the underlying archi
 2. Open a session against the 143 repo (or anything on `main`).
 3. Click **Start Preview**.
 
-**Demo credentials** (shown on the login page when `DEMO_MODE=true`):
+**Demo credentials** (the admin login is shown on the login page when `DEMO_MODE=true`):
 
-- Email: `dogfood@143.dev`
-- Password: `preview-dogfood`
+- Email: `preview-admin@143.dev`
+- Password: `preview`
+
+Additional seeded users use the same password:
+
+| Email | Role |
+|---|---|
+| `preview-member@143.dev` | `member` |
+| `preview-builder@143.dev` | `builder` |
+| `preview-viewer@143.dev` | `viewer` |
 
 The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed.sql`). If you override those env vars, regenerate the bcrypt hash in `seed.sql` in lockstep or the banner will point at credentials that don't log in.
 
@@ -34,6 +44,8 @@ The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was starte
 The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
 
 Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables the login-page credential banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
+
+The dogfood frontend runs as a production Next build inside the preview (`npm run build`, then the generated standalone server). The launch script stages `.next/static` and `public` into the standalone output before booting so generated CSS, JavaScript chunks, fonts, and public images are served by the production server. Avoid `next dev` here: its HMR stream is not useful for reviewers and can interact badly with the preview gateway's HTML instrumentation on App Router pages.
 
 **How the dogfood handles `SESSION_SECRET`:** The preview runs inside a 143 session sandbox, which has no access to sops-encrypted production secrets, so the secret is generated at boot from `/dev/urandom` and cached at `/tmp/143-preview/session_secret`. Server restarts within the same sandbox reuse the cached value, so a reviewer stays signed in. A full sandbox recycle generates a fresh secret — reviewers just re-sign-in with the public demo credentials.
 
@@ -81,12 +93,46 @@ Services share the sandbox's filesystem and `localhost` network namespace, so th
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `preview.name` | yes | Human label shown in the UI |
-| `preview.primary` | yes | Key from `preview.services` that the gateway proxies browser traffic to |
-| `preview.services` | yes | Map of service name → [service config](#services) |
+| `preview.version` | no | Optional version marker. |
+| `preview.name` | no | Human label shown in the UI. Recommended. |
+| `preview.primary` | yes for multi-service | Key from `preview.services` that the gateway proxies browser traffic to. |
+| `preview.services` | yes for multi-service | Map of service name → [service config](#services). |
 | `preview.infrastructure` | no | Map of infra name → [infrastructure config](#infrastructure). Max 2. |
 | `preview.credentials` | yes | [Credential config](#credentials). Use `{"mode": "none"}` if no secrets needed. |
 | `preview.network` | yes | [Network config](#network). Use `{"mode": "managed"}` for the default sandbox egress policy. |
+| `preview.progressive` | no | When `true`, a multi-service preview can become partially ready as soon as the primary service is ready. |
+| `preview.command` | yes for single-service | Single-service shorthand only. |
+| `preview.cwd` | no | Single-service shorthand only. |
+| `preview.port` | yes for single-service | Single-service shorthand only. |
+| `preview.env` | no | Single-service shorthand only. |
+| `preview.ready` | no | Single-service shorthand only. Defaults to `/` and `90` seconds when omitted. |
+
+143 supports two valid preview shapes:
+
+- single-service shorthand using top-level `command` / `port` / `ready`
+- multi-service config using `primary` + `services`
+
+Do not mix both shapes in the same config.
+
+### Single-service shorthand
+
+This is valid when your preview is just one service:
+
+```json
+{
+  "preview": {
+    "name": "frontend",
+    "command": ["npm", "run", "dev"],
+    "cwd": "frontend",
+    "port": 3000,
+    "ready": { "http_path": "/" },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  }
+}
+```
+
+143 normalizes this internally into a single-entry `services` map.
 
 ### Services
 
@@ -236,6 +282,12 @@ Any service using a destination or `credentials.mode != "none"` makes the previe
 
 The frontend proxies `/api/*` to the server at `localhost:8080`. The server gets `DATABASE_URL` injected and uses a shell `command` to chain `migrate` then `server` — the ready probe only passes once `server` is listening, so ordering is enforced naturally.
 
+For production preview domains such as `<preview-id>.preview.143.dev`, the public wildcard DNS must resolve to the app node and the edge proxy must be able to obtain a wildcard certificate. In 143's production setup that means:
+
+1. `*.preview.<your-domain>` points at the app node that runs Caddy.
+2. `PREVIEW_ORIGIN_TEMPLATE` is set to `https://{id}.preview.<your-domain>`.
+3. Caddy is built with a DNS provider plugin and the wildcard host uses the ACME DNS challenge. For Cloudflare, provide a scoped API token with `Zone:Read` and `DNS:Edit` on the zone and set `CLOUDFLARE_API_TOKEN` in the app host env bundle.
+
 ## Platform-Injected Env
 
 Every service receives:
@@ -299,4 +351,4 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 
 **Does the preview use my production secrets?** No. Secrets come from admin-configured credential sets, never from the repo or agent. Without a `credentials` block, the preview has no secrets at all.
 
-**What if my app needs to know its public URL?** For most frameworks, relative URLs work — the preview gateway rewrites traffic transparently. If your app needs an absolute origin (e.g., OAuth callbacks), set it via `env` in the service config. Passing the dynamic preview URL through is planned but not yet implemented.
+**What if my app needs to know its public URL?** For most frameworks, relative URLs work. When an app needs an absolute origin, use the platform-injected `PREVIEW_ORIGIN` env var as the external base URL for the preview so redirects and absolute links resolve back to the isolated preview host instead of `localhost`.

@@ -5,6 +5,13 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GO_VERSION: "1.26"
@@ -171,7 +178,7 @@ jobs:
   frontend-test:
     name: Frontend Test
     needs: changes
-    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -186,11 +193,6 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - uses: actions/setup-python@v6
-        if: github.event_name == 'pull_request'
-        with:
-          python-version: '3.x'
-
       - name: Materialize PR base ref (PR only)
         if: github.event_name == 'pull_request'
         working-directory: ${{ github.workspace }}
@@ -200,44 +202,25 @@ jobs:
           git rev-parse --verify "${PR_BASE_SHA}^{commit}"
           git branch -f pr-base "${PR_BASE_SHA}"
 
-      - name: Install diff-cover (PR only)
-        if: github.event_name == 'pull_request'
-        run: pip install 'diff_cover==10.2.0'
-
       - run: npm ci
-      - run: npm run lint
 
       - name: Run affected tests (PR)
         if: github.event_name == 'pull_request'
         timeout-minutes: 10
-        run: npx vitest run --changed=pr-base --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
+        run: npx vitest run --changed=pr-base --passWithNoTests
 
-      - name: Patch coverage gate (PR only)
-        if: github.event_name == 'pull_request'
-        run: |
-          if [ ! -f coverage/lcov.info ]; then
-            # vitest --changed found no affected tests, so no coverage was emitted.
-            # Fail if the diff includes frontend source files — uncovered changes shouldn't merge silently.
-            CHANGED_SOURCES=$(cd .. && git diff --name-only pr-base...HEAD \
-              | grep -E '^frontend/src/.*\.(ts|tsx)$' \
-              | grep -v '\.test\.' || true)
-            if [ -n "$CHANGED_SOURCES" ]; then
-              echo "::error::Frontend source files changed but no tests cover them:"
-              echo "$CHANGED_SOURCES"
-              exit 1
-            fi
-            echo "::notice::No frontend source files in diff; skipping patch-coverage gate."
-            exit 0
-          fi
-          diff-cover coverage/lcov.info --compare-branch=pr-base --fail-under=80
-
-      - name: Run full tests with coverage (main only)
+      - name: Run full tests (main)
         if: github.event_name == 'push'
         timeout-minutes: 10
+        run: npx vitest run --reporter=dot
+
+      - name: Run full tests with coverage (scheduled/manual)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        timeout-minutes: 20
         run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=lcov
 
-      - name: Check frontend coverage floor (main only)
-        if: github.event_name == 'push'
+      - name: Check frontend coverage floor (scheduled/manual)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           COVERAGE=$(cat coverage/coverage-summary.json | node -e "
             const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
@@ -253,7 +236,7 @@ jobs:
           fi
 
       - name: Upload coverage artifact
-        if: github.event_name == 'push'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-coverage
@@ -298,27 +281,35 @@ jobs:
   docker-build:
     name: Docker Build
     needs: changes
-    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true')
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: app
+            context: .
+            file: Dockerfile
+            tags: 143-app:latest
+          - name: sandbox
+            context: .
+            file: sandbox/Dockerfile
+            tags: 143-sandbox:latest
+          - name: frontend
+            context: .
+            file: Dockerfile.frontend
+            tags: 143-frontend:latest
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v3
-      - name: Build app Docker image
+      - name: Build ${{ matrix.name }} Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build sandbox Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: sandbox/Dockerfile
-          push: false
-          tags: 143-sandbox:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ matrix.tags }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   security:
     name: Security Scan

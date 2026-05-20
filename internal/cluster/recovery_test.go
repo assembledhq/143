@@ -26,6 +26,16 @@ func (s *recoveryJobStoreStub) ReclaimLostRunningJobs(ctx context.Context, stale
 	return s.reclaimFn(ctx, staleBefore, limit)
 }
 
+type recoverySessionExecutorStoreStub struct {
+	calls     int
+	reclaimFn func(ctx context.Context, staleBefore time.Time, limit int) (int64, error)
+}
+
+func (s *recoverySessionExecutorStoreStub) ReclaimLost(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+	s.calls++
+	return s.reclaimFn(ctx, staleBefore, limit)
+}
+
 func TestRecoveryLoop_RunOnce(t *testing.T) {
 	t.Parallel()
 
@@ -95,6 +105,39 @@ func TestRecoveryLoop_RunOnce(t *testing.T) {
 			require.NoError(t, err, "runOnce should not return an error")
 		})
 	}
+}
+
+func TestRecoveryLoop_ReclaimsLostSessionExecutorsBeforeJobs(t *testing.T) {
+	t.Parallel()
+
+	order := []string{}
+	nodes := &recoveryNodeStoreStub{
+		markDeadFn: func(ctx context.Context, staleBefore time.Time) (int64, error) {
+			order = append(order, "nodes")
+			return 1, nil
+		},
+	}
+	executors := &recoverySessionExecutorStoreStub{
+		reclaimFn: func(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+			order = append(order, "executors")
+			require.Equal(t, 100, limit, "executor reclaim should use the recovery batch size")
+			return 2, nil
+		},
+	}
+	jobs := &recoveryJobStoreStub{
+		reclaimFn: func(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+			order = append(order, "jobs")
+			return 3, nil
+		},
+	}
+
+	loop := NewRecoveryLoop(nodes, jobs, zerolog.Nop(), 90*time.Second, 100)
+	loop.SetSessionExecutors(executors)
+
+	err := loop.runOnce(context.Background(), time.Now())
+	require.NoError(t, err, "runOnce should reclaim stale executors")
+	require.Equal(t, []string{"nodes", "executors", "jobs"}, order, "executor reclaim should run before generic job reclaim")
+	require.Equal(t, 1, executors.calls, "runOnce should invoke executor reclaim once")
 }
 
 func TestRecoveryLoop_Start_StopsOnCancelAfterTick(t *testing.T) {

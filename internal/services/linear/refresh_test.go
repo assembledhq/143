@@ -746,6 +746,18 @@ func (f *fakeRetryClient) IssueRecentHumanEdits(context.Context, string, time.Ti
 func (f *fakeRetryClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
 	panic("not used in retry tests")
 }
+func (f *fakeRetryClient) AgentActivityCreate(context.Context, AgentActivityInput) (AgentActivityResult, error) {
+	panic("not used in retry tests")
+}
+func (f *fakeRetryClient) AgentSessionUpdate(context.Context, AgentSessionUpdateInput) error {
+	panic("not used in retry tests")
+}
+func (f *fakeRetryClient) AgentSessionGet(context.Context, string) (*FetchedAgentSession, error) {
+	panic("not used in retry tests")
+}
+func (f *fakeRetryClient) FetchComment(context.Context, string) (*FetchedComment, error) {
+	panic("not used in retry tests")
+}
 
 // TestMergeRefreshedConfig_PreservesMetadataAndRotatesAuth pins the
 // merge contract that the rest of the refresh flow depends on:

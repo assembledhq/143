@@ -45,6 +45,10 @@ func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
 // This is a constant interpolated via fmt.Sprintf — safe because it is never user input.
 const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy')`
 
+// terminalStatusFilter is the SQL IN clause for preview statuses that can be
+// shown as the most recent preview history when no active preview exists.
+const terminalStatusFilter = `('stopped', 'expired', 'failed')`
+
 // --- Column lists ---
 
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
@@ -158,6 +162,78 @@ func (s *PreviewStore) GetActivePreviewForSession(ctx context.Context, orgID, se
 		return nil, fmt.Errorf("get active preview: %w", err)
 	}
 	return &row, nil
+}
+
+// GetLatestFailedPreviewForSession returns the failed preview only when it is
+// the newest preview row for the session. This keeps async startup failures
+// visible without resurrecting stale failures after a later successful preview
+// has been stopped.
+func (s *PreviewStore) GetLatestFailedPreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE org_id = @org_id AND session_id = @session_id
+		AND status = 'failed'
+		AND NOT EXISTS (
+			SELECT 1 FROM preview_instances newer
+			WHERE newer.org_id = @org_id
+			  AND newer.session_id = @session_id
+			  AND newer.created_at > preview_instances.created_at
+		)
+		ORDER BY created_at DESC
+		LIMIT 1`, previewInstanceColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query latest failed preview: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get latest failed preview: %w", err)
+	}
+	return &row, nil
+}
+
+// GetLatestTerminalPreviewForSession returns the newest inactive preview row
+// for a session so the UI can show when the last preview ran and stopped.
+func (s *PreviewStore) GetLatestTerminalPreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE org_id = @org_id AND session_id = @session_id
+		AND status IN %s
+		ORDER BY created_at DESC
+		LIMIT 1`, previewInstanceColumns, terminalStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query latest terminal preview: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get latest terminal preview: %w", err)
+	}
+	return &row, nil
+}
+
+// UpdatePreviewWorkerNodeID reassigns a starting preview to the worker that
+// claimed its pinned job after the originally targeted worker was declared
+// dead.
+func (s *PreviewStore) UpdatePreviewWorkerNodeID(ctx context.Context, orgID, id uuid.UUID, workerNodeID string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET worker_node_id = @worker_node_id, updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = 'starting'`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "worker_node_id": workerNodeID},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview worker node: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found or no longer starting")
+	}
+	return nil
 }
 
 // UpdatePreviewStatus updates the status and optional error of a preview.
@@ -776,7 +852,16 @@ func (s *PreviewStore) CreatePreviewService(ctx context.Context, svc *models.Pre
 			preview_instance_id, service_name, role, status, command, cwd, port
 		) VALUES (
 			@preview_instance_id, @service_name, @role, @status, @command, @cwd, @port
-		) RETURNING %s`, previewServiceColumns)
+		)
+		ON CONFLICT (preview_instance_id, service_name) DO UPDATE SET
+			role = EXCLUDED.role,
+			status = EXCLUDED.status,
+			command = EXCLUDED.command,
+			cwd = EXCLUDED.cwd,
+			port = EXCLUDED.port,
+			pid = NULL,
+			error = ''
+		RETURNING %s`, previewServiceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"preview_instance_id": svc.PreviewInstanceID,
@@ -856,7 +941,16 @@ func (s *PreviewStore) CreatePreviewInfrastructure(ctx context.Context, infra *m
 		) VALUES (
 			@preview_instance_id, @infra_name, @template, @container_id, @status,
 			@host, @port, @credentials_hash
-		) RETURNING %s`, previewInfraColumns)
+		)
+		ON CONFLICT (preview_instance_id, infra_name) DO UPDATE SET
+			template = EXCLUDED.template,
+			container_id = EXCLUDED.container_id,
+			status = EXCLUDED.status,
+			host = EXCLUDED.host,
+			port = EXCLUDED.port,
+			credentials_hash = EXCLUDED.credentials_hash,
+			error = ''
+		RETURNING %s`, previewInfraColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"preview_instance_id": infra.PreviewInstanceID,

@@ -230,6 +230,27 @@ func TestSessionThreadStore_ListBySession_OmitsRawDiffPayloads(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionThreadStore_ListBySession_SelectsArchivedAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery(`(?s)SELECT .+created_at,\s+archived_at,\s+base_snapshot_key.+FROM session_threads`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+
+	threads, err := store.ListBySession(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ListBySession should select every SessionThread field required for row decoding")
+	require.Empty(t, threads, "ListBySession should return no rows from the empty result set")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
 	t.Parallel()
 
@@ -800,6 +821,64 @@ func TestSessionThreadStore_UpdateResult_NilError(t *testing.T) {
 	err = store.UpdateResult(context.Background(), orgID, threadID, models.ThreadStatusCompleted, result)
 	require.NoError(t, err, "UpdateResult should not return an error when Error is nil")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionThreadStore_FailRunningBySession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expected  int64
+		expectErr bool
+	}{
+		{
+			name: "fails running threads for session",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE session_threads[\\s\\S]+WHERE org_id = @org_id AND session_id = @session_id AND status = 'running'").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+			expected: 1,
+		},
+		{
+			name: "returns exec errors",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE session_threads[\\s\\S]+WHERE org_id = @org_id AND session_id = @session_id AND status = 'running'").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("write failed"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			tt.setupMock(mock)
+
+			category := "runtime_control_stalled"
+			msg := "runtime stop missed"
+			affected, err := store.FailRunningBySession(context.Background(), uuid.New(), uuid.New(), &models.SessionResult{
+				Error:           &msg,
+				FailureCategory: &category,
+			})
+			if tt.expectErr {
+				require.Error(t, err, "FailRunningBySession should return an error")
+				require.Contains(t, err.Error(), "fail running session threads", "FailRunningBySession should wrap exec errors")
+				return
+			}
+			require.NoError(t, err, "FailRunningBySession should not return an error")
+			require.Equal(t, tt.expected, affected, "FailRunningBySession should report rows affected")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestSessionThreadStore_UpdateTurnComplete(t *testing.T) {

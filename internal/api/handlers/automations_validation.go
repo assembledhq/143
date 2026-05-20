@@ -179,6 +179,16 @@ func (h *AutomationHandler) defaultAutomationAgentType(ctx context.Context, orgI
 	return models.DefaultDefaultAgentType, nil
 }
 
+func validatePrePRReviewLoopsForAgent(prePRReviewLoops int, agentType models.AgentType) error {
+	if prePRReviewLoops == 0 {
+		return nil
+	}
+	if !models.AgentSupportsNativeReview(agentType) {
+		return fmt.Errorf("pre_pr_review_loops requires Codex or Claude Code")
+	}
+	return nil
+}
+
 func (h *AutomationHandler) isAutomationAgentAvailable(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (bool, error) {
 	if agentType == "" {
 		return false, nil

@@ -93,6 +93,25 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			ThreadStatusAwaitingInput, ThreadStatusCompleted,
 			ThreadStatusFailed, ThreadStatusCancelled,
 		),
+		"session_human_input_requests_request_kind": toStrings(
+			HumanInputRequestKindFreeText, HumanInputRequestKindSingleChoice,
+			HumanInputRequestKindMultiChoice, HumanInputRequestKindToolApproval,
+			HumanInputRequestKindActionChoice,
+		),
+		"session_human_input_requests_status": toStrings(
+			HumanInputRequestStatusPending, HumanInputRequestStatusAnswered,
+			HumanInputRequestStatusCancelled, HumanInputRequestStatusExpired,
+			HumanInputRequestStatusSuperseded,
+		),
+		"session_executors_status": toStrings(
+			SessionExecutorStatusStarting, SessionExecutorStatusRunning,
+			SessionExecutorStatusDraining, SessionExecutorStatusRequeued,
+			SessionExecutorStatusCompleted, SessionExecutorStatusFailed,
+			SessionExecutorStatusLost,
+		),
+		"jobs_owner_kind": toStrings(
+			JobOwnerKindWorker, JobOwnerKindSessionExecutor,
+		),
 		// project_enums.go
 		"projects_status": toStrings(
 			ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted,
@@ -118,7 +137,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"integrations_provider": toStrings(
 			IntegrationProviderGitHub, IntegrationProviderSentry,
 			IntegrationProviderLinear, IntegrationProviderSlack,
-			IntegrationProviderNotion,
+			IntegrationProviderNotion, IntegrationProviderCircleCI,
 		),
 		// issue_source.go
 		"issues_source": toStrings(

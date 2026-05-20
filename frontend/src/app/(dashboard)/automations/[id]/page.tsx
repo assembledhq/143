@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Pause, Loader2 } from "lucide-react";
+import { Play, Pause, Loader2, Minus, Plus } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +25,7 @@ import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { useAuth } from "@/hooks/use-auth";
 import type { Automation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -42,6 +43,7 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
 const AutomationStatsCard = dynamic(
@@ -60,12 +62,19 @@ type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
   (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
 
-function SettingsTab({ automation }: { automation: Automation }) {
+function SettingsTab({
+  automation,
+  canManage,
+}: {
+  automation: Automation;
+  canManage: boolean;
+}) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(automation.name);
   const [goal, setGoal] = useState(automation.goal);
+  const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
-  const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
+  const [intervalValue, setIntervalValue] = useState(String(automation.interval_value ?? 1));
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
@@ -84,6 +93,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(automation.pre_pr_review_loops ?? 0);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
 
   const { data: settingsResponse } = useQuery({
@@ -95,22 +105,38 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const effectiveAgentType = model
     ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
     : automation.agent_type ?? defaultAgentType;
+  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  let prePRReviewDescription = "Off for agents without native review support.";
+  if (supportsNativeReviewLoop) {
+    prePRReviewDescription = effectivePrePRReviewLoops === 0
+      ? "Off"
+      : "Runs the coding agent's review/fix loop before opening a PR.";
+  }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const goalLength = automationGoalLengthState(goal);
+  const parsedIntervalValue = Number(intervalValue.trim());
+  const intervalValueIsValid = intervalValue.trim() !== ""
+    && Number.isInteger(parsedIntervalValue)
+    && parsedIntervalValue >= 1
+    && parsedIntervalValue <= 365;
 
   const updateMutation = useMutation({
     mutationFn: () =>
       api.automations.update(automation.id, {
         name: name.trim(),
         goal: goal.trim(),
+        icon_type: "emoji",
+        icon_value: iconValue,
         scope: scope.trim() || undefined,
-        interval_value: intervalValue,
+        interval_value: parsedIntervalValue,
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model: model ?? "",
         identity_scope: identityScope,
+        pre_pr_review_loops: effectivePrePRReviewLoops,
         reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
@@ -121,9 +147,22 @@ function SettingsTab({ automation }: { automation: Automation }) {
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-      <div className="space-y-1.5">
-        <Label htmlFor="name">Name</Label>
-        <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+      <div
+        data-testid="automation-settings-identity-row"
+        className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
+      >
+        <div className="space-y-1.5">
+          <Label>Emoji</Label>
+          <AutomationEmojiPicker
+            value={iconValue}
+            onChange={setIconValue}
+            className="w-16"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="name">Name</Label>
+          <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
       </div>
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
@@ -189,10 +228,8 @@ function SettingsTab({ automation }: { automation: Automation }) {
               min={1}
               max={365}
               value={intervalValue}
-              onChange={(e) => {
-                const parsed = parseInt(e.target.value, 10);
-                setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
-              }}
+              onChange={(e) => setIntervalValue(e.target.value)}
+              aria-invalid={!intervalValueIsValid}
               className="w-20"
             />
             <Select
@@ -287,21 +324,65 @@ function SettingsTab({ automation }: { automation: Automation }) {
           contentClassName="w-[var(--radix-popover-trigger-width)]"
         />
       </div>
-      <div className="flex items-center gap-3 pt-2">
-        <Button
-          onClick={() => updateMutation.mutate()}
-          disabled={updateMutation.isPending || goalLength.isTooLong}
-        >
-          {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Save changes
-        </Button>
-        {updateMutation.isError && (
-          <p className="text-xs text-destructive">Failed to save changes.</p>
-        )}
-        {updateMutation.isSuccess && !updateMutation.isPending && (
-          <p className="text-xs text-muted-foreground">Saved.</p>
-        )}
+      <div className="space-y-1.5">
+        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Decrease review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+            disabled={!canManage || !supportsNativeReviewLoop}
+          >
+            <Minus className="h-4 w-4" />
+          </Button>
+          <Input
+            id="pre-pr-review-loops"
+            aria-label="Review passes"
+            type="number"
+            min={0}
+            max={5}
+            value={effectivePrePRReviewLoops}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+            }}
+            disabled={!canManage || !supportsNativeReviewLoop}
+            className="w-20 text-center"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Increase review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+            disabled={!canManage || !supportsNativeReviewLoop}
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {prePRReviewDescription}
+        </p>
       </div>
+      {canManage && (
+        <div className="flex items-center gap-3 pt-2">
+          <Button
+            onClick={() => updateMutation.mutate()}
+            disabled={updateMutation.isPending || goalLength.isTooLong || !intervalValueIsValid}
+          >
+            {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Save changes
+          </Button>
+          {updateMutation.isError && (
+            <p className="text-xs text-destructive">Failed to save changes.</p>
+          )}
+          {updateMutation.isSuccess && !updateMutation.isPending && (
+            <p className="text-xs text-muted-foreground">Saved.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -310,7 +391,9 @@ export default function AutomationDetailPage() {
   const params = useParams();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const automationId = params?.id as string;
+  const canManage = user?.role === "admin" || user?.role === "member";
 
   const { data, isLoading } = useQuery({
     queryKey: ["automation", automationId],
@@ -352,6 +435,41 @@ export default function AutomationDetailPage() {
   const deleteMutation = useMutation({
     mutationFn: () => api.automations.del(automationId),
     onSuccess: () => router.push("/automations"),
+  });
+
+  const iconMutation = useMutation({
+    mutationFn: (iconValue: string) =>
+      api.automations.update(automationId, {
+        icon_type: "emoji",
+        icon_value: iconValue,
+      }),
+    onMutate: async (iconValue: string) => {
+      await queryClient.cancelQueries({ queryKey: ["automation", automationId] });
+      const previous = queryClient.getQueryData<typeof data>(["automation", automationId]);
+      queryClient.setQueryData<typeof data>(["automation", automationId], (current) => {
+        if (!current?.data) return current;
+        return {
+          ...current,
+          data: {
+            ...current.data,
+            icon_type: "emoji",
+            icon_value: iconValue,
+          },
+        };
+      });
+      return { previous };
+    },
+    onError: (_err, _iconValue, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["automation", automationId], context.previous);
+      }
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["automation", automationId], updated);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["automation", automationId] });
+    },
   });
 
   if (isLoading) {
@@ -400,6 +518,7 @@ export default function AutomationDetailPage() {
     pauseMutation.isError ? "Failed to pause automation." :
     resumeMutation.isError ? "Failed to resume automation." :
     runNowMutation.isError ? "Failed to trigger run." :
+    iconMutation.isError ? "Failed to update automation emoji." :
     deleteMutation.isError ? "Failed to delete automation." :
     null;
 
@@ -408,9 +527,29 @@ export default function AutomationDetailPage() {
       <div className="space-y-6">
         <MobileBackButton to="/automations" label="Back to automations" />
         <PageHeader
-          title={automation.name}
+          title={
+            <span className="inline-flex min-w-0 items-center gap-3">
+              {canManage ? (
+                <AutomationEmojiPicker
+                  value={automation.icon_value || "⚙️"}
+                  onChange={(iconValue) => iconMutation.mutate(iconValue)}
+                  trigger="icon"
+                  triggerLabel="Change automation emoji"
+                  disabled={iconMutation.isPending}
+                />
+              ) : (
+                <span
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                  aria-label={`Automation icon for ${automation.name}`}
+                >
+                  {automation.icon_value || "⚙️"}
+                </span>
+              )}
+              <span className="min-w-0 truncate">{automation.name}</span>
+            </span>
+          }
           description={headerDescription}
-          action={
+          action={canManage ? (
             <div className="flex items-center gap-2">
               {automation.enabled ? (
                 <Button
@@ -454,7 +593,7 @@ export default function AutomationDetailPage() {
                 Run now
               </Button>
             </div>
-          }
+          ) : undefined}
         />
 
         {headerError && (
@@ -478,7 +617,7 @@ export default function AutomationDetailPage() {
                 edit remounts SettingsTab, reseeding its useState-from-props
                 form fields. Without this, the visible values would drift
                 from the server until the user manually reopens the tab. */}
-            <SettingsTab key={automation.updated_at} automation={automation} />
+            <SettingsTab key={automation.updated_at} automation={automation} canManage={canManage} />
           </TabsContent>
         </Tabs>
       </div>
