@@ -230,7 +230,7 @@ This image is used by the Docker sandbox provider. It runs under **gVisor** (`ru
 
 ### Deploy-Time Host Hardening
 
-Routine fleet deploys roll only the user-facing runtime roles, `app` and `worker`. Stateful/supporting roles (`db`, `redis`, `logging`) are deployed explicitly with `make deploy-db`, `make deploy-redis`, `make deploy-logging`, or `DEPLOY_FLEET_ROLES=all make deploy-fleet` during maintenance. This keeps frequent application deploys from recreating Postgres, Redis, Grafana, or other non-runtime services.
+Routine fleet deploys roll only the user-facing runtime roles, `app` and `worker`. Stateful/supporting roles (`db`, `redis`, `logging`) are deployed explicitly with `make deploy-db`, `make deploy-redis`, `make deploy-logging`, or `make deploy-fleet ROLES=all` during maintenance. `make deploy-fleet TAG=<image-tag> ROLES=<roles>` is the operator-facing shape for deploying a specific image tag to a selected role set. This keeps frequent application deploys from recreating Postgres, Redis, Grafana, or other non-runtime services.
 
 Fleet deploys attempt to keep host hardening in place as they roll services:
 

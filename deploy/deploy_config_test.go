@@ -112,8 +112,11 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
 	require.NoError(t, err, "test should read deploy-fleet.sh")
 	fleetText := string(fleetScript)
-	require.Contains(t, fleetText, `DEPLOY_FLEET_ROLES="${DEPLOY_FLEET_ROLES:-app,worker}"`, "fleet deploy should default to the user-facing runtime roles so routine app deploys do not restart db, redis, or logging")
-	require.Contains(t, fleetText, `DEPLOY_FLEET_ROLES=all`, "fleet deploy should document an explicit all-roles maintenance escape hatch")
+	require.Contains(t, fleetText, `REQUESTED_ROLES="${3:-app,worker}"`, "fleet deploy should default to the user-facing runtime roles so routine app deploys do not restart db, redis, or logging")
+	require.Contains(t, fleetText, `./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] all`, "fleet deploy should document an explicit all-roles maintenance argument")
+	require.Contains(t, fleetText, `validate_requested_roles`, "fleet deploy should reject misspelled roles instead of silently skipping every host")
+	require.Contains(t, fleetText, `cannot be combined with other roles`, "fleet deploy should reject confusing mixed selections like all,redis")
+	require.Contains(t, fleetText, `No fleet hosts matched requested roles`, "fleet deploy should fail loudly when a valid role selection matches no hosts")
 	require.Contains(t, fleetText, `should_deploy_role()`, "fleet deploy should centralize role filtering so every FLEET_HOSTS entry is handled consistently")
 	require.Contains(t, fleetText, `Skipping $ROLE@$IP`, "fleet deploy should log skipped maintenance roles so operators can tell they were intentionally left alone")
 
@@ -123,7 +126,12 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
-	require.Contains(t, string(makefile), "DEPLOY_FLEET_ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy")
+	require.Contains(t, string(makefile), "ROLES ?= app,worker", "Makefile should make the default fleet role set visible to operators")
+	require.Contains(t, string(makefile), "TAG ?= latest", "Makefile should expose the image tag as the same kind of make argument as roles")
+	require.Contains(t, string(makefile), `./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)`, "single-role deploy targets should honor the same TAG argument as fleet deploys")
+	require.Contains(t, string(makefile), `./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG)`, "multi-host single-role deploy targets should pass TAG through for every host")
+	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
+	require.Contains(t, string(makefile), `./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)`, "Makefile should pass role and tag arguments through to deploy-fleet.sh")
 }
 
 // Worker preview routing and sandbox orchestration require per-host values:
