@@ -255,6 +255,34 @@ describe('SwipeActionRow', () => {
     expect(container).toHaveAttribute('data-swipe-state', 'committed');
   });
 
+  it('uses a single darker archive tray color while swiping', () => {
+    renderWithProviders(
+      <SwipeActionRow
+        actionLabel="Archive item"
+        actionText="Archive"
+        onAction={() => {}}
+      >
+        <div>Row content</div>
+      </SwipeActionRow>,
+    );
+
+    const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
+    expect(surface).not.toBeNull();
+    const container = surface!.parentElement;
+    expect(container).not.toBeNull();
+
+    fireEvent.touchStart(surface!, {
+      touches: [{ clientX: 220, clientY: 20 }],
+    });
+    fireEvent.touchMove(surface!, {
+      touches: [{ clientX: 120, clientY: 24 }],
+    });
+
+    const colorLayers = container!.querySelectorAll('[data-swipe-action-color="true"]');
+    expect(colorLayers).toHaveLength(1);
+    expect(colorLayers[0]).toHaveClass('bg-amber-600/88');
+  });
+
   it('keeps the trailing archive affordance to two text lines while swiping', () => {
     renderWithProviders(
       <SwipeActionRow
