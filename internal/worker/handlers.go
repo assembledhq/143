@@ -387,8 +387,15 @@ type Services struct {
 
 	// SessionExecutorDispatcher moves run_agent and continue_session ownership
 	// from the worker process to durable per-session executor containers when
-	// configured. nil preserves inline execution for local tests/dev wiring.
+	// configured. nil preserves inline execution only when
+	// RequireSessionExecutorDispatcher is false, which is reserved for local
+	// tests/dev wiring and executor-owned handler re-entry.
 	SessionExecutorDispatcher sessionExecutorDispatcher
+	// RequireSessionExecutorDispatcher makes a missing dispatcher a hard
+	// runtime error for worker-owned run_agent/continue_session jobs. Production
+	// workers set this so a startup wiring regression cannot silently reintroduce
+	// deploy-sensitive inline long-running sessions.
+	RequireSessionExecutorDispatcher bool
 }
 
 type previewStarter interface {

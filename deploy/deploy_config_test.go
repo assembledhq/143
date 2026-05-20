@@ -473,6 +473,7 @@ func TestWorkerComposeConfiguresSessionExecutorNetwork(t *testing.T) {
 
 	require.Contains(t, composeText, "SESSION_EXECUTOR_DOCKER_NETWORK", "worker compose should configure executor containers onto the worker docker network")
 	require.Contains(t, composeText, "${SESSION_EXECUTOR_DOCKER_NETWORK:-143_default}", "worker compose should default executor containers to the production compose network")
+	require.Contains(t, composeText, "SESSION_EXECUTOR_IMAGE: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}", "worker compose should provide the executor image required by production startup")
 	require.NotContains(t, composeText, "SESSION_EXECUTORS_ENABLED", "worker compose should launch session executors without a dark-launch boolean")
 }
 

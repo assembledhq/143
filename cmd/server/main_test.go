@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -169,6 +170,70 @@ func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
 	}
 }
 
+func TestValidateSessionExecutorStartupConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		wantErr bool
+	}{
+		{
+			name: "production worker requires executor image",
+			cfg: config.Config{
+				Env:  "production",
+				Mode: "worker",
+			},
+			wantErr: true,
+		},
+		{
+			name: "production all mode requires executor image",
+			cfg: config.Config{
+				Env:  "production",
+				Mode: "all",
+			},
+			wantErr: true,
+		},
+		{
+			name: "production api mode does not require executor image",
+			cfg: config.Config{
+				Env:  "production",
+				Mode: "api",
+			},
+		},
+		{
+			name: "local worker can fall back to inline execution",
+			cfg: config.Config{
+				Env:  "development",
+				Mode: "worker",
+			},
+		},
+		{
+			name: "production worker accepts configured executor image",
+			cfg: config.Config{
+				Env:                  "production",
+				Mode:                 "worker",
+				SessionExecutorImage: "143:test",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateSessionExecutorStartupConfig(&tt.cfg)
+
+			if tt.wantErr {
+				require.Error(t, err, "production worker-capable modes should fail fast without an executor image")
+				require.Contains(t, err.Error(), "SESSION_EXECUTOR_IMAGE", "error should name the missing production setting")
+				return
+			}
+			require.NoError(t, err, "startup config should allow this executor configuration")
+		})
+	}
+}
+
 func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +299,20 @@ func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *te
 	require.NotEqual(t, -1, construct, "worker startup should still construct the sandbox auth server")
 	require.Less(t, preflight, construct, "startup preflight must run before constructing the socket server so bad workers fail before claiming jobs")
 	require.Contains(t, body, `cfg.Env == "production"`, "the sandbox auth preflight should be production-scoped so local dev can opt into the legacy fallback path")
+}
+
+func TestMainValidatesSessionExecutorConfigBeforeConstructingRouter(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
+
+	body := string(src)
+	preflight := strings.Index(body, "validateSessionExecutorStartupConfig(cfg)")
+	construct := strings.Index(body, "api.NewRouter(")
+	require.NotEqual(t, -1, preflight, "startup should validate durable session executor config")
+	require.NotEqual(t, -1, construct, "startup should still construct the API router")
+	require.Less(t, preflight, construct, "production executor config should fail before expensive server/router wiring")
 }
 
 func TestMainPassesConfiguredNodeIDToWorkers(t *testing.T) {
