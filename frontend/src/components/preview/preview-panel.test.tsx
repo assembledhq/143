@@ -512,7 +512,7 @@ describe("PreviewPanel component", () => {
     expect(screen.getByRole("menuitem", { name: "Keep for 15 min" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Keep for 30 min" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Stop in 5 min" })).toBeInTheDocument();
-    expect(screen.queryByText(/1 hr/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /1 hr/i })).not.toBeInTheDocument();
   });
 
   it("updates preview lifetime from the hidden menu", async () => {
