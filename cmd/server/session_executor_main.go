@@ -183,7 +183,9 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		})
 		oldShutdown := shutdown
 		shutdown = func() {
-			apiDockerCli.Close()
+			if err := apiDockerCli.Close(); err != nil {
+				logger.Warn().Err(err).Msg("failed to close Docker client")
+			}
 			oldShutdown()
 		}
 	} else {
