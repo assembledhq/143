@@ -136,6 +136,14 @@ apply_tailscale_role_defaults() {
         : "${TS_ADVERTISE_ROUTES:=${DB_BIND_IP}/32}"
       fi
       ;;
+    redis)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_REDIS:-}}"
+      : "${TS_TAG:=${TS_TAG_REDIS:-tag:prod-redis}}"
+      if [ -n "${TS_AUTH_KEY:-}" ]; then
+        : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis Tailscale route advertisement}"
+        : "${TS_ADVERTISE_ROUTES:=${REDIS_PRIVATE_IP}/32}"
+      fi
+      ;;
     worker)
       if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
         : "${TS_AUTH_KEY:=${TS_AUTH_KEY_WORKER:-}}"
@@ -150,6 +158,9 @@ apply_tailscale_role_defaults() {
   fi
   if [ "$ROLE" = "db" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
     : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_DB is required when TS_ADVERTISE_ROUTES is set}"
+  fi
+  if [ "$ROLE" = "redis" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_REDIS is required when TS_ADVERTISE_ROUTES is set}"
   fi
 }
 

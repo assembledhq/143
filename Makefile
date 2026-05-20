@@ -334,7 +334,8 @@ secrets-rotate:
 #
 # Optional Tailscale provisioning env vars:
 #   TS_AUTH_KEY_<ROLE>           — role-specific auth keys: TS_AUTH_KEY_APP,
-#                                  TS_AUTH_KEY_DB, TS_AUTH_KEY_WORKER.
+#                                  TS_AUTH_KEY_DB, TS_AUTH_KEY_WORKER,
+#                                  TS_AUTH_KEY_REDIS.
 #   TS_TAG_<ROLE>                — role-specific tags. Defaults to tag:prod-<role>.
 #   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
 #   TS_WORKER_HOSTS              — comma-separated tailnet workers. Entries can be
@@ -347,6 +348,7 @@ secrets-rotate:
 #   make provision-db HOST=<public-ip>
 #   make provision-worker HOST=<public-ip>
 #   make tailscale-enroll ROLE=app HOST=<existing-app-public-ip>
+#   make tailscale-enroll ROLE=redis HOST=<existing-redis-public-ip>
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -391,9 +393,11 @@ export DB_BIND_IP
 export TS_AUTH_KEY_APP
 export TS_AUTH_KEY_DB
 export TS_AUTH_KEY_WORKER
+export TS_AUTH_KEY_REDIS
 export TS_TAG_APP
 export TS_TAG_DB
 export TS_TAG_WORKER
+export TS_TAG_REDIS
 export TS_WORKER_HOSTS
 export TS_AUTH_KEY
 export TS_TAG
@@ -434,9 +438,9 @@ provision-redis:
 	./deploy/scripts/provision.sh redis $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 tailscale-enroll:
-	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make tailscale-enroll ROLE=<app|db> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
-	@test "$(ROLE)" = "app" -o "$(ROLE)" = "db" || { echo "ROLE must be app or db. Use provision-worker for new tailnet workers."; exit 1; }
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make tailscale-enroll ROLE=<app|db> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make tailscale-enroll ROLE=<app|db|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	@test "$(ROLE)" = "app" -o "$(ROLE)" = "db" -o "$(ROLE)" = "redis" || { echo "ROLE must be app, db, or redis. Use provision-worker for new tailnet workers."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make tailscale-enroll ROLE=<app|db|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh $(ROLE) $(HOST) $(SSH_KEY) --tailscale-only
 
