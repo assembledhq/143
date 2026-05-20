@@ -147,6 +147,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// by Docker + gVisor, and bwrap fails because gVisor doesn't support the
 	// unprivileged user namespaces that bwrap requires.
 	var cmd string
+	modelArgs := codexModelArgs(sandbox.Env, prompt.UsageHint.EffectiveModel)
 	reasoningArg := ""
 	if prompt.ReasoningEffort != "" {
 		reasoningArg = fmt.Sprintf(" -c '%s'", shellEscapeSingle(fmt.Sprintf(`model_reasoning_effort="%s"`, prompt.ReasoningEffort)))
@@ -166,7 +167,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write follow-up prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s '%s' - < '%s'",
+			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s%s '%s' - < '%s'",
+			modelArgs,
 			reasoningArg,
 			shellEscapeCodex(prompt.ResumeSessionID),
 			shellEscapeCodex(promptPath),
@@ -185,7 +187,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s - < '%s'",
+			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s%s - < '%s'",
+			modelArgs,
 			reasoningArg,
 			shellEscapeCodex(promptPath),
 		)
@@ -257,6 +260,21 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
 
 	return result, nil
+}
+
+func codexModelArgs(env map[string]string, effectiveModel string) string {
+	model := effectiveModel
+	if env != nil && env["OPENAI_MODEL"] != "" {
+		model = env["OPENAI_MODEL"]
+	}
+	if model == "" {
+		return ""
+	}
+	spec := models.CodexRuntimeModel(model)
+	if spec.PriorityTier {
+		return fmt.Sprintf(" -m '%s' -c '%s'", shellEscapeCodex(spec.Model), shellEscapeSingle(`service_tier="priority"`))
+	}
+	return fmt.Sprintf(" -m '%s'", shellEscapeCodex(spec.Model))
 }
 
 // isDuplicateOutput returns true if content matches the previous output of the
