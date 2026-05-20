@@ -22,6 +22,7 @@ type DockerExecutorLauncherConfig struct {
 	Image       string
 	NetworkMode string
 	Binds       []string
+	GroupAdd    []string
 	Env         []string
 }
 
@@ -65,7 +66,8 @@ func (l *DockerExecutorLauncher) Launch(ctx context.Context, spec ExecutorLaunch
 
 	name := "143-session-executor-" + spec.ExecutorID.String()
 	hostConfig := &container.HostConfig{
-		Binds: l.cfg.Binds,
+		Binds:    l.cfg.Binds,
+		GroupAdd: l.cfg.GroupAdd,
 	}
 	if l.cfg.NetworkMode != "" {
 		hostConfig.NetworkMode = container.NetworkMode(l.cfg.NetworkMode)
