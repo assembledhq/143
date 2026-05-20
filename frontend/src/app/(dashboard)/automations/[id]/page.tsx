@@ -74,7 +74,7 @@ function SettingsTab({
   const [goal, setGoal] = useState(automation.goal);
   const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
-  const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
+  const [intervalValue, setIntervalValue] = useState(String(automation.interval_value ?? 1));
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
@@ -116,6 +116,11 @@ function SettingsTab({
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const goalLength = automationGoalLengthState(goal);
+  const parsedIntervalValue = Number(intervalValue.trim());
+  const intervalValueIsValid = intervalValue.trim() !== ""
+    && Number.isInteger(parsedIntervalValue)
+    && parsedIntervalValue >= 1
+    && parsedIntervalValue <= 365;
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -125,7 +130,7 @@ function SettingsTab({
         icon_type: "emoji",
         icon_value: iconValue,
         scope: scope.trim() || undefined,
-        interval_value: intervalValue,
+        interval_value: parsedIntervalValue,
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
@@ -223,10 +228,8 @@ function SettingsTab({
               min={1}
               max={365}
               value={intervalValue}
-              onChange={(e) => {
-                const parsed = parseInt(e.target.value, 10);
-                setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
-              }}
+              onChange={(e) => setIntervalValue(e.target.value)}
+              aria-invalid={!intervalValueIsValid}
               className="w-20"
             />
             <Select
@@ -367,7 +370,7 @@ function SettingsTab({
         <div className="flex items-center gap-3 pt-2">
           <Button
             onClick={() => updateMutation.mutate()}
-            disabled={updateMutation.isPending || goalLength.isTooLong}
+            disabled={updateMutation.isPending || goalLength.isTooLong || !intervalValueIsValid}
           >
             {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Save changes
