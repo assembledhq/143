@@ -429,7 +429,7 @@ export default function TeamSettingsPage() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="text-destructive hover:text-destructive"
+                            className="px-0 text-destructive hover:text-destructive"
                             disabled={removeMemberMutation.isPending}
                             onClick={() => setRemovingMember(member)}
                           >
