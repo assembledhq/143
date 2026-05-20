@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -140,6 +141,81 @@ func TestRunInteractiveCommand_ClosesHandleBeforeWaitingForStreamsAfterContextCa
 		}
 	}, 2*time.Second, 10*time.Millisecond, "runInteractiveCommand should close the handle before waiting for blocked stream readers")
 	require.True(t, handle.Closed(), "context cancellation should close the handle and unblock stream readers")
+}
+
+func TestStreamLines_DeliversMultiMegabyteLine(t *testing.T) {
+	t.Parallel()
+
+	largeLine := strings.Repeat("x", 2*1024*1024)
+	input := largeLine + "\nnext\n"
+	var got []string
+
+	err := streamLines(strings.NewReader(input), func(line []byte) {
+		got = append(got, string(line))
+	})
+
+	require.NoError(t, err, "streamLines should not fail on lines larger than bufio.Scanner's token limit")
+	require.Equal(t, []string{largeLine, "next"}, got, "streamLines should deliver oversized and subsequent lines intact")
+}
+
+func TestStreamLines_DeliversOversizedTrailingLineWithoutNewline(t *testing.T) {
+	t.Parallel()
+
+	largeLine := strings.Repeat("y", 2*1024*1024)
+	var got []string
+
+	err := streamLines(strings.NewReader(largeLine), func(line []byte) {
+		got = append(got, string(line))
+	})
+
+	require.NoError(t, err, "streamLines should flush an oversized trailing line at EOF")
+	require.Equal(t, []string{largeLine}, got, "streamLines should preserve a trailing line without a newline")
+}
+
+func TestStreamLines_DeliversLineAtRetainedLimit(t *testing.T) {
+	t.Parallel()
+
+	lineAtLimit := strings.Repeat("a", maxStreamLineBytes)
+	var got []string
+
+	err := streamLines(strings.NewReader(lineAtLimit+"\n"), func(line []byte) {
+		got = append(got, string(line))
+	})
+
+	require.NoError(t, err, "streamLines should accept a line exactly at the retained limit")
+	require.Equal(t, []string{lineAtLimit}, got, "streamLines should deliver a line exactly at the retained limit")
+}
+
+func TestStreamLines_DrainsAndReportsLinePastRetainedLimit(t *testing.T) {
+	t.Parallel()
+
+	input := strings.Repeat("z", maxStreamLineBytes+1024) + "\nnext\n"
+	var got []string
+
+	err := streamLines(strings.NewReader(input), func(line []byte) {
+		got = append(got, string(line))
+	})
+
+	var tooLong *streamLineTooLongError
+	require.ErrorAs(t, err, &tooLong, "streamLines should return a clear oversized-line error after draining the stream")
+	require.Equal(t, maxStreamLineBytes, tooLong.MaxBytes, "oversized-line error should expose the retained line limit")
+	require.Greater(t, tooLong.LineBytes, maxStreamLineBytes, "oversized-line error should expose the observed line size")
+	require.Equal(t, []string{"next"}, got, "streamLines should keep draining and deliver later bounded lines after an oversized line")
+}
+
+func TestStreamLines_DrainsAndReportsTrailingLinePastRetainedLimit(t *testing.T) {
+	t.Parallel()
+
+	input := strings.Repeat("z", maxStreamLineBytes+1024)
+	var got []string
+
+	err := streamLines(strings.NewReader(input), func(line []byte) {
+		got = append(got, string(line))
+	})
+
+	var tooLong *streamLineTooLongError
+	require.ErrorAs(t, err, &tooLong, "streamLines should report an oversized trailing line at EOF")
+	require.Empty(t, got, "streamLines should not deliver a line that exceeded the retained line limit")
 }
 
 // nonInteractiveProvider is a stand-alone SandboxProvider implementation
