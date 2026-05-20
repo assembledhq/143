@@ -37,7 +37,7 @@ func upsertLinearIssueForAgent(ctx context.Context, stores *Stores, orgID uuid.U
 		LastSeenAt:      now,
 		OccurrenceCount: 1,
 		Severity:        "medium",
-		Fingerprint:     "linear:" + fetched.ID,
+		Fingerprint:     models.IssueFingerprint(models.IssueSourceLinear, fetched.ID),
 		RepositoryID:    repoID,
 	}
 	if err := stores.Issues.Upsert(ctx, issue); err != nil {
