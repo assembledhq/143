@@ -606,6 +606,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	workerSelector := preview.NewWorkerSelector(nodeStore, previewStore)
 	workerClient := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+	settingsHandler.SetStaticEgressWorkerChecker(workerSelector)
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
 	// gwSrv is stored so callers can shut it down gracefully.

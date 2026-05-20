@@ -331,7 +331,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 					Str("container_id", candidate.ID).
 					Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				if match, mismatchErr := preview.SandboxNetworkMatches(ctx, h.sandboxProvider, candidate, expectedNetwork, h.staticEgress.NetworkName); mismatchErr != nil {
+				if match, mismatchErr := agent.SandboxNetworkMatches(ctx, h.sandboxProvider, candidate, expectedNetwork, h.staticEgress.NetworkName); mismatchErr != nil {
 					h.logger.Warn().Err(mismatchErr).
 						Str("session_id", session.ID.String()).
 						Str("container_id", candidate.ID).

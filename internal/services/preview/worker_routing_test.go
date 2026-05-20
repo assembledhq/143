@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -394,4 +395,62 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		require.Contains(t, err.Error(), "count active previews", "SelectLeastLoadedNode should wrap count failures")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+}
+
+func TestWorkerSelector_HasStaticEgressCapableWorker(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		metadata []WorkerNodeMetadata
+		expected bool
+	}{
+		{
+			name: "returns true when an active worker advertises static egress",
+			metadata: []WorkerNodeMetadata{
+				{
+					PreviewCapable:         true,
+					PreviewInternalBaseURL: "http://worker-1.internal:8080",
+					StaticEgressCapable:    true,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "returns false when active workers are not static egress capable",
+			metadata: []WorkerNodeMetadata{
+				{
+					PreviewCapable:         true,
+					PreviewInternalBaseURL: "http://worker-1.internal:8080",
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool")
+			defer mock.Close()
+
+			now := time.Now().UTC()
+			rows := pgxmock.NewRows(workerNodeTestCols)
+			for i, item := range tt.metadata {
+				raw, err := json.Marshal(item)
+				require.NoError(t, err, "should marshal worker metadata")
+				rows.AddRow(fmt.Sprintf("worker-%d", i+1), "worker", fmt.Sprintf("worker-%d.internal", i+1), "active", raw, now, now)
+			}
+			mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+				WillReturnRows(rows)
+
+			selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
+			ok, err := selector.HasStaticEgressCapableWorker(context.Background())
+			require.NoError(t, err, "HasStaticEgressCapableWorker should not error when listing active nodes succeeds")
+			require.Equal(t, tt.expected, ok, "HasStaticEgressCapableWorker should report whether any eligible worker can serve static egress")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }

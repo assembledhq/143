@@ -10,7 +10,7 @@ WG_PORT="${STATIC_EGRESS_GATEWAY_WG_PORT:-51820}"
 WG_PRIVATE_KEY="${STATIC_EGRESS_GATEWAY_PRIVATE_KEY:?STATIC_EGRESS_GATEWAY_PRIVATE_KEY is required}"
 WG_ADDRESS="${STATIC_EGRESS_GATEWAY_WG_ADDRESS:-10.143.0.1/24}"
 WG_TUNNEL_CIDR="${STATIC_EGRESS_GATEWAY_WG_CIDR:-10.143.0.0/24}"
-WG_PEERS="${STATIC_EGRESS_WORKER_PEERS:?STATIC_EGRESS_WORKER_PEERS is required as publicKey=allowedIP,...}"
+WG_PEERS="${STATIC_EGRESS_WORKER_PEERS:?STATIC_EGRESS_WORKER_PEERS is required as publicKey@allowedIP,...}"
 PUBLIC_INTERFACE="${STATIC_EGRESS_PUBLIC_INTERFACE:-$(ip route show default | awk '{print $5; exit}')}"
 
 BLOCKED_DESTS=(
@@ -34,8 +34,16 @@ WGCONF
 
 IFS=',' read -r -a peers <<< "$WG_PEERS"
 for peer in "${peers[@]}"; do
-  public_key="${peer%%=*}"
-  allowed_ip="${peer#*=}"
+  if [[ "$peer" != *@* ]]; then
+    echo "Invalid STATIC_EGRESS_WORKER_PEERS entry '${peer}'; expected publicKey@allowedIP" >&2
+    exit 1
+  fi
+  public_key="${peer%@*}"
+  allowed_ip="${peer##*@}"
+  if [[ -z "$public_key" || -z "$allowed_ip" ]]; then
+    echo "Invalid STATIC_EGRESS_WORKER_PEERS entry '${peer}'; expected publicKey@allowedIP" >&2
+    exit 1
+  fi
   cat >> "/etc/wireguard/${WG_INTERFACE}.conf" <<WGCONF
 
 [Peer]

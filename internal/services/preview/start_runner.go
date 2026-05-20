@@ -264,7 +264,7 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 			if inspectErr != nil {
 				r.logger.Warn().Err(inspectErr).Str("session_id", session.ID.String()).Str("container_id", candidate.ID).Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				if match, mismatchErr := SandboxNetworkMatches(ctx, r.sandboxProvider, candidate, expectedNetwork, r.staticEgress.NetworkName); mismatchErr != nil {
+				if match, mismatchErr := agent.SandboxNetworkMatches(ctx, r.sandboxProvider, candidate, expectedNetwork, r.staticEgress.NetworkName); mismatchErr != nil {
 					r.logger.Warn().Err(mismatchErr).Str("session_id", session.ID.String()).Str("container_id", candidate.ID).Msg("preview reuse: network check failed; falling through to hydrate")
 				} else if !match {
 					return acquireSandboxResult{ErrCode: "NETWORK_SETTING_RESTART_REQUIRED", Err: fmt.Errorf("restart environment to apply network setting")}
@@ -344,27 +344,6 @@ func (r *StartRunner) expectedSandboxNetwork(ctx context.Context, orgID uuid.UUI
 		return "", err
 	}
 	return cfg.NetworkName, nil
-}
-
-func SandboxNetworkMatches(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, expectedNetwork, staticNetwork string) (bool, error) {
-	if provider == nil || expectedNetwork == "" && staticNetwork == "" {
-		return true, nil
-	}
-	info, err := provider.ConnectionInfo(ctx, sb)
-	if err != nil {
-		return false, err
-	}
-	current := ""
-	if info != nil && info.Environment != nil {
-		current = info.Environment["DOCKER_HOST"]
-	}
-	if expectedNetwork != "" {
-		return current == expectedNetwork, nil
-	}
-	if staticNetwork != "" && current == staticNetwork {
-		return false, nil
-	}
-	return true, nil
 }
 
 func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, error) {

@@ -156,6 +156,29 @@ func ApplyStaticEgressRuntimeConfig(runtime StaticEgressRuntimeConfig, cfg *Sand
 	cfg.EgressMode = SandboxEgressModeStatic
 }
 
+// SandboxNetworkMatches verifies that a live sandbox is attached to the
+// network that new sandboxes for the same org setting would use.
+func SandboxNetworkMatches(ctx context.Context, provider SandboxProvider, sb *Sandbox, expectedNetwork, staticNetwork string) (bool, error) {
+	if provider == nil || expectedNetwork == "" && staticNetwork == "" {
+		return true, nil
+	}
+	info, err := provider.ConnectionInfo(ctx, sb)
+	if err != nil {
+		return false, err
+	}
+	current := ""
+	if info != nil && info.Environment != nil {
+		current = info.Environment["DOCKER_HOST"]
+	}
+	if expectedNetwork != "" {
+		return current == expectedNetwork, nil
+	}
+	if staticNetwork != "" && current == staticNetwork {
+		return false, nil
+	}
+	return true, nil
+}
+
 // StaticEgressEnabledFromRawSettings is a small helper for API paths that need
 // the org toggle without constructing a sandbox config.
 func StaticEgressEnabledFromRawSettings(raw json.RawMessage) (bool, error) {

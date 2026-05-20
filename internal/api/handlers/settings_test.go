@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,15 @@ type testOrgSettingsInvalidator struct {
 func (i *testOrgSettingsInvalidator) InvalidateOrg(orgID uuid.UUID) {
 	i.called = true
 	i.orgID = orgID
+}
+
+type testStaticEgressWorkerChecker struct {
+	available bool
+	err       error
+}
+
+func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Context) (bool, error) {
+	return c.available, c.err
 }
 
 func TestSettingsHandler_Get(t *testing.T) {
@@ -130,6 +140,46 @@ func TestSettingsHandler_GetNetworkStatus(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"static_egress_available":true`, "network status should report platform availability")
 	require.Contains(t, w.Body.String(), `"static_egress_enabled":true`, "network status should report the org setting")
 	require.Contains(t, w.Body.String(), `"static_egress_public_ip":"203.0.113.10"`, "network status should expose the customer allowlist IP")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_GetNetworkStatusRequiresCapableWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+				now,
+				now,
+			),
+		)
+
+	handler := NewSettingsHandler(db.NewOrganizationStore(mock), nil)
+	handler.SetStaticEgressStatus(StaticEgressStatus{
+		Available: true,
+		PublicIP:  "203.0.113.10",
+	})
+	handler.SetStaticEgressWorkerChecker(testStaticEgressWorkerChecker{available: false})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/network", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetNetworkStatus(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "network status should return success")
+	require.Contains(t, w.Body.String(), `"static_egress_available":false`, "network status should be unavailable without capable workers")
+	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"no active static-egress-capable workers are available"`, "network status should explain worker availability")
+	require.Contains(t, w.Body.String(), `"static_egress_public_ip":"203.0.113.10"`, "network status should still expose the configured allowlist IP")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

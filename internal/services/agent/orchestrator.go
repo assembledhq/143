@@ -503,10 +503,10 @@ type Orchestrator struct {
 	usageTracker       UsageRecorder        // can be nil — billing tracking disabled if nil
 	sandboxCapacity    *SandboxCapacityGate // can be nil — live local sandbox admission disabled
 	staticEgress       StaticEgressRuntimeConfig
-	env                *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver   *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth        SandboxAuthServer    // can be nil — paired with identityResolver
-	users              UserLookup           // can be nil — needed for App-token Co-authored-by trailer
+	env                *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver   *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth        SandboxAuthServer  // can be nil — paired with identityResolver
+	users              UserLookup         // can be nil — needed for App-token Co-authored-by trailer
 	logger             zerolog.Logger
 	maxConcurrent      int
 	cancels            *CancelRegistry
@@ -726,8 +726,8 @@ type OrchestratorConfig struct {
 	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
 	FileReader         sandbox.FileReader       // optional — enables proactive mention-index warmup
 	MentionIndexes     *workspace.MentionIndexCache
-	UsageTracker       UsageRecorder         // optional — enables billing observability
-	SandboxCapacity    *SandboxCapacityGate  // optional — gates new local sandbox creation
+	UsageTracker       UsageRecorder        // optional — enables billing observability
+	SandboxCapacity    *SandboxCapacityGate // optional — gates new local sandbox creation
 	StaticEgress       StaticEgressRuntimeConfig
 	Cancels            *CancelRegistry       // optional — enables session cancellation from API
 	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
@@ -3107,6 +3107,32 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					Str("stale_container_id", *session.ContainerID).
 					Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
 				return o.abandonReuseForRetry(ctx, session, log, "stale container_id cleared")
+			}
+			networkCtx, networkCancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
+			networkMatches, networkErr := SandboxNetworkMatches(networkCtx, o.provider, &Sandbox{ID: *session.ContainerID, Provider: "docker"}, sandboxCfg.NetworkName, o.staticEgress.NetworkName)
+			networkCancel()
+			if networkErr != nil {
+				log.Warn().Err(networkErr).
+					Str("container_id", *session.ContainerID).
+					Msg("network probe on recorded container_id failed during continue_session reuse; abandoning attempt so the worker retries instead of attaching to an indeterminate container")
+				return o.abandonReuseForRetry(ctx, session, log, "network probe error")
+			}
+			if !networkMatches {
+				log.Warn().
+					Str("container_id", *session.ContainerID).
+					Str("expected_network", sandboxCfg.NetworkName).
+					Str("static_egress_network", o.staticEgress.NetworkName).
+					Msg("recorded container_id uses a different sandbox network than the current org setting")
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network mismatch")
+				}
+				o.registerSandboxFailureMessage(
+					ctx,
+					session,
+					"Restart environment to apply network setting.",
+					"sandbox network",
+				)
+				return fmt.Errorf("restart environment to apply network setting")
 			}
 		}
 	}

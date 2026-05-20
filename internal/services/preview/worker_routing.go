@@ -171,6 +171,25 @@ func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Conte
 	return s.selectLeastLoadedNode(ctx, nil, req)
 }
 
+// HasStaticEgressCapableWorker reports whether at least one active worker can
+// cold-start static-egress sandboxes.
+func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context) (bool, error) {
+	nodes, err := s.nodes.ListActive(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, node := range nodes {
+		worker, err := parseWorkerNodeWithRequirements(node, WorkerSelectionRequirements{StaticEgressRequired: true})
+		if err != nil {
+			continue
+		}
+		if worker.Mode == "worker" || worker.Mode == "all" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, req WorkerSelectionRequirements) (WorkerNode, error) {
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {

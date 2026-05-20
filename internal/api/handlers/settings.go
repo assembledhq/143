@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -24,6 +25,10 @@ type OrgSettingsInvalidator interface {
 	InvalidateOrg(orgID uuid.UUID)
 }
 
+type StaticEgressWorkerChecker interface {
+	HasStaticEgressCapableWorker(ctx context.Context) (bool, error)
+}
+
 type SettingsHandler struct {
 	orgStore     *db.OrganizationStore
 	llmDefaults  map[string]string // provider name → masked key (from server env)
@@ -31,6 +36,7 @@ type SettingsHandler struct {
 	logger       zerolog.Logger
 	invalidator  OrgSettingsInvalidator
 	staticEgress StaticEgressStatus
+	workers      StaticEgressWorkerChecker
 }
 
 // StaticEgressStatus is platform-level availability for the opt-in static
@@ -71,6 +77,10 @@ func (h *SettingsHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInval
 // SetStaticEgressStatus injects platform-level static egress availability.
 func (h *SettingsHandler) SetStaticEgressStatus(status StaticEgressStatus) {
 	h.staticEgress = status
+}
+
+func (h *SettingsHandler) SetStaticEgressWorkerChecker(workers StaticEgressWorkerChecker) {
+	h.workers = workers
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
@@ -122,6 +132,17 @@ func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Reques
 	}
 	status := h.staticEgress
 	reason := status.UnavailableReason
+	if status.Available && h.workers != nil {
+		hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(r.Context())
+		if workerErr != nil {
+			h.logger.Warn().Err(workerErr).Msg("failed to verify static egress worker availability")
+			status.Available = false
+			reason = "failed to verify static egress worker availability"
+		} else if !hasWorker {
+			status.Available = false
+			reason = "no active static-egress-capable workers are available"
+		}
+	}
 	if !status.Available && reason == "" {
 		reason = "static egress gateway is not configured for this environment"
 	}
