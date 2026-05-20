@@ -17,7 +17,13 @@ type sessionExecutorDispatcher interface {
 }
 
 func maybeDispatchSessionExecutor(ctx context.Context, services *Services, jobType string, session models.Session, threadID *uuid.UUID) error {
-	if services == nil || services.SessionExecutorDispatcher == nil {
+	if services == nil {
+		return nil
+	}
+	if services.SessionExecutorDispatcher == nil {
+		if services.RequireSessionExecutorDispatcher {
+			return fmt.Errorf("session executor dispatcher is required for %s job for session %s", jobType, session.ID)
+		}
 		return nil
 	}
 	executorID, err := services.SessionExecutorDispatcher.Dispatch(ctx, jobType, session, threadID)

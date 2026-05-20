@@ -194,3 +194,26 @@ func TestDurableSessionExecutorDispatcher_RequiresFencingContext(t *testing.T) {
 	_, err := dispatcher.Dispatch(context.Background(), "run_agent", models.Session{ID: uuid.New(), OrgID: uuid.New()}, nil)
 	require.Error(t, err, "Dispatch should refuse to run without job id and lock token context")
 }
+
+func TestMaybeDispatchSessionExecutor_RequiresDispatcherWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	session := models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	services := &Services{RequireSessionExecutorDispatcher: true}
+
+	err := maybeDispatchSessionExecutor(context.Background(), services, "run_agent", session, nil)
+
+	require.Error(t, err, "production-style services should reject inline execution when no dispatcher is wired")
+	require.Contains(t, err.Error(), "session executor dispatcher is required", "error should identify the missing dispatcher")
+}
+
+func TestMaybeDispatchSessionExecutor_AllowsInlineWhenNotRequired(t *testing.T) {
+	t.Parallel()
+
+	session := models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	services := &Services{}
+
+	err := maybeDispatchSessionExecutor(context.Background(), services, "run_agent", session, nil)
+
+	require.NoError(t, err, "local/dev services should keep the explicit inline fallback")
+}
