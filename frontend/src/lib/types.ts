@@ -137,6 +137,26 @@ export interface GitHubRepositoryClaimCandidate {
   can_transfer: boolean;
 }
 
+export interface LinearAgentStatus {
+  enabled: boolean;
+  agent_scopes_granted: boolean;
+  app_user_name?: string;
+  has_linear_integration: boolean;
+  default_repo_id?: string;
+}
+
+export interface LinearTeamRepoMapping {
+  id: string;
+  org_id: string;
+  linear_team_id: string;
+  linear_project_id?: string;
+  repository_id: string;
+  default_branch?: string;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Issue {
   id: string;
   org_id: string;

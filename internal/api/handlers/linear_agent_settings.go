@@ -70,6 +70,7 @@ type linearAgentOrgSettings interface {
 // can be tested without standing up the full OrganizationStore.
 type linearAgentOrgWriter interface {
 	SetLinearAgentEnabled(ctx context.Context, orgID uuid.UUID, enabled bool) error
+	SetLinearAgentSettings(ctx context.Context, orgID uuid.UUID, settings models.LinearAgentSettings) error
 }
 
 // LinearAgentSettingsConfig packages the wiring parameters. Optional
@@ -116,6 +117,9 @@ type LinearAgentInstallStatus struct {
 	// Linear integration (legacy or agent). Surfaces a clearer "connect
 	// Linear first" message when both flags are false.
 	HasLinearIntegration bool `json:"has_linear_integration"`
+	// DefaultRepoID is the org-wide fallback repository for AgentSessions
+	// whose team/project has no explicit mapping.
+	DefaultRepoID *uuid.UUID `json:"default_repo_id,omitempty"`
 }
 
 // requireOrgID is the defense-in-depth gate every settings endpoint runs
@@ -157,6 +161,7 @@ func (h *LinearAgentSettingsHandler) GetStatus(w http.ResponseWriter, r *http.Re
 			h.logger.Warn().Err(err).Msg("failed to load agent settings; defaulting Enabled=false")
 		} else {
 			status.Enabled = settings.EffectiveEnabled()
+			status.DefaultRepoID = settings.DefaultRepoID
 		}
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[LinearAgentInstallStatus]{Data: status})
@@ -239,15 +244,7 @@ func (h *LinearAgentSettingsHandler) UpsertMapping(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, models.SingleResponse[db.LinearTeamRepoMapping]{Data: *mapping})
 }
 
-// PatchEnableRequest is the JSON body for PATCH /agent. Only the Enabled
-// flag is honored today; future fields (per-team overrides, default repo)
-// can extend this struct without breaking callers because absent fields
-// leave existing settings untouched.
-type PatchEnableRequest struct {
-	Enabled *bool `json:"enabled"`
-}
-
-// PatchSettings flips the per-org enable flag.
+// PatchSettings updates the per-org Linear agent settings.
 func (h *LinearAgentSettingsHandler) PatchSettings(w http.ResponseWriter, r *http.Request) {
 	if h.orgs == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "ORG_WRITER_UNAVAILABLE", "agent settings writer not configured")
@@ -257,21 +254,74 @@ func (h *LinearAgentSettingsHandler) PatchSettings(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
-	var req PatchEnableRequest
+	var req map[string]json.RawMessage
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, linearAgentSettingsMaxBodyBytes)).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse request body", err)
 		return
 	}
-	if req.Enabled == nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "enabled is required")
+	rawEnabled, hasEnabled := req["enabled"]
+	rawDefaultRepoID, hasDefaultRepoID := req["default_repo_id"]
+	if !hasEnabled && !hasDefaultRepoID {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "enabled or default_repo_id is required")
 		return
 	}
-	if err := h.orgs.SetLinearAgentEnabled(r.Context(), orgID, *req.Enabled); err != nil {
+	if hasEnabled && !hasDefaultRepoID {
+		var enabled bool
+		if err := json.Unmarshal(rawEnabled, &enabled); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "enabled must be a boolean", err)
+			return
+		}
+		if err := h.orgs.SetLinearAgentEnabled(r.Context(), orgID, enabled); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PATCH_FAILED", "failed to update agent settings", err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	settings := models.LinearAgentSettings{}
+	if h.settings != nil {
+		loaded, err := h.settings.LoadAgentSettings(r.Context(), orgID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PATCH_FAILED", "failed to load agent settings", err)
+			return
+		}
+		settings = loaded
+	}
+	if hasEnabled {
+		var enabled bool
+		if err := json.Unmarshal(rawEnabled, &enabled); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "enabled must be a boolean", err)
+			return
+		}
+		settings.Enabled = &enabled
+	}
+	if hasDefaultRepoID {
+		if string(rawDefaultRepoID) == "null" {
+			settings.DefaultRepoID = nil
+		} else {
+			var repoID uuid.UUID
+			if err := json.Unmarshal(rawDefaultRepoID, &repoID); err != nil || repoID == uuid.Nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "default_repo_id must be a repository id or null", err)
+				return
+			}
+			settings.DefaultRepoID = &repoID
+		}
+	}
+	if err := h.orgs.SetLinearAgentSettings(r.Context(), orgID, settings); err != nil {
+		if errors.Is(err, ErrInvalidDefaultRepo) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "default_repo_id is not a valid active repository for this organization", err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "PATCH_FAILED", "failed to update agent settings", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// ErrInvalidDefaultRepo is returned by linearAgentOrgWriter.SetLinearAgentSettings when
+// the requested default_repo_id does not belong to the org or is not an active repository.
+var ErrInvalidDefaultRepo = errors.New("invalid default repository")
 
 // AgentSessionDebugSummary is the projection rendered by the debug list
 // endpoint. Captures the join across linear_agent_sessions and the

@@ -57,6 +57,7 @@ export type IntegrationAuthErrorInfo = {
 type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   sentryConnected: boolean;
   linearConnected: boolean;
+  linearExtra?: ReactNode;
   linearLoading: boolean;
   linearAuthError?: IntegrationAuthErrorInfo | null;
   slackConnected: boolean;
@@ -471,6 +472,7 @@ type OptionalIntegrationDescriptor = {
   connected: boolean;
   loading?: boolean;
   authError?: IntegrationAuthErrorInfo | null;
+  extra?: ReactNode;
   onConnect: () => void;
 };
 
@@ -486,7 +488,12 @@ function buildOptionalIntegrationItems(
       description: meta.description,
       logo: <IntegrationLogo name={meta.name} src={meta.logoSrc} />,
       badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-      extra: d.authError ? <IntegrationAuthErrorAlert info={d.authError} /> : undefined,
+      extra: (
+        <>
+          {d.authError ? <IntegrationAuthErrorAlert info={d.authError} /> : null}
+          {d.extra}
+        </>
+      ),
       action: (
         <IntegrationAction
           connected={d.connected}
@@ -510,7 +517,7 @@ function optionalDescriptorsFromProps(
 ): OptionalIntegrationDescriptor[] {
   return [
     { key: "sentry", connected: p.sentryConnected, onConnect: p.onConnectSentry },
-    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, onConnect: p.onConnectLinear },
+    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, extra: p.linearExtra, onConnect: p.onConnectLinear },
     { key: "slack", connected: p.slackConnected, onConnect: p.onConnectSlack },
     { key: "notion", connected: p.notionConnected, loading: p.notionLoading, onConnect: p.onConnectNotion },
     { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, onConnect: p.onConnectCircleCI },
