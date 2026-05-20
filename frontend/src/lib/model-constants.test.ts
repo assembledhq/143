@@ -39,7 +39,9 @@ describe("model constants", () => {
   it("includes latest Codex models", () => {
     expect(AVAILABLE_CODEX_MODELS).toEqual([
       "gpt-5.5",
+      "gpt-5.5-fast",
       "gpt-5.4",
+      "gpt-5.4-fast",
       "gpt-5.4-mini",
       "gpt-5.3-codex",
       "gpt-5.2-codex",

@@ -25,7 +25,9 @@ export const AVAILABLE_GEMINI_CLI_MODELS = [
 ] as const;
 
 export const CODEX_MODEL_GPT_5_5 = "gpt-5.5";
+export const CODEX_MODEL_GPT_5_5_FAST = "gpt-5.5-fast";
 export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
+export const CODEX_MODEL_GPT_5_4_FAST = "gpt-5.4-fast";
 export const CODEX_MODEL_GPT_5_4_MINI = "gpt-5.4-mini";
 export const CODEX_MODEL_GPT_5_3_CODEX = "gpt-5.3-codex";
 export const CODEX_MODEL_GPT_5_2_CODEX = "gpt-5.2-codex";
@@ -34,7 +36,9 @@ export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
 export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_5_5,
+  CODEX_MODEL_GPT_5_5_FAST,
   CODEX_MODEL_GPT_5_4,
+  CODEX_MODEL_GPT_5_4_FAST,
   CODEX_MODEL_GPT_5_4_MINI,
   CODEX_MODEL_GPT_5_3_CODEX,
   CODEX_MODEL_GPT_5_2_CODEX,
