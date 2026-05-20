@@ -574,6 +574,17 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		WHERE id = @job_id
 		  AND status = 'running'
 		  AND lock_token = @lock_token
+		  AND (
+		    job_type NOT IN ('run_agent', 'continue_session')
+		    OR NULLIF(payload->>'session_id', '') IS NULL
+		    OR EXISTS (
+		      SELECT 1
+		      FROM sessions s
+		      WHERE s.org_id = jobs.org_id
+		        AND s.id::text = payload->>'session_id'
+		        AND s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')
+		    )
+		  )
 		RETURNING lease_expires_at`
 
 	var leaseExpiresAt time.Time
@@ -583,12 +594,77 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		"lock_token":    lockToken,
 	}).Scan(&leaseExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if terminalizeErr := s.terminalizeIfReferencedSessionTerminal(ctx, jobID, lockToken); terminalizeErr != nil {
+			return nil, false, terminalizeErr
+		}
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("renew job lease: %w", err)
 	}
 	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
+}
+
+func (s *JobStore) terminalizeIfReferencedSessionTerminal(ctx context.Context, jobID, lockToken uuid.UUID) error {
+	execer, ok := s.db.(jobExecer)
+	if !ok {
+		return fmt.Errorf("job store db does not support Exec")
+	}
+	_, err := execer.Exec(ctx, `
+		UPDATE jobs j
+		SET status = 'failed',
+			last_error = 'referenced session is already terminal; stopping session job lease renewal',
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE j.id = $1
+		  AND j.status = 'running'
+		  AND j.lock_token = $2
+		  AND j.job_type IN ('run_agent', 'continue_session')
+		  AND NULLIF(j.payload->>'session_id', '') IS NOT NULL
+		  AND EXISTS (
+		    SELECT 1
+		    FROM sessions s
+		    WHERE s.org_id = j.org_id
+		      AND s.id::text = j.payload->>'session_id'
+		      AND s.status IN ('completed', 'failed', 'cancelled', 'skipped')
+		  )`, jobID, lockToken)
+	if err != nil {
+		return fmt.Errorf("terminalize session job after terminal session lease loss: %w", err)
+	}
+	return nil
+}
+
+// TerminalizeRunningSessionJobs stops in-flight session runner jobs for a
+// session that has already reached terminal user-visible state.
+func (s *JobStore) TerminalizeRunningSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error) {
+	execer, ok := s.db.(jobExecer)
+	if !ok {
+		return 0, fmt.Errorf("job store db does not support Exec")
+	}
+	tag, err := execer.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'failed',
+			last_error = $3,
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE org_id = $1
+		  AND status = 'running'
+		  AND job_type IN ('run_agent', 'continue_session')
+		  AND payload->>'session_id' = $2::text`, orgID, sessionID, reason)
+	if err != nil {
+		return 0, fmt.Errorf("terminalize running session jobs: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // MarkSucceededWithLease transitions a running job to succeeded only if the

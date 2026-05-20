@@ -95,7 +95,6 @@ type runtimeProgressTracker struct {
 	lastStrength     models.RuntimeProgressStrength
 	lastStrongAt     time.Time
 	lastPersistedAt  time.Time
-	activeToolAt     time.Time
 	activeTools      map[string]time.Time
 }
 
@@ -127,14 +126,11 @@ func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType,
 				t.activeTools = make(map[string]time.Time)
 			}
 			t.activeTools[toolID] = observedAt
-		} else if t.activeToolAt.IsZero() {
-			t.activeToolAt = observedAt
 		}
 	case models.RuntimeProgressTypeToolResult, models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressTypeCheckpoint:
 		if toolID != "" && t.activeTools != nil {
 			delete(t.activeTools, toolID)
 		} else {
-			t.activeToolAt = time.Time{}
 			clear(t.activeTools)
 		}
 	}
@@ -149,7 +145,7 @@ func (t *runtimeProgressTracker) Snapshot() (time.Time, time.Time, models.Runtim
 func (t *runtimeProgressTracker) ToolActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return !t.activeToolAt.IsZero() || len(t.activeTools) > 0
+	return len(t.activeTools) > 0
 }
 
 func (t *runtimeProgressTracker) ShouldPersist() bool {

@@ -412,6 +412,20 @@ func TestJobStore_RenewLease(t *testing.T) {
 				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectExec("UPDATE jobs j[\\s\\S]*referenced session is already terminal").
+					WithArgs(uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			},
+		},
+		{
+			name: "terminalizes session job when referenced session is already terminal",
+			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectExec("UPDATE jobs j[\\s\\S]*s.status IN \\('completed', 'failed', 'cancelled', 'skipped'\\)").
+					WithArgs(uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
 		{
@@ -456,6 +470,41 @@ func TestJobStore_RenewLease(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestJobStore_RenewLease_GuardsSessionJobsAgainstTerminalSessions(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "job_type NOT IN ('run_agent', 'continue_session')", "RenewLease should only apply session terminal-state checks to session runner jobs")
+	require.Contains(t, sql, "payload->>'session_id'", "RenewLease should inspect the durable session reference in session job payloads")
+	require.Contains(t, sql, "s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')", "RenewLease should refuse renewal when the referenced session is terminal")
+	require.Contains(t, sql, "s.org_id = jobs.org_id", "RenewLease should scope the session guard to the job org")
+}
+
+func TestJobStore_TerminalizeRunningSessionJobs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	reason := "runtime-control watchdog failed terminal session"
+
+	mock.ExpectExec("UPDATE jobs[\\s\\S]*job_type IN \\('run_agent', 'continue_session'\\)[\\s\\S]*payload->>'session_id'").
+		WithArgs(orgID, sessionID, reason).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	updated, err := store.TerminalizeRunningSessionJobs(context.Background(), orgID, sessionID, reason)
+	require.NoError(t, err, "TerminalizeRunningSessionJobs should not return an error")
+	require.Equal(t, int64(2), updated, "TerminalizeRunningSessionJobs should return the affected row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestJobStore_MarkSucceededWithLease(t *testing.T) {
