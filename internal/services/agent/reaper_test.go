@@ -116,8 +116,10 @@ type reaperMockThreadLister struct {
 	stuckThreads []models.SessionThread
 	listErr      error
 	updateErr    error
+	failErr      error
 
 	updatedThreadResults []threadResultUpdate
+	failedBySession      []threadSessionFailure
 }
 
 type threadResultUpdate struct {
@@ -127,6 +129,12 @@ type threadResultUpdate struct {
 	result   *models.SessionResult
 }
 
+type threadSessionFailure struct {
+	orgID     uuid.UUID
+	sessionID uuid.UUID
+	result    *models.SessionResult
+}
+
 func (m *reaperMockThreadLister) ListStuckRunningThreads(_ context.Context, _ time.Time) ([]models.SessionThread, error) {
 	return m.stuckThreads, m.listErr
 }
@@ -134,6 +142,11 @@ func (m *reaperMockThreadLister) ListStuckRunningThreads(_ context.Context, _ ti
 func (m *reaperMockThreadLister) UpdateResult(_ context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	m.updatedThreadResults = append(m.updatedThreadResults, threadResultUpdate{orgID: orgID, threadID: threadID, status: status, result: result})
 	return m.updateErr
+}
+
+func (m *reaperMockThreadLister) FailRunningBySession(_ context.Context, orgID, sessionID uuid.UUID, result *models.SessionResult) (int64, error) {
+	m.failedBySession = append(m.failedBySession, threadSessionFailure{orgID: orgID, sessionID: sessionID, result: result})
+	return 1, m.failErr
 }
 
 // reaperMockSnapshotStore implements storage.SnapshotStore for testing.
@@ -244,6 +257,30 @@ func TestReapPhase0_4_FailsRuntimeControlStalledSessions(t *testing.T) {
 	require.Contains(t, terminalizer.calls[0].reason, FailureCategoryRuntimeControlStalled, "terminalize reason should preserve watchdog attribution")
 	require.True(t, !mock.stopAfterBefore.Before(before) && !mock.stopAfterBefore.After(after), "stop-after cutoff should use now so per-run persisted grace deadlines are honored")
 	require.True(t, mock.deadlineBefore.Before(mock.stopAfterBefore), "soft-deadline cutoff should retain watchdog slack for sessions with no persisted stop request")
+}
+
+func TestReapPhase0_4_FailsRuntimeStalledRunningThreads(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	mock := &reaperMockSessionLister{
+		runtimeStalled: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)},
+		},
+	}
+	threads := &reaperMockThreadLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(), WithStuckThreadLister(threads))
+	reaper.reap(context.Background())
+
+	require.Len(t, threads.failedBySession, 1, "runtime-control stalled sessions should fail running child threads")
+	require.Equal(t, orgID, threads.failedBySession[0].orgID, "thread failure should stay scoped to the session org")
+	require.Equal(t, sessionID, threads.failedBySession[0].sessionID, "thread failure should target the stalled session")
+	require.NotNil(t, threads.failedBySession[0].result, "thread failure should include a result payload")
+	require.NotNil(t, threads.failedBySession[0].result.FailureCategory, "thread failure should include a category")
+	require.Equal(t, FailureCategoryRuntimeControlStalled, *threads.failedBySession[0].result.FailureCategory, "thread failure should use the runtime-control category")
 }
 
 func TestReapPhase0_5_ContinuesOnUpdateStatusError(t *testing.T) {

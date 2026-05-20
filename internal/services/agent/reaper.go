@@ -96,6 +96,10 @@ type RuntimeJobTerminalizer interface {
 	TerminalizeRunningSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error)
 }
 
+type runtimeStalledThreadFailer interface {
+	FailRunningBySession(ctx context.Context, orgID, sessionID uuid.UUID, result *models.SessionResult) (int64, error)
+}
+
 // SessionReaperOption configures optional SessionReaper dependencies.
 type SessionReaperOption func(*SessionReaper)
 
@@ -316,6 +320,24 @@ func (r *SessionReaper) reap(ctx context.Context) {
 						Str("org_id", s.OrgID.String()).
 						Int64("terminalized_jobs", terminalized).
 						Msg("reaper: terminalized runtime-control stalled session jobs")
+				}
+			}
+			if threadFailer, ok := r.threads.(runtimeStalledThreadFailer); ok {
+				errMsg := "Session stopped after crossing its runtime stop deadline."
+				category := FailureCategoryRuntimeControlStalled
+				result := &models.SessionResult{
+					Error:           &errMsg,
+					FailureCategory: &category,
+				}
+				affected, err := threadFailer.FailRunningBySession(ctx, s.OrgID, s.ID, result)
+				if err != nil {
+					r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to fail runtime-control stalled session threads")
+				} else if affected > 0 {
+					r.logger.Warn().
+						Str("session_id", s.ID.String()).
+						Str("org_id", s.OrgID.String()).
+						Int64("threads_failed", affected).
+						Msg("reaper: failed runtime-control stalled session threads")
 				}
 			}
 			event := r.logger.Error().
