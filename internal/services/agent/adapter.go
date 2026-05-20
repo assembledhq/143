@@ -581,8 +581,7 @@ const SandboxMetadataBaseCommitSHA = "base_commit_sha"
 const SandboxMetadataTargetBranch = "target_branch"
 
 // SandboxMetadataClaudeCodePermissionMode is the sandbox.Metadata key used by
-// Claude Code auth setup to tell the adapter which CLI permission mode is
-// compatible with the selected credential path, CLI version, and model.
+// Claude Code auth setup to record the CLI permission mode for sandboxed runs.
 const SandboxMetadataClaudeCodePermissionMode = "claude_code_permission_mode"
 
 // SandboxMetadataClaudeCodeVersion is the sandbox.Metadata key used to cache
@@ -590,8 +589,9 @@ const SandboxMetadataClaudeCodePermissionMode = "claude_code_permission_mode"
 const SandboxMetadataClaudeCodeVersion = "claude_code_version"
 
 const (
-	ClaudeCodePermissionModeAuto        = "auto"
-	ClaudeCodePermissionModeAcceptEdits = "acceptEdits"
+	ClaudeCodePermissionModeAuto              = "auto"
+	ClaudeCodePermissionModeAcceptEdits       = "acceptEdits"
+	ClaudeCodePermissionModeBypassPermissions = "bypassPermissions"
 )
 
 // SandboxConnectionInfo holds provider-specific connection details for local resume.

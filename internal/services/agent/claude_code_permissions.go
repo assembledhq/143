@@ -22,8 +22,8 @@ func setClaudeCodePermissionMode(sandbox *Sandbox, mode string) {
 	if sandbox == nil {
 		return
 	}
-	if mode != ClaudeCodePermissionModeAuto {
-		mode = ClaudeCodePermissionModeAcceptEdits
+	if mode != ClaudeCodePermissionModeBypassPermissions {
+		mode = ClaudeCodePermissionModeBypassPermissions
 	}
 	if sandbox.Metadata == nil {
 		sandbox.Metadata = make(map[string]string, 1)
@@ -32,18 +32,7 @@ func setClaudeCodePermissionMode(sandbox *Sandbox, mode string) {
 }
 
 func claudeCodePermissionModeForAuth(billingMode TokenBillingMode, accountType string, model string, cliVersion string) string {
-	if !claudeCodeCLISupportsAuto(cliVersion) || !claudeCodeModelSupportsAuto(model) {
-		return ClaudeCodePermissionModeAcceptEdits
-	}
-	switch billingMode {
-	case TokenBillingModeAPIKey:
-		return ClaudeCodePermissionModeAuto
-	case TokenBillingModeSubscription:
-		if claudeCodeSubscriptionSupportsAuto(accountType) {
-			return ClaudeCodePermissionModeAuto
-		}
-	}
-	return ClaudeCodePermissionModeAcceptEdits
+	return ClaudeCodePermissionModeBypassPermissions
 }
 
 func claudeCodeModelSupportsAuto(model string) bool {
@@ -116,14 +105,14 @@ func detectClaudeCodeVersion(ctx context.Context, sandbox *Sandbox, provider San
 			Err(err).
 			Int("exit_code", exitCode).
 			Str("stderr", strings.TrimSpace(stderr.String())).
-			Msg("failed to detect Claude Code CLI version; using acceptEdits permission mode")
+			Msg("failed to detect Claude Code CLI version")
 		return ""
 	}
 	version := parseClaudeCodeVersion(stdout.String())
 	if version == "" {
 		logger.Debug().
 			Str("stdout", strings.TrimSpace(stdout.String())).
-			Msg("could not parse Claude Code CLI version; using acceptEdits permission mode")
+			Msg("could not parse Claude Code CLI version")
 		return ""
 	}
 	if sandbox.Metadata == nil {

@@ -5087,8 +5087,8 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	require.Contains(t, d.provider.ExecCalls,
 		"mkdir -p '/home/sandbox/.claude' && install -m 600 /dev/null '/home/sandbox/.claude/.credentials.json'",
 		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
-	require.Equal(t, agent.ClaudeCodePermissionModeAuto, capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode],
-		"Claude Max subscription should opt into auto mode for a supported Claude Code CLI and default model")
+	require.Equal(t, agent.ClaudeCodePermissionModeBypassPermissions, capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode],
+		"Claude Max subscription should use bypass mode for non-interactive sandbox execution")
 	require.Equal(t, "2.1.139", capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodeVersion],
 		"detected Claude Code CLI version should be cached in sandbox metadata")
 }

@@ -235,11 +235,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 }
 
 func claudeCodePermissionModeArg(sandbox *agent.Sandbox) string {
-	mode := agent.ClaudeCodePermissionModeAcceptEdits
-	if sandbox != nil && sandbox.Metadata != nil && sandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode] == agent.ClaudeCodePermissionModeAuto {
-		mode = agent.ClaudeCodePermissionModeAuto
-	}
-	return " --permission-mode " + mode
+	return " --permission-mode " + agent.ClaudeCodePermissionModeBypassPermissions
 }
 
 func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, prompt *agent.AgentPrompt) (string, string, error) {
