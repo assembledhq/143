@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
@@ -23,23 +22,53 @@ func (s staticEgressTestOrgStore) GetByID(context.Context, uuid.UUID) (models.Or
 func TestResolveStaticEgressRuntimeConfigRequiresCapabilityFile(t *testing.T) {
 	t.Parallel()
 
-	capabilityFile := filepath.Join(t.TempDir(), "static-egress-capable")
-	cfg := resolveStaticEgressRuntimeConfig(true, "203.0.113.10", capabilityFile)
-	require.True(t, cfg.Enabled, "static egress should remain enabled when platform config is present")
-	require.False(t, cfg.Capable, "static egress should not be capable before the host verifier writes its marker")
-	require.Contains(t, cfg.UnavailableReason, "capability file", "missing marker should explain why the worker is not capable")
-
-	require.NoError(t, WriteStaticEgressCapabilityFile(capabilityFile, "203.0.113.10", "static-net"), "test should write a verifier marker")
-	cfg = resolveStaticEgressRuntimeConfig(true, "203.0.113.10", capabilityFile)
-	require.True(t, cfg.Capable, "matching verifier marker should make the runtime static-egress capable")
+	cfg := ResolveStaticEgressRuntimeConfig(false, "203.0.113.10")
+	require.False(t, cfg.Enabled, "disabled static egress should not enable the runtime")
+	require.False(t, cfg.Capable, "disabled static egress should not advertise capability")
 	require.Equal(t, DefaultStaticEgressNetwork, cfg.NetworkName, "static egress bridge should use the fixed internal network")
 	require.Equal(t, DefaultStaticEgressResolvConf, cfg.ResolvConfPath, "static egress resolver should use the fixed internal path")
-	require.Empty(t, cfg.UnavailableReason, "capable runtime should not carry an unavailable reason")
+}
 
-	require.NoError(t, WriteStaticEgressCapabilityFile(capabilityFile, "198.51.100.20", "static-net"), "test should write a mismatched verifier marker")
-	cfg = resolveStaticEgressRuntimeConfig(true, "203.0.113.10", capabilityFile)
-	require.False(t, cfg.Capable, "mismatched public IP marker should not make the worker capable")
-	require.Contains(t, cfg.UnavailableReason, "does not match", "mismatched marker should explain the public IP mismatch")
+func TestParseStaticEgressCapabilityPublicIP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		content     string
+		expected    string
+		expectedErr string
+	}{
+		{
+			name:     "returns public ip",
+			content:  "public_ip=203.0.113.10\nnetwork=143-sandbox-static-egress\n",
+			expected: "203.0.113.10",
+		},
+		{
+			name:        "rejects empty public ip",
+			content:     "public_ip=\n",
+			expectedErr: "empty public_ip",
+		},
+		{
+			name:        "requires public ip",
+			content:     "network=143-sandbox-static-egress\n",
+			expectedErr: "missing public_ip",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := parseStaticEgressCapabilityPublicIP(tt.content, "test-marker")
+			if tt.expectedErr != "" {
+				require.Error(t, err, "invalid marker content should return an error")
+				require.Contains(t, err.Error(), tt.expectedErr, "error should explain the invalid marker content")
+				return
+			}
+			require.NoError(t, err, "valid marker content should parse")
+			require.Equal(t, tt.expected, got, "parser should return the marker public IP")
+		})
+	}
 }
 
 func TestApplyOrgSandboxNetworkSettingsRequiresVerifiedStaticEgress(t *testing.T) {

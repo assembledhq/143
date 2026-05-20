@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -39,10 +38,6 @@ type StaticEgressRuntimeConfig struct {
 // worker-local runtime contract. Static egress uses fixed internal bridge and
 // resolver paths; only the customer-facing public IP is configurable.
 func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP string) StaticEgressRuntimeConfig {
-	return resolveStaticEgressRuntimeConfig(enabled, publicIP, DefaultStaticEgressCapability)
-}
-
-func resolveStaticEgressRuntimeConfig(enabled bool, publicIP, capabilityFile string) StaticEgressRuntimeConfig {
 	runtime := StaticEgressRuntimeConfig{
 		Enabled:        enabled && publicIP != "",
 		NetworkName:    DefaultStaticEgressNetwork,
@@ -57,7 +52,7 @@ func resolveStaticEgressRuntimeConfig(enabled bool, publicIP, capabilityFile str
 		runtime.UnavailableReason = "STATIC_EGRESS_PUBLIC_IP is not configured"
 		return runtime
 	}
-	verifiedIP, err := readStaticEgressCapabilityPublicIP(capabilityFile)
+	verifiedIP, err := readStaticEgressCapabilityPublicIP()
 	if err != nil {
 		runtime.UnavailableReason = err.Error()
 		return runtime
@@ -70,45 +65,27 @@ func resolveStaticEgressRuntimeConfig(enabled bool, publicIP, capabilityFile str
 	return runtime
 }
 
-func readStaticEgressCapabilityPublicIP(path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		path = DefaultStaticEgressCapability
-	}
-	content, err := os.ReadFile(path)
+func readStaticEgressCapabilityPublicIP() (string, error) {
+	content, err := os.ReadFile(DefaultStaticEgressCapability)
 	if err != nil {
-		return "", fmt.Errorf("static egress capability file %q is not readable: %w", path, err)
+		return "", fmt.Errorf("static egress capability file %q is not readable: %w", DefaultStaticEgressCapability, err)
 	}
-	for _, line := range strings.Split(string(content), "\n") {
+	return parseStaticEgressCapabilityPublicIP(string(content), DefaultStaticEgressCapability)
+}
+
+func parseStaticEgressCapabilityPublicIP(content, source string) (string, error) {
+	for _, line := range strings.Split(content, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok || strings.TrimSpace(key) != "public_ip" {
 			continue
 		}
 		value = strings.TrimSpace(value)
 		if value == "" {
-			return "", fmt.Errorf("static egress capability file %q has an empty public_ip", path)
+			return "", fmt.Errorf("static egress capability file %q has an empty public_ip", source)
 		}
 		return value, nil
 	}
-	return "", fmt.Errorf("static egress capability file %q is missing public_ip", path)
-}
-
-// WriteStaticEgressCapabilityFile records successful host-side verification.
-func WriteStaticEgressCapabilityFile(path, publicIP, networkName string) error {
-	if strings.TrimSpace(path) == "" {
-		path = DefaultStaticEgressCapability
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create static egress capability directory: %w", err)
-	}
-	tmp := path + ".tmp"
-	content := fmt.Sprintf("public_ip=%s\nnetwork=%s\n", publicIP, networkName)
-	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
-		return fmt.Errorf("write static egress capability marker: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("publish static egress capability marker: %w", err)
-	}
-	return nil
+	return "", fmt.Errorf("static egress capability file %q is missing public_ip", source)
 }
 
 // ApplyOrgSandboxNetworkSettings chooses the sandbox network for a new
