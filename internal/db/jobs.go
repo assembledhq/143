@@ -73,6 +73,20 @@ type JobQueueHealthSample struct {
 	OldestRunnableAgeSeconds float64
 }
 
+// WorkerLoadSample is an ops-oriented snapshot of worker-owned load. It spans
+// orgs by design so the primary operations dashboard can show fleet capacity.
+type WorkerLoadSample struct {
+	WorkerNodeID          string
+	NodeStatus            string
+	RunningSessions       int64
+	TurnHeldSessions      int64
+	SandboxContainers     int64
+	ActivePreviews        int64
+	PreviewHeldContainers int64
+	RunningJobs           int64
+	RunningSessionJobs    int64
+}
+
 func NewJobStore(db DBTX) *JobStore {
 	return &JobStore{db: db, logger: zerolog.Nop()}
 }
@@ -300,6 +314,102 @@ func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSamp
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("queue health samples rows: %w", err)
+	}
+	return samples, nil
+}
+
+// WorkerLoadSamples returns platform-wide worker load grouped by worker node.
+// lint:allow-no-orgid reason="platform health sampler intentionally aggregates worker capacity across orgs"
+func (s *JobStore) WorkerLoadSamples(ctx context.Context) ([]WorkerLoadSample, error) {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		WITH worker_nodes AS (
+			SELECT id AS worker_node_id, status AS node_status
+			FROM nodes
+			WHERE mode IN ('worker', 'all') AND status IN ('active', 'draining')
+		),
+		session_counts AS (
+			SELECT
+				COALESCE(NULLIF(worker_node_id, ''), 'unassigned') AS worker_node_id,
+				COUNT(*) FILTER (WHERE status = 'running') AS running_sessions,
+				COUNT(*) FILTER (WHERE turn_holding_container = TRUE) AS turn_held_sessions,
+				COUNT(*) FILTER (WHERE container_id IS NOT NULL) AS sandbox_containers
+			FROM sessions
+			WHERE deleted_at IS NULL
+			  AND (
+				status = 'running'
+				OR turn_holding_container = TRUE
+				OR container_id IS NOT NULL
+			  )
+			GROUP BY COALESCE(NULLIF(worker_node_id, ''), 'unassigned')
+		),
+		preview_counts AS (
+			SELECT
+				COALESCE(NULLIF(worker_node_id, ''), 'unassigned') AS worker_node_id,
+				COUNT(*) FILTER (WHERE status IN %s) AS active_previews,
+				COUNT(*) FILTER (WHERE preview_holding_container = TRUE) AS preview_held_containers
+			FROM preview_instances
+			WHERE status IN %s OR preview_holding_container = TRUE
+			GROUP BY COALESCE(NULLIF(worker_node_id, ''), 'unassigned')
+		),
+		job_counts AS (
+			SELECT
+				COALESCE(NULLIF(locked_by_node_id, ''), 'unassigned') AS worker_node_id,
+				COUNT(*) AS running_jobs,
+				COUNT(*) FILTER (WHERE job_type IN ('run_agent', 'continue_session', 'start_preview')) AS running_session_jobs
+			FROM jobs
+			WHERE status = 'running'
+			GROUP BY COALESCE(NULLIF(locked_by_node_id, ''), 'unassigned')
+		),
+		worker_ids AS (
+			SELECT worker_node_id FROM worker_nodes
+			UNION
+			SELECT worker_node_id FROM session_counts
+			UNION
+			SELECT worker_node_id FROM preview_counts
+			UNION
+			SELECT worker_node_id FROM job_counts
+		)
+		SELECT
+			worker_ids.worker_node_id,
+			COALESCE(worker_nodes.node_status, '') AS node_status,
+			COALESCE(session_counts.running_sessions, 0) AS running_sessions,
+			COALESCE(session_counts.turn_held_sessions, 0) AS turn_held_sessions,
+			COALESCE(session_counts.sandbox_containers, 0) AS sandbox_containers,
+			COALESCE(preview_counts.active_previews, 0) AS active_previews,
+			COALESCE(preview_counts.preview_held_containers, 0) AS preview_held_containers,
+			COALESCE(job_counts.running_jobs, 0) AS running_jobs,
+			COALESCE(job_counts.running_session_jobs, 0) AS running_session_jobs
+		FROM worker_ids
+		LEFT JOIN worker_nodes USING (worker_node_id)
+		LEFT JOIN session_counts USING (worker_node_id)
+		LEFT JOIN preview_counts USING (worker_node_id)
+		LEFT JOIN job_counts USING (worker_node_id)
+		ORDER BY running_sessions DESC, active_previews DESC, running_jobs DESC, worker_ids.worker_node_id ASC`, activeStatusFilter, activeStatusFilter))
+	if err != nil {
+		return nil, fmt.Errorf("worker load samples: %w", err)
+	}
+	defer rows.Close()
+
+	var samples []WorkerLoadSample
+	for rows.Next() {
+		var sample WorkerLoadSample
+		if err := rows.Scan(
+			&sample.WorkerNodeID,
+			&sample.NodeStatus,
+			&sample.RunningSessions,
+			&sample.TurnHeldSessions,
+			&sample.SandboxContainers,
+			&sample.ActivePreviews,
+			&sample.PreviewHeldContainers,
+			&sample.RunningJobs,
+			&sample.RunningSessionJobs,
+		); err != nil {
+			return nil, fmt.Errorf("scan worker load sample: %w", err)
+		}
+		samples = append(samples, sample)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("worker load samples rows: %w", err)
 	}
 	return samples, nil
 }

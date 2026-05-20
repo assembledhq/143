@@ -570,6 +570,8 @@ func main() {
 		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
+		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
+		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{
@@ -1351,7 +1353,7 @@ func buildServices(
 	var runtimeSampler *agent.RuntimeSampler
 	if cfg.RuntimeStatsInterval > 0 {
 		if statsProvider, ok := any(sandboxProvider).(agent.RuntimeStatsProvider); ok {
-			runtimeSampler = agent.NewRuntimeSampler(usageTracker, statsProvider, billingMetrics, cfg.RuntimeStatsInterval, logger)
+			runtimeSampler = agent.NewRuntimeSampler(usageTracker, statsProvider, billingMetrics, cfg.RuntimeStatsInterval, logger, cfg.NodeID)
 		} else {
 			logger.Info().Msg("sandbox provider does not implement RuntimeStatsProvider; runtime sampler disabled")
 		}

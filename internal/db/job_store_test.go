@@ -123,6 +123,52 @@ func TestJobStore_Enqueue(t *testing.T) {
 	}
 }
 
+func TestJobStore_WorkerLoadSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("WITH worker_nodes AS").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"worker_node_id",
+			"node_status",
+			"running_sessions",
+			"turn_held_sessions",
+			"sandbox_containers",
+			"active_previews",
+			"preview_held_containers",
+			"running_jobs",
+			"running_session_jobs",
+		}).
+			AddRow("worker-1", "active", int64(2), int64(1), int64(3), int64(4), int64(2), int64(5), int64(2)).
+			AddRow("unassigned", "", int64(1), int64(0), int64(1), int64(0), int64(0), int64(0), int64(0)))
+
+	samples, err := store.WorkerLoadSamples(context.Background())
+	require.NoError(t, err, "WorkerLoadSamples should not return an error")
+	require.Equal(t, []WorkerLoadSample{
+		{
+			WorkerNodeID:          "worker-1",
+			NodeStatus:            "active",
+			RunningSessions:       2,
+			TurnHeldSessions:      1,
+			SandboxContainers:     3,
+			ActivePreviews:        4,
+			PreviewHeldContainers: 2,
+			RunningJobs:           5,
+			RunningSessionJobs:    2,
+		},
+		{
+			WorkerNodeID:      "unassigned",
+			RunningSessions:   1,
+			SandboxContainers: 1,
+		},
+	}, samples, "WorkerLoadSamples should return the expected per-worker load samples")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // TestJobStore_EnqueueWithOpts_PinsTargetNode verifies that EnqueueWithOpts
 // passes TargetNodeID through to the INSERT so node-affinity routing actually
 // records the pin. The plain Enqueue wrapper doesn't take a target — its
