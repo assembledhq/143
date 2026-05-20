@@ -867,6 +867,51 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
   }
 
+  wait_vector_healthy() {
+    local cid="$1"
+    local timeout="${VECTOR_HEALTH_TIMEOUT:-90}"
+    local waited=0
+    local state health
+
+    echo "Waiting for Vector log collector health check (timeout ${timeout}s)..."
+    while [ "$waited" -le "$timeout" ]; do
+      state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo "missing")"
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo "missing")"
+
+      if [ "$state" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "running" ]; }; then
+        echo "Vector is healthy (state: $state, health: $health)."
+        return 0
+      fi
+
+      if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+        echo "ERROR: Vector is not running (state: $state, health: $health)"
+        docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
+        return 1
+      fi
+
+      if [ "$health" = "unhealthy" ]; then
+        echo "ERROR: Vector is unhealthy (state: $state, health: $health)"
+        docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
+        docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
+{{.Output}}
+{{end}}{{end}}' "$cid" 2>&1 || true
+        return 1
+      fi
+
+      if [ "$waited" -ge "$timeout" ]; then
+        echo "ERROR: Vector did not become healthy after ${timeout}s (state: $state, health: $health)"
+        docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
+        docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
+{{.Output}}
+{{end}}{{end}}' "$cid" 2>&1 || true
+        return 1
+      fi
+
+      sleep 2
+      waited=$((waited + 2))
+    done
+  }
+
   # Ensure gVisor runtime is configured with the flags the sandbox depends on:
   #   --ignore-cgroups: Docker handles cgroup management (prevents EOF errors
   #     from cgroup conflicts).
@@ -1057,13 +1102,9 @@ EOS
       echo "ERROR: Vector container not found — logs will not be collected"
       exit 1
     fi
-    VECTOR_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VECTOR_ID")"
-    if [ "$VECTOR_STATUS" = "exited" ] || [ "$VECTOR_STATUS" = "dead" ]; then
-      echo "ERROR: Vector is not running (status: $VECTOR_STATUS)"
-      docker compose -f "$COMPOSE_FILE" logs --tail=20 vector 2>&1 || true
+    if ! wait_vector_healthy "$VECTOR_ID"; then
       exit 1
     fi
-    echo "Vector is running (status: $VECTOR_STATUS)."
   fi
 
   if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then

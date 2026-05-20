@@ -162,7 +162,7 @@ transforms:
 
       # Add server identity
       .server = get_env_var("SERVER_ROLE") ?? "unknown"
-      .hostname = get_hostname()
+      .hostname = get_hostname() ?? "unknown"
 
   # Drop health check requests after JSON parsing so we can match on structured fields.
   # Filtering on .path avoids accidentally dropping app logs that mention health endpoints.
@@ -349,7 +349,7 @@ Provisioning workflow:
 2. The provisioned platform health dashboard lives at `deploy/grafana/provisioning/dashboards/platform-health.json` and covers job queue health, session/agent outcomes, API latency and traffic, and sandbox/runtime health from structured log signals.
 3. The Grafana dashboard provider uses `disableDeletion: false`, so removed dashboard JSON files are deleted from Grafana after provisioning resync.
 4. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
-5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules/`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys.
+5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys. App, worker, and logging deploys wait for Vector's Docker healthcheck to leave the initial `starting` state before deciding whether log collection is healthy.
 6. Scheduler heartbeat alerts should wait for dedicated heartbeat signals so the rules are not guesswork.
 
 ## LogsQL Query Examples
