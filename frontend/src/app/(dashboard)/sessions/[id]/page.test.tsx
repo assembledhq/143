@@ -2898,7 +2898,7 @@ describe('SessionDetailPage', () => {
     expect(within(actions).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
   });
 
-  it('shows the horizontal tab scrollbar only when tabs run into the action buttons', async () => {
+  it('keeps the overflowing tab rail scrollbar hidden so actions stay vertically aligned', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const tabRail = await screen.findByLabelText('Session detail tabs');
@@ -2917,7 +2917,7 @@ describe('SessionDetailPage', () => {
     });
 
     await waitFor(() => {
-      expect(tabRail).not.toHaveClass('scrollbar-hide');
+      expect(tabRail).toHaveClass('scrollbar-hide');
     });
     expect(tabRail).toHaveClass('mask-fade-r');
   });
