@@ -13,6 +13,10 @@ import (
 )
 
 type executorCreatorStub struct {
+	clearCalls     int
+	clearOrgID     uuid.UUID
+	clearSessionID uuid.UUID
+	clearJobID     uuid.UUID
 	calls          int
 	orgID          uuid.UUID
 	params         models.CreateSessionExecutorParams
@@ -21,6 +25,14 @@ type executorCreatorStub struct {
 	terminalCalls  int
 	terminalStatus models.SessionExecutorStatus
 	terminalError  string
+}
+
+func (s *executorCreatorStub) ClearPreHandoffReservation(ctx context.Context, orgID, sessionID, jobID uuid.UUID) (int64, error) {
+	s.clearCalls++
+	s.clearOrgID = orgID
+	s.clearSessionID = sessionID
+	s.clearJobID = jobID
+	return 0, nil
 }
 
 func (s *executorCreatorStub) CreateStarting(ctx context.Context, orgID uuid.UUID, params models.CreateSessionExecutorParams) (uuid.UUID, error) {
@@ -113,6 +125,10 @@ func TestDurableSessionExecutorDispatcher_DispatchPreservesLockToken(t *testing.
 	got, err := dispatcher.Dispatch(ctx, "run_agent", models.Session{ID: sessionID, OrgID: orgID}, &threadID)
 	require.NoError(t, err, "Dispatch should create, launch, and hand off a session executor")
 	require.Equal(t, executorID, got, "Dispatch should return the created executor id")
+	require.Equal(t, 1, executors.clearCalls, "Dispatch should clear stale pre-handoff reservations before creating a new executor")
+	require.Equal(t, orgID, executors.clearOrgID, "pre-handoff cleanup should be org-scoped")
+	require.Equal(t, sessionID, executors.clearSessionID, "pre-handoff cleanup should target the current session")
+	require.Equal(t, jobID, executors.clearJobID, "pre-handoff cleanup should only target reservations for the current job")
 	require.Equal(t, 1, executors.calls, "Dispatch should create one executor row")
 	require.Equal(t, orgID, executors.orgID, "executor row should be org-scoped")
 	require.Equal(t, lockToken, executors.params.LockToken, "executor row should preserve the worker lock token")
