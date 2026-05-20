@@ -95,6 +95,7 @@ type runtimeProgressTracker struct {
 	lastStrongAt     time.Time
 	lastPersistedAt  time.Time
 	activeToolAt     time.Time
+	activeTools      map[string]time.Time
 }
 
 func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
@@ -106,7 +107,7 @@ func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
 	}
 }
 
-func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) {
+func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time, toolID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if observedAt.IsZero() {
@@ -120,11 +121,21 @@ func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType,
 	}
 	switch progressType {
 	case models.RuntimeProgressTypeToolUse:
-		if t.activeToolAt.IsZero() {
+		if toolID != "" {
+			if t.activeTools == nil {
+				t.activeTools = make(map[string]time.Time)
+			}
+			t.activeTools[toolID] = observedAt
+		} else if t.activeToolAt.IsZero() {
 			t.activeToolAt = observedAt
 		}
 	case models.RuntimeProgressTypeToolResult, models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressTypeCheckpoint:
-		t.activeToolAt = time.Time{}
+		if toolID != "" && t.activeTools != nil {
+			delete(t.activeTools, toolID)
+		} else {
+			t.activeToolAt = time.Time{}
+			clear(t.activeTools)
+		}
 	}
 }
 
@@ -137,7 +148,7 @@ func (t *runtimeProgressTracker) Snapshot() (time.Time, time.Time, models.Runtim
 func (t *runtimeProgressTracker) ToolActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return !t.activeToolAt.IsZero()
+	return !t.activeToolAt.IsZero() || len(t.activeTools) > 0
 }
 
 func (t *runtimeProgressTracker) ShouldPersist() bool {
@@ -153,30 +164,38 @@ func (t *runtimeProgressTracker) ShouldPersist() bool {
 	return false
 }
 
-func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, bool) {
+func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, string, bool) {
 	switch entry.Level {
 	case "tool_use":
 		if isTerminalCommandExecution(entry.Metadata) {
-			return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, true
+			return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, commandExecutionItemIDFromMetadata(entry.Metadata), true
 		}
-		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, commandExecutionItemIDFromMetadata(entry.Metadata), true
 	case "question":
-		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, true
+		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, "", true
 	case "output":
 		if entry.Metadata != nil {
 			if typ, ok := entry.Metadata["type"].(string); ok && typ == "tool_result" {
-				return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, true
+				return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, commandExecutionItemIDFromMetadata(entry.Metadata), true
 			}
 		}
-		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, "", true
 	case "debug":
-		if isCommandExecutionStart(entry.Message) {
-			return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
+		if itemID, ok := commandExecutionStartItemID(entry.Message); ok {
+			return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, itemID, true
 		}
-		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, "", true
 	default:
-		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, false
+		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, "", false
 	}
+}
+
+func commandExecutionItemIDFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	itemID, _ := metadata["item_id"].(string)
+	return itemID
 }
 
 func isTerminalCommandExecution(metadata map[string]any) bool {
@@ -196,20 +215,24 @@ func isTerminalCommandExecution(metadata map[string]any) bool {
 	}
 }
 
-func isCommandExecutionStart(message string) bool {
+func commandExecutionStartItemID(message string) (string, bool) {
 	if message == "" {
-		return false
+		return "", false
 	}
 	var event struct {
 		Type string `json:"type"`
 		Item struct {
+			ID   string `json:"id"`
 			Type string `json:"type"`
 		} `json:"item"`
 	}
 	if err := json.Unmarshal([]byte(message), &event); err != nil {
-		return false
+		return "", false
 	}
-	return event.Type == "item.started" && event.Item.Type == "command_execution"
+	if event.Type != "item.started" || event.Item.Type != "command_execution" {
+		return "", false
+	}
+	return event.Item.ID, true
 }
 
 type runtimeController struct {

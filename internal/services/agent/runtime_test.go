@@ -229,7 +229,7 @@ func TestRuntimeController_ExtendsHealthyRunAfterStrongProgress(t *testing.T) {
 	startedAt := time.Now().UTC()
 	require.NoError(t, controller.Begin(context.Background(), startedAt, models.CheckpointCapabilityFullResume), "Begin should seed the runtime deadlines")
 
-	controller.tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, startedAt.Add(900*time.Millisecond))
+	controller.tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, startedAt.Add(900*time.Millisecond), "")
 	controller.tick(context.Background(), startedAt.Add(1100*time.Millisecond))
 
 	require.Equal(t, 1, sessionStore.extensionGrants, "strong recent progress should grant a runtime extension after the soft budget expires")
@@ -263,7 +263,7 @@ func TestRuntimeController_ExtendsAtConfiguredConcurrencyLimit(t *testing.T) {
 	startedAt := time.Now().UTC()
 	require.NoError(t, controller.Begin(context.Background(), startedAt, models.CheckpointCapabilityFullResume), "Begin should seed the runtime deadlines")
 
-	controller.tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, startedAt.Add(900*time.Millisecond))
+	controller.tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, startedAt.Add(900*time.Millisecond), "")
 	controller.tick(context.Background(), startedAt.Add(1100*time.Millisecond))
 
 	require.Equal(t, 1, sessionStore.extensionGrants, "hitting the org concurrency cap should not block an in-flight session from receiving a bounded extension")
@@ -351,7 +351,7 @@ func TestRuntimeProgressTracker_RecordAndPersist(t *testing.T) {
 	tracker := &runtimeProgressTracker{}
 	require.False(t, tracker.ShouldPersist(), "ShouldPersist should ignore an empty tracker with no observed progress")
 
-	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, time.Time{})
+	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, time.Time{}, "")
 	lastProgressAt, lastStrongAt, progressType, strength := tracker.Snapshot()
 	require.False(t, lastProgressAt.IsZero(), "Record should synthesize the observation timestamp when none is supplied")
 	require.Equal(t, models.RuntimeProgressTypeToolResult, progressType, "Record should store the latest progress type")
@@ -359,6 +359,21 @@ func TestRuntimeProgressTracker_RecordAndPersist(t *testing.T) {
 	require.Equal(t, lastProgressAt, lastStrongAt, "strong progress should update the strong-progress watermark")
 	require.True(t, tracker.ShouldPersist(), "ShouldPersist should persist newly observed progress once")
 	require.False(t, tracker.ShouldPersist(), "ShouldPersist should not re-persist the same progress snapshot twice")
+}
+
+func TestRuntimeProgressTracker_TracksConcurrentCommandExecutions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	tracker := newRuntimeProgressTracker(now)
+
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(time.Second), "item_1")
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(2*time.Second), "item_2")
+	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(3*time.Second), "item_2")
+	require.True(t, tracker.ToolActive(), "completing one command should not clear another active command")
+
+	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(4*time.Second), "item_1")
+	require.False(t, tracker.ToolActive(), "all completed command IDs should clear active tool state")
 }
 
 func TestRuntimeProgressFromLog(t *testing.T) {
@@ -369,16 +384,17 @@ func TestRuntimeProgressFromLog(t *testing.T) {
 		entry        LogEntry
 		expectedType models.RuntimeProgressType
 		expected     models.RuntimeProgressStrength
+		expectedID   string
 		wantOK       bool
 	}{
 		{name: "tool use", entry: LogEntry{Level: "tool_use"}, expectedType: models.RuntimeProgressTypeToolUse, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
-		{name: "completed command execution", entry: LogEntry{Level: "tool_use", Metadata: map[string]any{"tool": "command_execution", "status": "completed"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
+		{name: "completed command execution", entry: LogEntry{Level: "tool_use", Metadata: map[string]any{"tool": "command_execution", "status": "completed", "item_id": "item_1"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, expectedID: "item_1", wantOK: true},
 		{name: "failed command execution", entry: LogEntry{Level: "tool_use", Metadata: map[string]any{"tool": "command_execution", "status": "failed"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
 		{name: "question", entry: LogEntry{Level: "question"}, expectedType: models.RuntimeProgressTypeQuestionBlocked, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
 		{name: "tool result output", entry: LogEntry{Level: "output", Metadata: map[string]any{"type": "tool_result"}}, expectedType: models.RuntimeProgressTypeToolResult, expected: models.RuntimeProgressStrengthStrong, wantOK: true},
 		{name: "assistant output", entry: LogEntry{Level: "output"}, expectedType: models.RuntimeProgressTypeAssistantOutput, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
 		{name: "debug", entry: LogEntry{Level: "debug"}, expectedType: models.RuntimeProgressTypeAssistantReason, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
-		{name: "debug item started command execution", entry: LogEntry{Level: "debug", Message: `{"type":"item.started","item":{"type":"command_execution"}}`}, expectedType: models.RuntimeProgressTypeToolUse, expected: models.RuntimeProgressStrengthWeak, wantOK: true},
+		{name: "debug item started command execution", entry: LogEntry{Level: "debug", Message: `{"type":"item.started","item":{"id":"item_1","type":"command_execution"}}`}, expectedType: models.RuntimeProgressTypeToolUse, expected: models.RuntimeProgressStrengthWeak, expectedID: "item_1", wantOK: true},
 		{name: "unknown", entry: LogEntry{Level: "trace"}, expectedType: models.RuntimeProgressTypeNone, expected: models.RuntimeProgressStrengthNone, wantOK: false},
 	}
 
@@ -386,9 +402,10 @@ func TestRuntimeProgressFromLog(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			progressType, strength, ok := runtimeProgressFromLog(tt.entry)
+			progressType, strength, toolID, ok := runtimeProgressFromLog(tt.entry)
 			require.Equal(t, tt.expectedType, progressType, "runtimeProgressFromLog should map the progress type correctly")
 			require.Equal(t, tt.expected, strength, "runtimeProgressFromLog should map the progress strength correctly")
+			require.Equal(t, tt.expectedID, toolID, "runtimeProgressFromLog should preserve the command execution item id")
 			require.Equal(t, tt.wantOK, ok, "runtimeProgressFromLog should report whether the log entry counts as progress")
 		})
 	}
@@ -641,7 +658,7 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 		)
 		controller.softDeadline = now.Add(5 * time.Second)
 		controller.hardDeadline = now.Add(time.Minute)
-		controller.tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(time.Second))
+		controller.tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(time.Second), "")
 
 		controller.tick(context.Background(), now)
 		require.Equal(t, 1, store.recordRuntimeProgressCalls, "tick should attempt to persist fresh runtime progress once")
@@ -697,7 +714,7 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 		)
 		controller.softDeadline = now.Add(5 * time.Second)
 		controller.hardDeadline = now.Add(time.Minute)
-		controller.tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(-5*time.Second))
+		controller.tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(-5*time.Second), "")
 
 		controller.tick(context.Background(), now)
 		require.Equal(t, StopReasonNone, controller.stopRequested, "tick should not request a no-progress stop while a tool command is still active")

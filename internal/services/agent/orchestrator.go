@@ -2455,7 +2455,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
 	} else if snapshotKey != "" {
-		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC())
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC(), "")
 		lockToken, _ := jobctx.LockTokenFromContext(ctx)
 		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
@@ -3732,7 +3732,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	} else if newSnapshotKey != "" {
-		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC())
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC(), "")
 		lockToken, _ := jobctx.LockTokenFromContext(ctx)
 		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
@@ -4329,8 +4329,8 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, threadID *uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
 	for entry := range logCh {
 		if tracker != nil {
-			if progressType, strength, ok := runtimeProgressFromLog(entry); ok {
-				tracker.Record(progressType, strength, entry.Timestamp)
+			if progressType, strength, toolID, ok := runtimeProgressFromLog(entry); ok {
+				tracker.Record(progressType, strength, entry.Timestamp, toolID)
 			}
 		}
 		effectiveThreadID := threadID
@@ -5561,7 +5561,7 @@ func (o *Orchestrator) publishBootstrapCheckpoint(ctx context.Context, session *
 		return nil
 	}
 	if runtimeTracker != nil {
-		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthWeak, time.Now().UTC())
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthWeak, time.Now().UTC(), "")
 	}
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
 	agentSessionID := ""
