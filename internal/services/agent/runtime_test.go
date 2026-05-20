@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,19 +459,64 @@ func TestRuntimeController_RequestStopCancelsBeforePersistingStopMarker(t *testi
 	require.True(t, sessionStore.stopAfter[0].After(minStopAfter), "stop-after deadline should include graceful shutdown, checkpoint finalization, and watchdog slack")
 }
 
+func TestRuntimeController_RequestStopLogsActiveToolSummaries(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	now := time.Now().UTC()
+	tracker := newRuntimeProgressTracker(now)
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(time.Second), "item_3", "/bin/bash -lc 'rg session internal'")
+
+	controller := newRuntimeController(
+		runtimeConfig{
+			GracefulShutdownWindow:   time.Second,
+			CheckpointFinalizeWindow: time.Second,
+		},
+		&runtimeTestSessionStore{},
+		&runtimeTestJobStore{},
+		nil,
+		logger,
+		uuid.New(),
+		uuid.New(),
+		0,
+		nil,
+		tracker,
+	)
+
+	controller.RequestStop(StopReasonSoftBudget)
+
+	require.Contains(t, logs.String(), `"active_tools":["item_3: /bin/bash -lc 'rg session internal'"]`, "runtime stop log should include active command summaries")
+}
+
 func TestRuntimeProgressTracker_TracksConcurrentCommandExecutions(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
 	tracker := newRuntimeProgressTracker(now)
 
-	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(time.Second), "item_1")
-	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(2*time.Second), "item_2")
-	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(3*time.Second), "item_2")
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(time.Second), "item_1", "npm test")
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(2*time.Second), "item_2", "go test ./...")
+	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(3*time.Second), "item_2", "")
 	require.True(t, tracker.ToolActive(), "completing one command should not clear another active command")
+	require.Equal(t, []string{"item_1: npm test"}, tracker.ActiveToolSummaries(10), "tracker should retain the active command summary for stop logs")
 
-	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(4*time.Second), "item_1")
+	tracker.Record(models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, now.Add(4*time.Second), "item_1", "")
 	require.False(t, tracker.ToolActive(), "all completed command IDs should clear active tool state")
+}
+
+func TestRuntimeProgressTracker_ActiveToolSummariesAreBounded(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	tracker := newRuntimeProgressTracker(now)
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(time.Second), "item_1", strings.Repeat("x", 240))
+	tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(2*time.Second), "item_2", "go test ./...")
+
+	summaries := tracker.ActiveToolSummaries(1)
+	require.Len(t, summaries, 1, "ActiveToolSummaries should honor the requested limit")
+	require.LessOrEqual(t, len(summaries[0]), 180, "ActiveToolSummaries should truncate oversized commands for structured logs")
+	require.Contains(t, summaries[0], "item_1:", "ActiveToolSummaries should include the tool id with the command summary")
 }
 
 func TestRuntimeProgressFromLog(t *testing.T) {
@@ -503,6 +550,40 @@ func TestRuntimeProgressFromLog(t *testing.T) {
 			require.Equal(t, tt.expected, strength, "runtimeProgressFromLog should map the progress strength correctly")
 			require.Equal(t, tt.expectedID, toolID, "runtimeProgressFromLog should preserve the command execution item id")
 			require.Equal(t, tt.wantOK, ok, "runtimeProgressFromLog should report whether the log entry counts as progress")
+		})
+	}
+}
+
+func TestRuntimeToolSummaryFromLog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		entry    LogEntry
+		expected string
+	}{
+		{
+			name:     "debug item started command execution",
+			entry:    LogEntry{Level: "debug", Message: `{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'rg session internal'"}}`},
+			expected: `/bin/bash -lc 'rg session internal'`,
+		},
+		{
+			name:     "tool metadata command input",
+			entry:    LogEntry{Level: "tool_use", Metadata: map[string]any{"tool": "command_execution", "input": map[string]any{"command": "go test ./..."}}},
+			expected: "go test ./...",
+		},
+		{
+			name:     "non-command log",
+			entry:    LogEntry{Level: "output", Message: "done"},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, runtimeToolSummaryFromLog(tt.entry), "runtimeToolSummaryFromLog should extract command text only for command execution progress")
 		})
 	}
 }

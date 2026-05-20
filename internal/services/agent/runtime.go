@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"time"
 
@@ -95,7 +96,12 @@ type runtimeProgressTracker struct {
 	lastStrength     models.RuntimeProgressStrength
 	lastStrongAt     time.Time
 	lastPersistedAt  time.Time
-	activeTools      map[string]time.Time
+	activeTools      map[string]activeToolProgress
+}
+
+type activeToolProgress struct {
+	startedAt time.Time
+	summary   string
 }
 
 func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
@@ -107,7 +113,7 @@ func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
 	}
 }
 
-func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time, toolID string) {
+func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time, toolID string, toolSummary ...string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if observedAt.IsZero() {
@@ -123,9 +129,13 @@ func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType,
 	case models.RuntimeProgressTypeToolUse:
 		if toolID != "" {
 			if t.activeTools == nil {
-				t.activeTools = make(map[string]time.Time)
+				t.activeTools = make(map[string]activeToolProgress)
 			}
-			t.activeTools[toolID] = observedAt
+			progress := activeToolProgress{startedAt: observedAt}
+			if len(toolSummary) > 0 {
+				progress.summary = toolSummary[0]
+			}
+			t.activeTools[toolID] = progress
 		}
 	case models.RuntimeProgressTypeToolResult, models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressTypeCheckpoint:
 		if toolID != "" && t.activeTools != nil {
@@ -146,6 +156,50 @@ func (t *runtimeProgressTracker) ToolActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.activeTools) > 0
+}
+
+func (t *runtimeProgressTracker) ActiveToolSummaries(limit int) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.activeTools) == 0 || limit <= 0 {
+		return nil
+	}
+	tools := make([]struct {
+		id       string
+		progress activeToolProgress
+	}, 0, len(t.activeTools))
+	for id, progress := range t.activeTools {
+		tools = append(tools, struct {
+			id       string
+			progress activeToolProgress
+		}{id: id, progress: progress})
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		if tools[i].progress.startedAt.Equal(tools[j].progress.startedAt) {
+			return tools[i].id < tools[j].id
+		}
+		return tools[i].progress.startedAt.Before(tools[j].progress.startedAt)
+	})
+	if len(tools) > limit {
+		tools = tools[:limit]
+	}
+	summaries := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		summary := tool.id
+		if tool.progress.summary != "" {
+			summary += ": " + truncateRuntimeToolSummary(tool.progress.summary)
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func truncateRuntimeToolSummary(summary string) string {
+	const maxRuntimeToolSummaryBytes = 170
+	if len(summary) <= maxRuntimeToolSummaryBytes {
+		return summary
+	}
+	return summary[:maxRuntimeToolSummaryBytes-3] + "..."
 }
 
 func (t *runtimeProgressTracker) ShouldPersist() bool {
@@ -185,6 +239,29 @@ func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.
 	default:
 		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, "", false
 	}
+}
+
+func runtimeToolSummaryFromLog(entry LogEntry) string {
+	if entry.Level == "debug" {
+		if itemID, ok := commandExecutionStartItemID(entry.Message); ok && itemID != "" {
+			if command, ok := commandExecutionStartCommand(entry.Message); ok {
+				return command
+			}
+		}
+	}
+	if entry.Metadata == nil {
+		return ""
+	}
+	tool, _ := entry.Metadata["tool"].(string)
+	if tool != "command_execution" {
+		return ""
+	}
+	input, _ := entry.Metadata["input"].(map[string]any)
+	if input == nil {
+		return ""
+	}
+	command, _ := input["command"].(string)
+	return command
 }
 
 func commandExecutionItemIDFromMetadata(metadata map[string]any) string {
@@ -230,6 +307,37 @@ func commandExecutionStartItemID(message string) (string, bool) {
 		return "", false
 	}
 	return event.Item.ID, true
+}
+
+func commandExecutionStartCommand(message string) (string, bool) {
+	if message == "" {
+		return "", false
+	}
+	var event struct {
+		Type string `json:"type"`
+		Item struct {
+			Type    string `json:"type"`
+			Command string `json:"command"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(message), &event); err != nil {
+		return "", false
+	}
+	if event.Type != "item.started" || event.Item.Type != "command_execution" || event.Item.Command == "" {
+		return "", false
+	}
+	return event.Item.Command, true
+}
+
+func (c *runtimeController) activeToolLogFields(event *zerolog.Event) *zerolog.Event {
+	if c.tracker == nil {
+		return event
+	}
+	summaries := c.tracker.ActiveToolSummaries(5)
+	if len(summaries) == 0 {
+		return event
+	}
+	return event.Int("active_tool_count", len(summaries)).Strs("active_tools", summaries)
 }
 
 type runtimeController struct {
@@ -328,10 +436,10 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 				Msg("failed to persist runtime stop request")
 		}
 	}
-	c.logger.Info().
+	event := c.logger.Info().
 		Str("session_id", c.sessionID.String()).
-		Str("stop_reason", string(runtimeReason)).
-		Msg("runtime stop requested")
+		Str("stop_reason", string(runtimeReason))
+	c.activeToolLogFields(event).Msg("runtime stop requested")
 }
 
 func (c *runtimeController) tick(ctx context.Context, now time.Time) {
