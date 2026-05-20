@@ -360,7 +360,7 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 
 const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
 	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
-	j.lease_expires_at, j.lock_token, j.run_owner_id, j.last_error,
+	j.lease_expires_at, j.lock_token, j.run_owner_id, j.owner_kind, j.last_error,
 	j.dedupe_key, j.target_node_id, j.created_at, j.updated_at, j.completed_at`
 
 // nodeDeadHeartbeatThreshold is how long a node can go without heartbeating
@@ -410,6 +410,7 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		SET status = 'running',
 			locked_by_node_id = @node_id,
 			run_owner_id = @owner_id,
+			owner_kind = 'worker',
 			lock_token = @lock_token,
 			locked_at = now(),
 			lease_expires_at = now() + (@lease_seconds * interval '1 second'),
@@ -419,33 +420,42 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		WHERE j.id = next_job.id
 		RETURNING %s`, claimedJobColumns)
 
+	job, err := scanJobRow(s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"node_id":       nodeID,
+		"owner_id":      ownerID,
+		"lock_token":    lockToken,
+		"lease_seconds": int(leaseDuration.Seconds()),
+		"dead_before":   time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim next runnable job: %w", err)
+	}
+	return job, nil
+}
+
+func scanJobRow(row pgx.Row) (*models.Job, error) {
 	var job models.Job
 	var lockedByNodeID pgtype.Text
 	var lockedAt pgtype.Timestamptz
 	var leaseExpiresAt pgtype.Timestamptz
 	var persistedLockToken pgtype.UUID
 	var runOwnerID pgtype.Text
+	var ownerKind string
 	var lastError pgtype.Text
 	var dedupeKey pgtype.Text
 	var targetNodeID pgtype.Text
 	var completedAt pgtype.Timestamptz
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"node_id":       nodeID,
-		"owner_id":      ownerID,
-		"lock_token":    lockToken,
-		"lease_seconds": int(leaseDuration.Seconds()),
-		"dead_before":   time.Now().Add(-nodeDeadHeartbeatThreshold),
-	}).Scan(
+	err := row.Scan(
 		&job.ID, &job.OrgID, &job.Queue, &job.JobType, &job.Payload, &job.Priority,
 		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
 		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
-		&lastError, &dedupeKey, &targetNodeID, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("claim next runnable job: %w", err)
+		return nil, err
 	}
 	if lockedByNodeID.Valid {
 		job.LockedByNodeID = &lockedByNodeID.String
@@ -463,6 +473,7 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 	if runOwnerID.Valid {
 		job.RunOwnerID = &runOwnerID.String
 	}
+	job.OwnerKind = models.JobOwnerKind(ownerKind)
 	if lastError.Valid {
 		job.LastError = &lastError.String
 	}
@@ -476,6 +487,80 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		job.CompletedAt = &completedAt.Time
 	}
 	return &job, nil
+}
+
+// GetRunningForSessionExecutor returns the running job only when the executor
+// still owns the job by owner id and fencing token.
+// lint:allow-no-orgid reason="session executor boot validates cross-org job ownership by globally unique fenced job id"
+func (s *JobStore) GetRunningForSessionExecutor(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID) (*models.Job, bool, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM jobs j
+		WHERE j.org_id = $1
+		  AND j.id = $2
+		  AND j.status = 'running'
+		  AND j.lock_token = $3
+		  AND j.owner_kind = 'session_executor'
+		  AND j.run_owner_id = $4`, claimedJobColumns)
+
+	job, err := scanJobRow(s.db.QueryRow(ctx, query, orgID, jobID, lockToken, executorID.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get running session executor job: %w", err)
+	}
+	return job, true, nil
+}
+
+// HandoffToSessionExecutorWithLease transfers a running job from the worker
+// dispatcher to a durable session executor without changing the fencing token.
+func (s *JobStore) HandoffToSessionExecutorWithLease(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET owner_kind = 'session_executor',
+			run_owner_id = $1,
+			updated_at = now()
+		WHERE org_id = $2
+		  AND id = $3
+		  AND status = 'running'
+		  AND lock_token = $4`, executorID.String(), orgID, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("handoff job to session executor: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RenewLeaseForSessionExecutor extends a running executor-owned job lease only
+// when both the fencing token and executor owner id still match.
+func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+	query := `
+		UPDATE jobs
+		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
+			updated_at = now()
+		WHERE id = @job_id
+		  AND org_id = @org_id
+		  AND status = 'running'
+		  AND owner_kind = 'session_executor'
+		  AND run_owner_id = @executor_id
+		  AND lock_token = @lock_token
+		RETURNING lease_expires_at`
+
+	var leaseExpiresAt time.Time
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"lease_seconds": int(leaseDuration.Seconds()),
+		"org_id":        orgID,
+		"job_id":        jobID,
+		"lock_token":    lockToken,
+		"executor_id":   executorID.String(),
+	}).Scan(&leaseExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("renew session executor job lease: %w", err)
+	}
+	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
 }
 
 // RenewLease extends the lease for a running job owned by the provided fencing
@@ -516,6 +601,7 @@ func (s *JobStore) MarkSucceededWithLease(ctx context.Context, jobID, lockToken 
 			completed_at = now(),
 			locked_by_node_id = NULL,
 			run_owner_id = NULL,
+			owner_kind = 'worker',
 			lock_token = NULL,
 			locked_at = NULL,
 			lease_expires_at = NULL,
@@ -539,6 +625,7 @@ func (s *JobStore) MarkFailedWithLease(ctx context.Context, jobID, lockToken uui
 			last_error = $1,
 			locked_by_node_id = NULL,
 			run_owner_id = NULL,
+			owner_kind = 'worker',
 			lock_token = NULL,
 			locked_at = NULL,
 			lease_expires_at = NULL,
@@ -563,6 +650,7 @@ func (s *JobStore) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUI
 			run_at = $2,
 			locked_by_node_id = NULL,
 			run_owner_id = NULL,
+			owner_kind = 'worker',
 			lock_token = NULL,
 			locked_at = NULL,
 			lease_expires_at = NULL,
@@ -589,6 +677,7 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jo
 			attempts = GREATEST(attempts - 1, 0),
 			locked_by_node_id = NULL,
 			run_owner_id = NULL,
+			owner_kind = 'worker',
 			lock_token = NULL,
 			locked_at = NULL,
 			lease_expires_at = NULL,
@@ -613,6 +702,7 @@ func (s *JobStore) DeadLetterWithLease(ctx context.Context, jobID, lockToken uui
 			completed_at = now(),
 			locked_by_node_id = NULL,
 			run_owner_id = NULL,
+			owner_kind = 'worker',
 			lock_token = NULL,
 			locked_at = NULL,
 			lease_expires_at = NULL,
@@ -684,6 +774,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				last_error = 'job ownership lost; queued for bounded recovery',
 				locked_by_node_id = NULL,
 				run_owner_id = NULL,
+				owner_kind = 'worker',
 				lock_token = NULL,
 				locked_at = NULL,
 				lease_expires_at = NULL,

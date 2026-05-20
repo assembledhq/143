@@ -309,11 +309,11 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -329,11 +329,11 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", "worker-1", now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", now, now, completedAt,
 					))
 			},
 		},

@@ -531,6 +531,9 @@ func (m *mockSessionStore) PublishCheckpoint(ctx context.Context, orgID, session
 	if !published {
 		return false, nil
 	}
+	if m.eventHook != nil {
+		m.eventHook("checkpoint:" + string(kind))
+	}
 	m.checkpoints = append(m.checkpoints, checkpointUpdate{
 		agentSessionID: agentSessionID,
 		snapshotKey:    snapshotKey,
@@ -8245,6 +8248,124 @@ func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should succeed without a snapshot store configured")
 	require.Empty(t, d.sessions.getCheckpointUpdates(), "RunAgent should not publish checkpoint metadata when no snapshot was actually persisted")
+}
+
+func TestRunAgent_PublishesBootstrapCheckpointAfterSetupSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	attachmentKey := orgID.String() + "/2026-05/bootstrap.png"
+	attachmentURL := "/api/v1/uploads/files/" + attachmentKey
+
+	var (
+		eventMu sync.Mutex
+		events  []string
+	)
+	recordEvent := func(event string) {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		events = append(events, event)
+	}
+
+	d := defaultDeps()
+	d.sessions.eventHook = recordEvent
+	d.uploads = &mockUploadStore{
+		files: map[string]mockUploadFile{
+			attachmentKey: {
+				body:        []byte("png-data"),
+				contentType: "image/png",
+			},
+		},
+	}
+	d.messages.messages = []models.SessionMessage{{
+		ID:          1,
+		SessionID:   run.ID,
+		OrgID:       orgID,
+		TurnNumber:  0,
+		Role:        models.MessageRoleUser,
+		Content:     "Use this screenshot.",
+		Attachments: []string{attachmentURL},
+	}}
+	d.provider.WriteFileFn = func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
+		recordEvent("attachment")
+		d.provider.Files[path] = append([]byte(nil), data...)
+		return nil
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		recordEvent("snapshot")
+		return io.NopCloser(bytes.NewReader([]byte("bootstrap-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		recordEvent("execute")
+		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should succeed after publishing a bootstrap checkpoint")
+	checkpoints := d.sessions.getCheckpointUpdates()
+	require.Len(t, checkpoints, 2, "RunAgent should publish bootstrap and turn-complete checkpoints")
+	require.Equal(t, models.CheckpointKindBootstrap, checkpoints[0].kind, "first checkpoint should capture post-setup sandbox state")
+	require.Equal(t, models.CheckpointKindTurnComplete, checkpoints[1].kind, "last checkpoint should still capture turn completion")
+	require.NotEmpty(t, checkpoints[0].snapshotKey, "bootstrap checkpoint should publish only a persisted snapshot key")
+
+	eventMu.Lock()
+	gotEvents := append([]string(nil), events...)
+	eventMu.Unlock()
+	require.Less(t, indexOfEvent(gotEvents, "attachment"), indexOfEvent(gotEvents, "checkpoint:bootstrap"), "bootstrap checkpoint should be published after attachment materialization")
+	require.Less(t, indexOfEvent(gotEvents, "checkpoint:bootstrap"), indexOfEvent(gotEvents, "execute"), "bootstrap checkpoint should be durable before agent execution starts")
+}
+
+func TestRunAgent_DoesNotPublishBootstrapCheckpointWhenSnapshotPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return nil, errors.New("snapshot failed")
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should continue when the best-effort bootstrap snapshot fails")
+	for _, checkpoint := range d.sessions.getCheckpointUpdates() {
+		require.NotEqual(t, models.CheckpointKindBootstrap, checkpoint.kind, "RunAgent should not publish bootstrap metadata without a persisted snapshot")
+	}
+}
+
+func TestRunAgent_ExecutorOwnedBootstrapCheckpointMetadataFailureBlocksExecution(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	lockToken := uuid.New()
+
+	d := defaultDeps()
+	d.sessions.publishCheckpointErr = errors.New("checkpoint metadata unavailable")
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("bootstrap-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatal("executor-owned run must not start agent execution without durable bootstrap metadata")
+		return nil, nil
+	}
+	ctx := jobctx.WithLockToken(context.Background(), lockToken)
+	ctx = jobctx.WithOwnerKind(ctx, string(models.JobOwnerKindSessionExecutor))
+
+	err := buildOrchestrator(d).RunAgent(ctx, run)
+
+	require.Error(t, err, "executor-owned RunAgent should fail when bootstrap checkpoint metadata is not durable")
+	require.Contains(t, err.Error(), "bootstrap checkpoint", "error should describe the missing durable bootstrap checkpoint")
 }
 
 func TestRunAgent_PublishesCheckpointForHumanInputPauseWithNonZeroExit(t *testing.T) {

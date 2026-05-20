@@ -479,6 +479,25 @@ type orchestratorServiceStub struct {
 	runtimeCeiling       time.Duration
 }
 
+type fakeSessionExecutorDispatcher struct {
+	calls    int
+	jobType  string
+	session  models.Session
+	threadID *uuid.UUID
+	err      error
+}
+
+func (d *fakeSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (uuid.UUID, error) {
+	d.calls++
+	d.jobType = jobType
+	d.session = session
+	d.threadID = threadID
+	if d.err != nil {
+		return uuid.Nil, d.err
+	}
+	return uuid.New(), nil
+}
+
 type sessionCompleteRecorder struct {
 	calls []sessionCompleteCall
 	err   error
@@ -4445,6 +4464,45 @@ func TestRunAgentHandler_PassesPrimaryThreadIDFromPayload(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_DispatchesSessionExecutorWhenDispatcherConfigured(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	dispatcher := &fakeSessionExecutorDispatcher{}
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{
+		Orchestrator:              orch,
+		SessionExecutorDispatcher: dispatcher,
+	}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	var handoff *HandoffError
+	require.ErrorAs(t, err, &handoff, "run_agent should return HandoffError after executor dispatch")
+	require.Equal(t, 1, dispatcher.calls, "run_agent should dispatch exactly one session executor")
+	require.Equal(t, "run_agent", dispatcher.jobType, "dispatcher should receive the job type")
+	require.Equal(t, runID, dispatcher.session.ID, "dispatcher should receive the fetched session")
+	require.NotNil(t, dispatcher.threadID, "dispatcher should receive the thread id from the payload")
+	require.Equal(t, threadID, *dispatcher.threadID, "dispatcher should receive the exact thread id")
+	require.Equal(t, 0, orch.runAgentCalls, "run_agent should not execute inline after handoff")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRunAgentHandler_RunningSessionUsesRecoveryPath(t *testing.T) {
 	t.Parallel()
 
@@ -4886,6 +4944,43 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	err := handler(context.Background(), "continue_session", payload)
 	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_DispatchesSessionExecutorWhenDispatcherConfigured(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	dispatcher := &fakeSessionExecutorDispatcher{}
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{
+		Orchestrator:              orch,
+		SessionExecutorDispatcher: dispatcher,
+	}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	var handoff *HandoffError
+	require.ErrorAs(t, err, &handoff, "continue_session should return HandoffError after executor dispatch")
+	require.Equal(t, 1, dispatcher.calls, "continue_session should dispatch exactly one session executor")
+	require.Equal(t, "continue_session", dispatcher.jobType, "dispatcher should receive the job type")
+	require.Equal(t, sessionID, dispatcher.session.ID, "dispatcher should receive the fetched session")
+	require.Nil(t, dispatcher.threadID, "dispatcher should leave thread id nil when payload has no thread")
+	require.Equal(t, 0, orch.continueSessionCalls, "continue_session should not execute inline after handoff")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

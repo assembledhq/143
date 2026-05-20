@@ -453,6 +453,8 @@ fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
+  "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
+  "SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}" \
   "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
   "DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}" \
   "DEPLOY_DOCKER_VOLUME_PRUNE=${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" \
@@ -813,6 +815,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
   }
 
+  run_worker_session_deploy_guardrail() {
+    if [ "$ROLE" != "worker" ]; then
+      return 0
+    fi
+    echo "Checking active long-running sessions before worker deploy..."
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps "$HEALTH_SERVICE" /bin/deploy-guardrail worker-sessions < /dev/null
+  }
+
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
   # passes its health check, or fail after TIMEOUT seconds.
   wait_container_healthy() {
@@ -935,6 +945,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     reconcile_caddy_service
 
   elif [ "$ROLE" = "worker" ]; then
+    run_worker_session_deploy_guardrail
+
     # Workers remain single-replica, but we drain the old replica before
     # replacement so accepted long-running sessions are not interrupted.
     #

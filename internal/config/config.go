@@ -57,6 +57,13 @@ type Config struct {
 	// this worker node. 0 derives from the final WorkerProcessCount; values >0
 	// are explicit per-node caps.
 	WorkerMaxActiveSandboxes int `env:"WORKER_MAX_ACTIVE_SANDBOXES" envDefault:"0"`
+	// SessionExecutorImage is the server image used for executor containers.
+	// Production worker compose defaults this to the same 143-server tag as
+	// the worker so executor code and worker dispatcher code roll together.
+	SessionExecutorImage string `env:"SESSION_EXECUTOR_IMAGE"`
+	// SessionExecutorDockerNetwork optionally attaches executor containers to
+	// the same Docker network as worker-side dependencies such as chrome.
+	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
