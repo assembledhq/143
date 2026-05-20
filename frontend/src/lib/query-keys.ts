@@ -56,6 +56,8 @@ export const queryKeys = {
   integrations: {
     all: ["integrations"] as const,
     githubRepositories: (installationId?: number | null) => ["integrations", "github", "repositories", installationId ?? null] as const,
+    linearAgentStatus: ["integrations", "linear", "agent"] as const,
+    linearAgentMappings: ["integrations", "linear", "agent", "mappings"] as const,
     slackChannels: ["slack-channels"] as const,
   },
   autopilot: {
