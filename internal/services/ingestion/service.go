@@ -2,7 +2,6 @@ package ingestion
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -102,9 +101,7 @@ func (s *Service) IngestNormalized(ctx context.Context, orgID uuid.UUID, ni Norm
 }
 
 func computeFingerprint(source, externalID string) string {
-	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%s:%s", source, externalID)))
-	return fmt.Sprintf("%x", h.Sum(nil))[:32]
+	return models.IssueFingerprint(models.IssueSource(source), externalID)
 }
 
 func normalizeSeverity(raw string) string {

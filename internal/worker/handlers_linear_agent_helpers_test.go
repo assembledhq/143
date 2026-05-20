@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -174,6 +175,43 @@ func TestEnqueueRunAgentForLinearAgentSkipsTerminalSessions(t *testing.T) {
 	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}, orgID, sessionID)
 	require.NoError(t, err, "terminal Linear agent reconciliation should be a no-op instead of enqueueing duplicate completed work")
 	require.NoError(t, mock.ExpectationsWereMet(), "completed sessions should only be loaded; no run_agent job should be inserted")
+}
+
+func TestUpsertLinearIssueForAgentUsesCanonicalFingerprint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now().UTC()
+	fetched := &linear.FetchedIssue{
+		ID:          "2563b72a-e241-44db-85a3-4267084bb274",
+		Identifier:  "VIR-102",
+		Title:       "Make a full screen mode for the file diff viewer",
+		Description: "Diff viewer should support full-screen review.",
+	}
+	expectedFingerprint := "2072004d71b40dd3c2eac1cdfa1c7290"
+
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), expectedFingerprint,
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+
+	issue, err := upsertLinearIssueForAgent(context.Background(), &Stores{
+		Issues: db.NewIssueStore(mock),
+	}, orgID, fetched, &repoID)
+	require.NoError(t, err, "linear agent issue upsert should use the canonical fingerprint")
+	require.Equal(t, issueID, issue.ID, "linear agent issue upsert should return the existing or inserted issue id")
+	require.Equal(t, expectedFingerprint, issue.Fingerprint, "linear agent issue model should carry the canonical fingerprint")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestLinearAgentPinSessionStateUsesRequestedState(t *testing.T) {

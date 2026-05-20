@@ -938,7 +938,7 @@ func (s *Service) upsertLinearIssue(ctx context.Context, orgID, integrationID uu
 		OccurrenceCount:     1,
 		Severity:            "medium",
 		Tags:                tags,
-		Fingerprint:         "linear:" + fetched.ID,
+		Fingerprint:         models.IssueFingerprint(models.IssueSourceLinear, fetched.ID),
 	}
 	if err := s.issues.Upsert(ctx, issue); err != nil {
 		return uuid.Nil, err

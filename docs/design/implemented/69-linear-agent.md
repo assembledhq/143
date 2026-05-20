@@ -168,6 +168,10 @@ update both sides in the same PR.
 - **Repo unmapped**: `response` activity + AgentSession state pinned
   to `complete`. Treated as a benign user-actionable state, not a
   system error.
+- **Created worker dead-letter before session start**: emit an `error`
+  activity and pin the AgentSession/bridge state to `error` so Linear
+  does not keep showing only the bootstrap "Reading…" thought after the
+  retry budget is exhausted.
 - **Activity emit failure post-Reserve**: row stays present without
   `linear_activity_id`; replays short-circuit on UNIQUE collision.
   Trade-off: prefer "missing activity" to "duplicate notifications".
