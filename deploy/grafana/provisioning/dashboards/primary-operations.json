@@ -1,0 +1,217 @@
+{
+  "uid": "primary-operations",
+  "title": "143 - Primary Operations",
+  "tags": ["143", "operations", "primary"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Fleet overview",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Running sessions",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load total sample\" | stats max(running_sessions) as running_sessions",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active previews",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load total sample\" | stats max(active_previews) as active_previews",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active containers",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load total sample\" | stats max(sandbox_containers) as active_containers",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Runnable jobs",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: job queue sample\" | stats sum(pending_runnable) as runnable",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Worker capacity",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Worker CPU utilization",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: host resource sample\" | stats by (worker_node_id) max(host_cpu_util) as host_cpu_util",
+          "step": "$__interval"
+        },
+        {
+          "refId": "B",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: host resource sample\" | stats by (worker_node_id) avg(host_cpu_util) as avg_host_cpu_util",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Worker RAM utilization",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: host resource sample\" | stats by (worker_node_id) max(host_memory_util) as host_memory_util",
+          "step": "$__interval"
+        },
+        {
+          "refId": "B",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: host resource sample\" | stats by (worker_node_id) avg(host_memory_util) as avg_host_memory_util",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Sessions by worker",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(running_sessions) as running_sessions",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Previews by worker",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(active_previews) as active_previews",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Sessions and previews by worker",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id, node_status) max(running_sessions) as running_sessions, max(turn_held_sessions) as turn_held_sessions, max(sandbox_containers) as sandbox_containers, max(active_previews) as active_previews, max(preview_held_containers) as preview_held_containers, max(running_jobs) as running_jobs, max(running_session_jobs) as running_session_jobs | sort by (running_sessions desc, active_previews desc)"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Queue pressure",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Runnable jobs by type",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: job queue sample\" | stats by (job_type) max(pending_runnable) as runnable",
+          "step": "$__interval"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Oldest runnable job age",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: job queue sample\" | stats by (job_type) max(oldest_runnable_age_seconds) as oldest_seconds",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 }
+    }
+  ]
+}

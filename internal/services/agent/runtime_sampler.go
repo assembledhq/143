@@ -32,6 +32,7 @@ type RuntimeSampler struct {
 	metrics  *metrics.BillingMetrics
 	interval time.Duration
 	logger   zerolog.Logger
+	nodeID   string
 }
 
 // NewRuntimeSampler builds a sampler that ticks every interval. interval <= 0
@@ -44,13 +45,19 @@ func NewRuntimeSampler(
 	m *metrics.BillingMetrics,
 	interval time.Duration,
 	logger zerolog.Logger,
+	nodeID ...string,
 ) *RuntimeSampler {
+	var resolvedNodeID string
+	if len(nodeID) > 0 {
+		resolvedNodeID = nodeID[0]
+	}
 	return &RuntimeSampler{
 		tracker:  tracker,
 		provider: provider,
 		metrics:  m,
 		interval: interval,
 		logger:   logger.With().Str("component", "runtime_sampler").Logger(),
+		nodeID:   resolvedNodeID,
 	}
 }
 
@@ -154,7 +161,11 @@ type runtimeSampleAggregate struct {
 }
 
 func (s *RuntimeSampler) logAggregateHealthSample(activeContainers, sampleFailures int, agg runtimeSampleAggregate) {
-	s.logger.Info().
+	event := s.logger.Info()
+	if s.nodeID != "" {
+		event = event.Str("worker_node_id", s.nodeID)
+	}
+	event.
 		Int("active_containers", activeContainers).
 		Int("sample_failures", sampleFailures).
 		Float64("max_memory_util", agg.maxMemoryUtil).

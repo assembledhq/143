@@ -304,6 +304,7 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 		dashboardNames[dashboardFile.Name()] = true
 	}
 	require.True(t, dashboardNames["platform-health.json"], "platform health dashboard should be provisioned from the repo")
+	require.True(t, dashboardNames["primary-operations.json"], "primary operations dashboard should be provisioned from the repo")
 
 	for _, dashboardFile := range dashboardFiles {
 		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
@@ -351,6 +352,47 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 				require.Equal(t, "statsRange", target.QueryType, "time-series stats panel %q in dashboard %s should use the VictoriaLogs range query type", panel.Title, dashboardFile.Name())
 			}
 		}
+	}
+}
+
+func TestPrimaryOperationsDashboardTracksWorkerLoad(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/primary-operations.json")
+	require.NoError(t, err, "test should read the primary operations dashboard")
+
+	var dashboard struct {
+		Title  string `json:"title"`
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				QueryType string `json:"queryType"`
+				Expr      string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "primary operations dashboard should be valid JSON")
+	require.Equal(t, "143 - Primary Operations", dashboard.Title, "primary operations dashboard should have the expected title")
+
+	required := map[string]string{
+		"Running sessions":                `platform health: worker load total sample`,
+		"Active previews":                 `platform health: worker load total sample`,
+		"Worker CPU utilization":          `host_cpu_util`,
+		"Worker RAM utilization":          `host_memory_util`,
+		"Sessions and previews by worker": `platform health: worker load sample`,
+	}
+	for title, exprFragment := range required {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.Title != title {
+				continue
+			}
+			found = true
+			require.NotEmpty(t, panel.Targets, "panel %q should have a LogsQL target", title)
+			require.Contains(t, panel.Targets[0].Expr, exprFragment, "panel %q should query the expected field or log message", title)
+		}
+		require.True(t, found, "primary operations dashboard should include panel %q", title)
 	}
 }
 
