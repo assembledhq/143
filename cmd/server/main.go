@@ -353,6 +353,7 @@ func main() {
 	// in api-only mode where buildServices never runs.
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
+	var jobStore *db.JobStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
 	// in api-only mode where buildServices never runs.
@@ -365,7 +366,7 @@ func main() {
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
-		jobStore := db.NewJobStore(pool)
+		jobStore = db.NewJobStore(pool)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
@@ -575,7 +576,7 @@ func main() {
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
-			agent.WithRuntimeStalledJobTerminator(jobStore),
+			agent.WithRuntimeJobTerminalizer(jobStore),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -697,6 +698,9 @@ func main() {
 		// = 15m), so the worst-case outcome is a delayed resume rather than
 		// a permanently stuck row.
 		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
+		if jobStore != nil && cfg.NodeID != "" {
+			waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)
+		}
 	drained:
 		drainCancel()
 
@@ -863,6 +867,28 @@ func totalActiveRunAgentJobs(workers []*worker.Worker) int {
 		total += w.ActiveRunAgentCount()
 	}
 	return total
+}
+
+func waitForDBOwnedJobsToDrain(ctx context.Context, jobStore *db.JobStore, nodeID string, logger zerolog.Logger) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		running, err := jobStore.CountRunningOwnedByNode(ctx, nodeID)
+		if err == nil && running == 0 {
+			return
+		}
+		if err != nil {
+			logger.Warn().Err(err).Str("node_id", nodeID).Msg("failed to verify DB-owned running jobs during drain")
+		} else {
+			logger.Info().Str("node_id", nodeID).Int("db_running_jobs", running).Msg("waiting for DB-owned running jobs to drain")
+		}
+		select {
+		case <-ctx.Done():
+			logger.Warn().Str("node_id", nodeID).Msg("DB-owned running jobs did not drain before shutdown timeout")
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // postPRSnapshotDrainer is the narrow surface drainPostPRUploads needs from

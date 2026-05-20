@@ -136,6 +136,43 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByText("GitHub repositories")).not.toBeInTheDocument();
   });
 
+  it("lays out GitHub repositories in a compact responsive grid", async () => {
+    listGitHubRepositoriesMock.mockResolvedValue({
+      data: [
+        {
+          github_id: 67890,
+          full_name: "acme/api",
+          default_branch: "main",
+          private: true,
+          clone_url: "https://github.com/acme/api.git",
+          installation_id: 12345,
+          status: "unclaimed",
+          can_transfer: false,
+        },
+        {
+          github_id: 67891,
+          full_name: "acme/web",
+          default_branch: "main",
+          private: true,
+          clone_url: "https://github.com/acme/web.git",
+          installation_id: 12345,
+          status: "owned_by_current_org",
+          can_transfer: false,
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    await screen.findByText("acme/api");
+
+    const repoGrid = screen.getByTestId("github-repository-grid");
+    expect(repoGrid).toHaveClass("grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]");
+    expect(within(repoGrid).getByText("acme/api")).toBeInTheDocument();
+    expect(within(repoGrid).getByText("acme/web")).toBeInTheDocument();
+  });
+
   it("renders GitHub repository cards without duplicate repo pills or section intro copy", async () => {
     repositoriesListMock.mockResolvedValue({
       data: [

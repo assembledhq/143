@@ -544,6 +544,17 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 		  AND owner_kind = 'session_executor'
 		  AND run_owner_id = @executor_id
 		  AND lock_token = @lock_token
+		  AND (
+		    job_type NOT IN ('run_agent', 'continue_session')
+		    OR NULLIF(payload->>'session_id', '') IS NULL
+		    OR EXISTS (
+		      SELECT 1
+		      FROM sessions s
+		      WHERE s.org_id = jobs.org_id
+		        AND s.id::text = payload->>'session_id'
+		        AND s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')
+		    )
+		  )
 		RETURNING lease_expires_at`
 
 	var leaseExpiresAt time.Time
@@ -555,6 +566,9 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 		"executor_id":   executorID.String(),
 	}).Scan(&leaseExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if terminalizeErr := s.terminalizeIfReferencedSessionTerminal(ctx, jobID, lockToken); terminalizeErr != nil {
+			return nil, false, terminalizeErr
+		}
 		return nil, false, nil
 	}
 	if err != nil {
@@ -574,6 +588,17 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		WHERE id = @job_id
 		  AND status = 'running'
 		  AND lock_token = @lock_token
+		  AND (
+		    job_type NOT IN ('run_agent', 'continue_session')
+		    OR NULLIF(payload->>'session_id', '') IS NULL
+		    OR EXISTS (
+		      SELECT 1
+		      FROM sessions s
+		      WHERE s.org_id = jobs.org_id
+		        AND s.id::text = payload->>'session_id'
+		        AND s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')
+		    )
+		  )
 		RETURNING lease_expires_at`
 
 	var leaseExpiresAt time.Time
@@ -583,6 +608,9 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 		"lock_token":    lockToken,
 	}).Scan(&leaseExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if terminalizeErr := s.terminalizeIfReferencedSessionTerminal(ctx, jobID, lockToken); terminalizeErr != nil {
+			return nil, false, terminalizeErr
+		}
 		return nil, false, nil
 	}
 	if err != nil {
@@ -591,34 +619,117 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
 }
 
-// DeadLetterSessionJobs terminalizes active agent jobs for a session that was
-// made terminal outside the normal worker handler path, such as runtime-control
-// reaping after a missed graceful-stop deadline.
-func (s *JobStore) DeadLetterSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, errMsg string) (int64, error) {
-	tag, err := s.db.Exec(ctx, `
-		UPDATE jobs
-		SET status = 'dead_letter',
-			last_error = @last_error,
-			completed_at = now(),
-			locked_by_node_id = NULL,
-			run_owner_id = NULL,
-			owner_kind = 'worker',
-			lock_token = NULL,
-			locked_at = NULL,
-			lease_expires_at = NULL,
-			updated_at = now()
-		WHERE org_id = @org_id
-		  AND status IN ('pending', 'running')
-		  AND job_type IN ('run_agent', 'continue_session')
-		  AND payload->>'session_id' = @session_id`, pgx.NamedArgs{
-		"org_id":     orgID,
-		"session_id": sessionID.String(),
-		"last_error": errMsg,
-	})
+func (s *JobStore) terminalizeIfReferencedSessionTerminal(ctx context.Context, jobID, lockToken uuid.UUID) error {
+	reason := "referenced session is already terminal; stopping session job lease renewal"
+	var updated int64
+	err := s.db.QueryRow(ctx, `
+		WITH target AS (
+			SELECT j.id, j.org_id, j.lock_token, j.owner_kind
+			FROM jobs j
+			WHERE j.id = $1
+			  AND j.status = 'running'
+			  AND j.lock_token = $2
+			  AND j.job_type IN ('run_agent', 'continue_session')
+			  AND NULLIF(j.payload->>'session_id', '') IS NOT NULL
+			  AND EXISTS (
+			    SELECT 1
+			    FROM sessions s
+			    WHERE s.org_id = j.org_id
+			      AND s.id::text = j.payload->>'session_id'
+			      AND s.status IN ('completed', 'failed', 'cancelled', 'skipped')
+			  )
+			FOR UPDATE
+		),
+		closed_executors AS (
+			UPDATE session_executors se
+			SET status = 'failed',
+				completed_at = now(),
+				exit_code = 1,
+				last_error = $3,
+				updated_at = now()
+			FROM target
+			WHERE target.owner_kind = 'session_executor'
+			  AND se.org_id = target.org_id
+			  AND se.job_id = target.id
+			  AND se.lock_token = target.lock_token
+			  AND se.status IN ('starting', 'running', 'draining')
+			RETURNING se.id
+		),
+		updated_jobs AS (
+			UPDATE jobs j
+			SET status = 'failed',
+				last_error = $3,
+				completed_at = now(),
+				locked_by_node_id = NULL,
+				run_owner_id = NULL,
+				owner_kind = 'worker',
+				lock_token = NULL,
+				locked_at = NULL,
+				lease_expires_at = NULL,
+				updated_at = now()
+			FROM target
+			WHERE j.org_id = target.org_id
+			  AND j.id = target.id
+			RETURNING j.id
+		)
+		SELECT COUNT(*) FROM updated_jobs`, jobID, lockToken, reason).Scan(&updated)
 	if err != nil {
-		return 0, fmt.Errorf("dead-letter session jobs: %w", err)
+		return fmt.Errorf("terminalize session job after terminal session lease loss: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return nil
+}
+
+// TerminalizeRunningSessionJobs stops in-flight session runner jobs for a
+// session that has already reached terminal user-visible state.
+func (s *JobStore) TerminalizeRunningSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error) {
+	var updated int64
+	err := s.db.QueryRow(ctx, `
+		WITH target AS (
+			SELECT id, org_id, lock_token, owner_kind
+			FROM jobs
+			WHERE org_id = $1
+			  AND status = 'running'
+			  AND job_type IN ('run_agent', 'continue_session')
+			  AND payload->>'session_id' = $2::text
+			FOR UPDATE
+		),
+		closed_executors AS (
+			UPDATE session_executors se
+			SET status = 'failed',
+				completed_at = now(),
+				exit_code = 1,
+				last_error = $3,
+				updated_at = now()
+			FROM target
+			WHERE target.owner_kind = 'session_executor'
+			  AND se.org_id = target.org_id
+			  AND se.job_id = target.id
+			  AND se.lock_token = target.lock_token
+			  AND se.status IN ('starting', 'running', 'draining')
+			RETURNING se.id
+		),
+		updated_jobs AS (
+			UPDATE jobs j
+			SET status = 'failed',
+				last_error = $3,
+				completed_at = now(),
+				locked_by_node_id = NULL,
+				run_owner_id = NULL,
+				owner_kind = 'worker',
+				lock_token = NULL,
+				locked_at = NULL,
+				lease_expires_at = NULL,
+				updated_at = now()
+			FROM target
+			WHERE j.org_id = target.org_id
+			  AND j.id = target.id
+			RETURNING j.id
+		)
+		SELECT COUNT(*) FROM updated_jobs`, orgID, sessionID, reason).Scan(&updated)
+	if err != nil {
+		return 0, fmt.Errorf("terminalize running session jobs: %w", err)
+	}
+	return updated, nil
 }
 
 // MarkSucceededWithLease transitions a running job to succeeded only if the

@@ -192,6 +192,42 @@ func newMockHijackedResponse(data string) types.HijackedResponse {
 	}
 }
 
+type hangingConn struct {
+	net.Conn
+	readDone    chan struct{}
+	closeCalled bool
+	mu          sync.Mutex
+}
+
+func newHangingConn() *hangingConn {
+	return &hangingConn{readDone: make(chan struct{})}
+}
+
+func (c *hangingConn) Read(p []byte) (int, error) {
+	<-c.readDone
+	return 0, io.EOF
+}
+
+func (c *hangingConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *hangingConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closeCalled = true
+	return nil
+}
+func (c *hangingConn) LocalAddr() net.Addr                { return nil }
+func (c *hangingConn) RemoteAddr() net.Addr               { return nil }
+func (c *hangingConn) SetDeadline(t time.Time) error      { return nil }
+func (c *hangingConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *hangingConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func newHangingHijackedResponse(conn *hangingConn) types.HijackedResponse {
+	return types.HijackedResponse{
+		Conn:   conn,
+		Reader: bufio.NewReader(conn),
+	}
+}
+
 // capturingConn wraps mockConn and records every Write so tests can assert
 // on the bytes a handle sent to the agent's stdin (e.g. 0x1b for Escape).
 type capturingConn struct {
@@ -1950,6 +1986,8 @@ func TestDockerHandle_Close_Idempotent(t *testing.T) {
 
 	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
 		Cmd:              "agent",
+		TTY:              true,
+		OpenStdin:        true,
 		CancellationSpec: agent.DefaultCancellationSpec,
 	})
 	require.NoError(t, err)
@@ -2083,14 +2121,59 @@ func TestDockerHandle_LogsInteractiveLifecycle(t *testing.T) {
 		CancellationSpec: agent.DefaultCancellationSpec,
 	})
 	require.NoError(t, err, "interactive command should start")
+	require.NoError(t, h.Interrupt(context.Background(), agent.DefaultCancellationSpec), "interrupt should log graceful cancellation")
 	require.NoError(t, h.Kill(context.Background()), "kill should force-stop the handle")
 
 	got := logs.String()
 	require.Contains(t, got, "started interactive command in sandbox", "start log should identify the interactive exec")
+	require.Contains(t, got, `"interrupt_sent":true`, "interrupt log should expose graceful cancellation delivery")
 	require.Contains(t, got, "force-stopping interactive command", "kill log should identify force-stop escalation")
+	require.Contains(t, got, `"kill_sent":true`, "force-stop log should expose kill delivery")
+	require.Contains(t, got, `"exec_closed":true`, "force-stop log should expose transport closure")
+	require.Contains(t, got, `"force_stop_timeout":false`, "force-stop log should expose bounded cleanup outcome")
 	require.Contains(t, got, "exec-logged", "logs should include the Docker exec id")
 	require.Contains(t, got, "container-logged", "logs should include the container id")
 	require.Contains(t, got, "session-logged", "logs should include the session id")
+}
+
+func TestDockerHandle_KillReturnsWhenExecWaitHangs(t *testing.T) {
+	t.Parallel()
+
+	conn := newHangingConn()
+	defer close(conn.readDone)
+	mock := &mockDockerClient{}
+	mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+		return container.ExecCreateResponse{ID: "exec-hanging"}, nil
+	}
+	mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+		return newHangingHijackedResponse(conn), nil
+	}
+	mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+		return container.ExecInspect{ExitCode: 0}, nil
+	}
+
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{ID: "container-hanging", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	h, err := p.StartInteractiveCommand(context.Background(), sb, agent.InteractiveCommandSpec{
+		Cmd:              "agent",
+		TTY:              true,
+		OpenStdin:        true,
+		CancellationSpec: agent.DefaultCancellationSpec,
+	})
+	require.NoError(t, err, "interactive command should start")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = h.Kill(ctx)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "Kill should report that the exec transport did not close inside the bounded window")
+	require.Less(t, elapsed, 500*time.Millisecond, "Kill should not block indefinitely when Docker exec wait hangs")
+	conn.mu.Lock()
+	closeCalled := conn.closeCalled
+	conn.mu.Unlock()
+	require.True(t, closeCalled, "Kill should still close the Docker exec transport before returning")
 }
 
 func TestDockerProvider_ConnectionInfo(t *testing.T) {

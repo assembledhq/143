@@ -412,6 +412,20 @@ func TestJobStore_RenewLease(t *testing.T) {
 				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectQuery("WITH target AS[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs[\\s\\S]*owner_kind = 'worker'").
+					WithArgs(uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken, "referenced session is already terminal; stopping session job lease renewal").
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+			},
+		},
+		{
+			name: "terminalizes session job when referenced session is already terminal",
+			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectQuery("WITH target AS[\\s\\S]*s.status IN \\('completed', 'failed', 'cancelled', 'skipped'\\)[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs").
+					WithArgs(uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken, "referenced session is already terminal; stopping session job lease renewal").
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
 			},
 		},
 		{
@@ -458,57 +472,52 @@ func TestJobStore_RenewLease(t *testing.T) {
 	}
 }
 
-func TestJobStore_DeadLetterSessionJobs(t *testing.T) {
+func TestJobStore_RenewLease_GuardsSessionJobsAgainstTerminalSessions(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name      string
-		setupMock func(mock pgxmock.PgxPoolIface)
-		expected  int64
-		expectErr bool
-	}{
-		{
-			name: "dead letters active session jobs",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectExec("UPDATE jobs[\\s\\S]+payload->>'session_id' = @session_id").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
-			},
-			expected: 2,
-		},
-		{
-			name: "returns wrapped exec errors",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectExec("UPDATE jobs[\\s\\S]+payload->>'session_id' = @session_id").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnError(errors.New("write failed"))
-			},
-			expectErr: true,
-		},
-	}
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	sql := string(body)
+	require.Contains(t, sql, "job_type NOT IN ('run_agent', 'continue_session')", "RenewLease should only apply session terminal-state checks to session runner jobs")
+	require.Contains(t, sql, "payload->>'session_id'", "RenewLease should inspect the durable session reference in session job payloads")
+	require.Contains(t, sql, "s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')", "RenewLease should refuse renewal when the referenced session is terminal")
+	require.Contains(t, sql, "s.org_id = jobs.org_id", "RenewLease should scope the session guard to the job org")
+}
 
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err, "should create mock pool")
-			defer mock.Close()
+func TestJobStore_TerminalizeRunningSessionJobs(t *testing.T) {
+	t.Parallel()
 
-			store := NewJobStore(mock)
-			tt.setupMock(mock)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
 
-			affected, err := store.DeadLetterSessionJobs(context.Background(), uuid.New(), uuid.New(), "runtime stopped")
-			if tt.expectErr {
-				require.Error(t, err, "DeadLetterSessionJobs should return an error")
-				require.Contains(t, err.Error(), "dead-letter session jobs", "DeadLetterSessionJobs should wrap exec errors")
-				return
-			}
-			require.NoError(t, err, "DeadLetterSessionJobs should not return an error")
-			require.Equal(t, tt.expected, affected, "DeadLetterSessionJobs should report rows affected")
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	reason := "runtime-control watchdog failed terminal session"
+
+	mock.ExpectQuery("UPDATE session_executors[\\s\\S]*UPDATE jobs[\\s\\S]*owner_kind = 'worker'[\\s\\S]*SELECT COUNT").
+		WithArgs(orgID, sessionID, reason).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(2)))
+
+	updated, err := store.TerminalizeRunningSessionJobs(context.Background(), orgID, sessionID, reason)
+	require.NoError(t, err, "TerminalizeRunningSessionJobs should not return an error")
+	require.Equal(t, int64(2), updated, "TerminalizeRunningSessionJobs should return the affected row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_TerminalizeRunningSessionJobs_ClosesExecutorOwnership(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "UPDATE session_executors", "TerminalizeRunningSessionJobs should terminalize active executor rows for executor-owned session jobs")
+	require.Contains(t, sql, "se.status IN ('starting', 'running', 'draining')", "TerminalizeRunningSessionJobs should only close active executor rows")
+	require.Contains(t, sql, "se.lock_token = target.lock_token", "TerminalizeRunningSessionJobs should fence executor terminalization with the job lock token")
+	require.Contains(t, sql, "owner_kind = 'worker'", "TerminalizeRunningSessionJobs should reset job ownership after leaving active executor ownership")
 }
 
 func TestJobStore_MarkSucceededWithLease(t *testing.T) {

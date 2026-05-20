@@ -1034,6 +1034,10 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		log.Warn().
 			Int("recovery_attempt_count", session.RecoveryAttemptCount).
 			Int("max_recovery_attempts", maxNoCheckpointRecoveryAttempts).
+			Bool("checkpoint_available", false).
+			Bool("restart_from_scratch", true).
+			Int("checkpoint_turn", session.CurrentTurn).
+			Str("checkpoint_capability", string(session.CheckpointCapability)).
 			Msg("no-checkpoint recovery exhausted; failing session")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1059,11 +1063,21 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	}()
 
 	if !ok {
-		log.Info().Msg("recovery requested with no durable checkpoint; restarting session from scratch")
+		log.Info().
+			Bool("checkpoint_available", false).
+			Bool("restart_from_scratch", true).
+			Int("recovery_attempt_count", session.RecoveryAttemptCount).
+			Int("checkpoint_turn", session.CurrentTurn).
+			Str("checkpoint_capability", string(session.CheckpointCapability)).
+			Msg("recovery requested with no durable checkpoint; restarting session from scratch")
 		return o.RunAgent(ctx, session)
 	}
 
-	event := log.Info().Int("checkpoint_turn", checkpoint.Turn)
+	event := log.Info().
+		Bool("checkpoint_available", true).
+		Bool("restart_from_scratch", false).
+		Int("checkpoint_turn", checkpoint.Turn).
+		Str("checkpoint_capability", string(session.CheckpointCapability))
 	if checkpoint.SnapshotKey != "" {
 		event = event.Str("snapshot_key", checkpoint.SnapshotKey)
 	}

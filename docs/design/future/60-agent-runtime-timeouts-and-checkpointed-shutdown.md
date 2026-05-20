@@ -200,10 +200,16 @@ A run should count as making progress when any of these move recently:
 - diff growth
 - explicit agent checkpoint event
 
-An active tool or shell command is not treated as idle just because it is
-temporarily quiet. The no-progress timer applies when the agent is between
+An active parsed tool or sandbox command is not treated as idle just because it
+is temporarily quiet. The no-progress timer applies when the agent is between
 tools or otherwise not emitting output; long-running active commands remain
 bounded by the soft budget, extension policy, and absolute ceiling.
+
+The adapter-level CLI process itself is not an active tool. A long-lived
+Codex/Claude/Gemini process can be alive while the platform has not parsed any
+meaningful tool lifecycle or sandbox-command event. That state must not
+suppress no-progress shutdown; otherwise silent agent hangs drift into soft
+budget stops instead of the more accurate `no_progress` stop reason.
 
 Not all signals are equally strong. The system should classify them as:
 
@@ -218,6 +224,38 @@ Not all signals are equally strong. The system should classify them as:
   - assistant output
   - reasoning text
   - tool-use event with no successful completion yet
+
+### Terminal session and job invariant
+
+Runtime watchdog failure is a user-visible terminal decision. Once a watchdog
+fails/cancels/completes a session, the matching `run_agent` or
+`continue_session` job must not continue renewing its lease or later write a
+second terminal state.
+
+The invariant is:
+
+```sql
+SELECT COUNT(*)
+FROM jobs j
+JOIN sessions s ON s.org_id = j.org_id
+  AND s.id::text = j.payload->>'session_id'
+WHERE j.status = 'running'
+  AND j.job_type IN ('run_agent', 'continue_session')
+  AND s.status IN ('completed', 'failed', 'cancelled', 'skipped');
+```
+
+The expected value is always zero. The session reaper terminalizes running
+session jobs after runtime-control watchdog failure, and `RenewLease` refuses
+to renew session runner jobs whose referenced session is already terminal.
+
+### Cancellation observability
+
+Interactive cancellation logs should expose the full lifecycle, not only the
+requested stop reason. Force-stop paths include structured fields for graceful
+interrupt delivery, kill delivery, Docker exec transport closure, and bounded
+force-stop timeout. If the exec wait path hangs after SIGKILL/transport close,
+the kill path returns under the bounded context so the worker handler can lose
+ownership/cancel and detached cleanup can proceed.
   - repeated retries of the same failing command
 
 Only strong progress should justify repeated automatic extensions. Weak

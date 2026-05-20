@@ -35,12 +35,6 @@ type PreviewStopper interface {
 	StopActivePreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
 }
 
-// RuntimeStalledJobTerminator terminalizes active session jobs after the
-// runtime-control reaper has made the owning session terminal.
-type RuntimeStalledJobTerminator interface {
-	DeadLetterSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, errMsg string) (int64, error)
-}
-
 // SessionReaper periodically cleans up stale sessions and expired snapshots
 // in seven phases:
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
@@ -64,7 +58,7 @@ type SessionReaper struct {
 	orphanCloser     OrphanCloser   // nil-safe — billing orphan cleanup disabled if nil
 	usageRoller      UsageRoller    // nil-safe — usage rollup disabled if nil
 	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
-	jobTerminator    RuntimeStalledJobTerminator
+	runtimeJobs      RuntimeJobTerminalizer
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
 	runtimeStallAge  time.Duration
@@ -94,6 +88,12 @@ type StaleSessionLister interface {
 type StuckThreadLister interface {
 	ListStuckRunningThreads(ctx context.Context, startedBefore time.Time) ([]models.SessionThread, error)
 	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
+}
+
+// RuntimeJobTerminalizer stops running run_agent/continue_session jobs after
+// the watchdog has already made the referenced session terminal.
+type RuntimeJobTerminalizer interface {
+	TerminalizeRunningSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error)
 }
 
 type runtimeStalledThreadFailer interface {
@@ -130,10 +130,10 @@ func WithStuckThreadLister(t StuckThreadLister) SessionReaperOption {
 	return func(r *SessionReaper) { r.threads = t }
 }
 
-// WithRuntimeStalledJobTerminator lets Phase 0.4 close active run_agent and
-// continue_session jobs for sessions it terminalizes.
-func WithRuntimeStalledJobTerminator(j RuntimeStalledJobTerminator) SessionReaperOption {
-	return func(r *SessionReaper) { r.jobTerminator = j }
+// WithRuntimeJobTerminalizer wires the runtime-control watchdog to the job
+// store so failed terminal sessions cannot leave a renewing runner job alive.
+func WithRuntimeJobTerminalizer(t RuntimeJobTerminalizer) SessionReaperOption {
+	return func(r *SessionReaper) { r.runtimeJobs = t }
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
@@ -309,17 +309,17 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryRuntimeControlStalled, nextSteps, true); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for runtime-control stalled session")
 			}
-			if r.jobTerminator != nil {
-				errMsg := fmt.Sprintf("%s: session %s crossed runtime stop deadline", FailureCategoryRuntimeControlStalled, s.ID.String())
-				affected, err := r.jobTerminator.DeadLetterSessionJobs(ctx, s.OrgID, s.ID, errMsg)
+			if r.runtimeJobs != nil {
+				reason := fmt.Sprintf("%s: runtime-control watchdog failed terminal session", FailureCategoryRuntimeControlStalled)
+				terminalized, err := r.runtimeJobs.TerminalizeRunningSessionJobs(ctx, s.OrgID, s.ID, reason)
 				if err != nil {
-					r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to dead-letter runtime-control stalled session jobs")
-				} else if affected > 0 {
+					r.logger.Warn().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to terminalize runtime-control stalled session jobs")
+				} else if terminalized > 0 {
 					r.logger.Warn().
 						Str("session_id", s.ID.String()).
 						Str("org_id", s.OrgID.String()).
-						Int64("jobs_dead_lettered", affected).
-						Msg("reaper: dead-lettered runtime-control stalled session jobs")
+						Int64("terminalized_jobs", terminalized).
+						Msg("reaper: terminalized runtime-control stalled session jobs")
 				}
 			}
 			if threadFailer, ok := r.threads.(runtimeStalledThreadFailer); ok {

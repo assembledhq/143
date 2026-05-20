@@ -210,7 +210,7 @@ Add the `vector` service and `vector-buffer` volume to the existing compose file
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
       - vector-buffer:/var/lib/vector  # persist disk buffer across restarts
-    command: ["vector", "--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
+    command: ["--config", "/etc/vector/vector.yaml"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
       interval: 30s
@@ -243,7 +243,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
       - vector-buffer:/var/lib/vector
-    command: ["vector", "--config", "/etc/vector/vector.yaml", "--api.enabled=true"]
+    command: ["--config", "/etc/vector/vector.yaml"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8686/health"]
       interval: 30s
@@ -351,6 +351,12 @@ Provisioning workflow:
 4. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
 5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules/`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys.
 6. Scheduler heartbeat alerts should wait for dedicated heartbeat signals so the rules are not guesswork.
+
+Vector's API is enabled in `deploy/vector.yaml` via top-level `api.enabled` and
+`api.address`; do not pass API settings as CLI flags in compose. Deploy
+verification fails closed if the Vector container is missing, crash-looping,
+`Restarting`, `unhealthy`, or otherwise not healthy, and prints recent Vector
+logs for diagnosis.
 
 ## LogsQL Query Examples
 

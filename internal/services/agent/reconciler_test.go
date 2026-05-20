@@ -110,6 +110,25 @@ func TestReconcileOrphanedContainers_SkipsEmptyContainerID(t *testing.T) {
 	require.Equal(t, int32(0), store.cleared.Load())
 }
 
+func TestReconcileOrphanedContainers_PreservesNonTerminalAndRecoveringSessions(t *testing.T) {
+	t.Parallel()
+
+	running := newOrphanSession("running-c1")
+	running.Status = string(models.SessionStatusRunning)
+	recovering := newOrphanSession("recovering-c1")
+	recovering.Status = string(models.SessionStatusFailed)
+	recovering.RecoveryState = models.RecoveryStateRecovering
+	store := &fakeOrphanStore{
+		batches: [][]models.Session{{running, recovering}},
+	}
+	provider := testutil.NewMockSandboxProvider()
+
+	err := agent.ReconcileOrphanedContainers(context.Background(), store, provider, zerolog.Nop())
+	require.NoError(t, err, "reconciler should skip protected rows without failing startup")
+	require.Equal(t, 0, provider.GetDestroyCalls(), "startup GC must not destroy containers for running or recovering sessions")
+	require.Equal(t, int32(0), store.clearAttempts.Load(), "startup GC must not clear container ownership for running or recovering sessions")
+}
+
 func TestReconcileOrphanedContainers_DestroyFailureAfterClearLogsButContinues(t *testing.T) {
 	t.Parallel()
 	store := &fakeOrphanStore{
