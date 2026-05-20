@@ -58,6 +58,7 @@ type SessionReaper struct {
 	orphanCloser     OrphanCloser   // nil-safe — billing orphan cleanup disabled if nil
 	usageRoller      UsageRoller    // nil-safe — usage rollup disabled if nil
 	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
+	runtimeJobs      RuntimeJobTerminalizer
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
 	runtimeStallAge  time.Duration
@@ -89,6 +90,12 @@ type StuckThreadLister interface {
 	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
 }
 
+// RuntimeJobTerminalizer stops running run_agent/continue_session jobs after
+// the watchdog has already made the referenced session terminal.
+type RuntimeJobTerminalizer interface {
+	TerminalizeRunningSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error)
+}
+
 // SessionReaperOption configures optional SessionReaper dependencies.
 type SessionReaperOption func(*SessionReaper)
 
@@ -117,6 +124,12 @@ func WithPreviewStopper(ps PreviewStopper) SessionReaperOption {
 // is skipped (the session-level Phase 0.5 still runs).
 func WithStuckThreadLister(t StuckThreadLister) SessionReaperOption {
 	return func(r *SessionReaper) { r.threads = t }
+}
+
+// WithRuntimeJobTerminalizer wires the runtime-control watchdog to the job
+// store so failed terminal sessions cannot leave a renewing runner job alive.
+func WithRuntimeJobTerminalizer(t RuntimeJobTerminalizer) SessionReaperOption {
+	return func(r *SessionReaper) { r.runtimeJobs = t }
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
@@ -291,6 +304,19 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			}
 			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryRuntimeControlStalled, nextSteps, true); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for runtime-control stalled session")
+			}
+			if r.runtimeJobs != nil {
+				reason := fmt.Sprintf("%s: runtime-control watchdog failed terminal session", FailureCategoryRuntimeControlStalled)
+				terminalized, err := r.runtimeJobs.TerminalizeRunningSessionJobs(ctx, s.OrgID, s.ID, reason)
+				if err != nil {
+					r.logger.Warn().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to terminalize runtime-control stalled session jobs")
+				} else if terminalized > 0 {
+					r.logger.Warn().
+						Str("session_id", s.ID.String()).
+						Str("org_id", s.OrgID.String()).
+						Int64("terminalized_jobs", terminalized).
+						Msg("reaper: terminalized runtime-control stalled session jobs")
+				}
 			}
 			event := r.logger.Error().
 				Str("session_id", s.ID.String()).

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,20 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecoverSessionLogsCheckpointRecoveryDecisionFields(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "test should read orchestrator.go")
+
+	src := string(body)
+	require.Contains(t, src, `Bool("checkpoint_available", false)`, "no-checkpoint recovery logs should expose checkpoint availability")
+	require.Contains(t, src, `Bool("checkpoint_available", true)`, "checkpoint recovery logs should expose checkpoint availability")
+	require.Contains(t, src, `Bool("restart_from_scratch", true)`, "no-checkpoint recovery logs should expose restart-from-scratch decisions")
+	require.Contains(t, src, `Bool("restart_from_scratch", false)`, "checkpoint recovery logs should expose restart-from-scratch decisions")
+	require.Contains(t, src, `Str("checkpoint_capability", string(session.CheckpointCapability))`, "recovery logs should expose checkpoint capability")
+}
 
 type helperSessionIssueLinkStore struct {
 	links []models.SessionIssueLink

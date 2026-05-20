@@ -105,6 +105,15 @@ func ReconcileOrphanedContainers(ctx context.Context, store OrphanedContainerLis
 			if s.ContainerID == nil || *s.ContainerID == "" {
 				continue
 			}
+			if startupContainerDestroyProtected(s) {
+				totalSkipped++
+				logger.Info().
+					Str("session_id", s.ID.String()).
+					Str("status", s.Status).
+					Str("recovery_state", string(s.RecoveryState)).
+					Msg("reconciler: preserving container for active or recovering session")
+				continue
+			}
 			expectedID := *s.ContainerID
 			sb := &Sandbox{ID: expectedID, Provider: "docker"}
 
@@ -186,6 +195,18 @@ func ReconcileOrphanedContainers(ctx context.Context, store OrphanedContainerLis
 		logger.Debug().Msg("reconciler: no orphaned containers found")
 	}
 	return nil
+}
+
+func startupContainerDestroyProtected(s models.Session) bool {
+	if s.Status == string(models.SessionStatusRunning) {
+		return true
+	}
+	switch s.RecoveryState {
+	case models.RecoveryStateQueued, models.RecoveryStateRecovering:
+		return true
+	default:
+		return false
+	}
 }
 
 // probeAliveWithRetry calls provider.IsAlive with bounded retries so a

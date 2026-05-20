@@ -1057,13 +1057,14 @@ EOS
       echo "ERROR: Vector container not found — logs will not be collected"
       exit 1
     fi
-    VECTOR_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VECTOR_ID")"
-    if [ "$VECTOR_STATUS" = "exited" ] || [ "$VECTOR_STATUS" = "dead" ]; then
-      echo "ERROR: Vector is not running (status: $VECTOR_STATUS)"
-      docker compose -f "$COMPOSE_FILE" logs --tail=20 vector 2>&1 || true
+    VECTOR_STATE="$(docker inspect --format '{{.State.Status}}' "$VECTOR_ID")"
+    VECTOR_HEALTH="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$VECTOR_ID")"
+    if ! { [ "$VECTOR_HEALTH" = "healthy" ] || { [ "$VECTOR_HEALTH" = "none" ] && [ "$VECTOR_STATE" = "running" ]; }; }; then
+      echo "ERROR: Vector is not healthy (state: $VECTOR_STATE, health: $VECTOR_HEALTH)"
+      docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
       exit 1
     fi
-    echo "Vector is running (status: $VECTOR_STATUS)."
+    echo "Vector is running (state: $VECTOR_STATE, health: $VECTOR_HEALTH)."
   fi
 
   if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then

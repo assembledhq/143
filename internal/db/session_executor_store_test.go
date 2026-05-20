@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -97,6 +98,52 @@ func TestJobStore_RenewLeaseForSessionExecutorFencesOwner(t *testing.T) {
 	require.NoError(t, err, "RenewLeaseForSessionExecutor should not return an error")
 	require.True(t, ok, "RenewLeaseForSessionExecutor should report that the fenced renewal landed")
 	require.Equal(t, leaseExpiresAt, *job.LeaseExpiresAt, "RenewLeaseForSessionExecutor should return the new lease expiry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_RenewLeaseForSessionExecutor_GuardsTerminalSessionJobs(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "func (s *JobStore) RenewLeaseForSessionExecutor", "test should inspect the executor-owned renew path")
+	require.Contains(t, sql, "s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')", "RenewLeaseForSessionExecutor should refuse renewal when the referenced session is terminal")
+	require.Contains(t, sql, "s.org_id = jobs.org_id", "RenewLeaseForSessionExecutor should scope the terminal-session guard to the job org")
+	require.Contains(t, sql, "terminalizeIfReferencedSessionTerminal", "RenewLeaseForSessionExecutor should terminalize terminal-session jobs after fenced lease loss")
+}
+
+func TestJobStore_RenewLeaseForSessionExecutor_TerminalizesTerminalSessionJob(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	executorID := uuid.New()
+
+	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at").
+		WithArgs(pgx.NamedArgs{
+			"lease_seconds": int(time.Minute.Seconds()),
+			"org_id":        orgID,
+			"job_id":        jobID,
+			"lock_token":    lockToken,
+			"executor_id":   executorID.String(),
+		}).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("WITH target AS[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs[\\s\\S]*owner_kind = 'worker'").
+		WithArgs(jobID, lockToken, "referenced session is already terminal; stopping session job lease renewal").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+	job, ok, err := store.RenewLeaseForSessionExecutor(context.Background(), orgID, jobID, lockToken, executorID, time.Minute)
+	require.NoError(t, err, "RenewLeaseForSessionExecutor should not return an error when terminalizing a terminal-session job")
+	require.False(t, ok, "RenewLeaseForSessionExecutor should report lost ownership after terminal-session cleanup")
+	require.Nil(t, job, "RenewLeaseForSessionExecutor should not return a job after terminal-session cleanup")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

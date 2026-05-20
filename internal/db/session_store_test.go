@@ -2292,7 +2292,7 @@ func TestSessionStore_ListOrphanedContainers(t *testing.T) {
 	// turn_holding_container is intentionally NOT part of the WHERE —
 	// crashed-turn rows (stuck with the flag TRUE) must be reachable so
 	// the reconciler can clear them via its IsAlive + CAS pipeline.
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND NOT EXISTS`).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND status <> 'running'\s+AND COALESCE\(recovery_state, ''\) NOT IN \('queued', 'recovering'\)\s+AND NOT EXISTS`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
