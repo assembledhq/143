@@ -106,8 +106,8 @@ func TestDeployWritesWorkerSandboxCapacityEnv(t *testing.T) {
 	require.Contains(t, string(deployScript), "SANDBOX_HEALTH_CHECK_IMAGE=%s", "worker deploy should write the sandbox health-check image into .env for compose preflight and app config")
 }
 
-// Worker preview routing requires three per-host values: NODE_ID,
-// WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL. They live in
+// Worker preview routing and sandbox orchestration require per-host values:
+// NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID. They live in
 // /opt/143/.env.local (not the shared .env that gets rewritten on every
 // deploy). If we ever stop writing or appending that file, every preview
 // start will fail with PREVIEW_NO_WORKERS — guard the wiring here so that
@@ -120,6 +120,7 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(compose), "${WORKER_PRIVATE_IP:?", "worker compose should bind port 8080 to the worker's private IP and fail loudly if WORKER_PRIVATE_IP is unset (binding to 0.0.0.0 would expose the internal preview API)")
 	require.Contains(t, string(compose), "${NODE_ID:?", "worker compose should require NODE_ID rather than silently falling back to a random container hostname")
 	require.Contains(t, string(compose), "${PREVIEW_INTERNAL_BASE_URL:?", "worker compose should require PREVIEW_INTERNAL_BASE_URL — without it, parseWorkerNode rejects the node and StartPreview returns PREVIEW_NO_WORKERS")
+	require.Contains(t, string(compose), "${DOCKER_GID:?", "worker compose should require the host docker group GID instead of defaulting to a distro-specific value that can block docker.sock access")
 	require.Contains(t, string(compose), ":8080:8080", "worker compose should publish port 8080 so the app node can reach the worker's internal preview API")
 
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
@@ -128,20 +129,25 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(cloudInit), "NODE_ID=${NODE_ID}", "worker cloud-init should populate NODE_ID in .env.local")
 	require.Contains(t, string(cloudInit), "WORKER_PRIVATE_IP=${WORKER_PRIVATE_IP}", "worker cloud-init should populate WORKER_PRIVATE_IP in .env.local")
 	require.Contains(t, string(cloudInit), "PREVIEW_INTERNAL_BASE_URL=${PREVIEW_INTERNAL_BASE_URL}", "worker cloud-init should populate PREVIEW_INTERNAL_BASE_URL in .env.local")
+	require.Contains(t, string(cloudInit), `DOCKER_GID="$(getent group docker | cut -d: -f3)"`, "worker cloud-init should detect the host docker group GID for docker.sock access")
+	require.Contains(t, string(cloudInit), `DOCKER_GID=%s`, "worker cloud-init should persist DOCKER_GID in .env.local")
 	require.Contains(t, string(cloudInit), "cat /opt/143/.env.local >> /opt/143/.env", "worker cloud-init should concatenate .env.local into .env so docker compose can interpolate ${WORKER_PRIVATE_IP} etc.")
 
 	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read the provisioning script")
+	require.Contains(t, string(provisionScript), "getent group docker", "provision.sh should detect the host docker group GID instead of relying on a hardcoded docker group id")
 	require.Contains(t, string(provisionScript), "NODE_ID=%s", "provision.sh should write NODE_ID into .env.local")
 	require.Contains(t, string(provisionScript), "WORKER_PRIVATE_IP=%s", "provision.sh should write WORKER_PRIVATE_IP into .env.local")
 	require.Contains(t, string(provisionScript), "PREVIEW_INTERNAL_BASE_URL=%s", "provision.sh should write PREVIEW_INTERNAL_BASE_URL into .env.local")
+	require.Contains(t, string(provisionScript), "DOCKER_GID=%s", "provision.sh should write DOCKER_GID into .env.local")
 	require.Contains(t, string(provisionScript), "/opt/143/.env.local", "provision.sh should target /opt/143/.env.local")
 	require.Contains(t, string(provisionScript), "cat /opt/143/.env.local >> /opt/143/.env", "provision.sh should concatenate .env.local into .env after writing both")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read the deploy script")
+	require.Contains(t, string(deployScript), `DOCKER_GID="$(getent group docker | cut -d: -f3)"`, "deploy.sh should backfill DOCKER_GID for workers provisioned before the value was written to .env.local")
 	require.Contains(t, string(deployScript), "cat /opt/143/.env.local >> /opt/143/.env", "deploy.sh worker branch should re-append .env.local into .env on every deploy — without this, every secret refresh wipes the per-host identity")
-	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID and WORKER_PRIVATE_IP")
+	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID, WORKER_PRIVATE_IP, or DOCKER_GID")
 }
 
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
@@ -172,6 +178,86 @@ func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
 	require.Contains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP//./-}`, "provision.sh's NODE_ID default should use the full dotted-to-dash IP so workers across multiple /24s don't collide on \"worker-<last-octet>\"")
 	require.NotContains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP##*.}`, "provision.sh should not fall back to the last-octet-only default — it collides across /24s")
 	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
+}
+
+func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
+	t.Parallel()
+
+	dbCompose, err := os.ReadFile("../docker-compose.db.yml")
+	require.NoError(t, err, "test should read db compose file")
+	dbComposeText := string(dbCompose)
+	require.Contains(t, dbComposeText, "${DB_BIND_IP:?", "db compose should require an explicit primary private bind IP instead of defaulting Postgres to the public interface")
+	require.NotContains(t, dbComposeText, "DB_TAILSCALE_BIND_IP", "db compose should not make Postgres startup depend on a Tailscale interface address")
+	require.NotContains(t, dbComposeText, "0.0.0.0:5432:5432", "db compose must not expose Postgres on every interface when cross-region workers use an overlay network")
+
+	pgHBA, err := os.ReadFile("../deploy/postgres/pg_hba.conf")
+	require.NoError(t, err, "test should read pg_hba.conf")
+	require.Contains(t, string(pgHBA), "100.64.0.0/10", "Postgres should allow Tailscale tailnet clients after Tailscale ACLs have admitted the nodes")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db provisioning should fail loudly until the operator chooses the primary private bind address")
+	require.Contains(t, provisionText, "DB_BIND_IP=%s", "db provisioning should write DB_BIND_IP into /opt/143/.env for compose interpolation")
+	require.Contains(t, provisionText, `TS_ADVERTISE_ROUTES:=${DB_BIND_IP}/32`, "db Tailscale enrollment should derive the advertised DB route from DB_BIND_IP instead of requiring a second production secret")
+	require.NotContains(t, provisionText, "TS_DB_ADVERTISE_ROUTES", "db provisioning should not require a separate DB route secret that can drift from DB_BIND_IP")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the primary private bind address")
+	require.Contains(t, deployText, "DB_BIND_IP=%s", "db deploy should preserve DB_BIND_IP in /opt/143/.env for compose interpolation")
+}
+
+func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
+	t.Parallel()
+
+	installScript, err := os.ReadFile("../deploy/scripts/install-tailscale.sh")
+	require.NoError(t, err, "install-tailscale.sh should exist as the shared Tailscale host setup helper")
+	installText := string(installScript)
+	require.Contains(t, installText, "TS_AUTH_KEY", "Tailscale install helper should use an auth key for non-interactive server enrollment")
+	require.Contains(t, installText, "--advertise-tags", "Tailscale install helper should support tagged production nodes for ACLs")
+	require.Contains(t, installText, "--advertise-routes", "Tailscale install helper should support private subnet route advertisement for cross-region DB access")
+	require.Contains(t, installText, "net.ipv4.ip_forward", "Tailscale install helper should enable forwarding when a node advertises subnet routes")
+	require.Contains(t, installText, "--accept-routes=true", "Tailscale install helper should let remote workers accept advertised DB routes")
+	require.Contains(t, installText, "--accept-dns=false", "Tailscale install helper should not let tailnet DNS rewrite host resolver state")
+	require.Contains(t, installText, "tailscale ip -4", "Tailscale install helper should print the assigned IPv4 address for provisioning")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "install-tailscale.sh", "provisioning should run the shared Tailscale setup helper when TS_AUTH_KEY is provided")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_APP", "provisioning should support role-specific app Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_DB", "provisioning should support role-specific db Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_WORKER", "provisioning should support role-specific worker Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, "TS_AUTH_KEY_REDIS", "provisioning should support role-specific redis Tailscale auth keys from production secrets")
+	require.Contains(t, provisionText, `TS_ADVERTISE_ROUTES:=${REDIS_PRIVATE_IP}/32`, "redis Tailscale enrollment should advertise the Redis private IP route from REDIS_PRIVATE_IP")
+	require.Contains(t, provisionText, "TS_WORKER_HOSTS", "provisioning should use a host list to choose which workers join Tailscale")
+	require.Contains(t, provisionText, "TS_ACCEPT_ROUTES", "provisioning should pass route acceptance through to Tailscale enrollment")
+	require.NotContains(t, provisionText, "TS_WORKER_ACCEPT_ROUTES", "mapped Tailscale workers should always accept advertised private routes without a separate production knob")
+	require.Contains(t, provisionText, "WORKER_PRIVATE_IP_SOURCE:=tailscale", "worker provisioning should derive Tailscale address discovery from the worker host list")
+	require.Contains(t, provisionText, "tailscale ip -4", "worker provisioning should be able to discover the worker's Tailscale IPv4 address")
+	require.Contains(t, provisionText, "100.64.0.0/10", "worker provisioning comments/errors should make the Tailscale address range explicit")
+	require.Contains(t, provisionText, "--tailscale-only", "provisioning should support enrolling already-provisioned hosts in Tailscale without reprovisioning containers or volumes")
+	require.Contains(t, provisionText, "Tailscale enrollment applied", "Tailscale-only enrollment should finish before the normal running-container reprovision guard")
+	tailscaleOnlyIndex := strings.Index(provisionText, `if [ "$MODE" = "--tailscale-only" ]`)
+	runningGuardIndex := strings.Index(provisionText, "# Check if already provisioned")
+	require.NotEqual(t, -1, tailscaleOnlyIndex, "provisioning should have a Tailscale-only mode branch")
+	require.NotEqual(t, -1, runningGuardIndex, "provisioning should still have the normal running-container guard")
+	require.Less(t, tailscaleOnlyIndex, runningGuardIndex, "Tailscale-only enrollment should bypass the running-container guard that blocks normal provisioning")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	makefileText := string(makefile)
+	require.Contains(t, makefileText, "tailscale-enroll:", "Makefile should expose a non-destructive Tailscale enrollment target for existing app/db/redis nodes")
+	require.Contains(t, makefileText, `ROLE=<app|db|redis>`, "Makefile should allow non-destructive Redis Tailscale enrollment")
+	require.NotContains(t, makefileText, "TS_DB_ADVERTISE_ROUTES", "Makefile should document DB_BIND_IP as the single source for the advertised DB route")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read worker cloud-init template")
+	cloudInitText := string(cloudInit)
+	require.NotContains(t, cloudInitText, "TS_AUTH_KEY", "worker Tailscale enrollment should stay in provision.sh so it can use the production host map")
+	require.NotContains(t, cloudInitText, "tailscale up", "worker cloud-init should not duplicate the Tailscale enrollment path")
 }
 
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {
@@ -439,6 +525,25 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 	require.Contains(t, repairText, "/opt/143/deploy/scripts/install-docker-dns.sh *", "repair-deploy-sudoers.sh should grant the install-docker-dns.sh sudoers entry — otherwise legacy-host repair via the no-teardown path leaves DNS pinning broken")
 }
 
+func TestProvisionWaitsForDockerDaemonBeforePullingImages(t *testing.T) {
+	t.Parallel()
+
+	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provision)
+
+	require.Contains(t, provisionText, "wait_for_docker_daemon()", "provision.sh should define a reusable Docker daemon readiness gate for fresh hosts")
+	require.Contains(t, provisionText, "systemctl enable --now docker", "provision.sh should start Docker before the first daemon-backed docker command")
+	require.Contains(t, provisionText, "su - deploy -c 'docker info >/dev/null 2>&1'", "provision.sh should verify the deploy user can reach the Docker daemon, not just that root can")
+	require.Contains(t, provisionText, "journalctl -u docker", "provision.sh should print Docker daemon logs when readiness fails so setup failures are actionable")
+
+	waitCallIndex := strings.Index(provisionText, "\nwait_for_docker_daemon\n")
+	pullStepIndex := strings.Index(provisionText, "echo \"--- Step 4/5: Pulling images ---\"")
+	require.NotEqual(t, -1, waitCallIndex, "provision.sh should call the Docker readiness gate")
+	require.NotEqual(t, -1, pullStepIndex, "provision.sh should still have the image-pulling step")
+	require.Less(t, waitCallIndex, pullStepIndex, "provision.sh should wait for Docker before docker login or docker pull runs")
+}
+
 // The synthetic DNS probe is what surfaces upstream DNS issues directly,
 // before they cascade into user-visible failures. Pin its wiring: the
 // service definition must exist in the shared compose include, both
@@ -558,6 +663,7 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	require.Contains(t, deployText, "deploy/vector.yaml", "logging deploy should sync Vector config for the logging node")
 	require.Contains(t, deployText, "deploy/grafana/provisioning", "logging deploy should sync Grafana provisioning files")
 	require.Contains(t, deployText, "deploy/vmalert/rules", "logging deploy should sync vmalert rules")
+	require.Contains(t, deployText, "deploy/scripts/alertmanager_slack_relay.py", "logging deploy should sync the Alertmanager Slack relay script mounted by docker-compose.logging.yml")
 	require.Contains(t, deployText, "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules", "logging deploy should remove stale provisioned dashboards and rules before syncing repo-owned config")
 
 	compose, err := os.ReadFile("../docker-compose.logging.yml")
@@ -567,6 +673,10 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	require.Contains(t, deployText, "SERVER_ROLE=%s", "logging deploy should write SERVER_ROLE=logging for Vector")
 	vectorCheck := deployText[strings.Index(deployText, "# Verify Vector is running"):]
 	require.Contains(t, vectorCheck, `"$ROLE" = "logging"`, "logging deploy should verify the logging-node Vector collector after stack recreation")
+
+	vectorCompose, err := os.ReadFile("../docker-compose.vector.yml")
+	require.NoError(t, err, "test should read shared Vector compose file")
+	require.Contains(t, string(vectorCompose), "--api.enabled=true", "Vector compose should enable the API endpoint used by its /health healthcheck")
 
 	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
 	require.NoError(t, err, "test should read Grafana dashboard provider config")

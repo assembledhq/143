@@ -479,6 +479,22 @@ func main() {
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
 
+		if sandboxCapacity != nil && services.SandboxGC != nil {
+			sandboxCapacity.SetPressureCleaner(services.SandboxGC)
+		}
+
+		// Run a Docker-first startup cleanup before workers accept jobs. Any
+		// DB-unreferenced sandbox already present on this host cannot belong to
+		// an in-flight turn in this process, so it should not consume local
+		// admission capacity through the normal GC grace window.
+		if services.SandboxGC != nil {
+			startupGCCtx, startupGCCancel := context.WithTimeout(ctx, 2*time.Minute)
+			if gcErr := services.SandboxGC.ReapStartup(startupGCCtx, time.Now()); gcErr != nil {
+				logger.Warn().Err(gcErr).Msg("startup: Docker-first sandbox cleanup failed; pressure cleanup and periodic GC will retry")
+			}
+			startupGCCancel()
+		}
+
 		// Reconcile containers that leaked when the last server exited mid-turn
 		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
 		// sees clean state. Best-effort: errors are logged, not fatal.

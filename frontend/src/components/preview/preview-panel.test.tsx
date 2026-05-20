@@ -16,6 +16,7 @@ const mockGet = vi.hoisted(() => vi.fn());
 const mockStart = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockRestart = vi.hoisted(() => vi.fn());
+const mockSetLifetime = vi.hoisted(() => vi.fn());
 const mockBootstrap = vi.hoisted(() => vi.fn());
 const mockLogs = vi.hoisted(() => vi.fn());
 const mockConsoleBadgeState = vi.hoisted(() => ({ shouldThrow: false }));
@@ -28,6 +29,7 @@ vi.mock("@/lib/api", () => ({
         start: mockStart,
         stop: mockStop,
         restart: mockRestart,
+        setLifetime: mockSetLifetime,
         bootstrap: mockBootstrap,
         logs: mockLogs,
       },
@@ -137,6 +139,7 @@ describe("PreviewPanel component", () => {
     mockStart.mockResolvedValue({});
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
+    mockSetLifetime.mockResolvedValue({});
     mockBootstrap.mockResolvedValue({ token: "tok-1" });
     mockLogs.mockResolvedValue([]);
     mockConsoleBadgeState.shouldThrow = false;
@@ -489,6 +492,45 @@ describe("PreviewPanel component", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("ttl-warning")).toBeInTheDocument();
+    });
+  });
+
+  it("offers bounded preview lifetime controls from a hidden menu", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "ready",
+        expires_at: "2026-12-31T00:00:00Z",
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await user.click(await screen.findByRole("button", { name: "Preview lifetime" }));
+
+    expect(screen.getByText("Preview lifetime")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Keep for 15 min" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Keep for 30 min" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Stop in 5 min" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /1 hr/i })).not.toBeInTheDocument();
+  });
+
+  it("updates preview lifetime from the hidden menu", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "ready",
+        expires_at: "2026-12-31T00:00:00Z",
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await user.click(await screen.findByRole("button", { name: "Preview lifetime" }));
+    await user.click(screen.getByRole("menuitem", { name: "Stop in 5 min" }));
+
+    await waitFor(() => {
+      expect(mockSetLifetime).toHaveBeenCalledWith("sess-1", { duration_seconds: 300 });
     });
   });
 

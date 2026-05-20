@@ -14,6 +14,7 @@ import (
 )
 
 const defaultExtensionQueueAgeThreshold = 2 * time.Minute
+const runtimeStopPersistenceTimeout = 2 * time.Second
 
 type runtimeConfig struct {
 	SoftBudget               time.Duration
@@ -318,6 +319,23 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 	if c.cancels != nil {
 		c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow)
 	}
+	runtimeReason := stopReasonToRuntime(reason)
+	if runtimeReason != models.RuntimeStopReasonNone {
+		stopAfter := time.Now().UTC().Add(c.cfg.GracefulShutdownWindow + c.cfg.CheckpointFinalizeWindow + defaultRuntimeStallAge)
+		persistCtx, cancel := context.WithTimeout(context.Background(), runtimeStopPersistenceTimeout)
+		defer cancel()
+		if err := c.sessions.MarkRuntimeStopRequested(persistCtx, c.orgID, c.sessionID, runtimeReason, stopAfter); err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str("session_id", c.sessionID.String()).
+				Str("stop_reason", string(runtimeReason)).
+				Msg("failed to persist runtime stop request")
+		}
+	}
+	c.logger.Info().
+		Str("session_id", c.sessionID.String()).
+		Str("stop_reason", string(runtimeReason)).
+		Msg("runtime stop requested")
 }
 
 func (c *runtimeController) tick(ctx context.Context, now time.Time) {
@@ -360,6 +378,12 @@ func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 }
 
 func (c *runtimeController) shouldExtend(ctx context.Context, now, lastStrongAt time.Time) bool {
+	if lastStrongAt.IsZero() {
+		return false
+	}
+	if now.Sub(lastStrongAt) > c.cfg.ExtensionIncrement {
+		return false
+	}
 	if c.isDraining != nil && c.isDraining() {
 		return false
 	}
@@ -375,10 +399,7 @@ func (c *runtimeController) shouldExtend(ctx context.Context, now, lastStrongAt 
 			return false
 		}
 	}
-	if lastStrongAt.IsZero() {
-		return false
-	}
-	return now.Sub(lastStrongAt) <= c.cfg.ExtensionIncrement
+	return true
 }
 
 func (c *runtimeController) tryExtend(ctx context.Context, expectedSoftDeadline time.Time) bool {

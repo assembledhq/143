@@ -178,7 +178,7 @@ func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
-			Error: models.ErrorDetail{Code: "PREVIEW_CAPACITY_REACHED", Message: "all preview slots are in use"},
+			Error: models.ErrorDetail{Code: PreviewCapacityCode, Message: "all preview slots are in use"},
 		}), "worker error responses should encode structured errors")
 	}))
 	defer server.Close()
@@ -193,8 +193,8 @@ func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {
 	reqErr, ok := AsWorkerRequestError(err)
 	require.True(t, ok, "StartPreview should expose structured worker errors")
 	require.Equal(t, http.StatusServiceUnavailable, reqErr.StatusCode, "worker error status should be preserved")
-	require.Equal(t, "PREVIEW_CAPACITY_REACHED", reqErr.Code, "worker error code should be preserved")
-	require.Contains(t, reqErr.Error(), "PREVIEW_CAPACITY_REACHED", "worker error string should include the code")
+	require.Equal(t, PreviewCapacityCode, reqErr.Code, "worker error code should be preserved")
+	require.Contains(t, reqErr.Error(), PreviewCapacityCode, "worker error string should include the code")
 }
 
 func TestWorkerPreviewClient_DecodeFailures(t *testing.T) {
@@ -277,7 +277,7 @@ func TestDecodeWorkerResponses_ErrorVariants(t *testing.T) {
 
 		resp := &http.Response{
 			StatusCode: http.StatusServiceUnavailable,
-			Body:       ioNopCloserString(`{"error":{"code":"PREVIEW_CAPACITY_REACHED","message":"full"}}`),
+			Body:       ioNopCloserString(fmt.Sprintf(`{"error":{"code":%q,"message":"full"}}`, PreviewCapacityCode)),
 		}
 
 		_, err := decodeWorkerResponse[models.PreviewInstance](resp)
@@ -285,7 +285,7 @@ func TestDecodeWorkerResponses_ErrorVariants(t *testing.T) {
 
 		reqErr, ok := AsWorkerRequestError(err)
 		require.True(t, ok, "decodeWorkerResponse should return a worker request error")
-		require.Equal(t, "PREVIEW_CAPACITY_REACHED", reqErr.Code, "decodeWorkerResponse should preserve the worker error code")
+		require.Equal(t, PreviewCapacityCode, reqErr.Code, "decodeWorkerResponse should preserve the worker error code")
 	})
 
 	t.Run("single response plain worker error", func(t *testing.T) {

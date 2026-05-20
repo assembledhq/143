@@ -17,12 +17,18 @@ import (
 
 type runtimeTestSessionStore struct {
 	countRunning               int
+	countRunningCalls          int
 	extensionGrants            int
 	countRunningErr            error
 	beginErr                   error
 	beginCalls                 int
 	recordRuntimeProgressCalls int
 	recordRuntimeProgressErr   error
+	stopRequests               []models.RuntimeStopReason
+	stopAfter                  []time.Time
+	markRuntimeStopErr         error
+	markRuntimeStopStarted     chan struct{}
+	markRuntimeStopRelease     chan struct{}
 	lastProgressType           models.RuntimeProgressType
 	lastProgressStrength       models.RuntimeProgressStrength
 	lastProgressObservedAt     time.Time
@@ -45,6 +51,7 @@ func (s *runtimeTestSessionStore) UpdateResult(context.Context, uuid.UUID, uuid.
 }
 
 func (s *runtimeTestSessionStore) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
+	s.countRunningCalls++
 	return s.countRunning, s.countRunningErr
 }
 
@@ -75,6 +82,22 @@ func (s *runtimeTestSessionStore) RecordRuntimeProgress(_ context.Context, _ uui
 	s.lastProgressStrength = strength
 	s.lastProgressObservedAt = observedAt
 	return s.recordRuntimeProgressErr
+}
+
+func (s *runtimeTestSessionStore) MarkRuntimeStopRequested(ctx context.Context, _ uuid.UUID, _ uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time) error {
+	if s.markRuntimeStopStarted != nil {
+		close(s.markRuntimeStopStarted)
+	}
+	if s.markRuntimeStopRelease != nil {
+		select {
+		case <-s.markRuntimeStopRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	s.stopRequests = append(s.stopRequests, reason)
+	s.stopAfter = append(s.stopAfter, stopAfter)
+	return s.markRuntimeStopErr
 }
 
 func (s *runtimeTestSessionStore) GrantRuntimeExtension(_ context.Context, _ uuid.UUID, _ uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error) {
@@ -172,9 +195,10 @@ func (s *runtimeTestJobStore) OldestPendingSessionJobAge(context.Context) (time.
 }
 
 type runtimeTestJobBacklogStore struct {
-	age time.Duration
-	ok  bool
-	err error
+	age   time.Duration
+	ok    bool
+	err   error
+	calls int
 }
 
 func (s *runtimeTestJobBacklogStore) Enqueue(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error) {
@@ -186,6 +210,7 @@ func (s *runtimeTestJobBacklogStore) EnqueueWithTarget(context.Context, uuid.UUI
 }
 
 func (s *runtimeTestJobBacklogStore) OldestPendingSessionJobAge(context.Context) (time.Duration, bool, error) {
+	s.calls++
 	return s.age, s.ok, s.err
 }
 
@@ -361,6 +386,77 @@ func TestRuntimeProgressTracker_RecordAndPersist(t *testing.T) {
 	require.False(t, tracker.ShouldPersist(), "ShouldPersist should not re-persist the same progress snapshot twice")
 }
 
+func TestRuntimeController_RequestStopCancelsBeforePersistingStopMarker(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	graceWindow := 5 * time.Minute
+	checkpointWindow := 3 * time.Minute
+	stopStarted := make(chan struct{})
+	stopRelease := make(chan struct{})
+	sessionStore := &runtimeTestSessionStore{
+		markRuntimeStopStarted: stopStarted,
+		markRuntimeStopRelease: stopRelease,
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancelObserved := make(chan struct{})
+	go func() {
+		<-cancelCtx.Done()
+		close(cancelObserved)
+	}()
+	cancels := NewCancelRegistry(zerolog.Nop())
+	cancels.Register(sessionID, cancel, DefaultCancellationSpec)
+
+	controller := newRuntimeController(
+		runtimeConfig{
+			GracefulShutdownWindow:   graceWindow,
+			CheckpointFinalizeWindow: checkpointWindow,
+		},
+		sessionStore,
+		&runtimeTestJobStore{},
+		cancels,
+		zerolog.Nop(),
+		orgID,
+		sessionID,
+		0,
+		nil,
+		newRuntimeProgressTracker(time.Now()),
+	)
+
+	requestedAt := time.Now().UTC()
+	done := make(chan struct{})
+	go func() {
+		controller.RequestStop(StopReasonNoProgress)
+		close(done)
+	}()
+
+	select {
+	case <-cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("RequestStop should deliver cancellation before waiting on stop-marker persistence")
+	}
+
+	select {
+	case <-stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("RequestStop should still attempt to persist the stop marker")
+	}
+	close(stopRelease)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RequestStop should finish once stop-marker persistence unblocks")
+	}
+
+	require.Equal(t, []models.RuntimeStopReason{models.RuntimeStopReasonNoProgress}, sessionStore.stopRequests, "RequestStop should persist the stop reason")
+	require.Len(t, sessionStore.stopAfter, 1, "RequestStop should persist one stop-after deadline")
+	minStopAfter := requestedAt.Add(graceWindow + checkpointWindow + defaultRuntimeStallAge - time.Second)
+	require.True(t, sessionStore.stopAfter[0].After(minStopAfter), "stop-after deadline should include graceful shutdown, checkpoint finalization, and watchdog slack")
+}
+
 func TestRuntimeProgressTracker_TracksConcurrentCommandExecutions(t *testing.T) {
 	t.Parallel()
 
@@ -458,15 +554,16 @@ func TestRuntimeController_ShouldExtend_GatesOnQueuePressureAndProgress(t *testi
 		queueErr    error
 		lastStrong  time.Time
 		expectAllow bool
+		expectReads bool
 	}{
 		{name: "rejects while draining", isDraining: true, lastStrong: now, expectAllow: false},
-		{name: "rejects above concurrency limit", running: 4, lastStrong: now, expectAllow: false},
-		{name: "ignores concurrency count errors", runningErr: errors.New("count failed"), lastStrong: now, expectAllow: true},
-		{name: "rejects old queue backlog", queueAge: 3 * time.Minute, queueOK: true, lastStrong: now, expectAllow: false},
-		{name: "ignores queue age errors", queueErr: errors.New("queue failed"), lastStrong: now, expectAllow: true},
+		{name: "rejects above concurrency limit", running: 4, lastStrong: now, expectAllow: false, expectReads: true},
+		{name: "ignores concurrency count errors", runningErr: errors.New("count failed"), lastStrong: now, expectAllow: true, expectReads: true},
+		{name: "rejects old queue backlog", queueAge: 3 * time.Minute, queueOK: true, lastStrong: now, expectAllow: false, expectReads: true},
+		{name: "ignores queue age errors", queueErr: errors.New("queue failed"), lastStrong: now, expectAllow: true, expectReads: true},
 		{name: "rejects without strong progress", lastStrong: time.Time{}, expectAllow: false},
 		{name: "rejects stale strong progress", lastStrong: now.Add(-3 * time.Second), expectAllow: false},
-		{name: "allows recent strong progress", lastStrong: now.Add(-time.Second), expectAllow: true},
+		{name: "allows recent strong progress", lastStrong: now.Add(-time.Second), expectAllow: true, expectReads: true},
 	}
 
 	for _, tt := range tests {
@@ -493,6 +590,10 @@ func TestRuntimeController_ShouldExtend_GatesOnQueuePressureAndProgress(t *testi
 			)
 
 			require.Equal(t, tt.expectAllow, controller.shouldExtend(context.Background(), now, tt.lastStrong), "shouldExtend should enforce queue-pressure and progress gates")
+			if !tt.expectReads {
+				require.Equal(t, 0, sessionStore.countRunningCalls, "shouldExtend should not read concurrency when progress already rejects extension")
+				require.Equal(t, 0, backlogStore.calls, "shouldExtend should not read queue pressure when progress already rejects extension")
+			}
 		})
 	}
 }
@@ -668,6 +769,7 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 	t.Run("requests no-progress stop", func(t *testing.T) {
 		t.Parallel()
 
+		sessionStore := &runtimeTestSessionStore{}
 		controller := newRuntimeController(
 			runtimeConfig{
 				SoftBudget:             10 * time.Second,
@@ -675,7 +777,7 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 				ExtensionIncrement:     time.Second,
 				AbsoluteRuntimeCeiling: time.Hour,
 			},
-			&runtimeTestSessionStore{},
+			sessionStore,
 			&runtimeTestJobStore{},
 			nil,
 			zerolog.Nop(),
@@ -690,6 +792,7 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 
 		controller.tick(context.Background(), now)
 		require.Equal(t, StopReasonNoProgress, controller.stopRequested, "tick should request a no-progress stop after the configured idle timeout")
+		require.Equal(t, []models.RuntimeStopReason{models.RuntimeStopReasonNoProgress}, sessionStore.stopRequests, "tick should persist the requested no-progress stop immediately")
 	})
 
 	t.Run("does not request no-progress stop while tool is active", func(t *testing.T) {

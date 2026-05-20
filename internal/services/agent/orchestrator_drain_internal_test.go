@@ -74,6 +74,9 @@ func (s *drainStubSessions) ConsumeCancelRequest(context.Context, uuid.UUID, uui
 func (s *drainStubSessions) RecordRuntimeProgress(context.Context, uuid.UUID, uuid.UUID, models.RuntimeProgressType, models.RuntimeProgressStrength, time.Time) error {
 	return nil
 }
+func (s *drainStubSessions) MarkRuntimeStopRequested(context.Context, uuid.UUID, uuid.UUID, models.RuntimeStopReason, time.Time) error {
+	return nil
+}
 func (s *drainStubSessions) GrantRuntimeExtension(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time, time.Time, time.Time, int) (bool, error) {
 	return false, nil
 }

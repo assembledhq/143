@@ -135,6 +135,99 @@ func TestSandboxGC_ReapOnceDestroysUnreferencedContainersAfterGrace(t *testing.T
 	require.Equal(t, []string{"old"}, usage.closedIDs(), "sandbox GC should close usage rows for containers it destroys")
 }
 
+func TestSandboxGC_ReapStartupDestroysUnreferencedContainersImmediately(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	provider := &fakeSandboxGCProvider{
+		containers: []agent.ManagedSandboxContainer{
+			{ID: "fresh-orphan", CreatedAt: now, Purpose: "agent_run"},
+			{ID: "referenced", CreatedAt: now, Purpose: "agent_run"},
+		},
+	}
+	store := &fakeSandboxGCStore{references: []string{"referenced"}}
+	usage := &fakeSandboxGCUsageCloser{}
+	gc := agent.NewSandboxGC(provider, store, usage, agent.SandboxGCConfig{
+		UnreferencedGracePeriod: 30 * time.Minute,
+		HardMaxAge:              24 * time.Hour,
+	}, zerolog.Nop())
+
+	err := gc.ReapStartup(context.Background(), now)
+	require.NoError(t, err, "startup sandbox GC should complete when immediate orphan cleanup succeeds")
+	require.Equal(t, []string{"fresh-orphan"}, provider.destroyedIDs(), "startup sandbox GC should immediately destroy unreferenced containers present before workers accept jobs")
+	require.Equal(t, []string{"fresh-orphan"}, usage.closedIDs(), "startup sandbox GC should close usage rows for immediately destroyed orphans")
+}
+
+func TestSandboxGC_ReapStartupSkipsContainersCreatedAfterGCStarted(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().Add(time.Hour).UTC()
+	provider := &fakeSandboxGCProvider{
+		containers: []agent.ManagedSandboxContainer{
+			{ID: "post-startup", CreatedAt: now, Purpose: "agent_run"},
+		},
+	}
+	store := &fakeSandboxGCStore{}
+	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{
+		UnreferencedGracePeriod: 30 * time.Minute,
+		HardMaxAge:              24 * time.Hour,
+	}, zerolog.Nop())
+
+	err := gc.ReapStartup(context.Background(), now.Add(time.Minute))
+	require.NoError(t, err, "startup sandbox GC should complete when it sees a post-startup unreferenced container")
+	require.Empty(t, provider.destroyedIDs(), "startup sandbox GC should leave containers created after this worker initialized to normal/pressure GC")
+}
+
+func TestSandboxGC_ReapForCapacityUsesPressureGrace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	provider := &fakeSandboxGCProvider{
+		containers: []agent.ManagedSandboxContainer{
+			{ID: "too-young", CreatedAt: now.Add(-30 * time.Second), Purpose: "agent_run"},
+			{ID: "pressure-old", CreatedAt: now.Add(-3 * time.Minute), Purpose: "agent_run"},
+		},
+	}
+	store := &fakeSandboxGCStore{}
+	usage := &fakeSandboxGCUsageCloser{}
+	gc := agent.NewSandboxGC(provider, store, usage, agent.SandboxGCConfig{
+		UnreferencedGracePeriod: 30 * time.Minute,
+		PressureGracePeriod:     2 * time.Minute,
+		HardMaxAge:              24 * time.Hour,
+	}, zerolog.Nop())
+
+	err := gc.ReapForCapacity(context.Background(), now)
+	require.NoError(t, err, "capacity-pressure sandbox GC should complete when orphan cleanup succeeds")
+	require.Equal(t, []string{"pressure-old"}, provider.destroyedIDs(), "capacity-pressure sandbox GC should use the shorter pressure grace for unreferenced containers")
+	require.Equal(t, []string{"pressure-old"}, usage.closedIDs(), "capacity-pressure sandbox GC should close usage rows for pressure-cleaned containers")
+}
+
+func TestSandboxGC_ReapForCapacityLimitsDestroyAttempts(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	provider := &fakeSandboxGCProvider{
+		containers: []agent.ManagedSandboxContainer{
+			{ID: "old-1", CreatedAt: now.Add(-3 * time.Minute), Purpose: "agent_run"},
+			{ID: "old-2", CreatedAt: now.Add(-3 * time.Minute), Purpose: "agent_run"},
+			{ID: "old-3", CreatedAt: now.Add(-3 * time.Minute), Purpose: "agent_run"},
+		},
+	}
+	store := &fakeSandboxGCStore{}
+	usage := &fakeSandboxGCUsageCloser{}
+	gc := agent.NewSandboxGC(provider, store, usage, agent.SandboxGCConfig{
+		PressureGracePeriod:     2 * time.Minute,
+		PressureMaxDestroy:      2,
+		UnreferencedGracePeriod: 30 * time.Minute,
+		HardMaxAge:              24 * time.Hour,
+	}, zerolog.Nop())
+
+	err := gc.ReapForCapacity(context.Background(), now)
+	require.NoError(t, err, "capacity-pressure sandbox GC should complete after hitting the destroy attempt cap")
+	require.Equal(t, []string{"old-1", "old-2"}, provider.destroyedIDs(), "capacity-pressure sandbox GC should cap destroy attempts on the admission path")
+	require.Equal(t, []string{"old-1", "old-2"}, usage.closedIDs(), "capacity-pressure sandbox GC should close usage rows only for containers destroyed before the cap")
+}
+
 func TestSandboxGC_ReapOnceKeepsReferencedContainerUntilHardMaxAge(t *testing.T) {
 	t.Parallel()
 

@@ -117,6 +117,42 @@ describe("NewAutomationPage", () => {
     );
   });
 
+  it("keeps the emoji selector small on the same row as the name field", async () => {
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await screen.findByDisplayValue("Security sweep");
+
+    const identityRow = screen.getByTestId("automation-identity-row");
+    expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
+    expect(screen.getByRole("button", { name: "Automation emoji" })).toHaveClass("w-16");
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+  });
+
   it("inserts selected @ mentions into the automation goal", async () => {
     const user = userEvent.setup();
 

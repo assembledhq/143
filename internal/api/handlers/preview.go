@@ -408,7 +408,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		})
 		if capErr != nil {
 			return acquireSandboxResult{
-				ErrCode: "PREVIEW_CAPACITY_REACHED",
+				ErrCode: preview.PreviewCapacityCode,
 				Err:     fmt.Errorf("%w: %w", preview.ErrPreviewCapacity, capErr),
 			}
 		}
@@ -574,7 +574,7 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error(), err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
 		}
 		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
@@ -640,7 +640,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error(), err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
 		}
 		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
@@ -661,7 +661,11 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 		// hydratedContainerID is "" — either we never hydrated, or
 		// acquireSandbox's race-loss branch already destroyed the local
 		// container before returning.
-		h.manager.AbortReservation(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		abortReason := fmt.Sprintf("acquire sandbox: %v", acq.Err)
+		if errors.Is(acq.Err, preview.ErrPreviewCapacity) {
+			abortReason = preview.PreviewCapacityMessage
+		}
+		h.manager.AbortReservation(ctx, reservation, "", abortReason)
 		switch acq.ErrCode {
 		case "SNAPSHOT_EXPIRED":
 			return nil, newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
@@ -671,8 +675,8 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		case "SANDBOX_BUSY":
 			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "PREVIEW_CAPACITY_REACHED":
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, acq.Err.Error(), acq.Err)
+		case preview.PreviewCapacityCode:
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, preview.PreviewCapacityMessage, acq.Err)
 		default:
 			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
 		}
@@ -1023,25 +1027,74 @@ func (h *PreviewHandler) GetSnapshots(w http.ResponseWriter, r *http.Request) {
 }
 
 // =============================================================================
-// POST /api/v1/sessions/{id}/preview/extend — Extend preview TTL
+// PATCH /api/v1/sessions/{id}/preview/lifetime — Set preview lifetime
 // =============================================================================
 
-func (h *PreviewHandler) ExtendTTL(w http.ResponseWriter, r *http.Request) {
+type setPreviewLifetimeRequest struct {
+	DurationSeconds int64 `json:"duration_seconds"`
+}
+
+func (h *PreviewHandler) SetLifetime(w http.ResponseWriter, r *http.Request) {
 	if !h.requireManager(w, r) {
 		return
 	}
+
+	var body setPreviewLifetimeRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
+		return
+	}
+
+	minSeconds := int64(preview.MinLifetimeTTL.Seconds())
+	maxSeconds := int64(preview.DefaultHardTTL.Seconds())
+	if body.DurationSeconds < minSeconds || body.DurationSeconds > maxSeconds {
+		writeError(w, r, http.StatusBadRequest, "INVALID_DURATION",
+			fmt.Sprintf("duration_seconds must be between %d and %d", minSeconds, maxSeconds))
+		return
+	}
+
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
 		return
 	}
 
-	if err := h.manager.ExtendTTL(r.Context(), orgID, instance.ID); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "EXTEND_TTL_FAILED", "failed to extend TTL", err)
+	previousExpiry := instance.ExpiresAt
+	newExpiry, err := h.manager.SetLifetime(r.Context(), orgID, instance.ID, time.Duration(body.DurationSeconds)*time.Second)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SET_PREVIEW_LIFETIME_FAILED", "failed to set preview lifetime", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "extended"}})
+	resourceID := instance.SessionID.String()
+	details, err := json.Marshal(map[string]any{
+		"preview_id":          instance.ID.String(),
+		"previous_expires_at": previousExpiry,
+		"new_expires_at":      newExpiry,
+		"duration_seconds":    body.DurationSeconds,
+		"direction":           previewLifetimeDirection(previousExpiry, newExpiry),
+	})
+	if err != nil {
+		h.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to marshal preview lifetime audit details")
+		details = json.RawMessage(`{}`)
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPreviewLifetimeSet, models.AuditResourceSession, &resourceID, &instance.SessionID, nil, details)
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]any]{Data: map[string]any{
+		"status":     "updated",
+		"expires_at": newExpiry,
+	}})
+}
+
+func previewLifetimeDirection(previous, next time.Time) string {
+	switch {
+	case next.After(previous):
+		return "extended"
+	case next.Before(previous):
+		return "shortened"
+	default:
+		return "unchanged"
+	}
 }
 
 // =============================================================================

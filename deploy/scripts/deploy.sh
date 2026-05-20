@@ -123,7 +123,8 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "db" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for db role (set it or add to .env.production.enc)}"
-    printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
+    : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node primary private IP)}"
+    printf 'DB_PASSWORD=%s\nDB_BIND_IP=%s\n' "$DB_PASSWORD" "$DB_BIND_IP" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "redis" ]; then
     : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
@@ -140,12 +141,11 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${SANDBOX_GC_GRACE:=30m}"
     : "${SANDBOX_GC_HARD_MAX:=24h}"
     # Refresh the shared secrets in /opt/143/.env, then re-append the per-host
-    # identity from /opt/143/.env.local (NODE_ID, WORKER_PRIVATE_IP,
-    # PREVIEW_INTERNAL_BASE_URL) so docker compose can still interpolate them
-    # when it parses the compose file. .env.local is owned by provisioning
-    # and we abort if it's missing instead of silently coming up with an
-    # empty NODE_ID and WORKER_PRIVATE_IP=0.0.0.0 (would expose worker to
-    # the public internet).
+    # identity/runtime values from /opt/143/.env.local (NODE_ID,
+    # WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) so docker
+    # compose can still interpolate them when it parses the compose file.
+    # .env.local is owned by provisioning and we abort if it's missing instead
+    # of silently coming up with empty/unsafe defaults.
     printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
@@ -156,9 +156,18 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
           chmod 600 /opt/143/.env
           if [ ! -f /opt/143/.env.local ]; then
             echo "ERROR: /opt/143/.env.local is missing on this host." >&2
-            echo "       It holds NODE_ID, WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL." >&2
+            echo "       It holds NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID." >&2
             echo "       Re-run: make provision-worker HOST=<this-host>" >&2
             exit 1
+          fi
+          if ! grep -q "^DOCKER_GID=" /opt/143/.env.local; then
+            DOCKER_GID="$(getent group docker | cut -d: -f3)"
+            if [ -z "$DOCKER_GID" ]; then
+              echo "ERROR: could not resolve docker group GID on this worker." >&2
+              echo "       Re-run: make provision-worker HOST=<this-host>" >&2
+              exit 1
+            fi
+            printf "DOCKER_GID=%s\n" "$DOCKER_GID" >> /opt/143/.env.local
           fi
           cat /opt/143/.env.local >> /opt/143/.env
         '
@@ -204,10 +213,17 @@ if [ "$ROLE" = "logging" ]; then
   # so the rm still runs on hosts where files are already deploy-owned.
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "sudo -n chown -R deploy:deploy /opt/143/deploy/vmalert 2>&1 | sed 's/^/  chown: /' || true; \
-     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true"
+     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true; \
+     sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules && mkdir -p /opt/143/deploy/grafana /opt/143/deploy/vmalert"
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/grafana/provisioning" deploy@"$HOST":/opt/143/deploy/grafana/
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vmalert/rules" deploy@"$HOST":/opt/143/deploy/vmalert/
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/alertmanager_slack_relay.py" \
+    deploy@"$HOST":/opt/143/deploy/scripts/alertmanager_slack_relay.py.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/alertmanager_slack_relay.py.new /opt/143/deploy/scripts/alertmanager_slack_relay.py \
+     && chmod 644 /opt/143/deploy/scripts/alertmanager_slack_relay.py \
+     || { rm -f /opt/143/deploy/scripts/alertmanager_slack_relay.py.new; exit 1; }"
 fi
 if [ "$ROLE" = "app" ]; then
   # Sync Caddyfile so the remote always has the latest reverse-proxy config.
