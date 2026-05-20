@@ -425,6 +425,62 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  it("keeps the settings emoji selector small on the same row as the name field", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await screen.findByText("Weekly audit");
+    await userEvent.click(screen.getByRole("tab", { name: "Settings" }));
+
+    const identityRow = screen.getByTestId("automation-settings-identity-row");
+    expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
+    expect(screen.getByRole("button", { name: "Automation emoji" })).toHaveClass("w-16");
+    expect(screen.getByLabelText("Name")).toHaveValue("Weekly audit");
+  });
+
   it("updates the automation emoji from the header picker without changing tabs", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
