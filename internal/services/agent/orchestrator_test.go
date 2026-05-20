@@ -2765,6 +2765,174 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
 }
 
+func TestContinueSession_PRRepairReconstructsFromExpectedHead(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+	pendingSnapshotKey := "snapshots/post-pr-upload.tar.zst"
+	session.PendingSnapshotKey = &pendingSnapshotKey
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please fix these tests.",
+		},
+	}
+	var cloneBranch string
+	d.provider.CloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+		cloneBranch = branch
+		return nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "expected-head-sha\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		PRRepair: &agent.PRRepairContinueOptions{
+			PullRequestID:     uuid.New(),
+			PullRequestNumber: 42,
+			CommandType:       models.PullRequestRepairActionTypeFixTests,
+			HealthVersion:     12,
+			HeadSHA:           "expected-head-sha",
+			WorkspaceMode:     models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+		},
+	})
+	require.NoError(t, err, "ContinueSession should reconstruct PR repairs even while a post-PR snapshot upload is pending")
+	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should start from the repository target branch before fetching the PR head")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head into the session working branch")
+	require.NotContains(t, d.provider.ExecCalls, "git checkout -b '143/00000000/nullpointerexception-in-handler'", "PR repair reconstruction should not create a branch from the target branch tip")
+}
+
+func TestContinueSession_PRRepairReconstructionClearsRecordedContainer(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+	containerID := "live-container"
+	session.ContainerID = &containerID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please resolve the conflicts.",
+		},
+	}
+	var clearedContainer string
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		clearedContainer = expected
+		return true, nil
+	}
+	var destroyedContainer string
+	d.provider.DestroyFn = func(ctx context.Context, sb *agent.Sandbox) error {
+		if sb.ID == containerID {
+			destroyedContainer = sb.ID
+		}
+		return nil
+	}
+	var cloneBranch string
+	d.provider.CloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+		cloneBranch = branch
+		return nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "expected-head-sha\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		PRRepair: &agent.PRRepairContinueOptions{
+			PullRequestID:     uuid.New(),
+			PullRequestNumber: 42,
+			CommandType:       models.PullRequestRepairActionTypeResolveConflicts,
+			HealthVersion:     12,
+			HeadSHA:           "expected-head-sha",
+			WorkspaceMode:     models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+		},
+	})
+	require.NoError(t, err, "ContinueSession should reconstruct PR repairs from a fresh workspace even when the session has a recorded container")
+	require.Equal(t, containerID, clearedContainer, "PR repair reconstruction should clear the recorded container before creating a fresh workspace")
+	require.Equal(t, containerID, destroyedContainer, "PR repair reconstruction should destroy the unheld recorded container after clearing it from the session row")
+	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should clone from the repository target branch")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head in the fresh workspace")
+}
+
+func TestContinueSession_PRRepairStaleHeadDoesNotInvokeAgent(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please resolve the conflicts.",
+		},
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "newer-head-sha\n")
+		}
+		return 0, nil
+	}
+	agentInvoked := false
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		agentInvoked = true
+		return &agent.AgentResult{Summary: "should not run", ConfidenceScore: 0.1, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		PRRepair: &agent.PRRepairContinueOptions{
+			PullRequestID:     uuid.New(),
+			PullRequestNumber: 42,
+			CommandType:       models.PullRequestRepairActionTypeResolveConflicts,
+			HealthVersion:     12,
+			HeadSHA:           "expected-head-sha",
+			WorkspaceMode:     models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+		},
+	})
+	require.ErrorIs(t, err, agent.ErrStalePullRequestHead, "ContinueSession should surface stale PR head as a typed error")
+	require.False(t, agentInvoked, "ContinueSession must not invoke the agent when the checked-out PR head is stale")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "stale PR head should not be persisted as a session failure")
+}
+
 func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testing.T) {
 	t.Parallel()
 
@@ -2791,9 +2959,6 @@ func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testin
 	}
 	d.messages.messages = []models.SessionMessage{
 		{
-			ID:         1,
-			SessionID:  session.ID,
-			OrgID:      orgID,
 			TurnNumber: 1,
 			Role:       models.MessageRoleAssistant,
 			Content:    "previous response",

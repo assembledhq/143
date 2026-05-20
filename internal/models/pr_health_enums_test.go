@@ -148,3 +148,30 @@ func TestPullRequestRepairActionTypeValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestPullRequestRepairWorkspaceModeValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		mode      PullRequestRepairWorkspaceMode
+		expectErr bool
+	}{
+		{name: "snapshot continuation", mode: PullRequestRepairWorkspaceModeSnapshotContinuation},
+		{name: "pr head reconstruction", mode: PullRequestRepairWorkspaceModePRHeadReconstruction},
+		{name: "invalid", mode: PullRequestRepairWorkspaceMode("child_revision"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.mode.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported repair workspace modes")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported repair workspace modes")
+		})
+	}
+}
