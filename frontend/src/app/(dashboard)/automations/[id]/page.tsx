@@ -142,17 +142,22 @@ function SettingsTab({
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-      <div className="space-y-1.5">
-        <Label>Emoji</Label>
-        <AutomationEmojiPicker
-          value={iconValue}
-          onChange={setIconValue}
-          className="w-full sm:w-64"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="name">Name</Label>
-        <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+      <div
+        data-testid="automation-settings-identity-row"
+        className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
+      >
+        <div className="space-y-1.5">
+          <Label>Emoji</Label>
+          <AutomationEmojiPicker
+            value={iconValue}
+            onChange={setIconValue}
+            className="w-16"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="name">Name</Label>
+          <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
       </div>
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
