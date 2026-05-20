@@ -2681,6 +2681,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
 		session.SandboxState != string(models.SandboxStateDestroyed)
+	if prHeadReconstruction && session.ContainerID != nil && *session.ContainerID != "" {
+		recordedContainerID := *session.ContainerID
+		cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, recordedContainerID)
+		if clearErr != nil {
+			return fmt.Errorf("clear recorded sandbox before pull request repair reconstruction: %w", clearErr)
+		}
+		if !cleared {
+			return fmt.Errorf("recorded sandbox %s is held by another owner; cannot reconstruct pull request repair workspace", recordedContainerID)
+		}
+		if destroyErr := o.provider.Destroy(context.Background(), &Sandbox{ID: recordedContainerID, Provider: o.provider.Name()}); destroyErr != nil {
+			log.Warn().Err(destroyErr).Str("container_id", recordedContainerID).Msg("failed to destroy recorded sandbox before pull request repair reconstruction")
+		}
+		session.ContainerID = nil
+		session.WorkerNodeID = nil
+	}
 	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 
 	var capacityReservation *SandboxCapacityReservation
