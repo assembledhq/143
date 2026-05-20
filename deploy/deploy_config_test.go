@@ -711,6 +711,7 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	vectorCompose, err := os.ReadFile("../docker-compose.vector.yml")
 	require.NoError(t, err, "test should read shared Vector compose file")
 	require.NotContains(t, string(vectorCompose), "--api.enabled", "Vector compose must not pass API settings as CLI flags because the pinned Vector image rejects them")
+	require.Contains(t, string(vectorCompose), "http://127.0.0.1:8686/health", "Vector healthcheck should probe IPv4 loopback because the API is configured on 0.0.0.0 and localhost may resolve to IPv6 first")
 	vectorConfig, err := os.ReadFile("../deploy/vector.yaml")
 	require.NoError(t, err, "test should read Vector config")
 	require.Contains(t, string(vectorConfig), "api:", "Vector config should enable the API in vector.yaml")
