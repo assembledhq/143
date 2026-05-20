@@ -253,6 +253,7 @@ func TestLinearAgentCreatedDeadLetterHookEmitsErrorAndMarksBridge(t *testing.T) 
 
 	ctx := jobctx.WithDeadLetterHooks(context.Background())
 	registerLinearAgentCreatedDeadLetter(ctx, LinearAgentEventHandlerDeps{
+		Linear: &linear.Service{},
 		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
 			clientCalls++
 			return client, nil
@@ -266,6 +267,8 @@ func TestLinearAgentCreatedDeadLetterHookEmitsErrorAndMarksBridge(t *testing.T) 
 	require.Equal(t, "as_1", client.lastActivity.AgentSessionID, "error activity should target the stuck Linear AgentSession")
 	require.Equal(t, string(models.LinearAgentActivityError), client.lastActivity.Type, "dead-letter activity should render as an error")
 	require.Contains(t, client.lastActivity.Body, "internal error", "dead-letter activity should explain that the agent failed before starting")
+	require.Contains(t, client.lastActivity.Body, "/api/v1/integrations/linear/agent/sessions/as_1",
+		"dead-letter activity should include the debug link for the Linear AgentSession row when no 143 session exists")
 	require.Equal(t, 1, client.updateCalls, "dead-letter hook should pin the Linear AgentSession into an error state")
 	require.Equal(t, "error", client.lastUpdate.State, "Linear AgentSession should be explicitly pinned to error")
 }
