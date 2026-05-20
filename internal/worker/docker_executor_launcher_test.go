@@ -48,6 +48,7 @@ func TestDockerExecutorLauncher_LaunchCreatesLabeledExecutorContainer(t *testing
 			Image:       "ghcr.io/assembledhq/143-server:test",
 			NetworkMode: "143_default",
 			Binds:       []string{"/var/run/docker.sock:/var/run/docker.sock"},
+			GroupAdd:    []string{"123"},
 			Env:         []string{"DATABASE_URL=postgres://example"},
 		},
 	}
@@ -76,6 +77,7 @@ func TestDockerExecutorLauncher_LaunchCreatesLabeledExecutorContainer(t *testing
 	require.Equal(t, jobID.String(), client.createConfig.Labels["com.143.job_id"], "Launch should label the job id")
 	require.Equal(t, container.NetworkMode("143_default"), client.createHostConfig.NetworkMode, "Launch should attach to the configured Docker network")
 	require.Equal(t, []string{"/var/run/docker.sock:/var/run/docker.sock"}, client.createHostConfig.Binds, "Launch should mount required host resources")
+	require.Equal(t, []string{"123"}, client.createHostConfig.GroupAdd, "Launch should add the configured supplemental groups")
 	require.Equal(t, "container-1", client.startID, "Launch should start the created container")
 }
 

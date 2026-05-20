@@ -208,11 +208,12 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 			 AND j.id = se.job_id
 			WHERE se.status IN ('starting', 'running', 'draining')
 			  AND se.heartbeat_at < $1
-			  AND j.lock_token = se.lock_token
 			  AND (
-				(j.status = 'running' AND j.owner_kind = 'session_executor' AND j.lease_expires_at < now())
+				(j.status = 'running' AND j.owner_kind = 'session_executor' AND j.lock_token = se.lock_token AND j.lease_expires_at < now())
 				OR
-				(se.status = 'starting' AND j.owner_kind = 'worker')
+				(se.status = 'starting' AND j.owner_kind = 'worker' AND (j.lock_token IS NULL OR j.lock_token = se.lock_token))
+				OR
+				(j.status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter') AND (j.lock_token IS NULL OR j.lock_token = se.lock_token))
 			  )
 			ORDER BY se.heartbeat_at ASC
 			FOR UPDATE SKIP LOCKED
@@ -227,7 +228,10 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 				updated_at = now()
 			FROM stale_active stale
 			WHERE se.id = stale.id
-			  AND stale.owner_kind = 'worker'
+			  AND (
+				stale.owner_kind = 'worker'
+				OR stale.job_status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter')
+			  )
 			RETURNING se.id
 		),
 		lost_executors AS (
@@ -239,6 +243,7 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 			FROM stale_active stale
 			WHERE se.id = stale.id
 			  AND stale.owner_kind = 'session_executor'
+			  AND stale.job_status = 'running'
 			RETURNING stale.org_id, stale.job_id, stale.lock_token
 		),
 		updated_jobs AS (
