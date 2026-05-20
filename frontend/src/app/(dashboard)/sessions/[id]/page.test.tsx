@@ -3622,6 +3622,11 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'More publish actions' }));
+
+    expect(await screen.findByRole('menuitem', { name: /Create branch/ })).toHaveClass('text-xs');
   });
 
   it('shows a durable View branch link after branch-only publish succeeds', async () => {
