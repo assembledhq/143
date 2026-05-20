@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
@@ -173,6 +174,43 @@ func TestNewRouter_BuildsWithoutOptionalReviewWiring(t *testing.T) {
 	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should still construct the router without session-review wiring")
 	require.NotNil(t, router, "NewRouter should still construct the router without session-review wiring")
+}
+
+func TestNewRouter_PublicAuthRoutesWarmAndRequireCSRF(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		CSRFSigningKey: "test-signing-key-that-is-long-enough",
+	}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err, "NewRouter should build successfully for public auth CSRF wiring")
+	require.NotNil(t, router, "NewRouter should construct a router for public auth CSRF wiring")
+
+	providersReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
+	providersRR := httptest.NewRecorder()
+	router.ServeHTTP(providersRR, providersReq)
+
+	require.Equal(t, http.StatusOK, providersRR.Code, "public auth provider lookup should still succeed")
+	var csrfCookie *http.Cookie
+	for _, cookie := range providersRR.Result().Cookies() {
+		if cookie.Name == middleware.CSRFCookieName {
+			csrfCookie = cookie
+			break
+		}
+	}
+	require.NotNil(t, csrfCookie, "public auth provider lookup should warm a CSRF cookie for the login form")
+	require.False(t, csrfCookie.HttpOnly, "CSRF cookie must be readable by the frontend login form")
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"email":"preview-admin@143.dev","password":"preview"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRR := httptest.NewRecorder()
+	router.ServeHTTP(loginRR, loginReq)
+
+	require.Equal(t, http.StatusForbidden, loginRR.Code, "public email login should require a CSRF token before reaching the handler")
+	require.Contains(t, loginRR.Body.String(), "missing CSRF cookie", "missing public auth CSRF should return the middleware error")
 }
 
 func TestNewRouter_InternalPreviewRoutesSkipGlobalBodyLimit(t *testing.T) {

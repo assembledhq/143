@@ -724,14 +724,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// bucket only — exactly the guarantee this public route needs.
 		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
-		// Auth routes (no auth)
-		r.Get("/api/v1/auth/providers", authHandler.Providers)
-		r.Get("/api/v1/auth/github/login", authHandler.Login)
-		r.Get("/api/v1/auth/github/callback", authHandler.Callback)
-		r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
-		r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
-		r.Post("/api/v1/auth/register", authHandler.Register)
-		r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+		// Auth routes (no auth). CSRF still wraps this group so safe public
+		// auth reads warm the double-submit cookie before email login/register.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
+			r.Get("/api/v1/auth/providers", authHandler.Providers)
+			r.Get("/api/v1/auth/github/login", authHandler.Login)
+			r.Get("/api/v1/auth/github/callback", authHandler.Callback)
+			r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
+			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
+			r.Post("/api/v1/auth/register", authHandler.Register)
+			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+		})
 
 		// Protected routes (authenticated)
 		r.Group(func(r chi.Router) {
