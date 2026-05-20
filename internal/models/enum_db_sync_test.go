@@ -103,6 +103,15 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			HumanInputRequestStatusCancelled, HumanInputRequestStatusExpired,
 			HumanInputRequestStatusSuperseded,
 		),
+		"session_executors_status": toStrings(
+			SessionExecutorStatusStarting, SessionExecutorStatusRunning,
+			SessionExecutorStatusDraining, SessionExecutorStatusRequeued,
+			SessionExecutorStatusCompleted, SessionExecutorStatusFailed,
+			SessionExecutorStatusLost,
+		),
+		"jobs_owner_kind": toStrings(
+			JobOwnerKindWorker, JobOwnerKindSessionExecutor,
+		),
 		// project_enums.go
 		"projects_status": toStrings(
 			ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted,

@@ -11,8 +11,10 @@ ARG BUILD_SHA=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/server ./cmd/server && \
+    CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/session-executor ./cmd/server && \
     CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate && \
-    CGO_ENABLED=0 go build -o /bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split
+    CGO_ENABLED=0 go build -o /bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split && \
+    CGO_ENABLED=0 go build -o /bin/deploy-guardrail ./cmd/deploy-guardrail
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -32,8 +34,10 @@ RUN apt-get update && apt-get install -y ca-certificates wget libheif-examples &
     && rm -rf /tmp/age /tmp/age.tar.gz
 
 COPY --from=go-builder /bin/server /bin/server
+COPY --from=go-builder /bin/session-executor /bin/session-executor
 COPY --from=go-builder /bin/migrate /bin/migrate
 COPY --from=go-builder /bin/migrate-coding-credentials-anthropic-split /bin/migrate-coding-credentials-anthropic-split
+COPY --from=go-builder /bin/deploy-guardrail /bin/deploy-guardrail
 COPY --from=go-builder /app/migrations /migrations
 
 # Copy entrypoint and encrypted production secrets

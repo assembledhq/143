@@ -2309,6 +2309,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// skills doc is injected into the prompt (BuildIntegrationSkills). No
 	// per-CLI config file injection needed — all agents can shell out directly.
 	input.Attachments = o.materializeAttachmentsForMessages(ctx, run.OrgID, sandbox, turnNumber, []models.SessionMessage{derefMessage(latestMsg)}, log)
+	if err := o.publishBootstrapCheckpoint(ctx, run, sandbox, runtimeTracker, log); err != nil {
+		return err
+	}
 	prompt, err := adapter.PreparePrompt(ctx, input)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
@@ -5559,6 +5562,40 @@ func (o *Orchestrator) snapshotSessionOnTurnSuccess(ctx context.Context, session
 		return "", 0, nil
 	}
 	return o.snapshotSession(ctx, session, sandbox, result)
+}
+
+func (o *Orchestrator) publishBootstrapCheckpoint(ctx context.Context, session *models.Session, sandbox *Sandbox, runtimeTracker *runtimeProgressTracker, log zerolog.Logger) error {
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, session, sandbox, nil)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Msg("failed to publish bootstrap checkpoint; session will recover from the next durable checkpoint")
+		return nil
+	}
+	if snapshotKey == "" {
+		return nil
+	}
+	if runtimeTracker != nil {
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthWeak, time.Now().UTC(), "")
+	}
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	agentSessionID := ""
+	if session.AgentSessionID != nil {
+		agentSessionID = *session.AgentSessionID
+	}
+	published, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindBootstrap, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to publish bootstrap checkpoint metadata")
+		if ownerKind, ok := jobctx.OwnerKindFromContext(ctx); ok && ownerKind == string(models.JobOwnerKindSessionExecutor) {
+			return fmt.Errorf("publish bootstrap checkpoint metadata: %w", err)
+		}
+		return nil
+	}
+	if !published {
+		log.Warn().Msg("bootstrap checkpoint metadata was not published")
+		if ownerKind, ok := jobctx.OwnerKindFromContext(ctx); ok && ownerKind == string(models.JobOwnerKindSessionExecutor) {
+			return fmt.Errorf("publish bootstrap checkpoint metadata: lost fenced ownership")
+		}
+	}
+	return nil
 }
 
 // snapshotSession snapshots the sandbox workspace to object storage for multi-turn support.
