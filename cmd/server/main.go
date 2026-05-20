@@ -82,6 +82,9 @@ func main() {
 	if err := cfg.ValidateSecrets(); err != nil {
 		logger.Fatal().Err(err).Msg("security configuration check failed")
 	}
+	if err := validateSessionExecutorStartupConfig(cfg); err != nil {
+		logger.Fatal().Err(err).Msg("worker session executor configuration is invalid")
+	}
 
 	sentryReporter, err := observability.NewSentryReporter(observability.SentryConfig{
 		DSN:         cfg.SentryDSN,
@@ -913,6 +916,51 @@ func canBuildServices(cfg *config.Config, logger zerolog.Logger) bool {
 	return true
 }
 
+func validateSessionExecutorStartupConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is required")
+	}
+	if cfg.Env == "production" && (cfg.Mode == "worker" || cfg.Mode == "all") && cfg.SessionExecutorImage == "" {
+		return fmt.Errorf("SESSION_EXECUTOR_IMAGE is required in production %s mode", cfg.Mode)
+	}
+	return nil
+}
+
+func configureSessionExecutorDispatch(
+	svc *worker.Services,
+	cfg *config.Config,
+	pool *pgxpool.Pool,
+	dockerCli *dockerclient.Client,
+	jobStore *db.JobStore,
+	logger zerolog.Logger,
+) {
+	if svc == nil || cfg == nil {
+		return
+	}
+	if cfg.SessionExecutorImage == "" {
+		logger.Warn().Msg("SESSION_EXECUTOR_IMAGE is empty; using inline run_agent/continue_session execution outside production")
+		return
+	}
+
+	svc.RequireSessionExecutorDispatcher = true
+	svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
+		Executors: db.NewSessionExecutorStore(pool),
+		Jobs:      jobStore,
+		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
+			Image:       cfg.SessionExecutorImage,
+			NetworkMode: cfg.SessionExecutorDockerNetwork,
+			Binds: []string{
+				"/var/run/docker.sock:/var/run/docker.sock",
+				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+			},
+			Env: os.Environ(),
+		}),
+		NodeID:   cfg.NodeID,
+		Image:    cfg.SessionExecutorImage,
+		BuildSHA: version.BuildSHA,
+	}
+}
+
 // buildServices constructs the full set of Phase 3+ worker services.
 func buildServices(
 	cfg *config.Config,
@@ -1313,26 +1361,7 @@ func buildServices(
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,
 	}
-	executorImage := cfg.SessionExecutorImage
-	if executorImage == "" {
-		logger.Warn().Msg("SESSION_EXECUTOR_IMAGE is empty; run_agent and continue_session executor dispatch will fail until configured")
-	}
-	svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
-		Executors: db.NewSessionExecutorStore(pool),
-		Jobs:      jobStore,
-		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
-			Image:       executorImage,
-			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds: []string{
-				"/var/run/docker.sock:/var/run/docker.sock",
-				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
-			},
-			Env: os.Environ(),
-		}),
-		NodeID:   cfg.NodeID,
-		Image:    executorImage,
-		BuildSHA: version.BuildSHA,
-	}
+	configureSessionExecutorDispatch(svc, cfg, pool, dockerCli, jobStore, logger)
 
 	// Linear inbound-agent worker wiring. The process-wide
 	// LINEAR_AGENT_ENABLED flag gates the webhook dispatcher, not the
