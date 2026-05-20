@@ -245,7 +245,7 @@ func registerLinearAgentCreatedDeadLetter(
 
 		activity := linear.AgentMilestoneActivity{
 			Type:            models.LinearAgentActivityError,
-			Body:            "I hit an internal error before I could start the coding session. Please retry or check the 143 session logs.",
+			Body:            linearAgentCreatedDeadLetterBody(deps.Linear, row),
 			IdemKey:         "bootstrap:failed",
 			PinSessionState: "error",
 		}
@@ -265,6 +265,16 @@ func registerLinearAgentCreatedDeadLetter(
 				Msg("linear_agent_event: created job dead-lettered before session creation")
 		}
 	})
+}
+
+func linearAgentCreatedDeadLetterBody(linearService *linear.Service, row *db.LinearAgentSession) string {
+	if row == nil {
+		return "I hit an internal error before I could start the coding session. Please retry or check the 143 session logs."
+	}
+	return fmt.Sprintf(
+		"I hit an internal error before I could start the coding session. No 143 session was created yet. Debug this Linear agent session here: %s",
+		linearService.AgentSessionDebugURL(row.LinearAgentSessionID),
+	)
 }
 
 func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgID, agentSessionRowID uuid.UUID, session *models.Session) error {
