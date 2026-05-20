@@ -332,7 +332,9 @@ describe('TeamSettingsPage', () => {
     });
 
     // Remove button should exist for the other member
-    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+    const removeButton = screen.getByRole('button', { name: 'Remove' });
+    expect(removeButton).toBeInTheDocument();
+    expect(removeButton).toHaveClass('px-0');
   });
 
   it('shows confirmation dialog when Remove is clicked and calls removeMember on confirm', async () => {
