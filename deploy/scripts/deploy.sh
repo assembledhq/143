@@ -876,9 +876,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "Waiting for Vector log collector health check (timeout ${timeout}s)..."
     while [ "$waited" -le "$timeout" ]; do
       state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo "missing")"
-      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo "missing")"
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo "missing")"
 
-      if [ "$state" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "running" ]; }; then
+      if [ "$state" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "none" ]; }; then
         echo "Vector is healthy (state: $state, health: $health)."
         return 0
       fi
@@ -890,7 +890,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       fi
 
       if [ "$health" = "unhealthy" ]; then
-        echo "ERROR: Vector is unhealthy (state: $state, health: $health)"
+        echo "ERROR: Vector is not healthy (state: $state, health: $health)"
         docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
         docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
 {{.Output}}
@@ -899,7 +899,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       fi
 
       if [ "$waited" -ge "$timeout" ]; then
-        echo "ERROR: Vector did not become healthy after ${timeout}s (state: $state, health: $health)"
+        echo "ERROR: Vector is not healthy after ${timeout}s (state: $state, health: $health)"
         docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
         docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
 {{.Output}}

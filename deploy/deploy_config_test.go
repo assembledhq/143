@@ -678,7 +678,12 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 
 	vectorCompose, err := os.ReadFile("../docker-compose.vector.yml")
 	require.NoError(t, err, "test should read shared Vector compose file")
-	require.Contains(t, string(vectorCompose), "--api.enabled=true", "Vector compose should enable the API endpoint used by its /health healthcheck")
+	require.NotContains(t, string(vectorCompose), "--api.enabled", "Vector compose must not pass API settings as CLI flags because the pinned Vector image rejects them")
+	vectorConfig, err := os.ReadFile("../deploy/vector.yaml")
+	require.NoError(t, err, "test should read Vector config")
+	require.Contains(t, string(vectorConfig), "api:", "Vector config should enable the API in vector.yaml")
+	require.Contains(t, string(vectorConfig), "enabled: true", "Vector API should stay enabled for the healthcheck")
+	require.Contains(t, string(vectorConfig), `address: "0.0.0.0:8686"`, "Vector API should bind the healthcheck address from config")
 
 	dashboardProvider, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/dashboards.yml")
 	require.NoError(t, err, "test should read Grafana dashboard provider config")
@@ -694,9 +699,14 @@ func TestDeployWaitsForVectorHealthcheck(t *testing.T) {
 
 	require.Contains(t, deployText, "wait_vector_healthy()", "deploy script should have a dedicated Vector health wait helper")
 	require.Contains(t, deployText, `VECTOR_HEALTH_TIMEOUT:-90`, "Vector health wait should give Docker healthchecks time to leave the initial starting state")
-	require.Contains(t, deployText, `health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid"`, "Vector health wait should read Docker's health status on each poll")
+	require.Contains(t, deployText, `health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid"`, "Vector health wait should read Docker's health status on each poll")
 	require.Contains(t, deployText, `if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then`, "Vector health wait should still fail immediately when the collector has exited")
 	require.Contains(t, deployText, `wait_vector_healthy "$VECTOR_ID"`, "deploy script should call the Vector health wait before declaring deploy success")
+
+	require.Contains(t, deployText, `"healthy"`, "deploy should require Vector's healthcheck to report healthy")
+	require.Contains(t, deployText, `"none"`, "deploy may accept running only when no healthcheck exists")
+	require.Contains(t, deployText, `Vector is not healthy`, "deploy should fail closed for Restarting, unhealthy, missing, and other non-healthy states")
+	require.Contains(t, deployText, `logs --tail=50 vector`, "deploy failure should print enough Vector logs to diagnose crash loops")
 }
 
 // Sandbox DNS resolution depends on three values agreeing across three

@@ -2429,6 +2429,8 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 		FROM sessions
 		WHERE container_id IS NOT NULL
 		  AND id > @after_id
+		  AND status <> 'running'
+		  AND COALESCE(recovery_state, '') NOT IN ('queued', 'recovering')
 		  AND NOT EXISTS (
 		    SELECT 1 FROM preview_instances p
 		    WHERE p.session_id = sessions.id

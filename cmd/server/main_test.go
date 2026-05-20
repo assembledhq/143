@@ -385,21 +385,28 @@ func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
 		"worker jobs should keep the full configured drain timeout")
 	require.Contains(t, body, "shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)",
 		"HTTP shutdown should use the bounded timeout constant")
+	require.Contains(t, body, "waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)",
+		"worker shutdown should verify DB-owned jobs for the draining node before process exit")
+	require.Contains(t, body, "jobStore.CountRunningOwnedByNode(ctx, nodeID)",
+		"DB-owned drain verification should query the durable job owner state")
 
 	nodeDrain := strings.Index(body, "nodeManager.RequestDrain(nodeDrainCtx, time.Now())")
 	httpDrainSignal := strings.Index(body, "close(shutdownCh)")
 	httpDrainDelay := strings.Index(body, "time.Sleep(httpDrainPropagationDelay)")
 	workerDrain := strings.Index(body, "drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)")
 	activeJobLoop := strings.Index(body, "activeJobs := 0")
+	dbOwnedDrain := strings.Index(body, "waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)")
 	require.NotEqual(t, -1, nodeDrain, "shutdown should mark the node draining")
 	require.NotEqual(t, -1, httpDrainSignal, "shutdown should mark HTTP health as draining")
 	require.NotEqual(t, -1, httpDrainDelay, "shutdown should wait for proxy health propagation")
 	require.NotEqual(t, -1, workerDrain, "shutdown should create the worker drain context")
 	require.NotEqual(t, -1, activeJobLoop, "shutdown should wait for active jobs")
+	require.NotEqual(t, -1, dbOwnedDrain, "shutdown should verify DB-owned jobs after active jobs drain")
 	require.Less(t, nodeDrain, httpDrainSignal, "node drain DB marking should happen before HTTP health drain begins")
 	require.Less(t, httpDrainSignal, httpDrainDelay, "HTTP health should be marked draining before waiting for proxy propagation")
 	require.Less(t, httpDrainDelay, workerDrain, "proxy propagation should finish before the worker drain budget starts")
 	require.Less(t, workerDrain, activeJobLoop, "the worker drain budget should be reserved for the active-job wait")
+	require.Less(t, activeJobLoop, dbOwnedDrain, "DB-owned drain verification should run after in-process active jobs reach zero")
 }
 
 func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {
