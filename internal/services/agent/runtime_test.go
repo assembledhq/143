@@ -795,7 +795,7 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 		require.Equal(t, []models.RuntimeStopReason{models.RuntimeStopReasonNoProgress}, sessionStore.stopRequests, "tick should persist the requested no-progress stop immediately")
 	})
 
-	t.Run("does not request no-progress stop while tool is active", func(t *testing.T) {
+	t.Run("does not request no-progress stop while tracked tool is active", func(t *testing.T) {
 		t.Parallel()
 
 		controller := newRuntimeController(
@@ -817,10 +817,40 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 		)
 		controller.softDeadline = now.Add(5 * time.Second)
 		controller.hardDeadline = now.Add(time.Minute)
-		controller.tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(-5*time.Second), "")
+		controller.tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(-5*time.Second), "item_1")
 
 		controller.tick(context.Background(), now)
 		require.Equal(t, StopReasonNone, controller.stopRequested, "tick should not request a no-progress stop while a tool command is still active")
+	})
+
+	t.Run("requests no-progress stop while adapter process is only unkeyed activity", func(t *testing.T) {
+		t.Parallel()
+
+		sessionStore := &runtimeTestSessionStore{}
+		controller := newRuntimeController(
+			runtimeConfig{
+				SoftBudget:             10 * time.Second,
+				NoProgressTimeout:      2 * time.Second,
+				ExtensionIncrement:     time.Second,
+				AbsoluteRuntimeCeiling: time.Hour,
+			},
+			sessionStore,
+			&runtimeTestJobStore{},
+			nil,
+			zerolog.Nop(),
+			uuid.New(),
+			uuid.New(),
+			3,
+			nil,
+			newRuntimeProgressTracker(now.Add(-5*time.Second)),
+		)
+		controller.softDeadline = now.Add(5 * time.Second)
+		controller.hardDeadline = now.Add(time.Minute)
+		controller.tracker.Record(models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, now.Add(-5*time.Second), "")
+
+		controller.tick(context.Background(), now)
+		require.Equal(t, StopReasonNoProgress, controller.stopRequested, "unkeyed adapter-level activity should not suppress no-progress shutdown")
+		require.Equal(t, []models.RuntimeStopReason{models.RuntimeStopReasonNoProgress}, sessionStore.stopRequests, "tick should persist the requested no-progress stop")
 	})
 
 	t.Run("requests absolute-ceiling stop", func(t *testing.T) {

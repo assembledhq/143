@@ -33,11 +33,22 @@ The initial hardening and checkpoint-recovery phases described here are now in p
 - jobs carry renewable leases plus fencing tokens (`lease_expires_at`,
   `lock_token`, `run_owner_id`)
 - worker terminal writes are guarded by the current `lock_token`
+- session runner lease renewal refuses to keep `run_agent` or
+  `continue_session` alive after the referenced session reaches a terminal
+  state
 - nodes advertise `draining` status and heartbeat metadata
 - a recovery loop marks stale nodes `dead` and re-queues lost running jobs
-- worker deploys now use `drain -> replace` instead of blind stop/recreate
+- worker deploys now use `drain -> replace` instead of blind stop/recreate,
+  and worker shutdown verifies DB-owned running jobs for the node are zero
+  before the process is considered fully drained
 - reclaimed `run_agent` work now resumes from the latest committed session
   checkpoint when one exists, and otherwise restarts from scratch
+- recovery logs include `checkpoint_available`, `restart_from_scratch`, and
+  checkpoint capability fields so operators can see when intra-turn work was
+  lost because no durable checkpoint existed
+- startup sandbox cleanup preserves containers for sessions that are still
+  `running` or in queued/recovering recovery state; it only destroys containers
+  whose DB ownership is terminal or conclusively stale
 - the committed checkpoint boundary is the last fully persisted turn
   (`current_turn`, `snapshot_key`, `agent_session_id`, stored messages/diff);
   blob-only snapshots not referenced by the session row are intentionally ignored
