@@ -52,7 +52,7 @@ func TestBuildAgentSession(t *testing.T) {
 	require.Equal(t, models.AgentTypePi, session.AgentType, "Linear-triggered sessions should honor the org default agent type resolved by the caller")
 	require.Equal(t, string(models.DefaultSessionAutonomy), session.AutonomyLevel,
 		"Linear-triggered sessions should use the session-level autonomy default accepted by chk_sessions_autonomy_level")
-	require.Equal(t, "low", session.TokenMode,
+	require.Equal(t, models.DefaultSessionTokenMode, session.TokenMode,
 		"Linear-triggered sessions should use the same default token mode as manual and automation-created sessions")
 	require.Equal(t, models.SessionOriginIssueTrigger, session.Origin,
 		"origin must mark this as an inbound trigger, not a manual session — drives downstream PM/automation behavior")
