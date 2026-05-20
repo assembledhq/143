@@ -230,9 +230,12 @@ This image is used by the Docker sandbox provider. It runs under **gVisor** (`ru
 
 ### Deploy-Time Host Hardening
 
+Routine fleet deploys roll only the user-facing runtime roles, `app` and `worker`. Stateful/supporting roles (`db`, `redis`, `logging`) are deployed explicitly with `make deploy-db`, `make deploy-redis`, `make deploy-logging`, or `make deploy-fleet ROLES=all` during maintenance. `make deploy-fleet TAG=<image-tag> ROLES=<roles>` is the operator-facing shape for deploying a specific image tag to a selected role set. This keeps frequent application deploys from recreating Postgres, Redis, Grafana, or other non-runtime services.
+
 Fleet deploys attempt to keep host hardening in place as they roll services:
 
 - Docker `json-file` log rotation is installed through `deploy/scripts/install-log-rotation.sh`, which merges the desired `log-driver` and `log-opts` into `/etc/docker/daemon.json` and restarts Docker only when the file changes.
+- App-role deploys skip Docker-daemon-mutating hardening checks by default because a Docker restart recycles Caddy and briefly unbinds ports `80`/`443`, which Cloudflare surfaces as origin downtime. Operators can opt in for explicit maintenance with `ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1`.
 - The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access. Worker cloud-init installs the same grant on first boot, because those hosts can start successfully from user-data before any operator runs SSH provisioning.
 - Existing hosts that predate a sudoers entry are repaired through `deploy/scripts/repair-deploy-sudoers.sh` when root SSH is available.
 - If a routine deploy cannot repair sudoers from CI, Docker log-rotation update failure is warning-only. The service rollout continues, and operators can run `make repair-deploy-sudoers ROLE=<role> HOST=<host>` later from a machine with root SSH access.

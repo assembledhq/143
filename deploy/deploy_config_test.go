@@ -106,6 +106,34 @@ func TestDeployWritesWorkerSandboxCapacityEnv(t *testing.T) {
 	require.Contains(t, string(deployScript), "SANDBOX_HEALTH_CHECK_IMAGE=%s", "worker deploy should write the sandbox health-check image into .env for compose preflight and app config")
 }
 
+func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
+	t.Parallel()
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetText := string(fleetScript)
+	require.Contains(t, fleetText, `REQUESTED_ROLES="${3:-app,worker}"`, "fleet deploy should default to the user-facing runtime roles so routine app deploys do not restart db, redis, or logging")
+	require.Contains(t, fleetText, `./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] all`, "fleet deploy should document an explicit all-roles maintenance argument")
+	require.Contains(t, fleetText, `validate_requested_roles`, "fleet deploy should reject misspelled roles instead of silently skipping every host")
+	require.Contains(t, fleetText, `cannot be combined with other roles`, "fleet deploy should reject confusing mixed selections like all,redis")
+	require.Contains(t, fleetText, `No fleet hosts matched requested roles`, "fleet deploy should fail loudly when a valid role selection matches no hosts")
+	require.Contains(t, fleetText, `should_deploy_role()`, "fleet deploy should centralize role filtering so every FLEET_HOSTS entry is handled consistently")
+	require.Contains(t, fleetText, `Skipping $ROLE@$IP`, "fleet deploy should log skipped maintenance roles so operators can tell they were intentionally left alone")
+
+	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
+	require.NoError(t, err, "test should read the deploy workflow")
+	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"`, "CI should use deploy-fleet's default app/worker role set for routine main-branch deploys")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	require.Contains(t, string(makefile), "ROLES ?= app,worker", "Makefile should make the default fleet role set visible to operators")
+	require.Contains(t, string(makefile), "TAG ?= latest", "Makefile should expose the image tag as the same kind of make argument as roles")
+	require.Contains(t, string(makefile), `./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)`, "single-role deploy targets should honor the same TAG argument as fleet deploys")
+	require.Contains(t, string(makefile), `./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG)`, "multi-host single-role deploy targets should pass TAG through for every host")
+	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
+	require.Contains(t, string(makefile), `./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)`, "Makefile should pass role and tag arguments through to deploy-fleet.sh")
+}
+
 // Worker preview routing and sandbox orchestration require per-host values:
 // NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID. They live in
 // /opt/143/.env.local (not the shared .env that gets rewritten on every
@@ -401,7 +429,9 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy script")
 	deployText := string(deployScript)
-	require.Contains(t, deployText, "install-log-rotation.sh", "deploy.sh should sync and invoke the install-log-rotation.sh helper on every deploy")
+	require.Contains(t, deployText, "install-log-rotation.sh", "deploy.sh should sync and invoke the install-log-rotation.sh helper for maintenance-capable deploys")
+	require.Contains(t, deployText, "ALLOW_DEPLOY_DOCKER_DAEMON_RESTART", "deploy.sh should require an explicit maintenance flag before app deploys can restart Docker")
+	require.Contains(t, deployText, "Skipping docker log rotation check on app deploy", "routine app deploys should skip daemon-mutating log rotation checks to keep Caddy bound on 80/443")
 	require.Contains(t, deployText, `db) LOG_MAX_SIZE="500m"`, "deploy.sh should give the db role a larger log cap — postgres logging is verbose and the db host has no Vector log shipping, so the local docker log is the only copy")
 	require.Contains(t, deployText, `*)  LOG_MAX_SIZE="100m"`, "deploy.sh should default non-db roles to a 100m cap")
 	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh", "deploy.sh should invoke install-log-rotation.sh via deploy+sudo (not root SSH) — matches the sandbox-firewall.sh pattern and avoids depending on root SSH at routine deploy time")
@@ -504,8 +534,10 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy script")
 	deployText := string(deployScript)
-	require.Contains(t, deployText, "install-docker-dns.sh", "deploy.sh should sync and invoke install-docker-dns.sh on every deploy")
+	require.Contains(t, deployText, "install-docker-dns.sh", "deploy.sh should sync and invoke install-docker-dns.sh for maintenance-capable deploys")
 	require.Contains(t, deployText, "DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)", "deploy.sh should pin three independent resolver operators (Cloudflare, Google, Quad9) so a single-provider outage doesn't take fleet DNS down")
+	require.Contains(t, deployText, "ALLOW_DEPLOY_DOCKER_DAEMON_RESTART", "deploy.sh should require an explicit maintenance flag before app deploys can restart Docker")
+	require.Contains(t, deployText, "Skipping docker daemon DNS check on app deploy", "routine app deploys should skip daemon-mutating DNS checks to keep Caddy bound on 80/443")
 	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh", "deploy.sh should invoke install-docker-dns.sh via deploy+sudo so missing sudoers fails fast instead of hanging")
 	require.Contains(t, deployText, "Retrying docker daemon DNS pinning after sudoers repair", "deploy.sh should retry install-docker-dns.sh after repairing sudoers so the first deploy that introduces the helper succeeds on legacy hosts")
 	require.Contains(t, deployText, "warn_docker_dns_skipped", "deploy.sh should warn (not fail the deploy) when the DNS helper can't be installed — DNS hardening is operational, not a hard prerequisite for the rolling deploy")
