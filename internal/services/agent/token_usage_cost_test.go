@@ -115,6 +115,25 @@ func TestFinalizeTokenUsage(t *testing.T) {
 			},
 		},
 		{
+			name: "derives codex fast subscription credits at priority rate",
+			usage: TokenUsage{
+				InputTokens:       1_000_000,
+				CachedInputTokens: 1_000_000,
+				OutputTokens:      1_000_000,
+			},
+			hint: TokenUsageHint{
+				AgentType:      models.AgentTypeCodex,
+				EffectiveModel: models.CodexModelGPT54Fast,
+				BillingMode:    TokenBillingModeSubscription,
+			},
+			validate: func(t *testing.T, usage TokenUsage) {
+				t.Helper()
+				require.NotNil(t, usage.NativeCost, "fast subscription-backed codex runs should keep a native credit estimate")
+				require.Equal(t, TokenCostUnitCredits, usage.NativeCost.Unit, "fast codex native billing unit should be credits")
+				require.InDelta(t, 1109.375, usage.NativeCost.Amount, 0.0001, "fast codex subscription derivation should apply the priority multiplier")
+			},
+		},
+		{
 			name: "derives gemini api key usd cost when model pricing is known",
 			usage: TokenUsage{
 				InputTokens:       1_000_000,

@@ -102,6 +102,52 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 	}
 }
 
+func TestCodexModelArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		env            map[string]string
+		effectiveModel string
+		expected       string
+	}{
+		{
+			name:     "adds priority service tier for gpt 5.5 fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT55Fast},
+			expected: ` -m 'gpt-5.5' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "adds priority service tier for gpt 5.4 fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT54Fast},
+			expected: ` -m 'gpt-5.4' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "adds explicit model for regular model",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT55},
+			expected: ` -m 'gpt-5.5'`,
+		},
+		{
+			name:     "does not add args when no env model is set",
+			env:      map[string]string{},
+			expected: "",
+		},
+		{
+			name:           "uses resolved effective model when env model is absent",
+			env:            map[string]string{},
+			effectiveModel: models.CodexModelGPT54Fast,
+			expected:       ` -m 'gpt-5.4' -c 'service_tier="priority"'`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codexModelArgs(tt.env, tt.effectiveModel), "codexModelArgs should translate selectable fast aliases into CLI config")
+		})
+	}
+}
+
 func TestParseCodexOutput_JSON(t *testing.T) {
 	t.Parallel()
 

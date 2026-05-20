@@ -17,7 +17,9 @@ type tokenRate struct {
 
 var openAIAPIRates = map[string]tokenRate{
 	models.CodexModelGPT55:      {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT55Fast:  {inputPerMTok: 12.50, cachedInputPerMTok: 1.25, outputPerMTok: 75.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
 	models.CodexModelGPT54:      {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT54Fast:  {inputPerMTok: 6.25, cachedInputPerMTok: 0.625, outputPerMTok: 37.50, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
 	models.CodexModelGPT54Mini:  {inputPerMTok: 0.75, cachedInputPerMTok: 0.075, outputPerMTok: 4.50, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 	models.CodexModelGPT5Codex:  {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 	models.CodexModelGPT53Codex: {inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
@@ -27,7 +29,9 @@ var openAIAPIRates = map[string]tokenRate{
 
 var codexCreditRates = map[string]tokenRate{
 	models.CodexModelGPT55:      {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT55Fast:  {inputPerMTok: 312.50, cachedInputPerMTok: 31.25, outputPerMTok: 1875.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
 	models.CodexModelGPT54:      {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT54Fast:  {inputPerMTok: 156.25, cachedInputPerMTok: 15.625, outputPerMTok: 937.50, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
 	models.CodexModelGPT54Mini:  {inputPerMTok: 18.75, cachedInputPerMTok: 1.875, outputPerMTok: 113.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
 	models.CodexModelGPT53Codex: {inputPerMTok: 43.75, cachedInputPerMTok: 4.375, outputPerMTok: 350.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
 	models.CodexModelGPT52Codex: {inputPerMTok: 43.75, cachedInputPerMTok: 4.375, outputPerMTok: 350.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
