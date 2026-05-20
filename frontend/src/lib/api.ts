@@ -658,6 +658,18 @@ export const api = {
         github_ids: githubIds,
         allow_transfer: allowTransfer,
       }),
+    getLinearAgentStatus: () =>
+      get<import('./types').SingleResponse<import('./types').LinearAgentStatus>>('/api/v1/integrations/linear/agent'),
+    updateLinearAgentSettings: (body: { enabled?: boolean; default_repo_id?: string | null }) =>
+      request('/api/v1/integrations/linear/agent', {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    listLinearAgentMappings: () =>
+      get<import('./types').ListResponse<import('./types').LinearTeamRepoMapping>>('/api/v1/integrations/linear/agent/mappings'),
+    upsertLinearAgentMapping: (body: { linear_team_id: string; linear_project_id?: string; repository_id: string; default_branch?: string; priority?: number }) =>
+      post<import('./types').SingleResponse<import('./types').LinearTeamRepoMapping>>('/api/v1/integrations/linear/agent/mappings', body),
+    deleteLinearAgentMapping: (id: string) => del(`/api/v1/integrations/linear/agent/mappings/${id}`),
   },
   codexAuth: {
     // `scope` defaults to "org" on the server; pass "personal" to write the
