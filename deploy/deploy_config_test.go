@@ -616,7 +616,7 @@ func TestDNSProbeVectorAlertFieldNamesAlign(t *testing.T) {
 	vectorText := string(vector)
 	require.Contains(t, vectorText, "_msg_field: \"message\"", "vector.yaml must promote .message to _msg or the alert's `_msg:` match will never fire")
 	require.Contains(t, vectorText, ". = merge(., parsed)", "vector.yaml must merge parsed zerolog JSON to root — without this, .probe and .target stay nested under .message and the alert query can't see them")
-	require.Contains(t, vectorText, ".hostname, err = get_hostname()", "vector.yaml must enrich each log line with .hostname — DNSProbeFailures groups by hostname to distinguish host-local from fleet-wide failures")
+	require.Contains(t, vectorText, `.hostname = get_hostname() ?? "unknown"`, "vector.yaml must enrich each log line with .hostname without emitting unused-variable VRL warnings")
 
 	// Explicitly assert the keys the alert depends on are NOT in vector's
 	// protected denylist. Adding any of them would cause vector to
@@ -690,18 +690,23 @@ func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
 	require.Contains(t, string(dashboardProvider), "disableDeletion: false", "Grafana dashboard provisioning should remove dashboards deleted from the repo")
 }
 
-func TestDeployRejectsUnhealthyVectorStates(t *testing.T) {
+func TestDeployWaitsForVectorHealthcheck(t *testing.T) {
 	t.Parallel()
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy script")
 	deployText := string(deployScript)
 
-	vectorCheck := deployText[strings.Index(deployText, "# Verify Vector is running"):]
-	require.Contains(t, vectorCheck, `"healthy"`, "deploy should require Vector's healthcheck to report healthy")
-	require.Contains(t, vectorCheck, `"running"`, "deploy may accept running only when no healthcheck exists")
-	require.Contains(t, vectorCheck, `Vector is not healthy`, "deploy should fail closed for Restarting, unhealthy, missing, and other non-healthy states")
-	require.Contains(t, vectorCheck, `logs --tail=50 vector`, "deploy failure should print enough Vector logs to diagnose crash loops")
+	require.Contains(t, deployText, "wait_vector_healthy()", "deploy script should have a dedicated Vector health wait helper")
+	require.Contains(t, deployText, `VECTOR_HEALTH_TIMEOUT:-90`, "Vector health wait should give Docker healthchecks time to leave the initial starting state")
+	require.Contains(t, deployText, `health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid"`, "Vector health wait should read Docker's health status on each poll")
+	require.Contains(t, deployText, `if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then`, "Vector health wait should still fail immediately when the collector has exited")
+	require.Contains(t, deployText, `wait_vector_healthy "$VECTOR_ID"`, "deploy script should call the Vector health wait before declaring deploy success")
+
+	require.Contains(t, deployText, `"healthy"`, "deploy should require Vector's healthcheck to report healthy")
+	require.Contains(t, deployText, `"none"`, "deploy may accept running only when no healthcheck exists")
+	require.Contains(t, deployText, `Vector is not healthy`, "deploy should fail closed for Restarting, unhealthy, missing, and other non-healthy states")
+	require.Contains(t, deployText, `logs --tail=50 vector`, "deploy failure should print enough Vector logs to diagnose crash loops")
 }
 
 // Sandbox DNS resolution depends on three values agreeing across three
