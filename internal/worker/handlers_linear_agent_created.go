@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
@@ -43,9 +44,11 @@ func handleLinearAgentCreated(
 	if err != nil {
 		return fmt.Errorf("invalid org_id: %w", err)
 	}
-	if _, err := uuid.Parse(payload.AgentSessionRowID); err != nil {
+	agentSessionRowID, err := uuid.Parse(payload.AgentSessionRowID)
+	if err != nil {
 		return fmt.Errorf("invalid agent_session_row_id: %w", err)
 	}
+	registerLinearAgentCreatedDeadLetter(ctx, deps, agentSessions, activities, orgID, agentSessionRowID, payload.LinearAgentSessionID, logger)
 
 	// 1. Idempotency guard. The dispatcher's UNIQUE on
 	// linear_agent_sessions guarantees we have at most one row per
@@ -196,6 +199,72 @@ func handleLinearAgentCreated(
 		Str("repo_resolution", repoResult.Source).
 		Msg("linear_agent_event: session created")
 	return nil
+}
+
+func registerLinearAgentCreatedDeadLetter(
+	ctx context.Context,
+	deps LinearAgentEventHandlerDeps,
+	agentSessions *db.LinearAgentSessionStore,
+	activities *db.LinearAgentActivityLogStore,
+	orgID, agentSessionRowID uuid.UUID,
+	linearAgentSessionID string,
+	logger zerolog.Logger,
+) {
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if agentSessions == nil || activities == nil || deps.ClientForOrg == nil {
+			logger.Warn().
+				Str("agent_session_id", linearAgentSessionID).
+				Msg("linear_agent_event: cannot close dead-lettered AgentSession; dependencies unavailable")
+			return
+		}
+		row, err := agentSessions.GetByID(hookCtx, orgID, agentSessionRowID)
+		if err != nil {
+			logger.Warn().Err(err).
+				Str("agent_session_id", linearAgentSessionID).
+				Msg("linear_agent_event: failed to load bridge row for dead-letter close")
+			return
+		}
+		if row.State.IsTerminal() {
+			return
+		}
+		if row.SessionID != nil {
+			return
+		}
+		client, err := deps.ClientForOrg(hookCtx, orgID)
+		if err != nil {
+			logger.Warn().Err(err).
+				Str("agent_session_id", row.LinearAgentSessionID).
+				Msg("linear_agent_event: failed to resolve Linear client for dead-letter close")
+			if stateErr := agentSessions.SetState(hookCtx, orgID, row.ID, models.LinearAgentSessionStateError); stateErr != nil {
+				logger.Warn().Err(stateErr).
+					Str("agent_session_id", row.LinearAgentSessionID).
+					Msg("linear_agent_event: failed to record dead-letter error state")
+			}
+			return
+		}
+
+		activity := linear.AgentMilestoneActivity{
+			Type:            models.LinearAgentActivityError,
+			Body:            "I hit an internal error before I could start the coding session. Please retry or check the 143 session logs.",
+			IdemKey:         "bootstrap:failed",
+			PinSessionState: "error",
+		}
+		if err := emitOnce(hookCtx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity, logger); err != nil {
+			logger.Warn().Err(err).
+				Str("agent_session_id", row.LinearAgentSessionID).
+				Msg("linear_agent_event: failed to emit dead-letter error activity")
+		}
+		if err := agentSessions.SetState(hookCtx, orgID, row.ID, models.LinearAgentSessionStateError); err != nil {
+			logger.Warn().Err(err).
+				Str("agent_session_id", row.LinearAgentSessionID).
+				Msg("linear_agent_event: failed to record dead-letter error state")
+		}
+		if deadLetterErr != nil {
+			logger.Error().Err(deadLetterErr).
+				Str("agent_session_id", row.LinearAgentSessionID).
+				Msg("linear_agent_event: created job dead-lettered before session creation")
+		}
+	})
 }
 
 func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgID, agentSessionRowID uuid.UUID, session *models.Session) error {

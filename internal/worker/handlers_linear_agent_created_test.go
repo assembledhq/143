@@ -9,12 +9,35 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type linearAgentCreatedDeadLetterClient struct {
+	linear.Client
+
+	activityCalls int
+	updateCalls   int
+	lastActivity  linear.AgentActivityInput
+	lastUpdate    linear.AgentSessionUpdateInput
+}
+
+func (c *linearAgentCreatedDeadLetterClient) AgentActivityCreate(_ context.Context, in linear.AgentActivityInput) (linear.AgentActivityResult, error) {
+	c.activityCalls++
+	c.lastActivity = in
+	return linear.AgentActivityResult{ActivityID: "act_error"}, nil
+}
+
+func (c *linearAgentCreatedDeadLetterClient) AgentSessionUpdate(_ context.Context, in linear.AgentSessionUpdateInput) error {
+	c.updateCalls++
+	c.lastUpdate = in
+	return nil
+}
 
 func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 	t.Parallel()
@@ -187,6 +210,106 @@ func TestReconcileLinearAgentCreatedNoPrimaryIssueOnlyReenqueuesRunAgent(t *test
 	require.NoError(t, err, "reconcile with no primary issue should succeed by only re-enqueueing run_agent")
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"reconcile must not touch FetchIssue, the SessionIssueLinks store, or the LinearProviderStateStore on the no-primary-issue branch")
+}
+
+func TestLinearAgentCreatedDeadLetterHookEmitsErrorAndMarksBridge(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	client := &linearAgentCreatedDeadLetterClient{}
+	clientCalls := 0
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, linear_agent_session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_1",
+			"iss_1", "VIR-102",
+			"", "",
+			nil, "pending", &now,
+			now, now,
+		))
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("UPDATE linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	registerLinearAgentCreatedDeadLetter(ctx, LinearAgentEventHandlerDeps{
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			clientCalls++
+			return client, nil
+		},
+	}, db.NewLinearAgentSessionStore(mock), db.NewLinearAgentActivityLogStore(mock), orgID, rowID, "as_1", zerolog.Nop())
+
+	jobctx.RunDeadLetterHooks(ctx, errors.New("upsert linear issue failed"))
+	require.Equal(t, 1, clientCalls, "dead-letter hook should resolve a Linear client before emitting")
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should persist the local bridge state")
+	require.Equal(t, 1, client.activityCalls, "dead-letter hook should emit exactly one Linear error activity")
+	require.Equal(t, "as_1", client.lastActivity.AgentSessionID, "error activity should target the stuck Linear AgentSession")
+	require.Equal(t, string(models.LinearAgentActivityError), client.lastActivity.Type, "dead-letter activity should render as an error")
+	require.Contains(t, client.lastActivity.Body, "internal error", "dead-letter activity should explain that the agent failed before starting")
+	require.Equal(t, 1, client.updateCalls, "dead-letter hook should pin the Linear AgentSession into an error state")
+	require.Equal(t, "error", client.lastUpdate.State, "Linear AgentSession should be explicitly pinned to error")
+}
+
+func TestLinearAgentCreatedDeadLetterHookSkipsAttachedSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	clientCalls := 0
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, linear_agent_session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, uuid.New(), "as_1",
+			"iss_1", "VIR-102",
+			"", "",
+			&sessionID, "in_progress", &now,
+			now, now,
+		))
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	registerLinearAgentCreatedDeadLetter(ctx, LinearAgentEventHandlerDeps{
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			clientCalls++
+			return &linearAgentCreatedDeadLetterClient{}, nil
+		},
+	}, db.NewLinearAgentSessionStore(mock), db.NewLinearAgentActivityLogStore(mock), orgID, rowID, "as_1", zerolog.Nop())
+
+	jobctx.RunDeadLetterHooks(ctx, errors.New("reconcile failed"))
+	require.Zero(t, clientCalls, "dead-letter hook should not close Linear when a 143 session is already attached")
+	require.NoError(t, mock.ExpectationsWereMet(), "attached bridge rows should only be inspected, not mutated")
 }
 
 // TestReconcileLinearAgentCreatedRejectsZeroValueSession pins the guardrail
