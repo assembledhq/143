@@ -24,6 +24,29 @@ const sessionExecutorColumns = `id, org_id, session_id, thread_id, job_id, job_t
 	host_node_id, owner_id, lock_token, status, image, build_sha, heartbeat_at,
 	lease_expires_at, started_at, completed_at, exit_code, last_error, created_at, updated_at`
 
+func (s *SessionExecutorStore) ClearPreHandoffReservation(ctx context.Context, orgID, sessionID, jobID uuid.UUID) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_executors se
+		SET status = 'failed',
+			completed_at = now(),
+			exit_code = 1,
+			last_error = 'executor launch or handoff did not complete; cleared stale pre-handoff reservation before retry',
+			updated_at = now()
+		FROM jobs j
+		WHERE se.org_id = $1
+		  AND se.session_id = $2
+		  AND se.job_id = $3
+		  AND se.status IN ('starting', 'running', 'draining')
+		  AND j.org_id = se.org_id
+		  AND j.id = se.job_id
+		  AND j.status = 'running'
+		  AND j.owner_kind = 'worker'`, orgID, sessionID, jobID)
+	if err != nil {
+		return 0, fmt.Errorf("clear pre-handoff session executor reservation: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *SessionExecutorStore) CreateStarting(ctx context.Context, orgID uuid.UUID, params models.CreateSessionExecutorParams) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.db.QueryRow(ctx, `
