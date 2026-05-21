@@ -28,7 +28,28 @@ func (golangciLint) Install(ctx context.Context, exec Executor, version string) 
 	// /usr/local/bin would be read-only at runtime. The Dockerfile already
 	// puts ~/.local/bin on PATH.
 	cmd := fmt.Sprintf(
-		`mkdir -p "$HOME/.local/bin" && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$HOME/.local/bin" v%s`,
+		`set -eu
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+os="$(uname -s)"
+case "$os" in
+  Linux|linux) os=linux ;;
+  Darwin|darwin) os=darwin ;;
+  *) echo "unsupported OS: $os" >&2; exit 1 ;;
+esac
+arch="$(uname -m)"
+case "$arch" in
+  x86_64|amd64) arch=amd64 ;;
+  aarch64|arm64) arch=arm64 ;;
+  *) echo "unsupported architecture: $arch" >&2; exit 1 ;;
+esac
+archive="$tmp_dir/golangci-lint.tar.gz"
+url="https://github.com/golangci/golangci-lint/releases/download/v%[1]s/golangci-lint-%[1]s-${os}-${arch}.tar.gz"
+curl -fsSL --connect-timeout 10 --max-time 120 -o "$archive" "$url"
+tar -xzf "$archive" -C "$tmp_dir"
+mkdir -p "$HOME/.local/bin"
+cp "$tmp_dir/golangci-lint-%[1]s-${os}-${arch}/golangci-lint" "$HOME/.local/bin/golangci-lint"
+chmod 0755 "$HOME/.local/bin/golangci-lint"`,
 		version,
 	)
 	var stdout, stderr bytes.Buffer

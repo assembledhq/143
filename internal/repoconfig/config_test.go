@@ -50,12 +50,13 @@ func TestParse_TrimsCommandWhitespace(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := Parse([]byte(`{
-		"dependencies": {"golangci-lint": "  1.64.8  "},
+		"dependencies": {"  golangci-lint  ": "  1.64.8  "},
 		"bootstrap": {"commands": ["  npm ci  "]},
 		"validation": {"commands": ["  npm run lint:js  "]}
 	}`))
 	require.NoError(t, err, "Parse should accept commands with leading and trailing whitespace")
 	require.Equal(t, "1.64.8", cfg.Dependencies["golangci-lint"], "Parse should trim dependency version whitespace")
+	require.NotContains(t, cfg.Dependencies, "  golangci-lint  ", "Parse should trim dependency names before dependency registry lookup")
 	require.Equal(t, []string{"npm ci"}, cfg.Bootstrap.Commands, "Parse should trim bootstrap command whitespace")
 	require.Equal(t, []string{"npm run lint:js"}, cfg.Validation.Commands, "Parse should trim validation command whitespace")
 }
@@ -100,4 +101,17 @@ func TestParse_RejectsLatestDependencyVersion(t *testing.T) {
 	}`))
 	require.Error(t, err, "Parse should reject 'latest' so installs stay deterministic and cacheable by name@version")
 	require.Contains(t, err.Error(), "dependencies.golangci-lint", "Parse should identify the offending dependency")
+}
+
+func TestParse_RejectsDuplicateDependencyAfterTrim(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]byte(`{
+		"dependencies": {
+			"golangci-lint": "1.64.8",
+			" golangci-lint ": "1.64.8"
+		}
+	}`))
+	require.Error(t, err, "Parse should reject duplicate dependency names after whitespace normalization")
+	require.Contains(t, err.Error(), "dependencies.golangci-lint", "Parse should identify the duplicate dependency")
 }

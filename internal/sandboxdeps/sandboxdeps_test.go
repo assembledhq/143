@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+var dependencyRegistryMu sync.Mutex
 
 type fakeDep struct {
 	name     string
@@ -32,16 +35,21 @@ func noopExec(_ context.Context, _ string, _ io.Writer, _ io.Writer) (int, error
 }
 
 // swapDependencyRegistry replaces the package-level registry for the duration of t and
-// restores the original on cleanup. Tests can't run in parallel because they
-// share DependencyRegistry.
+// restores the original on cleanup.
 func swapDependencyRegistry(t *testing.T) {
 	t.Helper()
+	dependencyRegistryMu.Lock()
 	orig := DependencyRegistry
 	DependencyRegistry = newRegistry()
-	t.Cleanup(func() { DependencyRegistry = orig })
+	t.Cleanup(func() {
+		DependencyRegistry = orig
+		dependencyRegistryMu.Unlock()
+	})
 }
 
 func TestApply_InstallsEveryDependency(t *testing.T) {
+	t.Parallel()
+
 	swapDependencyRegistry(t)
 	installs := 0
 	DependencyRegistry.Register(&fakeDep{name: "tool-a", installs: &installs})
@@ -56,6 +64,8 @@ func TestApply_InstallsEveryDependency(t *testing.T) {
 }
 
 func TestApply_UnknownDependencyDoesNotAbortPeers(t *testing.T) {
+	t.Parallel()
+
 	swapDependencyRegistry(t)
 	installs := 0
 	DependencyRegistry.Register(&fakeDep{name: "tool-a", installs: &installs})
@@ -70,6 +80,8 @@ func TestApply_UnknownDependencyDoesNotAbortPeers(t *testing.T) {
 }
 
 func TestApply_InstallFailureDoesNotAbortPeers(t *testing.T) {
+	t.Parallel()
+
 	swapDependencyRegistry(t)
 	peerInstalls := 0
 	DependencyRegistry.Register(&fakeDep{name: "tool-a", failOn: "1.0.0"})
@@ -91,6 +103,9 @@ func TestApply_NilDepsIsNoop(t *testing.T) {
 
 func TestDependencyRegistry_HasGolangciLint(t *testing.T) {
 	t.Parallel()
+
+	dependencyRegistryMu.Lock()
+	defer dependencyRegistryMu.Unlock()
 
 	_, ok := DependencyRegistry.deps["golangci-lint"]
 	require.True(t, ok, "DependencyRegistry should ship a recipe for golangci-lint so repos can declare it without a 143 PR")
