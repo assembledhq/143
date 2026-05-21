@@ -165,7 +165,7 @@ type PullRequestHealthResponse struct {
 	PullRequestNumber            int                               `json:"pull_request_number"`
 	Repository                   string                            `json:"repository"`
 	URL                          string                            `json:"url"`
-	Status                       string                            `json:"status"`
+	Status                       PullRequestStatus                 `json:"status"`
 	HeadSHA                      string                            `json:"head_sha"`
 	BaseSHA                      string                            `json:"base_sha"`
 	HealthVersion                int64                             `json:"health_version"`
@@ -192,7 +192,7 @@ type PullRequestHealthResponse struct {
 type PullRequestActiveRepair struct {
 	ActionType    PullRequestRepairActionType `json:"action_type"`
 	SessionID     uuid.UUID                   `json:"session_id"`
-	SessionStatus string                      `json:"session_status"`
+	SessionStatus SessionStatus               `json:"session_status"`
 	HealthVersion int64                       `json:"health_version"`
 }
 

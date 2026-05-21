@@ -814,7 +814,7 @@ func (s *OrgCredentialStore) ExistsForProviderByID(ctx context.Context, orgID uu
 }
 
 // UpdateStatus updates the status and last_verified_at timestamp.
-func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error {
+func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status models.CredentialStatus) error {
 	// Snapshot the affected ids so the post-update mirror can flip status on
 	// each one. Pre-SELECT keeps the public Exec call path identical, which
 	// keeps the mock-based unit tests green.
@@ -830,7 +830,7 @@ func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),
-		"status":   status,
+		"status":   string(status),
 	})
 	if err != nil {
 		return err
@@ -842,12 +842,12 @@ func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, 
 }
 
 // UpdateStatusByID updates the status for a specific credential by ID, scoped to org.
-func (s *OrgCredentialStore) UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status string) error {
+func (s *OrgCredentialStore) UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status models.CredentialStatus) error {
 	query := `UPDATE org_credentials SET status = @status, last_verified_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     id,
 		"org_id": orgID,
-		"status": status,
+		"status": string(status),
 	})
 	if err == nil {
 		s.reflectOrgCredentialByID(ctx, id)

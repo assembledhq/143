@@ -487,7 +487,7 @@ func newAutomationFixture() models.Automation {
 	orgID := uuid.New()
 	autoID := uuid.New()
 	interval := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	nextRun := time.Now().Add(-time.Minute)
 	return models.Automation{
 		ID:            autoID,

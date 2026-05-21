@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -37,7 +38,7 @@ func TestOrganizationMembershipStore_ListByUser(t *testing.T) {
 	require.Len(t, memberships, 2)
 	require.Equal(t, orgA, memberships[0].OrgID)
 	require.Equal(t, "Org A", memberships[0].OrgName)
-	require.Equal(t, "admin", memberships[0].Role)
+	require.Equal(t, models.RoleAdmin, memberships[0].Role)
 	require.Equal(t, orgB, memberships[1].OrgID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -84,7 +85,7 @@ func TestOrganizationMembershipStore_Get(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, userID, m.UserID)
 	require.Equal(t, orgID, m.OrgID)
-	require.Equal(t, "admin", m.Role)
+	require.Equal(t, models.RoleAdmin, m.Role)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -503,7 +504,7 @@ func TestOrganizationMembershipStore_OldestForUser(t *testing.T) {
 	m, err := store.OldestForUser(context.Background(), userID)
 	require.NoError(t, err)
 	require.Equal(t, orgID, m.OrgID)
-	require.Equal(t, "admin", m.Role)
+	require.Equal(t, models.RoleAdmin, m.Role)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

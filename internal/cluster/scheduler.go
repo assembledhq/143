@@ -570,7 +570,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		if err != nil {
 			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
-				Str("schedule_type", a.ScheduleType).
+				Str("schedule_type", string(a.ScheduleType)).
 				Msg("skipping automation: could not compute next_run_at; expected Create/Update validation to prevent this state")
 			continue
 		}

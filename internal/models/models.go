@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,7 +21,7 @@ type User struct {
 	OrgID       uuid.UUID `db:"org_id" json:"org_id"`
 	Email       string    `db:"email" json:"email"`
 	Name        string    `db:"name" json:"name"`
-	Role        string    `db:"role" json:"role"`
+	Role        Role      `db:"role" json:"role"`
 	GitHubID    *int64    `db:"github_id" json:"github_id,omitempty"`
 	GitHubLogin *string   `db:"github_login" json:"github_login,omitempty"`
 	// GitHubNoreplyEmail is the address used to attribute git commits so they
@@ -41,7 +42,7 @@ type UserWithSettings struct {
 	OrgID       uuid.UUID    `db:"org_id" json:"org_id"`
 	Email       string       `db:"email" json:"email"`
 	Name        string       `db:"name" json:"name"`
-	Role        string       `db:"role" json:"role"`
+	Role        Role         `db:"role" json:"role"`
 	GitHubID    *int64       `db:"github_id" json:"github_id,omitempty"`
 	GitHubLogin *string      `db:"github_login" json:"github_login,omitempty"`
 	AvatarURL   *string      `db:"avatar_url" json:"avatar_url,omitempty"`
@@ -143,23 +144,23 @@ const (
 )
 
 type Repository struct {
-	ID             uuid.UUID       `db:"id" json:"id"`
-	OrgID          uuid.UUID       `db:"org_id" json:"org_id"`
-	IntegrationID  uuid.UUID       `db:"integration_id" json:"integration_id"`
-	GitHubID       int64           `db:"github_id" json:"github_id"`
-	FullName       string          `db:"full_name" json:"full_name"`
-	DefaultBranch  string          `db:"default_branch" json:"default_branch"`
-	Private        bool            `db:"private" json:"private"`
-	Language       *string         `db:"language" json:"language,omitempty"`
-	Description    *string         `db:"description" json:"description,omitempty"`
-	CloneURL       string          `db:"clone_url" json:"clone_url"`
-	InstallationID int64           `db:"installation_id" json:"installation_id"`
-	Status         string          `db:"status" json:"status"`
-	LastSyncedAt   *time.Time      `db:"last_synced_at" json:"last_synced_at,omitempty"`
-	ContextQuality *float64        `db:"context_quality" json:"context_quality,omitempty"`
-	Settings       json.RawMessage `db:"settings" json:"settings"`
-	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
+	ID             uuid.UUID        `db:"id" json:"id"`
+	OrgID          uuid.UUID        `db:"org_id" json:"org_id"`
+	IntegrationID  uuid.UUID        `db:"integration_id" json:"integration_id"`
+	GitHubID       int64            `db:"github_id" json:"github_id"`
+	FullName       string           `db:"full_name" json:"full_name"`
+	DefaultBranch  string           `db:"default_branch" json:"default_branch"`
+	Private        bool             `db:"private" json:"private"`
+	Language       *string          `db:"language" json:"language,omitempty"`
+	Description    *string          `db:"description" json:"description,omitempty"`
+	CloneURL       string           `db:"clone_url" json:"clone_url"`
+	InstallationID int64            `db:"installation_id" json:"installation_id"`
+	Status         RepositoryStatus `db:"status" json:"status"`
+	LastSyncedAt   *time.Time       `db:"last_synced_at" json:"last_synced_at,omitempty"`
+	ContextQuality *float64         `db:"context_quality" json:"context_quality,omitempty"`
+	Settings       json.RawMessage  `db:"settings" json:"settings"`
+	CreatedAt      time.Time        `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time        `db:"updated_at" json:"updated_at"`
 }
 
 // RepositoryStatus is a typed string for the `repositories.status` column.
@@ -173,11 +174,20 @@ const (
 	RepositoryStatusDisconnected RepositoryStatus = "disconnected"
 )
 
+func (s RepositoryStatus) Validate() error {
+	switch s {
+	case RepositoryStatusActive, RepositoryStatusDisconnected:
+		return nil
+	default:
+		return fmt.Errorf("invalid RepositoryStatus: %q", s)
+	}
+}
+
 // IsActive reports whether the repo is currently usable for new work. Disconnected
 // repos remain readable (existing sessions still load) but must be rejected from
 // any code path that creates new sessions, runs, projects, or automations.
 func (r Repository) IsActive() bool {
-	return RepositoryStatus(r.Status) == RepositoryStatusActive
+	return r.Status == RepositoryStatusActive
 }
 
 // RepoSummary is the API model for repository summary data in the context switcher.
@@ -200,12 +210,12 @@ type Issue struct {
 	Title                 string          `db:"title" json:"title"`
 	Description           *string         `db:"description" json:"description,omitempty"`
 	RawData               json.RawMessage `db:"raw_data" json:"-"`
-	Status                string          `db:"status" json:"status"`
+	Status                IssueStatus     `db:"status" json:"status"`
 	FirstSeenAt           time.Time       `db:"first_seen_at" json:"first_seen_at"`
 	LastSeenAt            time.Time       `db:"last_seen_at" json:"last_seen_at"`
 	OccurrenceCount       int             `db:"occurrence_count" json:"occurrence_count"`
 	AffectedCustomerCount int             `db:"affected_customer_count" json:"affected_customer_count"`
-	Severity              string          `db:"severity" json:"severity"`
+	Severity              IssueSeverity   `db:"severity" json:"severity"`
 	Tags                  []string        `db:"tags" json:"tags"`
 	Fingerprint           string          `db:"fingerprint" json:"fingerprint"`
 	DeletedAt             *time.Time      `db:"deleted_at" json:"-"`
@@ -230,9 +240,9 @@ type Session struct {
 	ValidationPolicy    SessionValidationPolicy `db:"validation_policy" json:"validation_policy"`
 	LinkedIssues        []SessionIssueLink      `db:"-" json:"linked_issues,omitempty"`
 	AgentType           AgentType               `db:"agent_type" json:"agent_type"`
-	Status              string                  `db:"status" json:"status"`
-	AutonomyLevel       string                  `db:"autonomy_level" json:"autonomy_level"`
-	TokenMode           string                  `db:"token_mode" json:"token_mode"`
+	Status              SessionStatus           `db:"status" json:"status"`
+	AutonomyLevel       SessionAutonomy         `db:"autonomy_level" json:"autonomy_level"`
+	TokenMode           SessionTokenMode        `db:"token_mode" json:"token_mode"`
 	ComplexityTier      *int                    `db:"complexity_tier" json:"complexity_tier,omitempty"`
 	ConfidenceScore     *float64                `db:"confidence_score" json:"confidence_score,omitempty"`
 	ConfidenceReasoning *string                 `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
@@ -278,9 +288,9 @@ type Session struct {
 	// LastActivityAt is the timestamp of the last write to this session — used
 	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.
-	LastActivityAt time.Time `db:"last_activity_at" json:"last_activity_at"`
-	SandboxState   string    `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey    *string   `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	LastActivityAt time.Time    `db:"last_activity_at" json:"last_activity_at"`
+	SandboxState   SandboxState `db:"sandbox_state" json:"sandbox_state"`
+	SnapshotKey    *string      `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	// PendingSnapshotKey, when non-nil, is the storage key for a post-PR
 	// snapshot whose upload is still in flight. Hydration paths
 	// (continue_session / Fix tests) must wait until this is NULL before
@@ -374,9 +384,9 @@ type Session struct {
 	// the orchestrator after the identity resolver picks the right token.
 	// nil for sessions that ran before this audit was added or that never
 	// got a credential helper wired (preview sandboxes, PM bootstrap, etc.).
-	GitIdentitySource *string    `db:"git_identity_source" json:"git_identity_source,omitempty"`
-	GitIdentityUserID *uuid.UUID `db:"git_identity_user_id" json:"git_identity_user_id,omitempty"`
-	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
+	GitIdentitySource *GitIdentitySource `db:"git_identity_source" json:"git_identity_source,omitempty"`
+	GitIdentityUserID *uuid.UUID         `db:"git_identity_user_id" json:"git_identity_user_id,omitempty"`
+	CreatedAt         time.Time          `db:"created_at" json:"created_at"`
 }
 
 // SessionDetail is the API response for a single session, enriched with threads.
@@ -416,7 +426,7 @@ type SessionIssueLink struct {
 	ExternalID    *string              `db:"external_id" json:"external_id,omitempty"`
 	Description   *string              `db:"description" json:"description,omitempty"`
 	RepositoryID  *uuid.UUID           `db:"repository_id" json:"repository_id,omitempty"`
-	IssueStatus   *string              `db:"issue_status" json:"issue_status,omitempty"`
+	IssueStatus   *IssueStatus         `db:"issue_status" json:"issue_status,omitempty"`
 	// IssueWorkspaceSlug is left-joined off Linear's provider_state. The
 	// frontend uses it to render `linear.app/<slug>/issue/<KEY>` deep
 	// links instead of the universal redirect path. Nil for non-Linear
@@ -456,7 +466,7 @@ type SessionIssueSnapshotEntry struct {
 	Source       IssueSource                      `json:"source"`
 	Description  string                           `json:"description,omitempty"`
 	RepositoryID *uuid.UUID                       `json:"repository_id,omitempty"`
-	Status       string                           `json:"status,omitempty"`
+	Status       IssueStatus                      `json:"status,omitempty"`
 	StateName    string                           `json:"state_name,omitempty"`
 	StateType    string                           `json:"state_type,omitempty"`
 	Priority     string                           `json:"priority,omitempty"`
@@ -553,68 +563,113 @@ func (s SessionListItem) MarshalJSON() ([]byte, error) {
 
 // SessionResult holds the result fields to update on an agent run.
 type SessionResult struct {
-	ConfidenceScore     *float64        `json:"confidence_score,omitempty"`
-	ConfidenceReasoning *string         `json:"confidence_reasoning,omitempty"`
-	RiskFactors         []string        `json:"risk_factors,omitempty"`
-	TokenUsage          json.RawMessage `json:"token_usage,omitempty"`
-	ModelUsed           *string         `json:"model_used,omitempty"`
-	ResultSummary       *string         `json:"result_summary,omitempty"`
-	Diff                *string         `json:"diff,omitempty"`
-	Error               *string         `json:"error,omitempty"`
-	FailureCategory     *string         `json:"failure_category,omitempty"`
-	DiffBaseCommitSHA   *string         `json:"-"`
-	DiffHeadCommitSHA   *string         `json:"-"`
-	DiffWorkspaceDirty  bool            `json:"-"`
-	DiffCollectedAt     *time.Time      `json:"-"`
-	DiffSource          string          `json:"-"`
+	ConfidenceScore     *float64          `json:"confidence_score,omitempty"`
+	ConfidenceReasoning *string           `json:"confidence_reasoning,omitempty"`
+	RiskFactors         []string          `json:"risk_factors,omitempty"`
+	TokenUsage          json.RawMessage   `json:"token_usage,omitempty"`
+	ModelUsed           *string           `json:"model_used,omitempty"`
+	ResultSummary       *string           `json:"result_summary,omitempty"`
+	Diff                *string           `json:"diff,omitempty"`
+	Error               *string           `json:"error,omitempty"`
+	FailureCategory     *string           `json:"failure_category,omitempty"`
+	DiffBaseCommitSHA   *string           `json:"-"`
+	DiffHeadCommitSHA   *string           `json:"-"`
+	DiffWorkspaceDirty  bool              `json:"-"`
+	DiffCollectedAt     *time.Time        `json:"-"`
+	DiffSource          SessionDiffSource `json:"-"`
 }
 
 type SessionDiffSnapshot struct {
-	ID             uuid.UUID `db:"id" json:"id"`
-	SessionID      uuid.UUID `db:"session_id" json:"session_id"`
-	OrgID          uuid.UUID `db:"org_id" json:"org_id"`
-	TurnNumber     int       `db:"turn_number" json:"turn_number"`
-	SequenceNumber int       `db:"sequence_number" json:"sequence_number"`
-	Source         string    `db:"source" json:"source"`
-	BaseCommitSHA  string    `db:"base_commit_sha" json:"base_commit_sha"`
-	HeadCommitSHA  *string   `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
-	WorkspaceDirty bool      `db:"workspace_dirty" json:"workspace_dirty"`
-	WorkingBranch  *string   `db:"working_branch" json:"working_branch,omitempty"`
-	TargetBranch   *string   `db:"target_branch" json:"target_branch,omitempty"`
-	Diff           string    `db:"diff" json:"diff"`
-	FilesChanged   int       `db:"files_changed" json:"files_changed"`
-	LinesAdded     int       `db:"lines_added" json:"lines_added"`
-	LinesRemoved   int       `db:"lines_removed" json:"lines_removed"`
-	CapturedAt     time.Time `db:"captured_at" json:"captured_at"`
+	ID             uuid.UUID         `db:"id" json:"id"`
+	SessionID      uuid.UUID         `db:"session_id" json:"session_id"`
+	OrgID          uuid.UUID         `db:"org_id" json:"org_id"`
+	TurnNumber     int               `db:"turn_number" json:"turn_number"`
+	SequenceNumber int               `db:"sequence_number" json:"sequence_number"`
+	Source         SessionDiffSource `db:"source" json:"source"`
+	BaseCommitSHA  string            `db:"base_commit_sha" json:"base_commit_sha"`
+	HeadCommitSHA  *string           `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
+	WorkspaceDirty bool              `db:"workspace_dirty" json:"workspace_dirty"`
+	WorkingBranch  *string           `db:"working_branch" json:"working_branch,omitempty"`
+	TargetBranch   *string           `db:"target_branch" json:"target_branch,omitempty"`
+	Diff           string            `db:"diff" json:"diff"`
+	FilesChanged   int               `db:"files_changed" json:"files_changed"`
+	LinesAdded     int               `db:"lines_added" json:"lines_added"`
+	LinesRemoved   int               `db:"lines_removed" json:"lines_removed"`
+	CapturedAt     time.Time         `db:"captured_at" json:"captured_at"`
 }
 
 // PullRequest.Status values. Stored as a free-form string for historical
 // reasons (the webhook used to forward GitHub's raw state field). New code
 // should compare against these constants rather than literal strings so
 // renames stay grep-friendly.
+type PullRequestStatus string
+
 const (
-	PullRequestStatusOpen   = "open"
-	PullRequestStatusClosed = "closed"
-	PullRequestStatusMerged = "merged"
+	PullRequestStatusOpen   PullRequestStatus = "open"
+	PullRequestStatusClosed PullRequestStatus = "closed"
+	PullRequestStatusMerged PullRequestStatus = "merged"
 )
+
+func (s PullRequestStatus) Validate() error {
+	switch s {
+	case PullRequestStatusOpen, PullRequestStatusClosed, PullRequestStatusMerged:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestStatus: %q", s)
+	}
+}
+
+type PullRequestReviewStatus string
+
+const (
+	PullRequestReviewStatusPending          PullRequestReviewStatus = "pending"
+	PullRequestReviewStatusApproved         PullRequestReviewStatus = "approved"
+	PullRequestReviewStatusChangesRequested PullRequestReviewStatus = "changes_requested"
+)
+
+func (s PullRequestReviewStatus) Validate() error {
+	switch s {
+	case PullRequestReviewStatusPending, PullRequestReviewStatusApproved, PullRequestReviewStatusChangesRequested:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestReviewStatus: %q", s)
+	}
+}
+
+type PullRequestCIStatus string
+
+const (
+	PullRequestCIStatusSuccess PullRequestCIStatus = "success"
+	PullRequestCIStatusFailure PullRequestCIStatus = "failure"
+	PullRequestCIStatusPending PullRequestCIStatus = "pending"
+)
+
+func (s PullRequestCIStatus) Validate() error {
+	switch s {
+	case "", PullRequestCIStatusSuccess, PullRequestCIStatusFailure, PullRequestCIStatusPending:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestCIStatus: %q", s)
+	}
+}
 
 // PullRequest represents a GitHub PR created by an agent run.
 // NOTE: SessionID is nullable (*uuid.UUID) because PRs can be created manually
 // without an associated session. API consumers should handle null session_id.
 type PullRequest struct {
-	ID             uuid.UUID  `db:"id" json:"id"`
-	SessionID      *uuid.UUID `db:"session_id" json:"session_id,omitempty"`
-	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
-	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
-	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
-	GitHubRepo     string     `db:"github_repo" json:"github_repo"`
-	Title          string     `db:"title" json:"title"`
-	Body           *string    `db:"body" json:"body,omitempty"`
-	Status         string     `db:"status" json:"status"`
-	ReviewStatus   string     `db:"review_status" json:"review_status"`
-	AuthoredBy     string     `db:"authored_by" json:"authored_by"`
-	CIStatus       string     `db:"ci_status" json:"ci_status"`
-	HeadSHA        *string    `db:"head_sha" json:"head_sha,omitempty"`
+	ID             uuid.UUID               `db:"id" json:"id"`
+	SessionID      *uuid.UUID              `db:"session_id" json:"session_id,omitempty"`
+	OrgID          uuid.UUID               `db:"org_id" json:"org_id"`
+	GitHubPRNumber int                     `db:"github_pr_number" json:"github_pr_number"`
+	GitHubPRURL    string                  `db:"github_pr_url" json:"github_pr_url"`
+	GitHubRepo     string                  `db:"github_repo" json:"github_repo"`
+	Title          string                  `db:"title" json:"title"`
+	Body           *string                 `db:"body" json:"body,omitempty"`
+	Status         PullRequestStatus       `db:"status" json:"status"`
+	ReviewStatus   PullRequestReviewStatus `db:"review_status" json:"review_status"`
+	AuthoredBy     GitIdentitySource       `db:"authored_by" json:"authored_by"`
+	CIStatus       PullRequestCIStatus     `db:"ci_status" json:"ci_status"`
+	HeadSHA        *string                 `db:"head_sha" json:"head_sha,omitempty"`
 	// HeadRef is the branch name on GitHub the PR tracks. Captured at
 	// PR-creation time so the "Push changes" follow-up always targets the
 	// same ref even if the session's title or Linear identifier (which feed
@@ -636,10 +691,10 @@ type PullRequest struct {
 
 // PRSummary is a lightweight view of a PR for inclusion in session list responses.
 type PRSummary struct {
-	Status   string `json:"status"`
-	CIStatus string `json:"ci_status"`
-	Number   int    `json:"number"`
-	URL      string `json:"url"`
+	Status   PullRequestStatus   `json:"status"`
+	CIStatus PullRequestCIStatus `json:"ci_status"`
+	Number   int                 `json:"number"`
+	URL      string              `json:"url"`
 }
 
 // SessionListItem wraps a Session with enrichment data for list views.
@@ -666,7 +721,7 @@ type SessionLog struct {
 	OrgID      uuid.UUID       `db:"org_id" json:"org_id"`
 	ThreadID   *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
 	Timestamp  time.Time       `db:"timestamp" json:"created_at"`
-	Level      string          `db:"level" json:"level"`
+	Level      SessionLogLevel `db:"level" json:"level"`
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	TurnNumber int             `db:"turn_number" json:"turn_number"`
@@ -725,32 +780,32 @@ type SessionThread struct {
 // power overlap badges in the tab strip and the "Touched by tab" / "Overlap
 // with another tab" filters in the Changes view. Not security attribution.
 type SessionThreadFileEvent struct {
-	ID         int64      `db:"id" json:"id"`
-	OrgID      uuid.UUID  `db:"org_id" json:"org_id"`
-	SessionID  uuid.UUID  `db:"session_id" json:"session_id"`
-	ThreadID   *uuid.UUID `db:"thread_id" json:"thread_id,omitempty"`
-	Turn       int        `db:"turn" json:"turn"`
-	Path       string     `db:"path" json:"path"`
-	EventType  string     `db:"event_type" json:"event_type"`
-	BeforeHash *string    `db:"before_hash" json:"before_hash,omitempty"`
-	AfterHash  *string    `db:"after_hash" json:"after_hash,omitempty"`
-	ObservedAt time.Time  `db:"observed_at" json:"observed_at"`
+	ID         int64                      `db:"id" json:"id"`
+	OrgID      uuid.UUID                  `db:"org_id" json:"org_id"`
+	SessionID  uuid.UUID                  `db:"session_id" json:"session_id"`
+	ThreadID   *uuid.UUID                 `db:"thread_id" json:"thread_id,omitempty"`
+	Turn       int                        `db:"turn" json:"turn"`
+	Path       string                     `db:"path" json:"path"`
+	EventType  SessionThreadFileEventType `db:"event_type" json:"event_type"`
+	BeforeHash *string                    `db:"before_hash" json:"before_hash,omitempty"`
+	AfterHash  *string                    `db:"after_hash" json:"after_hash,omitempty"`
+	ObservedAt time.Time                  `db:"observed_at" json:"observed_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.
 type SessionQuestion struct {
-	ID           uuid.UUID  `db:"id" json:"id"`
-	SessionID    uuid.UUID  `db:"session_id" json:"session_id"`
-	OrgID        uuid.UUID  `db:"org_id" json:"org_id"`
-	QuestionText string     `db:"question_text" json:"question_text"`
-	Options      []string   `db:"options" json:"options,omitempty"`
-	Context      *string    `db:"context" json:"context,omitempty"`
-	BlocksPhase  *string    `db:"blocks_phase" json:"blocks_phase,omitempty"`
-	AnswerText   *string    `db:"answer_text" json:"answer_text,omitempty"`
-	AnsweredBy   *uuid.UUID `db:"answered_by" json:"answered_by,omitempty"`
-	AnsweredAt   *time.Time `db:"answered_at" json:"answered_at,omitempty"`
-	Status       string     `db:"status" json:"status"`
-	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+	ID           uuid.UUID             `db:"id" json:"id"`
+	SessionID    uuid.UUID             `db:"session_id" json:"session_id"`
+	OrgID        uuid.UUID             `db:"org_id" json:"org_id"`
+	QuestionText string                `db:"question_text" json:"question_text"`
+	Options      []string              `db:"options" json:"options,omitempty"`
+	Context      *string               `db:"context" json:"context,omitempty"`
+	BlocksPhase  *string               `db:"blocks_phase" json:"blocks_phase,omitempty"`
+	AnswerText   *string               `db:"answer_text" json:"answer_text,omitempty"`
+	AnsweredBy   *uuid.UUID            `db:"answered_by" json:"answered_by,omitempty"`
+	AnsweredAt   *time.Time            `db:"answered_at" json:"answered_at,omitempty"`
+	Status       SessionQuestionStatus `db:"status" json:"status"`
+	CreatedAt    time.Time             `db:"created_at" json:"created_at"`
 }
 
 // PriorityScore holds the computed priority score for an issue.
@@ -841,7 +896,7 @@ type Job struct {
 	JobType        string          `db:"job_type" json:"job_type"`
 	Payload        json.RawMessage `db:"payload" json:"payload"`
 	Priority       int             `db:"priority" json:"priority"`
-	Status         string          `db:"status" json:"status"`
+	Status         JobStatus       `db:"status" json:"status"`
 	Attempts       int             `db:"attempts" json:"attempts"`
 	MaxAttempts    int             `db:"max_attempts" json:"max_attempts"`
 	RunAt          time.Time       `db:"run_at" json:"run_at"`

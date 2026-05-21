@@ -517,7 +517,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 
 		r.logger.Info().
 			Str("session_id", s.ID.String()).
-			Str("status", s.Status).
+			Str("status", string(s.Status)).
 			Msg("reaper: cleaned up expired snapshot")
 	}
 

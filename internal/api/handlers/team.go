@@ -258,11 +258,11 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("member_id", memberIDStr).Msg("team: role updated but display lookup failed; returning minimal payload")
-		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: body.Role}})
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: models.Role(body.Role)}})
 		return
 	}
 
-	member.Role = body.Role
+	member.Role = models.Role(body.Role)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: member})
 }
 
@@ -407,7 +407,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Role == "" {
-		body.Role = models.RoleMember
+		body.Role = string(models.RoleMember)
 	}
 	if !models.IsValidRole(body.Role) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, builder, member, or viewer")
@@ -455,7 +455,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	inv := &models.Invitation{
 		OrgID:            orgID,
 		AcceptanceMethod: body.AcceptanceMethod,
-		Role:             body.Role,
+		Role:             models.Role(body.Role),
 		InvitedBy:        currentUser.ID,
 		Token:            token,
 		ExpiresAt:        time.Now().Add(7 * 24 * time.Hour),

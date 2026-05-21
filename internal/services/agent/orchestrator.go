@@ -397,7 +397,7 @@ type OrgStore interface {
 // IssueStore defines the issue read operations.
 type IssueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
-	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error
 }
 
 // RepositoryStore defines the repository read operations.
@@ -1848,7 +1848,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 	if run.PrimaryIssueID != nil && o.issues != nil {
-		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
+		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, models.IssueStatusInProgress); err != nil {
 			log.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update primary issue status to in_progress")
 		}
 	}
@@ -2000,7 +2000,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			}
 			return *run.ReasoningEffort
 		}(),
-		TokenMode:     run.TokenMode,
+		TokenMode:     string(run.TokenMode),
 		ContextLimits: contextLimits,
 	}
 	if run.ComplexityTier != nil {
@@ -2656,7 +2656,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// Determine whether we can restore from a snapshot or need a fresh start.
 	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
-		session.SandboxState != string(models.SandboxStateDestroyed)
+		session.SandboxState != models.SandboxStateDestroyed
 	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 
 	var capacityReservation *SandboxCapacityReservation
@@ -2689,7 +2689,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	runtimeCfg := o.resolveRuntimeConfig(ctx, session.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
-	fallbackStatus := session.Status
+	fallbackStatus := string(session.Status)
 	if fallbackStatus == "" {
 		fallbackStatus = string(models.SessionStatusIdle)
 	}
@@ -3449,7 +3449,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					}
 					return *session.ReasoningEffort
 				}(),
-				TokenMode:         session.TokenMode,
+				TokenMode:         string(session.TokenMode),
 				RevisionContext:   revisionContext,
 				IntegrationSkills: integrationSkills,
 			}
@@ -3489,7 +3489,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Continuation:    true,
 				ResumeSessionID: resumeSessionID,
 				UserMessage:     appendAgentAttachmentSection(EnsureSlashCommandsInPrompt(userMessage, commands), materializedAttachments),
-				MaxTokens:       tokenLimitForMode(session.TokenMode),
+				MaxTokens:       tokenLimitForMode(string(session.TokenMode)),
 				ReasoningEffort: func() models.ReasoningEffort {
 					if session.ReasoningEffort == nil {
 						return ""
@@ -3559,7 +3559,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				}
 				return *session.ReasoningEffort
 			}(),
-			TokenMode:       session.TokenMode,
+			TokenMode:       string(session.TokenMode),
 			RevisionContext: revisionContext,
 		}
 		input.IntegrationSkills = integrationSkills
@@ -3896,15 +3896,15 @@ func (o *Orchestrator) answerQueuedHumanInputRequest(ctx context.Context, sessio
 // another continue_session turn. Running and idle are the common paths; the
 // resumable statuses cover prompts that arrived during an initial run_agent
 // and must be picked up after that run lands in a terminal or paused state.
-func drainAcceptableStatus(status string) bool {
+func drainAcceptableStatus(status models.SessionStatus) bool {
 	switch status {
-	case string(models.SessionStatusIdle),
-		string(models.SessionStatusRunning),
-		string(models.SessionStatusAwaitingInput),
-		string(models.SessionStatusNeedsHumanGuidance):
+	case models.SessionStatusIdle,
+		models.SessionStatusRunning,
+		models.SessionStatusAwaitingInput,
+		models.SessionStatusNeedsHumanGuidance:
 		return true
 	}
-	return models.SessionStatus(status).IsResumable()
+	return status.IsResumable()
 }
 
 // continueSessionDedupeKey mirrors db.ContinueSessionDedupeKey. The agent
@@ -4381,7 +4381,7 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 			SessionID:  runID,
 			OrgID:      orgID,
 			ThreadID:   effectiveThreadID,
-			Level:      entry.Level,
+			Level:      models.SessionLogLevel(entry.Level),
 			Message:    entry.Message,
 			Metadata:   metadata,
 			TurnNumber: turnNumber,

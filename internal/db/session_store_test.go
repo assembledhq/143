@@ -1229,7 +1229,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
-				row[4] = string(models.SessionStatusRunning)
+				row[4] = models.SessionStatusRunning
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1243,7 +1243,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
-				row[4] = string(models.SessionStatusRunning)
+				row[4] = models.SessionStatusRunning
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(

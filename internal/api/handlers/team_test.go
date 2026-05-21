@@ -696,7 +696,7 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	var resp models.SingleResponse[models.User]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, memberID, resp.Data.ID)
-	require.Equal(t, "viewer", resp.Data.Role)
+	require.Equal(t, models.RoleViewer, resp.Data.Role)
 }
 
 func TestTeamHandler_CreateInvitation_AcceptsBuilderRole(t *testing.T) {
@@ -708,7 +708,7 @@ func TestTeamHandler_CreateInvitation_AcceptsBuilderRole(t *testing.T) {
 
 	h := newTeamHandler(nil, &mockTeamMembershipStore{}, nil, &mockTeamInvitationStore{
 		createFn: func(_ context.Context, inv *models.Invitation) error {
-			createdRoles = append(createdRoles, inv.Role)
+			createdRoles = append(createdRoles, string(inv.Role))
 			inv.ID = uuid.New()
 			inv.Status = "pending"
 			inv.CreatedAt = time.Now()

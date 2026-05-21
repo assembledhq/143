@@ -242,7 +242,7 @@ func (h *AuthHandler) Memberships(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": models.MembershipsResponse{
 			ActiveOrgID: middleware.OrgIDFromContext(r.Context()),
-			ActiveRole:  middleware.ActiveRoleFromContext(r.Context()),
+			ActiveRole:  models.Role(middleware.ActiveRoleFromContext(r.Context())),
 			Memberships: memberships,
 		},
 	})
@@ -1298,13 +1298,13 @@ func (h *AuthHandler) acceptInvitationAndUpsertUser(
 		return nil, "", nil, fmt.Errorf("upsert invited oauth user: %w", err)
 	}
 
-	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role)
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, string(user.Role))
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
 	}
 	// Sync the legacy users.role column with the effective membership role so
 	// the compat-window dual-read lands on the same value the new path sees.
-	user.Role = effectiveRole
+	user.Role = models.Role(effectiveRole)
 
 	sessionToken, err := h.persistSessionTx(ctx, tx, user)
 	if err != nil {
@@ -1372,14 +1372,14 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 		return nil, "", nil, fmt.Errorf("create invited user: %w", err)
 	}
 
-	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, role)
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, string(role))
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
 	}
 	// Freshly-created password user: the grant is the first membership, so
 	// effectiveRole equals the invited role. Assignment is harmless and
 	// keeps the legacy users.role column in sync with the membership row.
-	user.Role = effectiveRole
+	user.Role = models.Role(effectiveRole)
 
 	sessionToken, err := h.persistSessionTx(ctx, tx, user)
 	if err != nil {
@@ -1397,11 +1397,11 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 // It checks that the invitation is pending, not expired, and that the
 // signing-in user satisfies the invitation's acceptance method. An invitation
 // can keep an email for notifications while still requiring GitHub OAuth.
-func (h *AuthHandler) validateInvitation(ctx context.Context, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
+func (h *AuthHandler) validateInvitation(ctx context.Context, token, email, githubLogin string) (models.Invitation, uuid.UUID, models.Role, *invitationError) {
 	return h.validateInvitationWithStore(ctx, h.invitationStore, token, email, githubLogin)
 }
 
-func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitationStore invitationLookupStore, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
+func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitationStore invitationLookupStore, token, email, githubLogin string) (models.Invitation, uuid.UUID, models.Role, *invitationError) {
 	if invitationStore == nil {
 		return models.Invitation{}, uuid.Nil, "", &invitationError{http.StatusInternalServerError, "INVITE_LOOKUP_FAILED", "failed to look up invitation"}
 	}

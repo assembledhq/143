@@ -145,7 +145,7 @@ func TestAutopilotQueueDisplayStatePrecedence(t *testing.T) {
 			row: autopilotQueueDBRow{
 				ID:            uuid.NewString(),
 				SessionStatus: sql.NullString{String: "running", Valid: true},
-				PRStatus:      sql.NullString{String: models.PullRequestStatusOpen, Valid: true},
+				PRStatus:      sql.NullString{String: string(models.PullRequestStatusOpen), Valid: true},
 			},
 			action: models.AutopilotQueueActionViewRun,
 			state:  models.AutopilotRunStateRunning,
@@ -155,7 +155,7 @@ func TestAutopilotQueueDisplayStatePrecedence(t *testing.T) {
 			row: autopilotQueueDBRow{
 				ID:            uuid.NewString(),
 				SessionStatus: sql.NullString{String: "needs_human_guidance", Valid: true},
-				PRStatus:      sql.NullString{String: models.PullRequestStatusOpen, Valid: true},
+				PRStatus:      sql.NullString{String: string(models.PullRequestStatusOpen), Valid: true},
 			},
 			action: models.AutopilotQueueActionReview,
 			state:  models.AutopilotRunStateNeedsReview,
@@ -165,7 +165,7 @@ func TestAutopilotQueueDisplayStatePrecedence(t *testing.T) {
 			row: autopilotQueueDBRow{
 				ID:            uuid.NewString(),
 				SessionStatus: sql.NullString{String: "completed", Valid: true},
-				PRStatus:      sql.NullString{String: models.PullRequestStatusOpen, Valid: true},
+				PRStatus:      sql.NullString{String: string(models.PullRequestStatusOpen), Valid: true},
 			},
 			action: models.AutopilotQueueActionOpenPR,
 			state:  models.AutopilotRunStatePROpen,

@@ -118,7 +118,7 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 	if invErr != nil {
 		return invitationOrNil(inv), "", invErr, nil
 	}
-	effectiveRole, acceptErr, err := h.acceptValidatedInvitation(ctx, &inv, userID, role, acceptOptions{updateLastOrgID: true})
+	effectiveRole, acceptErr, err := h.acceptValidatedInvitation(ctx, &inv, userID, string(role), acceptOptions{updateLastOrgID: true})
 	if err != nil {
 		return &inv, "", nil, err
 	}

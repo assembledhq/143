@@ -66,9 +66,9 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			PrimaryIssueID: &primaryIssueID,
 			OrgID:          orgID,
 			AgentType:      agentType,
-			Status:         "pending",
-			AutonomyLevel:  string(models.DefaultSessionAutonomy),
-			TokenMode:      tokenModeFromComplexity(task.Complexity),
+			Status:         models.SessionStatusPending,
+			AutonomyLevel:  models.DefaultSessionAutonomy,
+			TokenMode:      models.SessionTokenMode(tokenModeFromComplexity(task.Complexity)),
 			PMPlanID:       &plan.ID,
 			Title:          &task.Title,
 			PMApproach:     &task.Approach,
@@ -82,7 +82,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 		}
 
 		for _, issueID := range task.IssueIDs {
-			if err := s.issues.UpdateStatus(ctx, orgID, issueID, "triaged"); err != nil {
+			if err := s.issues.UpdateStatus(ctx, orgID, issueID, models.IssueStatusTriaged); err != nil {
 				s.logger.Warn().Err(err).Str("issue_id", issueID.String()).Msg("failed to mark issue as triaged")
 			}
 		}

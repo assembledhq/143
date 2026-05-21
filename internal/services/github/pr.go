@@ -645,8 +645,8 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		Title:          title,
 		Body:           &body,
 		Status:         models.PullRequestStatusOpen,
-		ReviewStatus:   "pending",
-		AuthoredBy:     authoredBy,
+		ReviewStatus:   models.PullRequestReviewStatusPending,
+		AuthoredBy:     models.GitIdentitySource(authoredBy),
 		HeadSHA:        &headSHA,
 		HeadRef:        &headRef,
 	}
@@ -1743,12 +1743,12 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		return nil
 	}
 
-	var reviewStatus string
+	var reviewStatus models.PullRequestReviewStatus
 	switch event.Review.State {
 	case "approved":
-		reviewStatus = "approved"
+		reviewStatus = models.PullRequestReviewStatusApproved
 	case "changes_requested":
-		reviewStatus = "changes_requested"
+		reviewStatus = models.PullRequestReviewStatusChangesRequested
 	default:
 		return nil
 	}
@@ -1760,7 +1760,7 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 	// If the PR was approved, reinforce memories that were active for this repo.
 	// This closes the feedback loop: memories that helped produce approved code
 	// get stronger, while unused memories naturally decay.
-	if reviewStatus == "approved" {
+	if reviewStatus == models.PullRequestReviewStatusApproved {
 		s.enqueueReinforceMemories(ctx, pr.OrgID, pr.GitHubRepo)
 	}
 
@@ -2887,7 +2887,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 	if issue != nil {
 		userData.IssueTitle = issue.Title
 		userData.IssueSource = string(issue.Source)
-		userData.IssueSeverity = issue.Severity
+		userData.IssueSeverity = string(issue.Severity)
 	}
 
 	// Include the diff — truncated to keep the prompt manageable.
@@ -3026,7 +3026,7 @@ func (s *PRService) formatPRBody(_ context.Context, run *models.Session, issue *
 	if issue != nil {
 		fmt.Fprintf(&b, "**Issue**: %s — %s", issue.Source, issue.Title)
 		if issue.Severity != "" {
-			fmt.Fprintf(&b, " (%s)", issue.Severity)
+			fmt.Fprintf(&b, " (%s)", string(issue.Severity))
 		}
 		b.WriteString("\n\n")
 	}
@@ -3052,7 +3052,7 @@ func buildLabels(issue *models.Issue) []string {
 		return labels
 	}
 	if issue.Severity != "" {
-		labels = append(labels, "severity:"+issue.Severity)
+		labels = append(labels, "severity:"+string(issue.Severity))
 	}
 	if issue.Source != "" {
 		labels = append(labels, "source:"+string(issue.Source))
@@ -3089,11 +3089,11 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 			continue // Not a 143-managed PR.
 		}
 
-		ciStatus := "failure"
+		ciStatus := models.PullRequestCIStatusFailure
 		if event.CheckSuite.Conclusion != nil {
 			switch *event.CheckSuite.Conclusion {
 			case "success", "neutral", "skipped":
-				ciStatus = "success"
+				ciStatus = models.PullRequestCIStatusSuccess
 			}
 		}
 

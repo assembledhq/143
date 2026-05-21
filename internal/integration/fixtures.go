@@ -77,7 +77,7 @@ type sessionOpts struct {
 func seedSession(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, opts sessionOpts) models.Session {
 	t.Helper()
 	if opts.Status == "" {
-		opts.Status = string(models.SessionStatusIdle)
+		opts.Status = models.SessionStatusIdle
 	}
 	if opts.Origin == "" {
 		opts.Origin = models.SessionOriginManual
@@ -97,7 +97,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, opts session
 		OrgID:            orgID,
 		AgentType:        opts.AgentType,
 		Status:           opts.Status,
-		AutonomyLevel:    string(models.DefaultSessionAutonomy),
+		AutonomyLevel:    models.DefaultSessionAutonomy,
 		TokenMode:        "low",
 		Origin:           opts.Origin,
 		InteractionMode:  opts.Interaction,

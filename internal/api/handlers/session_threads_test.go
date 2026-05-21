@@ -116,7 +116,7 @@ func (m *mockSessionStoreForThread) ClaimIdle(ctx context.Context, orgID, sessio
 	if m.claimIdleFn != nil {
 		return m.claimIdleFn(ctx, orgID, sessionID)
 	}
-	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+	return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 }
 
 func (m *mockSessionStoreForThread) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {

@@ -115,7 +115,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 		}
 		failedSession := session
 		failureCategory := agent.FailureCategorySandboxCapacity
-		failedSession.Status = string(models.SessionStatusFailed)
+		failedSession.Status = models.SessionStatusFailed
 		failedSession.Error = &errMsg
 		failedSession.FailureExplanation = &explanation
 		failedSession.FailureCategory = &failureCategory
@@ -652,7 +652,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("fetch automation run: %w", err)
 		}
 		if run.Status != models.AutomationRunStatusPending {
-			log.Info().Str("status", run.Status).Msg("skipping automation_run: row no longer pending")
+			log.Info().Str("status", string(run.Status)).Msg("skipping automation_run: row no longer pending")
 			return nil
 		}
 
@@ -781,7 +781,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			OrgID:             orgID,
 			AgentType:         agentType,
 			Status:            "pending",
-			AutonomyLevel:     string(models.DefaultSessionAutonomy),
+			AutonomyLevel:     models.DefaultSessionAutonomy,
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
 			ReasoningEffort:   automation.ReasoningEffort,
@@ -3124,7 +3124,7 @@ func (w *bootstrapLogWriter) log(ctx context.Context, level, message string) {
 	entry := &models.SessionLog{
 		SessionID:  w.sessionID,
 		OrgID:      w.orgID,
-		Level:      level,
+		Level:      models.SessionLogLevel(level),
 		Message:    message,
 		TurnNumber: 0,
 	}
@@ -3167,9 +3167,9 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 		session := &models.Session{
 			OrgID:         orgID,
 			AgentType:     models.AgentTypeClaudeCode,
-			Status:        "running",
-			AutonomyLevel: string(models.SessionAutonomyFull),
-			TokenMode:     "low",
+			Status:        models.SessionStatusRunning,
+			AutonomyLevel: models.SessionAutonomyFull,
+			TokenMode:     models.SessionTokenModeLow,
 			Title:         &title,
 			RepositoryID:  &repoID,
 		}

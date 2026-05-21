@@ -117,7 +117,7 @@ func TestSummarizeIssue(t *testing.T) {
 	require.Equal(t, string(issue.Source), summary.Source, "summary should include source")
 	require.Equal(t, issue.Title, summary.Title, "summary should include title")
 	require.Len(t, []rune(summary.Description), 500, "summary description should be truncated to 500 runes")
-	require.Equal(t, issue.Severity, summary.Severity, "summary should include severity")
+	require.Equal(t, string(issue.Severity), summary.Severity, "summary should include severity")
 	require.Equal(t, issue.OccurrenceCount, summary.OccurrenceCount, "summary should include occurrence count")
 	require.Equal(t, issue.AffectedCustomerCount, summary.AffectedCustomerCount, "summary should include affected customer count")
 	require.Equal(t, issue.FirstSeenAt.Format(time.RFC3339), summary.FirstSeenAt, "summary should format first seen timestamp")

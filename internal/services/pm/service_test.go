@@ -26,7 +26,7 @@ func (m *mockIssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters
 	return nil, nil
 }
 
-func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error {
 	m.updated = append(m.updated, issueID)
 	return nil
 }
@@ -248,7 +248,7 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 
 	// Verify an error-level session log was written.
 	require.Len(t, logStore.logs, 1, "should write one session log entry")
-	require.Equal(t, "error", logStore.logs[0].Level, "log should be error level")
+	require.Equal(t, models.SessionLogLevelError, logStore.logs[0].Level, "log should be error level")
 	require.Contains(t, logStore.logs[0].Message, "gather context", "log message should describe failure")
 }
 

@@ -1065,8 +1065,8 @@ func (e *AgentEnv) resolveFromLegacy(ctx context.Context, orgID uuid.UUID, userI
 // by the resolver. Mirrors the unified store's
 // `Status == CodingCredentialStatusActive` filter so the two paths agree
 // during the migration window.
-func legacyStatusActive(status string) bool {
-	return status == models.CodingCredentialStatusActive
+func legacyStatusActive(status models.CredentialStatus) bool {
+	return status == models.CredentialStatusActive
 }
 
 // resolveOrgProviderConfig returns (config, picked-id, found) for an org-

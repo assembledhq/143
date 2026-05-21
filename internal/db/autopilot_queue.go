@@ -416,7 +416,7 @@ func (r autopilotQueueDBRow) toModel() models.AutopilotQueueRow {
 		Rank:        int(r.Rank),
 		Source:      models.AutopilotIssueSource{Type: models.IssueSource(r.SourceType), Key: r.SourceKey},
 		Title:       r.Title,
-		IssueStatus: r.IssueStatus,
+		IssueStatus: models.IssueStatus(r.IssueStatus),
 		CustomerImpact: models.AutopilotCustomerImpact{
 			Label: r.CustomerImpactLabel,
 			Count: r.CustomerImpactCount,
@@ -441,9 +441,9 @@ func (r autopilotQueueDBRow) toModel() models.AutopilotQueueRow {
 			Title:     title,
 			UpdatedAt: r.SessionUpdatedAt.Time,
 		}
-		status := ""
+		status := models.SessionStatus("")
 		if r.SessionStatus.Valid {
-			status = r.SessionStatus.String
+			status = models.SessionStatus(r.SessionStatus.String)
 		}
 		var startedAt *time.Time
 		if r.SessionStartedAt.Valid {
@@ -465,7 +465,7 @@ func (r autopilotQueueDBRow) toModel() models.AutopilotQueueRow {
 			ID:       uuid.MustParse(r.PRID.String),
 			Number:   int(r.PRNumber.Int64),
 			URL:      r.PRURL.String,
-			Status:   r.PRStatus.String,
+			Status:   models.PullRequestStatus(r.PRStatus.String),
 			MergedAt: mergedAt,
 		}
 	}
@@ -502,7 +502,7 @@ func deriveAutopilotRunStateAction(row autopilotQueueDBRow) (models.AutopilotRun
 		}
 	}
 	if row.PRStatus.Valid {
-		switch row.PRStatus.String {
+		switch models.PullRequestStatus(row.PRStatus.String) {
 		case models.PullRequestStatusOpen:
 			return models.AutopilotRunStatePROpen, models.AutopilotQueueActionOpenPR, nil
 		case models.PullRequestStatusMerged:

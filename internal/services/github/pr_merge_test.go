@@ -378,7 +378,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	prMock.ExpectCommit()
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
-		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "ci_status": "success"}).
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
@@ -402,10 +402,10 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
 	prMock.ExpectExec("UPDATE pull_requests SET status = @status, merged_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
-		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "status": "merged"}).
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "status": models.PullRequestStatusMerged}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
 	setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
 	setPRHealthSessionRowValue(sessionRow, "agent_type", "codex")
 	setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")
@@ -418,7 +418,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 			pgxmock.NewRows(prHealthSessionColumns).AddRow(sessionRow...),
 		)
 	issueMock.ExpectExec("UPDATE issues SET status").
-		WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": "fixed"}).
+		WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": models.IssueStatusFixed}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	sessionMock.ExpectExec("UPDATE sessions\n\t\tSET snapshot_key = NULL, sandbox_state = 'destroyed'").
 		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).

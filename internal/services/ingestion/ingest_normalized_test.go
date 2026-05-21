@@ -75,8 +75,8 @@ func TestIngestNormalized(t *testing.T) {
 				require.Equal(t, models.IssueSourceSentry, issue.Source, "source should be sentry")
 				require.Equal(t, "EXT-123", issue.ExternalID, "external ID should match input")
 				require.Equal(t, "Test Issue", issue.Title, "title should match input")
-				require.Equal(t, "high", issue.Severity, "error severity should normalize to high")
-				require.Equal(t, "open", issue.Status, "status should default to open")
+				require.Equal(t, models.IssueSeverityHigh, issue.Severity, "error severity should normalize to high")
+				require.Equal(t, models.IssueStatusOpen, issue.Status, "status should default to open")
 				require.Equal(t, 5, issue.OccurrenceCount, "occurrence count should match input")
 			},
 		},
@@ -134,7 +134,7 @@ func TestIngestNormalized(t *testing.T) {
 				t.Helper()
 				require.NotNil(t, issue, "ingested issue should not be nil even when enqueue fails")
 				require.Equal(t, issueID, issue.ID, "issue ID should match upserted value")
-				require.Equal(t, "medium", issue.Severity, "warning severity should normalize to medium")
+				require.Equal(t, models.IssueSeverityMedium, issue.Severity, "warning severity should normalize to medium")
 			},
 		},
 	}

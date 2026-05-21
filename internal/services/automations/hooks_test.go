@@ -22,13 +22,13 @@ type fakeAutomationRunStore struct {
 type fakeTransitionCall struct {
 	orgID         uuid.UUID
 	runID         uuid.UUID
-	fromStatus    string
-	toStatus      string
+	fromStatus    models.AutomationRunStatus
+	toStatus      models.AutomationRunStatus
 	completedAt   *time.Time
 	resultSummary *string
 }
 
-func (f *fakeAutomationRunStore) TransitionStatusIf(_ context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
+func (f *fakeAutomationRunStore) TransitionStatusIf(_ context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
 	f.calls = append(f.calls, fakeTransitionCall{
 		orgID:         orgID,
 		runID:         runID,

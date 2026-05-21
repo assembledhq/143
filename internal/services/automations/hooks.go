@@ -19,7 +19,7 @@ import (
 // an interface here (rather than taking *db.AutomationRunStore) so hook tests
 // don't have to stand up a Postgres pool.
 type automationRunStore interface {
-	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error)
+	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error)
 }
 
 // AutomationHooks implements agent.AutomationRunUpdater by mapping a session's
@@ -48,7 +48,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 		return nil
 	}
 
-	var runStatus string
+	var runStatus models.AutomationRunStatus
 	switch models.SessionStatus(status) {
 	case models.SessionStatusCompleted:
 		runStatus = models.AutomationRunStatusCompleted
@@ -76,7 +76,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 		// worker handler). No-op — the earlier writer's status stands.
 		h.logger.Debug().
 			Str("automation_run_id", run.AutomationRunID.String()).
-			Str("attempted_status", runStatus).
+			Str("attempted_status", string(runStatus)).
 			Msg("automation run already non-running; hook update skipped")
 	}
 	return nil

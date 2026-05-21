@@ -54,7 +54,7 @@ var ErrAllCredentialsShed = errors.New("all eligible coding credentials are curr
 // caller which.
 type ErrCodingCredentialLabelTaken struct {
 	Label          string
-	ExistingStatus string
+	ExistingStatus models.CodingCredentialRowStatus
 }
 
 func (e *ErrCodingCredentialLabelTaken) Error() string {
@@ -78,7 +78,7 @@ func (e *ErrCodingCredentialLabelTaken) Error() string {
 // just-allocated priority.
 type CreateOpts struct {
 	CreatedBy *uuid.UUID
-	Status    string // defaults to "active"
+	Status    models.CodingCredentialRowStatus // defaults to "active"
 }
 
 // CodingCredentialStore is the unified credential store.
@@ -774,7 +774,7 @@ func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, 
 			"provider":   string(cfg.Provider()),
 			"label":      label,
 			"config":     encrypted,
-			"status":     status,
+			"status":     string(status),
 			"created_by": opts.CreatedBy,
 			"priority":   nextPriority,
 		}
@@ -811,7 +811,7 @@ func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, 
 			return fmt.Errorf("insert credential: %w", scanErr)
 		}
 		// Active or invalid row blocked the insert; report typed error.
-		var existingStatus string
+		var existingStatus models.CodingCredentialRowStatus
 		lookupArgs := pgx.NamedArgs{
 			"org_id":   scope.OrgID,
 			"user_id":  scope.UserID,
@@ -966,7 +966,7 @@ func (s *CodingCredentialStore) Rename(ctx context.Context, scope models.Scope, 
 
 // UpdateStatus moves a credential between active / disabled / pending_auth /
 // invalid. Disable() is a thin wrapper that calls UpdateStatus(disabled).
-func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error {
+func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error {
 	switch status {
 	case models.CodingCredentialStatusActive,
 		models.CodingCredentialStatusDisabled,
@@ -978,7 +978,7 @@ func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.S
 	var provider models.ProviderName
 	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
 		provider = rowProvider
-		args := pgx.NamedArgs{"id": id, "status": status, "org_id": scope.OrgID}
+		args := pgx.NamedArgs{"id": id, "status": string(status), "org_id": scope.OrgID}
 		var query string
 		if scope.IsPersonal() {
 			args["user_id"] = *scope.UserID

@@ -371,7 +371,7 @@ func TestDrainQueuedMessages_LinearPromptedRunningSessionContract(t *testing.T) 
 	}
 
 	messages := &drainStubMessages{messages: []models.SessionMessage{linearAppended}}
-	sessions := &drainStubSessions{session: models.Session{Status: string(models.SessionStatusIdle)}}
+	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle}}
 	jobs := &drainStubJobs{}
 	o := newDrainOrchestrator(messages, sessions, jobs, nil)
 

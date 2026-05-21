@@ -146,7 +146,7 @@ func TestEnqueueRunAgentForLinearAgentUsesAgentQueue(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(orgID, "agent", "run_agent", pgxmock.AnyArg(), 5, &dedupe).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -170,7 +170,7 @@ func TestEnqueueRunAgentForLinearAgentSkipsTerminalSessions(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCompleted, 1, nil, nil)...))
 
 	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}, orgID, sessionID)
 	require.NoError(t, err, "terminal Linear agent reconciliation should be a no-op instead of enqueueing duplicate completed work")

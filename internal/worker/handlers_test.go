@@ -611,7 +611,7 @@ func TestCancelSessionHandler_ConsumesDeliveredCancelWithDetachedContext(t *test
 	require.NoError(t, mock.ExpectationsWereMet(), "delivered cancel request should be consumed")
 }
 
-func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
+func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status models.SessionStatus, currentTurn int, agentSessionID, snapshotKey *string) []any {
 	now := time.Now()
 	var primaryIssueID any
 	if issueID != uuid.Nil {
@@ -640,7 +640,7 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 // callers set the linear_prepare_state column. Used by the prepare-state
 // gate test below. The four linear_* columns are emitted in trailing
 // position so the row matches the post-migration column shape.
-func workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID uuid.UUID, status string, prepareState string) []any {
+func workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID uuid.UUID, status models.SessionStatus, prepareState string) []any {
 	now := time.Now()
 	var primaryIssueID any
 	if issueID != uuid.Nil {
@@ -695,7 +695,7 @@ func TestRunAgentHandler_LinearPrepareStateGatesTurnOne(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusPending), "pending")...,
+				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, models.SessionStatusPending, "pending")...,
 			),
 		)
 
@@ -731,7 +731,7 @@ func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusPending), "failed")...,
+				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, models.SessionStatusPending, "failed")...,
 			),
 		)
 	// The handler best-effort updates the session row with a recoverable
@@ -741,7 +741,7 @@ func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
-			workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusFailed), "failed")...,
+			workerSessionRowWithLinearPrepareState(runID, issueID, orgID, models.SessionStatusFailed, "failed")...,
 		))
 
 	orch := &orchestratorServiceStub{}
@@ -1110,7 +1110,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		now := time.Now()
 		mock.ExpectQuery("SELECT .* FROM sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCompleted, 1, nil, nil)...))
 
 		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
 		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
@@ -1140,7 +1140,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		mock.ExpectQuery("SELECT .* FROM sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCompleted, 1, nil, nil)...))
 		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{
@@ -1178,7 +1178,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		sessionID := uuid.New()
 		mock.ExpectQuery("SELECT .* FROM sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCompleted, 1, nil, nil)...))
 		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("db unavailable"))
@@ -2339,7 +2339,7 @@ func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
 	externalID := "ACS-123"
 	title := "Fix Linear title"
 	source := models.IssueSourceLinear
-	status := "open"
+	status := models.IssueStatusOpen
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4414,7 +4414,7 @@ func TestRunAgentHandler_PendingSessionUsesFreshRunPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 1, &agentSessionID, &snapshotKey)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 1, &agentSessionID, &snapshotKey)...,
 			),
 		)
 
@@ -4444,7 +4444,7 @@ func TestRunAgentHandler_PassesPrimaryThreadIDFromPayload(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 
@@ -4479,7 +4479,7 @@ func TestRunAgentHandler_DispatchesSessionExecutorWhenDispatcherConfigured(t *te
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 
@@ -4519,7 +4519,7 @@ func TestRunAgentHandler_RunningSessionUsesRecoveryPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusRunning), 1, &agentSessionID, &snapshotKey)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 1, &agentSessionID, &snapshotKey)...,
 			),
 		)
 
@@ -4548,7 +4548,7 @@ func TestRunAgentHandler_PropagatesRunErrors(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 
@@ -4587,7 +4587,7 @@ func TestRunAgentHandler_StaleSandboxIDClearedRetries(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 	// No UPDATE expectations: the orchestrator clears container_id internally
@@ -4624,7 +4624,7 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 
@@ -4665,7 +4665,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	projectTaskID := uuid.New()
 	automationRunID := uuid.New()
 
-	sessionRow := workerSessionRow(runID, issueID, orgID, string(models.SessionStatusRunning), 0, nil, nil)
+	sessionRow := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
 	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -4707,7 +4707,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
-			workerSessionRow(runID, issueID, orgID, string(models.SessionStatusFailed), 0, nil, nil)...,
+			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
 		WithArgs(
@@ -4775,7 +4775,7 @@ func TestRunAgentHandler_RecoveryAttemptsExhaustedDeadLetters(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusRunning), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)...,
 			),
 		)
 
@@ -4815,7 +4815,7 @@ func TestRunAgentHandler_SandboxRaceLoserDeadLetters(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 	// Deliberately register no UPDATE expectations: the loser must not write
@@ -4854,7 +4854,7 @@ func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
 			),
 		)
 
@@ -4886,7 +4886,7 @@ func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(
 			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
-			workerSessionRow(runID, issueID, orgID, string(models.SessionStatusFailed), 0, nil, nil)...,
+			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
 		WithArgs(
@@ -4921,7 +4921,7 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 
@@ -4961,7 +4961,7 @@ func TestContinueSessionHandler_DispatchesSessionExecutorWhenDispatcherConfigure
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 
@@ -5004,7 +5004,7 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 
@@ -5038,7 +5038,7 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 
@@ -5075,7 +5075,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	issueID := uuid.New()
 	projectTaskID := uuid.New()
 	automationRunID := uuid.New()
-	sessionRow := workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusRunning), 2, nil, nil)
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
 	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
 	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
 
@@ -5119,7 +5119,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 		WithArgs(workerAnyArgs(14)...).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusFailed), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
 			),
 		)
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
@@ -5157,7 +5157,7 @@ func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 
@@ -5197,7 +5197,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 	mock.ExpectQuery("SELECT .* FROM session_threads").
@@ -5244,7 +5244,7 @@ func TestContinueSessionHandler_MarksReviewLoopFailedOnContinuationFailure(t *te
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 	mock.ExpectQuery("SELECT .* FROM session_threads").
@@ -5301,7 +5301,7 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 	mock.ExpectQuery("SELECT .* FROM session_threads").
@@ -5360,7 +5360,7 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), sessionTurnBefore, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, sessionTurnBefore, nil, nil)...,
 			),
 		)
 	mock.ExpectQuery("SELECT .* FROM session_threads").

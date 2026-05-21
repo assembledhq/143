@@ -162,7 +162,7 @@ func TestSessionStreams_PublishStatusSchedulesExpiryForTerminalSessions(t *testi
 		OrgID:          uuid.New(),
 		PrimaryIssueID: &issueID,
 		AgentType:      models.AgentType("codex"),
-		Status:         string(models.SessionStatusCompleted),
+		Status:         models.SessionStatusCompleted,
 		CompletedAt:    &now,
 	}
 
@@ -225,8 +225,8 @@ func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
 
 	require.Equal(t, "143:stream:{ses:"+sessionID.String()+"}:logs", logStreamKey(sessionID), "log stream key should be stable")
 	require.Equal(t, "143:stream:{ses:"+sessionID.String()+"}:status", statusStreamKey(sessionID), "status stream key should be stable")
-	require.True(t, isTerminalSessionStatus(string(models.SessionStatusCompleted)), "completed sessions should be terminal")
-	require.False(t, isTerminalSessionStatus(string(models.SessionStatusRunning)), "running sessions should not be terminal")
+	require.True(t, isTerminalSessionStatus(models.SessionStatusCompleted), "completed sessions should be terminal")
+	require.False(t, isTerminalSessionStatus(models.SessionStatusRunning), "running sessions should not be terminal")
 	require.Equal(t, []string{"123", "0"}, stringsSplit2("123-0", '-'), "stream ID splitter should split once")
 
 	now := time.Now()
@@ -422,7 +422,7 @@ func TestSessionStreams_DecodeStatusEntryAndInvalidStreamID(t *testing.T) {
 	t.Parallel()
 
 	issueID := uuid.New()
-	want := models.Session{ID: uuid.New(), OrgID: uuid.New(), PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	want := models.Session{ID: uuid.New(), OrgID: uuid.New(), PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 	payload, err := json.Marshal(want)
 	require.NoError(t, err, "test payload should marshal")
 

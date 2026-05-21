@@ -440,7 +440,7 @@ func TestExecutePlan_DefaultAgentType(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sessions.created, 1)
 	require.Equal(t, models.DefaultDefaultAgentType, sessions.created[0].AgentType)
-	require.Equal(t, "high", sessions.created[0].TokenMode, "moderate complexity should use high token mode")
+	require.Equal(t, models.SessionTokenModeHigh, sessions.created[0].TokenMode, "moderate complexity should use high token mode")
 }
 
 func TestExecutePlan_DefaultMaxConcurrentRuns(t *testing.T) {
@@ -1175,7 +1175,7 @@ func TestDispatchProjectTasks_TaskWithApproachAndReasoning(t *testing.T) {
 	require.NotNil(t, sessions.created[0].Title, "session title should be set")
 	require.Equal(t, "my approach", *sessions.created[0].PMApproach)
 	require.Equal(t, "my reasoning", *sessions.created[0].PMReasoning)
-	require.Equal(t, "high", sessions.created[0].TokenMode, "complex should map to high")
+	require.Equal(t, models.SessionTokenModeHigh, sessions.created[0].TokenMode, "complex should map to high")
 }
 
 // --- dispatchProjectTasks: model override ---

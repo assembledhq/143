@@ -30,7 +30,7 @@ func TestIntegration_EndSession_EnqueuesOpenPRJob(t *testing.T) {
 	user := seedUser(t, pool, orgID)
 
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusIdle),
+		Status:      models.SessionStatusIdle,
 		CurrentTurn: 2,
 		Validation:  models.SessionValidationPolicyOnSessionEnd,
 	})
@@ -87,7 +87,7 @@ func TestIntegration_EndSession_RejectsNonIdleSession(t *testing.T) {
 	orgID := seedOrg(t, pool)
 	user := seedUser(t, pool, orgID)
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusRunning),
+		Status:      models.SessionStatusRunning,
 		CurrentTurn: 1,
 	})
 

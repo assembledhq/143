@@ -148,7 +148,7 @@ func TestOrganizationsHandler_Create_HappyPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, orgID, resp.Data.ID)
 	require.Equal(t, "Acme", resp.Data.Name, "whitespace should be trimmed before persistence")
-	require.Equal(t, models.RoleAdmin, resp.Data.Role)
+	require.Equal(t, string(models.RoleAdmin), resp.Data.Role)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -77,7 +77,7 @@ func (h *AuthHandler) createSignupOrg(
 	// Plain Insert (not GrantAtLeast): both the user and the org were just
 	// created in this tx, so a conflict means something is wrong — we want a
 	// loud failure rather than the silent no-op GrantAtLeast would return.
-	if err := db.NewOrganizationMembershipStore(tx).Insert(ctx, user.ID, org.ID, models.RoleAdmin); err != nil {
+	if err := db.NewOrganizationMembershipStore(tx).Insert(ctx, user.ID, org.ID, string(models.RoleAdmin)); err != nil {
 		return "", fmt.Errorf("grant admin membership: %w", err)
 	}
 

@@ -172,8 +172,8 @@ func TestReapPhase0_FailsStalePendingSessions(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		stalePendingSessions: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusPending)},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusPending)},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusPending},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusPending},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -204,8 +204,8 @@ func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleRunningSessions: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: &startedAt},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -233,7 +233,7 @@ func TestReapPhase0_4_FailsRuntimeControlStalledSessions(t *testing.T) {
 	sessionID := uuid.New()
 	mock := &reaperMockSessionLister{
 		runtimeStalled: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -266,7 +266,7 @@ func TestReapPhase0_4_FailsRuntimeStalledRunningThreads(t *testing.T) {
 	sessionID := uuid.New()
 	mock := &reaperMockSessionLister{
 		runtimeStalled: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning},
 		},
 	}
 	threads := &reaperMockThreadLister{}
@@ -293,8 +293,8 @@ func TestReapPhase0_5_ContinuesOnUpdateStatusError(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleRunningSessions: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: &startedAt},
 		},
 		updateStatusErr: errors.New("db error"),
 	}
@@ -319,8 +319,8 @@ func TestReapPhase0_5_ContinuesOnUpdateFailureError(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleRunningSessions: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: &startedAt},
 		},
 		updateFailureErr: errors.New("db error"),
 	}
@@ -344,7 +344,7 @@ func TestReapPhase0_5_UsesStartedAtForElapsedLog(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleRunningSessions: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: nil},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, StartedAt: nil},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -365,7 +365,7 @@ func TestReapPhase0_5_ContinuesOnListError(t *testing.T) {
 	mock := &reaperMockSessionLister{
 		listRunningErr: errors.New("db error"),
 		staleIdleSessions: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusIdle},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -387,7 +387,7 @@ func TestReapPhase0Error_StillRunsPhase1(t *testing.T) {
 	mock := &reaperMockSessionLister{
 		listPendingErr: errors.New("db error"),
 		staleIdleSessions: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusIdle},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -410,8 +410,8 @@ func TestReapPhase1_TransitionsIdleSessionsToCompleted(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleIdleSessions: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusIdle), SnapshotKey: &snapshotKey},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusIdle, SnapshotKey: &snapshotKey},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusIdle},
 		},
 		expiredSnapshots: nil, // No expired snapshots in this test.
 	}
@@ -446,8 +446,8 @@ func TestReapPhase2_DeletesExpiredSnapshots(t *testing.T) {
 	mock := &reaperMockSessionLister{
 		staleIdleSessions: nil, // No idle sessions in this test.
 		expiredSnapshots: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey1},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey2},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &snapshotKey1},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &snapshotKey2},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -477,7 +477,7 @@ func TestReapPhase2_SkipsSessionsWithNilSnapshotKey(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		expiredSnapshots: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: nil},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: nil},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -501,7 +501,7 @@ func TestReapPhase2_SkipsSessionsWithEmptySnapshotKey(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		expiredSnapshots: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &emptyKey},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &emptyKey},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -524,10 +524,10 @@ func TestReapBothPhases(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleIdleSessions: []models.Session{
-			{ID: idleSessionID, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+			{ID: idleSessionID, OrgID: orgID, Status: models.SessionStatusIdle},
 		},
 		expiredSnapshots: []models.Session{
-			{ID: expiredSessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey},
+			{ID: expiredSessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &snapshotKey},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -558,7 +558,7 @@ func TestReapPhase1Error_StillRunsPhase2(t *testing.T) {
 	mock := &reaperMockSessionLister{
 		listIdleErr: errors.New("db error"),
 		expiredSnapshots: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &snapshotKey},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -580,7 +580,7 @@ func TestReapPhase2Error_ListExpiredSnapshots(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		staleIdleSessions: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusIdle},
 		},
 		listExpiredErr: errors.New("db error"),
 	}
@@ -609,8 +609,8 @@ func TestReapPhase2_SnapshotDeleteError_SkipsSession(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		expiredSnapshots: []models.Session{
-			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &key1},
-			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &key2},
+			{ID: sessionID1, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &key1},
+			{ID: sessionID2, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &key2},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{deleteErr: errors.New("s3 error")}
@@ -826,7 +826,7 @@ func TestReapPhase2_StopsActivePreviewBeforeDeletingSnapshot(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		expiredSnapshots: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &snapshotKey},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}
@@ -854,7 +854,7 @@ func TestReapPhase2_ProceedsWhenPreviewStopperErrors(t *testing.T) {
 
 	mock := &reaperMockSessionLister{
 		expiredSnapshots: []models.Session{
-			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey},
+			{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SnapshotKey: &snapshotKey},
 		},
 	}
 	snapStore := &reaperMockSnapshotStore{}

@@ -1391,7 +1391,7 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 			Private:        ghRepo.Private,
 			CloneURL:       defaultCloneURL(ghRepo.FullName, ghRepo.CloneURL),
 			InstallationID: link.InstallationID,
-			Status:         string(models.RepositoryStatusActive),
+			Status:         models.RepositoryStatusActive,
 			Settings:       json.RawMessage(`{}`),
 		})
 	}

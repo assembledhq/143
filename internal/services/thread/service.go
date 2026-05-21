@@ -916,13 +916,13 @@ func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid
 	if getErr != nil {
 		return models.Session{}, "", fmt.Errorf("inspect session for claim fallback: %w", getErr)
 	}
-	if existing.Status == string(models.SessionStatusRunning) {
+	if existing.Status == models.SessionStatusRunning {
 		s.logger.Debug().
 			Str("session_id", sessionID.String()).
 			Msg("session already running due to sibling thread; proceeding without re-claim")
 		return existing, "", nil
 	}
-	if existing.SandboxState == string(models.SandboxStateDestroyed) {
+	if existing.SandboxState == models.SandboxStateDestroyed {
 		return models.Session{}, "", ErrSessionSnapshotExpired
 	}
 
@@ -930,7 +930,7 @@ func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid
 	if resumeErr != nil {
 		return models.Session{}, "", fmt.Errorf("%w: %w", ErrSessionNotResumable, resumeErr)
 	}
-	return resumed, existing.Status, nil
+	return resumed, string(existing.Status), nil
 }
 
 // createMessageInTx wraps the message insert plus any of (a) review-comment

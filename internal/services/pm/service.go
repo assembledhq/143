@@ -37,7 +37,7 @@ func resolveAgentType(settings models.OrgSettings, override *models.AgentType) m
 type issueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error)
-	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error
 }
 
 type sessionStore interface {
@@ -516,11 +516,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	pmSession := &models.Session{
 		OrgID:         orgID,
 		AgentType:     models.AgentTypePMAgent,
-		Status:        "running",
+		Status:        models.SessionStatusRunning,
 		Title:         strPtr("PM Analysis"),
 		RepositoryID:  &repo.ID,
-		AutonomyLevel: string(models.SessionAutonomyFull),
-		TokenMode:     "high",
+		AutonomyLevel: models.SessionAutonomyFull,
+		TokenMode:     models.SessionTokenModeHigh,
 	}
 	if err := s.sessions.Create(ctx, pmSession); err != nil {
 		s.logger.Error().Err(err).Msg("failed to create PM session — continuing without session logging")
@@ -821,7 +821,7 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 		log := &models.SessionLog{
 			SessionID: pmSession.ID,
 			OrgID:     pmSession.OrgID,
-			Level:     entry.Level,
+			Level:     models.SessionLogLevel(entry.Level),
 			Message:   entry.Message,
 			Metadata:  metadata,
 		}

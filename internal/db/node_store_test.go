@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
@@ -112,7 +113,7 @@ func TestNodeStore_ListActive(t *testing.T) {
 		require.NoError(t, err, "ListActive should return nodes")
 		require.Len(t, nodes, 2, "ListActive should return every active node")
 		require.Equal(t, "worker-1", nodes[0].ID, "ListActive should preserve row order")
-		require.Equal(t, "api", nodes[1].Mode, "ListActive should decode node modes")
+		require.Equal(t, models.NodeModeAPI, nodes[1].Mode, "ListActive should decode node modes")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 

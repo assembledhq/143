@@ -270,7 +270,7 @@ func (m *mockCredentialProvider) withDefaultStatus(cred *models.DecryptedCredent
 		return cred
 	}
 	copy := *cred
-	copy.Status = models.CodingCredentialStatusActive
+	copy.Status = models.CredentialStatusActive
 	return &copy
 }
 
@@ -416,7 +416,7 @@ type turnUpdate struct {
 func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.statusUpdates = append(m.statusUpdates, status)
+	m.statusUpdates = append(m.statusUpdates, string(status))
 	return nil
 }
 
@@ -1117,13 +1117,13 @@ func (m *mockIssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) 
 	return m.issue, nil
 }
 
-func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
-	m.statusUpdates = append(m.statusUpdates, status)
+	m.statusUpdates = append(m.statusUpdates, string(status))
 	return nil
 }
 
@@ -1982,7 +1982,7 @@ func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusRunning)
+	session.Status = models.SessionStatusRunning
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	session.AgentSessionID = strPtr("agent-session-1")
@@ -2034,7 +2034,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.Status = string(models.SessionStatusRunning)
+	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -2062,7 +2062,7 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.Status = string(models.SessionStatusRunning)
+	run.Status = models.SessionStatusRunning
 	run.RecoveryAttemptCount = 3
 	threadID := uuid.New()
 	run.PrimaryThreadID = &threadID
@@ -2098,7 +2098,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.Status = string(models.SessionStatusRunning)
+	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
 	d.sessions.countRunning = 1
@@ -2147,7 +2147,7 @@ func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T)
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusRunning)
+	session.Status = models.SessionStatusRunning
 	session.CurrentTurn = 1
 	session.AgentSessionID = strPtr("agent-session-1")
 	session.SnapshotKey = strPtr("snapshots/test/recover-init-failure.tar")
@@ -2707,7 +2707,7 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -2771,7 +2771,7 @@ func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testin
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "snapshots/session.tar"
 	agentSessionID := "agent-session-1"
@@ -2827,7 +2827,7 @@ func TestContinueSession_AllowsAttachmentOnlyFollowUp(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "snapshots/session.tar"
 	agentSessionID := "agent-session-1"
@@ -2884,7 +2884,7 @@ func TestContinueSession_MaterializesAttachmentsFromMultiplePendingMessages(t *t
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "snapshots/session.tar"
 	agentSessionID := "agent-session-1"
@@ -2940,7 +2940,7 @@ func TestContinueSession_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeAmp
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -3017,7 +3017,7 @@ func TestContinueSession_RateLimitFallbackExhaustionCreatesBlockedMessage(t *tes
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeAmp
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -3092,7 +3092,7 @@ func TestContinueSession_FreshResumeLegacyGitHubAuthStillBootstrapsBranchGuard(t
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -3426,7 +3426,7 @@ func TestRunAgent_FailedExecutionDrainsInitialQueuedPrompt(t *testing.T) {
 		return models.Session{
 			ID:     sessionID,
 			OrgID:  orgID,
-			Status: string(models.SessionStatusFailed),
+			Status: models.SessionStatusFailed,
 		}, nil
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -3904,7 +3904,7 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusPRCreated)
+	session.Status = models.SessionStatusPRCreated
 	session.SnapshotKey = strPtr("snapshots/test/old-pre-pr.tar.zst")
 	session.PendingSnapshotKey = strPtr("snapshots/test/post-pr.tar.zst")
 
@@ -3926,7 +3926,7 @@ func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testin
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 
 	d := defaultDeps()
 	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
@@ -4008,7 +4008,7 @@ func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
 	session := &models.Session{
 		ID:            sessionID,
 		OrgID:         orgID,
-		Status:        string(models.SessionStatusIdle),
+		Status:        models.SessionStatusIdle,
 		SnapshotKey:   &snapshotKey,
 		BaseCommitSHA: &baseCommitSHA,
 	}
@@ -4042,7 +4042,7 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	agentSessionID := "existing-agent-session"
 	snapshotKey := "existing-snapshot"
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.AgentSessionID = &agentSessionID
 	session.SnapshotKey = &snapshotKey
 	session.CurrentTurn = 1
@@ -4105,7 +4105,7 @@ func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedS
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// Snapshot present (Path A) but no captured agent session id — exactly
 	// the case where the adapter would otherwise lose conversation context.
@@ -4187,7 +4187,7 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "existing-snapshot"
 	session.SnapshotKey = &snapshotKey
@@ -4292,7 +4292,7 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 2
 	snapshotKey := "existing-snapshot"
 	session.SnapshotKey = &snapshotKey
@@ -4358,7 +4358,7 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	session.AgentType = models.AgentTypeClaudeCode
 	session.ModelOverride = strPtr("claude-sonnet-4-6")
 	session.AgentSessionID = strPtr("parent-claude-session")
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -4432,11 +4432,11 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	missingCommand := models.SessionInputCommand{
 		Kind:      "command",
@@ -4511,13 +4511,13 @@ func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	stale := "stale-container-8d0c678c"
 	session.ContainerID = &stale
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4571,13 +4571,13 @@ func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "preview-container-on-other-host"
 	session.ContainerID = &containerID
 	otherNode := "worker-host-c"
 	session.WorkerNodeID = &otherNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = "worker-host-7" // we are NOT the recorded owner
@@ -4624,13 +4624,13 @@ func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *te
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "container-on-dead-worker"
 	session.ContainerID = &containerID
 	deadNode := "worker-dead"
 	session.WorkerNodeID = &deadNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = "worker-recovery"
@@ -4692,13 +4692,13 @@ func TestContinueSession_ReusePathRetriesWhenIsAliveProbeErrors(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4753,13 +4753,13 @@ func TestContinueSession_ReusePathRetriesWhenClearContainerIDErrors(t *testing.T
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	stale := "stale-container-clear-err"
 	session.ContainerID = &stale
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4813,13 +4813,13 @@ func TestContinueSession_ReusePathRetriesWhenClearContainerIDCASLost(t *testing.
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	stale := "stale-container-cas-lost"
 	session.ContainerID = &stale
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4903,7 +4903,7 @@ func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 	questions := d.questions.getQuestions()
 	require.Len(t, questions, 1)
 	require.Equal(t, "Should I refactor this function too?", questions[0].QuestionText)
-	require.Equal(t, "pending", questions[0].Status)
+	require.Equal(t, models.SessionQuestionStatusPending, questions[0].Status)
 
 	// Status should have been set to "awaiting_input" after the pause checkpoint.
 	statuses := d.sessions.getStatusUpdates()
@@ -5534,7 +5534,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	session.ReasoningEffort = func() *models.ReasoningEffort {
@@ -5617,7 +5617,7 @@ func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	session.PrimaryThreadID = nil
@@ -5711,7 +5711,7 @@ func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T)
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 11
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -5775,7 +5775,7 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 	session.ReasoningEffort = func() *models.ReasoningEffort {
@@ -5847,7 +5847,7 @@ func TestContinueSession_OmitsReasoningEffortWhenUnset(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session-nil-effort.tar")
 	session.ReasoningEffort = nil
@@ -5897,7 +5897,7 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -5962,7 +5962,7 @@ func TestContinueSession_ClaudeSnapshotRestoresTopLevelConfigFromBackup(t *testi
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session-with-claude-backup.tar")
 	session.AgentSessionID = strPtr("claude-session-abc")
@@ -6026,11 +6026,11 @@ func TestContinueSession_AppendsNonReviewRevisionContextToUserMessage(t *testing
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-append"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	revisionContextJSON, err := json.Marshal(agent.RevisionContext{
 		FormattedFeedback: "Please address the code review notes.",
@@ -6074,11 +6074,11 @@ func TestContinueSession_IgnoresMalformedRevisionContext(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-invalid-revision"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 	session.RevisionContext = json.RawMessage(`{"review_context":`)
 
 	d := defaultDeps()
@@ -6123,11 +6123,11 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 	// No SnapshotKey: proves the reuse branch takes precedence over hydrate.
 
 	d := defaultDeps()
@@ -6211,11 +6211,11 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-base-sha"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	const expectedBaseSHA = "feedfacecafe1234"
 	baseSHA := expectedBaseSHA
@@ -6272,11 +6272,11 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-xyz"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.creds = &mockCredentialProvider{
@@ -6358,7 +6358,7 @@ func TestContinueSession_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// No ContainerID, no SnapshotKey: forces the fresh-Create path that
 	// goes through prepareSandboxGitHubAuth → Listen before AcquireTurnHold.
@@ -6411,7 +6411,7 @@ func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6465,7 +6465,7 @@ func TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6521,7 +6521,7 @@ func TestContinueSession_AcquireHoldLosesRaceToPreviewRetries(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6578,7 +6578,7 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// SnapshotKey forces the hydrate path, which fails when the snapshot
 	// store can't fulfil the restore (the orchestrator's mock provider
@@ -6636,7 +6636,7 @@ func TestContinueSession_AcquireHoldErrorFailsTurn(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// No ContainerID and no SnapshotKey — forces the Create path, which is
 	// the leak-prone branch: on hold error we must tear the new container down.
@@ -6669,7 +6669,7 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6707,7 +6707,7 @@ func TestContinueSession_SetWorkerNodeIDFailureResetsThread(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	threadID := uuid.New()
@@ -6800,7 +6800,7 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			orgID := testOrg()
 			issue := testIssue(orgID)
 			session := testRun(orgID, issue.ID)
-			session.Status = string(models.SessionStatusIdle)
+			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 			c.prepSession(session)
 
@@ -6922,7 +6922,7 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			orgID := testOrg()
 			issue := testIssue(orgID)
 			session := testRun(orgID, issue.ID)
-			session.Status = string(models.SessionStatusIdle)
+			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 
 			d := defaultDeps()
@@ -6998,7 +6998,7 @@ func TestContinueSession_DeadLetterHookIdempotent(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -7106,7 +7106,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			issue := testIssue(orgID)
 			session := testRun(orgID, issue.ID)
 			session.AgentType = models.AgentTypeCodex
-			session.Status = string(models.SessionStatusIdle)
+			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 			// Reuse-path setup: container exists on this node and is alive,
 			// so the orchestrator skips the IsAlive bail and proceeds to
@@ -7115,7 +7115,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			session.ContainerID = &containerID
 			thisNode := "worker-this-node"
 			session.WorkerNodeID = &thisNode
-			session.SandboxState = string(models.SandboxStateRunning)
+			session.SandboxState = models.SandboxStateRunning
 
 			d := defaultDeps()
 			d.nodeID = thisNode
@@ -7251,13 +7251,13 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeCodex
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "alive-container-on-this-node"
 	session.ContainerID = &containerID
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -7480,7 +7480,7 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -8041,7 +8041,7 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	startedAt := time.Now().Add(-10 * time.Minute)
@@ -9133,7 +9133,7 @@ func TestContinueSession_AmpMissingAPIKeyFailsFast(t *testing.T) {
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeAmp
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()

@@ -406,7 +406,7 @@ func TestCheckAutoTrigger(t *testing.T) {
 				orgID,
 				&models.PriorityScore{Score: tt.score},
 				&models.ComplexityEstimate{Tier: tt.tier},
-				&models.Issue{ID: issueID, Severity: tt.issueSeverity},
+				&models.Issue{ID: issueID, Severity: models.IssueSeverity(tt.issueSeverity)},
 			)
 			require.NoError(t, err, "CheckAutoTrigger should not return an error for gate pass or skip paths")
 			require.Equal(t, tt.expectedCreateRun, len(runs.createdRuns) == 1, "CheckAutoTrigger should create a run only when all gates pass")

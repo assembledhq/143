@@ -74,7 +74,7 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 	return &models.Session{
 		OrgID:                orgID,
 		AgentType:            agentType,
-		Status:               string(models.SessionStatusPending),
+		Status:               models.SessionStatusPending,
 		Origin:               models.SessionOriginIssueTrigger,
 		Title:                &title,
 		PMApproach:           &approach,

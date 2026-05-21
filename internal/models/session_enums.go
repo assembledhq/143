@@ -324,6 +324,22 @@ func (a SessionAutonomy) Validate() error {
 // automation-triggered runs).
 const DefaultSessionAutonomy = SessionAutonomySemi
 
+type SessionTokenMode string
+
+const (
+	SessionTokenModeLow  SessionTokenMode = "low"
+	SessionTokenModeHigh SessionTokenMode = "high"
+)
+
+func (m SessionTokenMode) Validate() error {
+	switch m {
+	case SessionTokenModeLow, SessionTokenModeHigh:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionTokenMode: %q", m)
+	}
+}
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 
@@ -340,6 +356,22 @@ func (s SandboxState) Validate() error {
 		return nil
 	default:
 		return fmt.Errorf("invalid SandboxState: %q", s)
+	}
+}
+
+type GitIdentitySource string
+
+const (
+	GitIdentitySourceUser GitIdentitySource = "user"
+	GitIdentitySourceApp  GitIdentitySource = "app"
+)
+
+func (s GitIdentitySource) Validate() error {
+	switch s {
+	case GitIdentitySourceUser, GitIdentitySourceApp:
+		return nil
+	default:
+		return fmt.Errorf("invalid GitIdentitySource: %q", s)
 	}
 }
 
@@ -400,10 +432,83 @@ const MaxRunningThreadsPerSession = 3
 // classifies git status output into these three buckets. Renames are recorded
 // as a delete + create pair so each path's history is independent.
 const (
-	FileEventTypeCreated  = "created"
-	FileEventTypeModified = "modified"
-	FileEventTypeDeleted  = "deleted"
+	FileEventTypeCreated  SessionThreadFileEventType = "created"
+	FileEventTypeModified SessionThreadFileEventType = "modified"
+	FileEventTypeDeleted  SessionThreadFileEventType = "deleted"
 )
+
+type SessionQuestionStatus string
+
+const (
+	SessionQuestionStatusPending  SessionQuestionStatus = "pending"
+	SessionQuestionStatusAnswered SessionQuestionStatus = "answered"
+	SessionQuestionStatusTimedOut SessionQuestionStatus = "timed_out"
+	SessionQuestionStatusSkipped  SessionQuestionStatus = "skipped"
+)
+
+func (s SessionQuestionStatus) Validate() error {
+	switch s {
+	case SessionQuestionStatusPending, SessionQuestionStatusAnswered, SessionQuestionStatusTimedOut, SessionQuestionStatusSkipped:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionQuestionStatus: %q", s)
+	}
+}
+
+type SessionLogLevel string
+
+const (
+	SessionLogLevelDebug    SessionLogLevel = "debug"
+	SessionLogLevelInfo     SessionLogLevel = "info"
+	SessionLogLevelWarn     SessionLogLevel = "warn"
+	SessionLogLevelError    SessionLogLevel = "error"
+	SessionLogLevelOutput   SessionLogLevel = "output"
+	SessionLogLevelToolUse  SessionLogLevel = "tool_use"
+	SessionLogLevelQuestion SessionLogLevel = "question"
+)
+
+func (l SessionLogLevel) Validate() error {
+	switch l {
+	case SessionLogLevelDebug, SessionLogLevelInfo, SessionLogLevelWarn, SessionLogLevelError,
+		SessionLogLevelOutput, SessionLogLevelToolUse, SessionLogLevelQuestion:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionLogLevel: %q", l)
+	}
+}
+
+type SessionThreadFileEventType string
+
+const (
+	SessionThreadFileEventTypeCreated  SessionThreadFileEventType = "created"
+	SessionThreadFileEventTypeModified SessionThreadFileEventType = "modified"
+	SessionThreadFileEventTypeDeleted  SessionThreadFileEventType = "deleted"
+)
+
+func (t SessionThreadFileEventType) Validate() error {
+	switch t {
+	case SessionThreadFileEventTypeCreated, SessionThreadFileEventTypeModified, SessionThreadFileEventTypeDeleted:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionThreadFileEventType: %q", t)
+	}
+}
+
+type SessionDiffSource string
+
+const (
+	SessionDiffSourceTurnComplete SessionDiffSource = "turn_complete"
+	SessionDiffSourceReview       SessionDiffSource = "review"
+)
+
+func (s SessionDiffSource) Validate() error {
+	switch s {
+	case SessionDiffSourceTurnComplete, SessionDiffSourceReview:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionDiffSource: %q", s)
+	}
+}
 
 // MessageRole identifies who sent a session message.
 type MessageRole string
