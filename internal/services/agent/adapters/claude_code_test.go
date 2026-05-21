@@ -380,7 +380,7 @@ func TestPrepareClaudeHumanInputHooks_ConfiguresAskUserQuestionDeferral(t *testi
 		matchers[hook.Matcher] = true
 	}
 	require.True(t, matchers["AskUserQuestion"], "PreToolUse hooks should route explicit Claude questions through 143")
-	require.False(t, matchers["Bash"], "PreToolUse hooks should let Claude auto mode classify Bash instead of routing every command through 143")
+	require.False(t, matchers["Bash"], "PreToolUse hooks should let Claude handle Bash permissions instead of routing every command through 143")
 }
 
 func TestClaudeHumanInputHookScopesResumeAnswerToMatchingToolUse(t *testing.T) {
@@ -557,7 +557,7 @@ func TestClaudeCodeAdapter_Execute_UsesAutoModeWithoutBypassingAllPermissions(t 
 				HomeDir: "/home/sandbox",
 				Metadata: map[string]string{
 					agent.SandboxMetadataBaseCommitSHA:            "abc123",
-					agent.SandboxMetadataClaudeCodePermissionMode: agent.ClaudeCodePermissionModeAuto,
+					agent.SandboxMetadataClaudeCodePermissionMode: agent.ClaudeCodePermissionModeBypassPermissions,
 				},
 			}
 			logCh := make(chan agent.LogEntry, 10)
@@ -567,14 +567,14 @@ func TestClaudeCodeAdapter_Execute_UsesAutoModeWithoutBypassingAllPermissions(t 
 			require.NoError(t, err, "execute should succeed")
 			require.NotNil(t, result, "execute should return a result")
 			require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
-			require.Contains(t, provider.ExecCalls[0], "--permission-mode auto", "Claude CLI should use auto mode inside the gVisor sandbox to reduce routine approval prompts")
-			require.NotContains(t, provider.ExecCalls[0], "--permission-mode bypassPermissions", "Claude CLI should not skip every permission check while public internet egress is available")
+			require.Contains(t, provider.ExecCalls[0], "--permission-mode bypassPermissions", "Claude CLI should bypass interactive prompts inside the gVisor sandbox")
+			require.NotContains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should not use edit-only approval mode for headless sandbox runs")
 			require.NotContains(t, provider.ExecCalls[0], "--dangerously-skip-permissions", "Claude CLI should not use the bypass-permissions alias while public internet egress is available")
 		})
 	}
 }
 
-func TestClaudeCodeAdapter_Execute_DefaultsToAcceptEditsPermissionMode(t *testing.T) {
+func TestClaudeCodeAdapter_Execute_DefaultsToBypassPermissionsMode(t *testing.T) {
 	t.Parallel()
 
 	provider := testutil.NewMockSandboxProvider()
@@ -606,8 +606,8 @@ func TestClaudeCodeAdapter_Execute_DefaultsToAcceptEditsPermissionMode(t *testin
 	require.NoError(t, err, "execute should succeed")
 	require.NotNil(t, result, "execute should return a result")
 	require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
-	require.Contains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should default to the broadly supported permission mode unless auth setup opted into auto")
-	require.NotContains(t, provider.ExecCalls[0], "--permission-mode auto", "Claude CLI should not use auto mode without an auth compatibility signal")
+	require.Contains(t, provider.ExecCalls[0], "--permission-mode bypassPermissions", "Claude CLI should default to non-interactive bypass mode in the gVisor sandbox")
+	require.NotContains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should not default to edit-only approvals for headless runs")
 }
 
 func TestClaudeCodeAdapter_ResumeMode(t *testing.T) {
