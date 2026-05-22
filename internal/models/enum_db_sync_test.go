@@ -129,6 +129,11 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			ProjectTaskStatusCompleted, ProjectTaskStatusFailed,
 			ProjectTaskStatusSkipped, ProjectTaskStatusCancelled,
 		),
+		// models.go
+		"repositories_status": toStrings(
+			RepositoryStatusActive, RepositoryStatusPaused,
+			RepositoryStatusDisconnected,
+		),
 		// integration_enums.go
 		"integrations_status": toStrings(
 			IntegrationStatusActive, IntegrationStatusInactive,

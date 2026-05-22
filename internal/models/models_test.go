@@ -17,6 +17,7 @@ func TestRepository_IsActive(t *testing.T) {
 		want   bool
 	}{
 		{RepositoryStatusActive, true},
+		{RepositoryStatusPaused, false},
 		{RepositoryStatusDisconnected, false},
 		{"", false},
 		{"unknown", false},

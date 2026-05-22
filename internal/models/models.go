@@ -171,12 +171,13 @@ type RepositoryStatus string
 
 const (
 	RepositoryStatusActive       RepositoryStatus = "active"
+	RepositoryStatusPaused       RepositoryStatus = "paused"
 	RepositoryStatusDisconnected RepositoryStatus = "disconnected"
 )
 
 func (s RepositoryStatus) Validate() error {
 	switch s {
-	case RepositoryStatusActive, RepositoryStatusDisconnected:
+	case RepositoryStatusActive, RepositoryStatusPaused, RepositoryStatusDisconnected:
 		return nil
 	default:
 		return fmt.Errorf("invalid RepositoryStatus: %q", s)
