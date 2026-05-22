@@ -788,19 +788,6 @@ func splitCodexStderrDiagnostics(stderr string) ([]string, []codexHiddenDiagnost
 	return visible, hidden
 }
 
-func isBenignCodexDiagnostic(msg string) bool {
-	_, _, ok := classifyBenignCodexDiagnostic(msg)
-	return ok
-}
-
-func codexDiagnosticKind(msg string) string {
-	kind, _, ok := classifyBenignCodexDiagnostic(msg)
-	if ok {
-		return kind
-	}
-	return "unknown"
-}
-
 func classifyBenignCodexDiagnostic(msg string) (kind string, multiline bool, ok bool) {
 	trimmed := strings.TrimSpace(msg)
 	if strings.Contains(trimmed, "codex_core::tools::router:") &&
