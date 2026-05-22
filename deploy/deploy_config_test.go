@@ -303,6 +303,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, firewallText, `COMMENT_TAG="143-sandbox-egress-${NETWORK_TAG}"`, "firewall rules should use network-specific comment tags so reconciling one bridge does not delete the other bridge's rules")
 	require.Contains(t, firewallText, "169.254.0.0/16", "firewall should block metadata destinations")
 	require.Contains(t, firewallText, "10.0.0.0/8", "firewall should block private ranges")
+	require.Contains(t, firewallText, "100.64.0.0/10", "firewall should block Tailscale CGNAT destinations from sandbox traffic")
 
 	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
 	require.NoError(t, err, "test should read reconcile-worker-host.sh")
@@ -313,12 +314,23 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, reconcileText, "sandbox-static-egress-resolv.conf", "static egress sandboxes should get a dedicated resolver file")
 	require.Contains(t, reconcileText, "install-static-egress-worker.sh", "worker reconciliation should install policy routing and WireGuard for the static egress bridge")
 	require.Contains(t, reconcileText, "STATIC_EGRESS_ENABLED", "worker reconciliation should fail closed when static egress is enabled but cannot be installed")
+	require.Contains(t, reconcileText, "/opt/143/.env", "worker reconciliation should load static egress config from the host env file during fresh provisioning")
+	require.Contains(t, reconcileText, "load_static_egress_env_key", "worker reconciliation should parse env values without eval/source")
 	require.Contains(t, reconcileText, "static egress is enabled but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing", "enabled static egress must not silently skip a missing install helper")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
 	require.Contains(t, deployText, "install-static-egress-worker.sh.new", "worker deploys should sync the static egress install helper to existing workers")
+	require.NotContains(t, deployText, "STATIC_EGRESS_WORKER_PRIVATE_KEY=%q", "deploy should not place the WireGuard private key in ssh/sudo argv")
+	require.NotContains(t, deployText, "sudo -n env $reconcile_env", "deploy should let root-side reconciliation read static egress config from /opt/143/.env")
+
+	workerInstallScript, err := os.ReadFile("../deploy/scripts/install-static-egress-worker.sh")
+	require.NoError(t, err, "test should read static egress worker installer")
+	workerInstallText := string(workerInstallScript)
+	require.Contains(t, workerInstallText, "docker run", "static egress verification should probe from a sandbox-network container")
+	require.Contains(t, workerInstallText, "--network \"$STATIC_EGRESS_NETWORK\"", "static egress verification should exercise the static egress bridge")
+	require.NotContains(t, workerInstallText, "curl --interface", "static egress verification should not use a host-originated WireGuard interface probe")
 
 	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read worker compose")
@@ -347,6 +359,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, gatewayText, "MASQUERADE", "egress gateway should SNAT tunnel traffic to its public IPv4")
 	require.Contains(t, gatewayText, "169.254.0.0/16", "egress gateway should independently block metadata ranges")
 	require.Contains(t, gatewayText, "10.0.0.0/8", "egress gateway should independently block private ranges")
+	require.Contains(t, gatewayText, "100.64.0.0/10", "egress gateway should block Tailscale CGNAT ranges")
 }
 
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {

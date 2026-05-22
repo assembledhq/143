@@ -411,6 +411,59 @@ func TestMainPassesConfiguredNodeIDToWorkers(t *testing.T) {
 	require.Equal(t, "NodeID", nodeArg.Sel.Name, "workers should use cfg.NodeID rather than the Docker hostname")
 }
 
+func TestMainWiresStaticEgressIntoDurablePreviewRunner(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err, "main.go should parse for durable preview runner wiring regression test")
+
+	var cfgLiteral *ast.CompositeLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			selector, ok := lhs.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "PreviewStarter" || i >= len(assign.Rhs) {
+				continue
+			}
+			call, ok := assign.Rhs[i].(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				continue
+			}
+			fun, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || fun.Sel.Name != "NewStartRunner" {
+				continue
+			}
+			lit, ok := call.Args[0].(*ast.CompositeLit)
+			if !ok {
+				continue
+			}
+			cfgLiteral = lit
+			return false
+		}
+		return true
+	})
+
+	require.NotNil(t, cfgLiteral, "startup should construct a durable preview StartRunnerConfig")
+	fields := map[string]bool{}
+	for _, elt := range cfgLiteral.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		fields[key.Name] = true
+	}
+	require.True(t, fields["Orgs"], "durable preview runner should load org network settings")
+	require.True(t, fields["StaticEgress"], "durable preview runner should fail closed and hydrate on the static egress bridge when org settings require it")
+}
+
 func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {
 	t.Parallel()
 

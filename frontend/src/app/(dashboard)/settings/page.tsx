@@ -231,7 +231,7 @@ function NetworkAccessSettings() {
             <Switch
               id="static-egress-enabled"
               checked={enabled}
-              disabled={!available}
+              disabled={!available && !enabled}
               onCheckedChange={saveStaticEgress}
               aria-label="Use static egress IP for sessions and previews"
             />

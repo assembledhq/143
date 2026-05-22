@@ -230,4 +230,41 @@ describe('SettingsPage', () => {
       });
     });
   });
+
+  it('allows admins to disable static egress when the gateway is unavailable', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: false,
+        static_egress_enabled: true,
+        static_egress_public_ip: '203.0.113.10',
+        static_egress_unavailable_reason: 'no active static-egress-capable workers are available',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const toggle = await screen.findByLabelText('Use static egress IP for sessions and previews');
+    await waitFor(() => {
+      expect(toggle).toBeChecked();
+      expect(toggle).not.toBeDisabled();
+    });
+
+    const user = userEvent.setup();
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_network: { static_egress_enabled: false } },
+      });
+    });
+  });
 });

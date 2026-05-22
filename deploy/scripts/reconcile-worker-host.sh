@@ -11,8 +11,40 @@ STATIC_EGRESS_NETWORK="143-sandbox-static-egress"
 STATIC_EGRESS_SUBNET="172.31.0.0/24"
 STATIC_EGRESS_RESOLV_CONF="/etc/143/sandbox-static-egress-resolv.conf"
 STATIC_EGRESS_DNS_IP="172.31.0.2"
-STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-false}"
+STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-}"
 STATIC_EGRESS_CAPABILITY_FILE="/etc/143/static-egress-capable"
+STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
+
+load_static_egress_env_key() {
+  local key="$1"
+  local value
+
+  value="$(grep -E "^${key}=" "$STATIC_EGRESS_ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  if [ -n "$value" ]; then
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  fi
+}
+
+load_static_egress_env() {
+  local key
+
+  if [ ! -f "$STATIC_EGRESS_ENV_FILE" ]; then
+    return 0
+  fi
+
+  for key in \
+    STATIC_EGRESS_ENABLED \
+    STATIC_EGRESS_PUBLIC_IP \
+    STATIC_EGRESS_GATEWAY_PUBLIC_IP \
+    STATIC_EGRESS_GATEWAY_PUBLIC_KEY \
+    STATIC_EGRESS_WORKER_PRIVATE_KEY \
+    STATIC_EGRESS_WORKER_WG_ADDRESS; do
+    if [ -z "${!key:-}" ]; then
+      load_static_egress_env_key "$key"
+    fi
+  done
+}
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
   echo "ERROR: reconcile-worker-host.sh must run as root." >&2
@@ -51,6 +83,9 @@ ensure_bridge() {
 # ICC at Docker's default so gVisor sandboxes can reach sandbox-dns.
 ensure_bridge "$SANDBOX_NETWORK" "$SANDBOX_SUBNET"
 ensure_bridge "$STATIC_EGRESS_NETWORK" "$STATIC_EGRESS_SUBNET"
+
+load_static_egress_env
+STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-false}"
 
 # Install iptables-persistent so the egress block survives reboots. This is
 # best-effort because some minimal images prompt or temporarily lack apt locks;

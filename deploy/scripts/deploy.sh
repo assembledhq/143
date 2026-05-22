@@ -89,11 +89,8 @@ DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
 ALLOW_DEPLOY_DOCKER_DAEMON_RESTART="${ALLOW_DEPLOY_DOCKER_DAEMON_RESTART:-0}"
 
 run_worker_host_reconcile() {
-  local reconcile_env
-  reconcile_env=$(printf 'STATIC_EGRESS_ENABLED=%q STATIC_EGRESS_PUBLIC_IP=%q STATIC_EGRESS_GATEWAY_PUBLIC_IP=%q STATIC_EGRESS_GATEWAY_PUBLIC_KEY=%q STATIC_EGRESS_WORKER_PRIVATE_KEY=%q STATIC_EGRESS_WORKER_WG_ADDRESS=%q' \
-    "${STATIC_EGRESS_ENABLED:-false}" "${STATIC_EGRESS_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:-}" "${STATIC_EGRESS_WORKER_PRIVATE_KEY:-}" "${STATIC_EGRESS_WORKER_WG_ADDRESS:-}")
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n env $reconcile_env /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
+    "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
 }
 
 # --- Refresh secrets from .env.production.enc ---
