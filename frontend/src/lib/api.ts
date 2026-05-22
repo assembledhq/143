@@ -234,6 +234,15 @@ export const api = {
     },
     create: (body: import('./types').BranchPreviewCreateRequest) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>('/api/v1/previews', body),
+    configOptions: (params: { repository_id: string; branch?: string; commit_sha?: string; preview_config_name?: string }) => {
+      const searchParams = new URLSearchParams({ repository_id: params.repository_id });
+      if (params.branch) searchParams.set('branch', params.branch);
+      if (params.commit_sha) searchParams.set('commit_sha', params.commit_sha);
+      if (params.preview_config_name) searchParams.set('preview_config_name', params.preview_config_name);
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewConfigOptions>>(`/api/v1/previews/configs?${searchParams.toString()}`);
+    },
+    resolveLink: (type: 'target' | 'pull_request', slug: string) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
     get: (id: string) =>
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
     getPullRequest: (owner: string, repo: string, number: string | number) =>
@@ -246,6 +255,13 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/stop`),
     bootstrap: (id: string) =>
       post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
+    apiTokens: {
+      list: () => get<import('./types').ListResponse<import('./types').PreviewAPIToken>>('/api/v1/previews/api-tokens'),
+      create: (body: { name: string; scopes: string[]; repository_ids: string[] }) =>
+        post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
+      revoke: (id: string) =>
+        del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
+    },
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {

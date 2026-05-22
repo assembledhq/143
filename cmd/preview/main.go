@@ -24,12 +24,20 @@ type createPreviewRequest struct {
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
 }
 
+type repositoryListResponse struct {
+	Data []struct {
+		ID       string `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"data"`
+}
+
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "create" {
-		fmt.Fprintln(os.Stderr, "usage: 143-preview create --repository-id UUID --branch BRANCH [--commit-sha SHA] [--config NAME]")
+		fmt.Fprintln(os.Stderr, "usage: 143 preview create --repo owner/name --branch BRANCH [--commit-sha SHA] [--config NAME]")
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
+	repoFullName := fs.String("repo", "", "repository full name, for example owner/name")
 	repositoryID := fs.String("repository-id", "", "143 repository UUID")
 	branch := fs.String("branch", "", "repository branch")
 	commitSHA := fs.String("commit-sha", "", "optional commit SHA")
@@ -41,12 +49,21 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if *repositoryID == "" || *branch == "" || *apiURL == "" || *token == "" {
-		fmt.Fprintln(os.Stderr, "--repository-id, --branch, --api-url, and --token are required")
+	if (*repositoryID == "" && *repoFullName == "") || *branch == "" || *apiURL == "" || *token == "" {
+		fmt.Fprintln(os.Stderr, "--repo or --repository-id, --branch, --api-url, and --token are required")
 		os.Exit(2)
 	}
+	resolvedRepoID := *repositoryID
+	if resolvedRepoID == "" {
+		var err error
+		resolvedRepoID, err = resolveRepositoryID(*apiURL, *token, *repoFullName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 	reqBody := createPreviewRequest{
-		RepositoryID:      *repositoryID,
+		RepositoryID:      resolvedRepoID,
 		Branch:            *branch,
 		CommitSHA:         *commitSHA,
 		PreviewConfigName: *configName,
@@ -82,4 +99,35 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println(string(respBody))
+}
+
+func resolveRepositoryID(apiURL, token, fullName string) (string, error) {
+	endpoint := strings.TrimRight(apiURL, "/") + "/api/v1/repositories"
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("repository lookup failed: %s\n%s", resp.Status, string(body))
+	}
+	var parsed repositoryListResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("decode repository list: %w", err)
+	}
+	for _, repo := range parsed.Data {
+		if repo.FullName == fullName {
+			return repo.ID, nil
+		}
+	}
+	return "", fmt.Errorf("repository %q not found", fullName)
 }

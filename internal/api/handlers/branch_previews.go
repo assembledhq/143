@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
@@ -26,6 +27,7 @@ type branchPreviewGitHub interface {
 	ResolveBranchHead(ctx context.Context, token, owner, repo, branch string) (string, error)
 	CommitExists(ctx context.Context, token, owner, repo, sha string) error
 	GetPullRequestHead(ctx context.Context, token, owner, repo string, number int) (ghservice.PullRequestHead, error)
+	GetFileContent(ctx context.Context, token, owner, repo, ref, path string) (string, error)
 }
 
 type BranchPreviewHandler struct {
@@ -93,6 +95,11 @@ type branchPreviewResponse struct {
 	Status              string                         `json:"status"`
 	Error               string                         `json:"error,omitempty"`
 	CurrentPhase        string                         `json:"current_phase,omitempty"`
+	PhaseSteps          []branchPreviewPhaseStep       `json:"phase_steps,omitempty"`
+	CreatedByUserID     *uuid.UUID                     `json:"created_by_user_id,omitempty"`
+	CreatedAt           *time.Time                     `json:"created_at,omitempty"`
+	SourceID            string                         `json:"source_id,omitempty"`
+	RequestID           string                         `json:"request_id,omitempty"`
 	NewCommitsAvailable bool                           `json:"new_commits_available,omitempty"`
 	LatestCommitSHA     string                         `json:"latest_commit_sha,omitempty"`
 	GitHubBranchURL     string                         `json:"github_branch_url,omitempty"`
@@ -103,6 +110,24 @@ type branchPreviewResponse struct {
 	Services            []models.PreviewService        `json:"services,omitempty"`
 	Infrastructure      []models.PreviewInfrastructure `json:"infrastructure,omitempty"`
 	Logs                []models.PreviewLog            `json:"logs,omitempty"`
+}
+
+type branchPreviewPhaseStep struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type branchPreviewConfigOptionsResponse struct {
+	RepositoryID       uuid.UUID               `json:"repository_id"`
+	RepositoryFullName string                  `json:"repository_full_name"`
+	Ref                string                  `json:"ref"`
+	PreviewConfigName  string                  `json:"preview_config_name,omitempty"`
+	Names              []string                `json:"names"`
+	DefaultName        string                  `json:"default_name,omitempty"`
+	SelectedName       string                  `json:"selected_name,omitempty"`
+	RequiresSelection  bool                    `json:"requires_selection"`
+	Readiness          models.PreviewReadiness `json:"readiness"`
+	ValidationErrors   []string                `json:"validation_errors,omitempty"`
 }
 
 type restartBranchPreviewRequest struct {
@@ -214,12 +239,18 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.PreviewConfigName != nil {
 		configName = strings.TrimSpace(*req.PreviewConfigName)
 	}
+	resolvedConfigName, configErr := h.validateCommittedPreviewConfig(r.Context(), token, owner, name, req.CommitSHA, configName)
+	if configErr != nil {
+		writeError(w, r, configErr.status, configErr.code, configErr.message, configErr.err)
+		return
+	}
+	configName = resolvedConfigName
 	var target *models.PreviewTarget
 	restart := r.URL.Query().Get("restart") == "true"
 	if idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key")); idemKey != "" {
 		existing, idemErr := h.previews.GetPreviewTargetByIdempotencyKey(r.Context(), orgID, idemKey)
 		if idemErr == nil && existing != nil {
-			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), "header")
+			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), orgID.String(), "header")
 			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart)
 			if startErr != nil {
 				writePreviewHTTPError(w, r, startErr)
@@ -241,7 +272,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if sourceID != "" {
 		existing, sourceErr := h.previews.GetPreviewTargetBySource(r.Context(), orgID, sourceType, sourceID)
 		if sourceErr == nil && existing != nil {
-			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), "source")
+			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), orgID.String(), "source")
 			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart)
 			if startErr != nil {
 				writePreviewHTTPError(w, r, startErr)
@@ -265,12 +296,13 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SourceID:          sourceID,
 		SourceURL:         sourceURL,
 		CreatedByUserID:   user.ID,
+		RequestID:         chiMiddleware.GetReqID(r.Context()),
 	}
 	if err := h.previews.CreatePreviewTarget(r.Context(), target); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_CREATE_FAILED", "failed to create preview target", err)
 		return
 	}
-	metrics.RecordBranchPreviewCreate(r.Context(), string(sourceType), repo.FullName)
+	metrics.RecordBranchPreviewCreate(r.Context(), orgID.String(), string(sourceType), repo.FullName)
 
 	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, req.TTLSeconds, restart)
 	if startErr != nil {
@@ -278,6 +310,51 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, models.SingleResponse[branchPreviewResponse]{Data: resp})
+}
+
+type previewConfigHTTPError struct {
+	status  int
+	code    string
+	message string
+	err     error
+}
+
+func (h *BranchPreviewHandler) validateCommittedPreviewConfig(ctx context.Context, token, owner, repo, ref, requestedName string) (string, *previewConfigHTTPError) {
+	content, err := h.github.GetFileContent(ctx, token, owner, repo, ref, ".143/config.json")
+	if err != nil {
+		return "", &previewConfigHTTPError{
+			status:  http.StatusBadGateway,
+			code:    "PREVIEW_CONFIG_LOOKUP_FAILED",
+			message: "failed to read .143/config.json",
+			err:     err,
+		}
+	}
+	options, err := preview.InspectConfigOptions([]byte(content), requestedName)
+	if err != nil {
+		return "", &previewConfigHTTPError{
+			status:  http.StatusBadRequest,
+			code:    "INVALID_PREVIEW_CONFIG",
+			message: "invalid preview configuration",
+			err:     err,
+		}
+	}
+	if options.RequiresSelection {
+		return "", &previewConfigHTTPError{
+			status:  http.StatusBadRequest,
+			code:    "PREVIEW_CONFIG_REQUIRED",
+			message: fmt.Sprintf("preview_config_name is required; available configs: %s", strings.Join(options.Names, ", ")),
+		}
+	}
+	selectedName := options.SelectedName
+	if _, err := preview.ParseNamedConfig([]byte(content), selectedName); err != nil {
+		return "", &previewConfigHTTPError{
+			status:  http.StatusBadRequest,
+			code:    "INVALID_PREVIEW_CONFIG",
+			message: err.Error(),
+			err:     err,
+		}
+	}
+	return selectedName, nil
 }
 
 func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +380,10 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to load repository", err)
 		return
 	}
+	if !previewTokenAllows(r.Context(), "previews:read", repo.ID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read previews for this repository")
+		return
+	}
 	if h.github == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_NOT_CONFIGURED", "GitHub is not configured")
 		return
@@ -318,7 +399,6 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	slug := fmt.Sprintf("github/%s/%s/pull/%d", owner, repoName, number)
-	metrics.RecordStablePreviewLinkOpen(r.Context(), string(models.PreviewLinkTypePullRequest), false)
 	target, err := h.previews.GetLatestPreviewTargetForBranch(r.Context(), orgID, repo.ID, head.Branch, "")
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load PR preview target", err)
@@ -333,6 +413,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	metrics.RecordStablePreviewLinkOpen(r.Context(), orgID.String(), repo.FullName, string(models.PreviewLinkTypePullRequest), previewInstanceExpired(active))
 	if target != nil && active != nil && target.CommitSHA != head.SHA {
 		resp := h.responseForPreview(slug, target, active)
 		resp.NewCommitsAvailable = true
@@ -352,6 +433,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 			PreviewConfigName: target.PreviewConfigName,
 			SourceType:        target.SourceType,
 			SourceURL:         target.SourceURL,
+			RequestID:         target.RequestID,
 			Status:            "target_created",
 			StableURL:         h.stableURL(slug),
 			PullRequestURL:    head.HTMLURL,
@@ -364,6 +446,10 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 	if target == nil || target.CommitSHA != head.SHA {
 		if middleware.ActiveRoleFromContext(r.Context()) == "viewer" {
 			writeError(w, r, http.StatusForbidden, "PREVIEW_CREATE_FORBIDDEN", "viewer role cannot start a new PR preview")
+			return
+		}
+		if !previewTokenAllows(r.Context(), "previews:create", repo.ID) {
+			writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to create previews for this repository")
 			return
 		}
 		target = &models.PreviewTarget{
@@ -402,6 +488,138 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 	resp.PullRequestURL = head.HTMLURL
 	resp.LatestCommitSHA = head.SHA
 	h.decoratePreviewResponse(r.Context(), orgID, &resp)
+	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
+}
+
+func (h *BranchPreviewHandler) GetConfigOptions(w http.ResponseWriter, r *http.Request) {
+	if h.repos == nil || h.github == nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_UNAVAILABLE", "preview service is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	repoID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("repository_id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "repository_id is required")
+		return
+	}
+	repo, err := h.repos.GetByID(r.Context(), orgID, repoID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to load repository", err)
+		return
+	}
+	if !previewTokenAllows(r.Context(), "previews:read", repo.ID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read previews for this repository")
+		return
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		writeError(w, r, http.StatusUnprocessableEntity, "INVALID_REPOSITORY_NAME", "repository full name is invalid")
+		return
+	}
+	ref := strings.TrimSpace(r.URL.Query().Get("commit_sha"))
+	if ref == "" {
+		ref = strings.TrimSpace(r.URL.Query().Get("branch"))
+	}
+	if ref == "" {
+		ref = repo.DefaultBranch
+	}
+	token, err := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", err)
+		return
+	}
+	content, err := h.github.GetFileContent(r.Context(), token, owner, repoName, ref, ".143/config.json")
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", err)
+		return
+	}
+	configName := strings.TrimSpace(r.URL.Query().Get("preview_config_name"))
+	options, err := preview.InspectConfigOptions([]byte(content), configName)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_CONFIG", "invalid preview configuration", err)
+		return
+	}
+	cfg, parseErr := preview.ParseNamedConfig([]byte(content), options.SelectedName)
+	var readiness models.PreviewReadiness
+	var validationErrors []string
+	if parseErr != nil {
+		readiness = models.PreviewReadinessNotSupported
+		validationErrors = []string{parseErr.Error()}
+	} else {
+		detection := preview.DetectReadiness(cfg)
+		readiness = detection.Readiness
+		validationErrors = detection.ValidationErrors
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewConfigOptionsResponse]{Data: branchPreviewConfigOptionsResponse{
+		RepositoryID:       repo.ID,
+		RepositoryFullName: repo.FullName,
+		Ref:                ref,
+		PreviewConfigName:  configName,
+		Names:              options.Names,
+		DefaultName:        options.DefaultName,
+		SelectedName:       options.SelectedName,
+		RequiresSelection:  options.RequiresSelection,
+		Readiness:          readiness,
+		ValidationErrors:   validationErrors,
+	}})
+}
+
+func (h *BranchPreviewHandler) ResolveLink(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	rawType := strings.TrimSpace(chi.URLParam(r, "link_type"))
+	slug := strings.Trim(strings.TrimSpace(chi.URLParam(r, "*")), "/")
+	linkType := models.PreviewLinkType(rawType)
+	if err := linkType.Validate(); err != nil || slug == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_LINK", "invalid preview link")
+		return
+	}
+	link, err := h.previews.GetPreviewLinkBySlug(r.Context(), orgID, linkType, slug)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "PREVIEW_LINK_NOT_FOUND", "preview link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LINK_LOOKUP_FAILED", "failed to load preview link", err)
+		return
+	}
+	target, err := h.previews.GetPreviewTarget(r.Context(), orgID, link.PreviewTargetID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load preview target", err)
+		return
+	}
+	if !previewTokenAllows(r.Context(), "previews:read", target.RepositoryID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read this preview")
+		return
+	}
+	resp := branchPreviewResponse{
+		TargetID:          target.ID,
+		RepositoryID:      target.RepositoryID,
+		Branch:            target.Branch,
+		CommitSHA:         target.CommitSHA,
+		PreviewConfigName: target.PreviewConfigName,
+		SourceType:        target.SourceType,
+		SourceID:          target.SourceID,
+		SourceURL:         target.SourceURL,
+		CreatedByUserID:   &target.CreatedByUserID,
+		CreatedAt:         &target.CreatedAt,
+		RequestID:         target.RequestID,
+		Status:            "target_created",
+		StableURL:         h.stableURL(link.Slug),
+	}
+	expired := true
+	if active, activeErr := h.previews.GetActivePreviewForTarget(r.Context(), orgID, target.ID); activeErr == nil && active != nil {
+		resp = h.responseForPreview(link.Slug, target, active)
+		expired = previewInstanceExpired(active)
+	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load active preview", activeErr)
+		return
+	}
+	h.decoratePreviewResponse(r.Context(), orgID, &resp)
+	metrics.RecordStablePreviewLinkOpen(r.Context(), orgID.String(), resp.RepositoryFullName, string(linkType), expired)
 	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 }
 
@@ -453,6 +671,7 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 			PreviewConfigName: target.PreviewConfigName,
 			SourceType:        target.SourceType,
 			SourceURL:         target.SourceURL,
+			RequestID:         target.RequestID,
 			Status:            "target_created",
 			StableURL:         h.stableURL(link.Slug),
 		}
@@ -537,6 +756,7 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 				PreviewConfigName: target.PreviewConfigName,
 				SourceType:        target.SourceType,
 				SourceURL:         target.SourceURL,
+				RequestID:         target.RequestID,
 				Status:            "target_created",
 				StableURL:         h.stableURL(target.ID.String()),
 			}
@@ -558,11 +778,12 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := branchPreviewResponse{
-		TargetID:  previewTargetIDValue(instance.PreviewTargetID),
-		PreviewID: &instance.ID,
-		Status:    string(instance.Status),
-		StableURL: h.stableURL(instance.ID.String()),
-		ExpiresAt: &instance.ExpiresAt,
+		TargetID:     previewTargetIDValue(instance.PreviewTargetID),
+		PreviewID:    &instance.ID,
+		Status:       string(instance.Status),
+		CurrentPhase: instance.CurrentPhase,
+		StableURL:    h.stableURL(instance.ID.String()),
+		ExpiresAt:    &instance.ExpiresAt,
 	}
 	if instance.PreviewTargetID != nil {
 		resp.StableURL = h.stableURL(instance.PreviewTargetID.String())
@@ -582,6 +803,7 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 			resp.PreviewConfigName = target.PreviewConfigName
 			resp.SourceType = target.SourceType
 			resp.SourceURL = target.SourceURL
+			resp.RequestID = target.RequestID
 		}
 	}
 	h.decoratePreviewResponse(r.Context(), orgID, &resp)
@@ -971,11 +1193,16 @@ func (h *BranchPreviewHandler) responseForPreview(slug string, target *models.Pr
 		CommitSHA:         target.CommitSHA,
 		PreviewConfigName: target.PreviewConfigName,
 		SourceType:        target.SourceType,
+		SourceID:          target.SourceID,
 		SourceURL:         target.SourceURL,
+		CreatedByUserID:   &target.CreatedByUserID,
+		CreatedAt:         &target.CreatedAt,
 		Status:            string(instance.Status),
 		Error:             instance.Error,
+		CurrentPhase:      instance.CurrentPhase,
 		StableURL:         h.stableURL(slug),
 		ExpiresAt:         &instance.ExpiresAt,
+		RequestID:         target.RequestID,
 	}
 	if url := h.previewURL(instance.ID); url != "" {
 		resp.PreviewURL = &url
@@ -997,6 +1224,10 @@ func (h *BranchPreviewHandler) decoratePreviewResponse(ctx context.Context, orgI
 		resp.PullRequestURL = resp.SourceURL
 	}
 	if resp.PreviewID == nil {
+		if resp.CurrentPhase == "" {
+			resp.CurrentPhase = inferPreviewPhase(resp.Status, resp.Services, resp.Infrastructure)
+		}
+		resp.PhaseSteps = previewPhaseSteps(resp.CurrentPhase, resp.Status)
 		return
 	}
 	if services, err := h.previews.ListServicesByPreview(ctx, orgID, *resp.PreviewID); err == nil {
@@ -1014,6 +1245,45 @@ func (h *BranchPreviewHandler) decoratePreviewResponse(ctx context.Context, orgI
 	if resp.CurrentPhase == "" {
 		resp.CurrentPhase = inferPreviewPhase(resp.Status, resp.Services, resp.Infrastructure)
 	}
+	resp.PhaseSteps = previewPhaseSteps(resp.CurrentPhase, resp.Status)
+}
+
+func previewPhaseSteps(currentPhase, status string) []branchPreviewPhaseStep {
+	steps := []branchPreviewPhaseStep{
+		{Name: "checkout", Status: "pending"},
+		{Name: "install_build", Status: "pending"},
+		{Name: "start_services", Status: "pending"},
+		{Name: "readiness", Status: "pending"},
+	}
+	if currentPhase == "" {
+		return steps
+	}
+	order := map[string]int{
+		"reserved":       -1,
+		"checkout":       0,
+		"install_build":  1,
+		"build":          1,
+		"start_services": 2,
+		"readiness":      3,
+		"ready":          4,
+		"expired":        4,
+		"stopped":        4,
+	}
+	current, ok := order[currentPhase]
+	if !ok {
+		current = 0
+	}
+	for i := range steps {
+		switch {
+		case status == string(models.PreviewStatusFailed) && i == current:
+			steps[i].Status = "failed"
+		case i < current || current >= len(steps):
+			steps[i].Status = "complete"
+		case i == current:
+			steps[i].Status = "active"
+		}
+	}
+	return steps
 }
 
 func inferPreviewPhase(status string, services []models.PreviewService, infra []models.PreviewInfrastructure) string {
@@ -1094,6 +1364,13 @@ func branchPreviewExpiresAt(ttlSeconds *int64) time.Time {
 		ttl = preview.DefaultMaxTTL
 	}
 	return time.Now().Add(ttl)
+}
+
+func previewInstanceExpired(instance *models.PreviewInstance) bool {
+	if instance == nil {
+		return true
+	}
+	return instance.Status == models.PreviewStatusExpired || instance.ExpiresAt.Before(time.Now())
 }
 
 func (h *BranchPreviewHandler) previewURL(id uuid.UUID) string {

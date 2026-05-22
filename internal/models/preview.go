@@ -36,6 +36,8 @@ type PreviewInstance struct {
 	CPULimitMillis     int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
 	RecycleConfig      json.RawMessage `db:"recycle_config" json:"-"`
 	RecycleSandbox     json.RawMessage `db:"recycle_sandbox" json:"-"`
+	CurrentPhase       string          `db:"current_phase" json:"current_phase,omitempty"`
+	RequestID          string          `db:"request_id" json:"request_id,omitempty"`
 	Error              string          `db:"error" json:"error,omitempty"`
 	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time       `db:"updated_at" json:"updated_at"`
@@ -61,6 +63,7 @@ type PreviewTarget struct {
 	SourceID             string            `db:"source_id" json:"source_id,omitempty"`
 	SourceURL            string            `db:"source_url" json:"source_url,omitempty"`
 	CreatedByUserID      uuid.UUID         `db:"created_by_user_id" json:"created_by_user_id"`
+	RequestID            string            `db:"request_id" json:"request_id,omitempty"`
 	CreatedAt            time.Time         `db:"created_at" json:"created_at"`
 }
 

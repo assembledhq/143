@@ -91,6 +91,92 @@ func TestParseConfig_MultiService(t *testing.T) {
 	}
 }
 
+func TestInspectConfigOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		selected string
+		expected ConfigOptions
+	}{
+		{
+			name: "single preview config does not require selection",
+			raw: `{
+				"preview": {
+					"name": "web",
+					"command": ["npm", "run", "dev"],
+					"port": 3000
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"web"},
+				SelectedName: "web",
+			},
+		},
+		{
+			name: "multi config uses default",
+			raw: `{
+				"preview": {
+					"default": "web",
+					"configs": {
+						"docs": {"name": "docs", "command": ["npm", "run", "docs"], "port": 3001},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"docs", "web"},
+				DefaultName:  "web",
+				SelectedName: "web",
+			},
+		},
+		{
+			name: "multi config without default requires selection",
+			raw: `{
+				"preview": {
+					"configs": {
+						"api": {"name": "api", "command": ["go", "run", "."], "port": 8080},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:             []string{"api", "web"},
+				RequiresSelection: true,
+			},
+		},
+		{
+			name:     "selected config is preserved",
+			selected: "api",
+			raw: `{
+				"preview": {
+					"default": "web",
+					"configs": {
+						"api": {"name": "api", "command": ["go", "run", "."], "port": 8080},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"api", "web"},
+				DefaultName:  "web",
+				SelectedName: "api",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := InspectConfigOptions([]byte(tt.raw), tt.selected)
+			require.NoError(t, err, "InspectConfigOptions should parse valid preview config metadata")
+			require.Equal(t, tt.expected, actual, "InspectConfigOptions should return exact config selection metadata")
+		})
+	}
+}
+
 func TestParseConfig_WithInfrastructure(t *testing.T) {
 	t.Parallel()
 

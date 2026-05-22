@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -173,15 +174,18 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 // StartPreviewInput contains everything needed to start a new preview.
 type StartPreviewInput struct {
-	SessionID       uuid.UUID
-	PreviewTargetID uuid.UUID
-	OrgID           uuid.UUID
-	UserID          uuid.UUID // for per-user concurrency cap
-	Sandbox         *agent.Sandbox
-	Config          *models.PreviewConfig
-	BaseCommitSHA   string
-	ProfileName     string
-	ExpiresAt       time.Time
+	SessionID                 uuid.UUID
+	PreviewTargetID           uuid.UUID
+	OrgID                     uuid.UUID
+	UserID                    uuid.UUID // for per-user concurrency cap
+	Sandbox                   *agent.Sandbox
+	Config                    *models.PreviewConfig
+	BaseCommitSHA             string
+	ProfileName               string
+	ExpiresAt                 time.Time
+	RequestID                 string
+	MetricsSource             string
+	MetricsRepositoryFullName string
 }
 
 // =============================================================================
@@ -282,6 +286,8 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 		ProfileName:     profileName,
 		Name:            input.Config.Name,
 		Status:          models.PreviewStatusStarting,
+		CurrentPhase:    "reserved",
+		RequestID:       input.RequestID,
 		Provider:        ProviderDocker,
 		WorkerNodeID:    workerNodeID,
 		PrimaryService:  input.Config.Primary,
@@ -345,6 +351,8 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		ProfileName:    profileName,
 		Name:           input.Config.Name,
 		Status:         models.PreviewStatusStarting,
+		CurrentPhase:   "reserved",
+		RequestID:      input.RequestID,
 		Provider:       ProviderDocker,
 		WorkerNodeID:   workerNodeID,
 		PrimaryService: input.Config.Primary,
@@ -498,7 +506,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// startup checklist sees progress instead of "all starting" until the
 	// whole launch returns. It also writes a preview_logs row with the tail
 	// of stdout/stderr when a service fails, so the user sees why.
-	observer := m.newServiceObserver(input.OrgID, instance.ID)
+	observer := m.newServiceObserver(input.OrgID, instance.ID, input.MetricsSource, input.MetricsRepositoryFullName)
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID), observer)
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
@@ -673,17 +681,65 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // callbacks fired after StartPreview returns (progressive support services,
 // the startService goroutine catching a non-zero exit) still land in the DB
 // even if the request context has already been canceled.
-func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID) ServiceObserver {
-	return &managerServiceObserver{manager: m, orgID: orgID, previewID: previewID}
+func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo string) ServiceObserver {
+	return &managerServiceObserver{
+		manager:     m,
+		orgID:       orgID,
+		previewID:   previewID,
+		source:      strings.TrimSpace(metricsSource),
+		repository:  strings.TrimSpace(metricsRepo),
+		phaseStarts: make(map[string]time.Time),
+	}
 }
 
 type managerServiceObserver struct {
-	manager   *Manager
-	orgID     uuid.UUID
-	previewID uuid.UUID
+	manager     *Manager
+	orgID       uuid.UUID
+	previewID   uuid.UUID
+	source      string
+	repository  string
+	phaseMu     sync.Mutex
+	phaseStarts map[string]time.Time
 }
 
 const observerWriteTimeout = 5 * time.Second
+
+func (o *managerServiceObserver) OnPhaseStart(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	o.phaseMu.Lock()
+	o.phaseStarts[name] = time.Now()
+	o.phaseMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	if err := o.manager.store.UpdatePreviewPhase(ctx, o.orgID, o.previewID, name); err != nil {
+		o.manager.logger.Warn().Err(err).
+			Str("preview_id", o.previewID.String()).
+			Str("phase", name).
+			Msg("observer: failed to update preview phase")
+	}
+}
+
+func (o *managerServiceObserver) OnPhaseEnd(name string, phaseErr error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+
+	o.phaseMu.Lock()
+	started, ok := o.phaseStarts[name]
+	if ok {
+		delete(o.phaseStarts, name)
+	}
+	o.phaseMu.Unlock()
+	if !ok || o.source == "" || o.repository == "" {
+		return
+	}
+	metrics.RecordBranchPreviewPhaseDuration(context.Background(), o.orgID.String(), o.source, o.repository, name, time.Since(started))
+}
 
 func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
@@ -874,6 +930,11 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	// Atomically stop + revoke access sessions.
 	if err := m.store.StopPreviewWithRevocation(ctx, orgID, previewID); err != nil {
 		return fmt.Errorf("stop preview: %w", err)
+	}
+	if instance.PreviewTargetID != nil {
+		if target, targetErr := m.store.GetPreviewTarget(ctx, orgID, *instance.PreviewTargetID); targetErr == nil {
+			metrics.RecordBranchPreviewMinutes(ctx, orgID.String(), string(target.SourceType), target.RepositoryID.String(), time.Since(instance.CreatedAt))
+		}
 	}
 
 	// Stop HMR watching for this preview.
@@ -1249,7 +1310,7 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	// Restart via provider with same sandbox and config. Use the existing
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
-	observer := m.newServiceObserver(orgID, previewID)
+	observer := m.newServiceObserver(orgID, previewID, "", "")
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {

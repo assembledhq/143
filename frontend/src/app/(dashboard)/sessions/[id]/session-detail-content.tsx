@@ -3176,6 +3176,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   // every render.
   const prevPRStateRef = useRef<string | undefined>(undefined);
   const prUrl = prData?.data?.github_pr_url;
+  const prPreviewHref = useMemo(() => {
+    if (!prUrl) return undefined;
+    const match = prUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) return undefined;
+    return `/previews/github/${encodeURIComponent(match[1])}/${encodeURIComponent(match[2])}/pull/${match[3]}`;
+  }, [prUrl]);
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
     localPRState === "queued" &&
@@ -3573,7 +3579,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   const branchPreviewMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (!session?.repository_id) {
         throw new Error("Session has no repository");
       }
@@ -3581,7 +3587,11 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (!branch) {
         throw new Error("Session has no branch");
       }
-      return api.previews.create({
+      if (session.has_unpushed_changes && isRunning) {
+        await api.sessions.preview.start(session.id);
+        return { kind: "session" as const };
+      }
+      const response = await api.previews.create({
         repository_id: session.repository_id,
         branch,
         source: {
@@ -3590,8 +3600,14 @@ export function SessionDetailContent({ id }: { id: string }) {
           url: `/sessions/${session.id}`,
         },
       });
+      return { kind: "branch" as const, response };
     },
-    onSuccess: (response) => {
+    onSuccess: (result) => {
+      if (result.kind === "session") {
+        handleDetailTabClick("preview");
+        return;
+      }
+      const response = result.response;
       const url = response.data.stable_url;
       if (url.startsWith("http")) {
         window.location.href = url;
@@ -4777,6 +4793,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
   const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
   const canStartBranchPreview = Boolean(session.repository_id && (session.target_branch || session.working_branch));
+  const branchPreviewLabel = session.has_unpushed_changes && isRunning ? "Preview current sandbox" : "Open preview";
+  const branchPreviewTitle = session.has_unpushed_changes && isRunning
+    ? "Open a session-backed preview for the current sandbox"
+    : "Open branch preview";
 
   // Push-changes button derived state. Mirrors the PR creation block above
   // but operates on session.pr_push_state and the backend-derived
@@ -4919,6 +4939,14 @@ export function SessionDetailContent({ id }: { id: string }) {
                     View PR
                   </a>
                 </Button>
+                {prPreviewHref ? (
+                  <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="Preview PR">
+                    <a href={prPreviewHref}>
+                      <ExternalLink className="h-3 w-3" />
+                      Preview
+                    </a>
+                  </Button>
+                ) : null}
               </>
             ) : showPRAction && !prErrorNotice ? (
               <>
@@ -4988,7 +5016,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 size="sm"
                 className="h-7 text-xs gap-1.5"
                 disabled={branchPreviewMutation.isPending}
-                title="Open branch preview"
+                title={branchPreviewTitle}
                 onClick={() => branchPreviewMutation.mutate()}
               >
                 {branchPreviewMutation.isPending ? (
@@ -4996,7 +5024,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 ) : (
                   <ExternalLink className="h-3 w-3" />
                 )}
-                Preview
+                {branchPreviewLabel}
               </Button>
             ) : null}
             <Button

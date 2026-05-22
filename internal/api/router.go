@@ -864,6 +864,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
 				r.Get("/api/v1/previews", branchPreviewHandler.List)
+				r.Get("/api/v1/previews/configs", branchPreviewHandler.GetConfigOptions)
+				r.Get("/api/v1/previews/links/{link_type}/*", branchPreviewHandler.ResolveLink)
 				r.Get("/api/v1/previews/github/{owner}/{repo}/pull/{number}", branchPreviewHandler.GetPullRequest)
 				r.Get("/api/v1/previews/{preview_id}", branchPreviewHandler.Get)
 				r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)

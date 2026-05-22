@@ -45,6 +45,7 @@ export default function PreviewLandingPage({
   });
 
   const preview = previewQuery.data?.data;
+  const isExpired = preview?.status === "expired";
   const title = preview?.repository_full_name
     ? `${preview.repository_full_name}${preview.branch ? ` · ${preview.branch}` : ""}`
     : preview
@@ -124,9 +125,52 @@ export default function PreviewLandingPage({
                   </div>
                 ) : null}
 
+                {isExpired ? (
+                  <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div>
+                      <p className="font-medium text-foreground">Preview expired</p>
+                      <p className="text-muted-foreground">Start latest to launch a fresh runtime for this branch target.</p>
+                    </div>
+                  </div>
+                ) : null}
+
                 {preview.error ? (
                   <p className="rounded-md border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">{preview.error}</p>
                 ) : null}
+
+                {preview.phase_steps?.length ? (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-foreground">Startup progress</p>
+                    <div className="grid gap-2 md:grid-cols-4">
+                      {preview.phase_steps.map((step) => (
+                        <div key={step.name} className="rounded-md border border-border px-3 py-2">
+                          <p className="text-sm font-medium capitalize text-foreground">{step.name.replaceAll("_", " ")}</p>
+                          <p className="text-xs capitalize text-muted-foreground">{step.status}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="grid gap-3 text-sm md:grid-cols-4">
+                  <div>
+                    <p className="text-muted-foreground">Created</p>
+                    <p className="font-medium text-foreground">{preview.created_at ? new Date(preview.created_at).toLocaleString() : "Unknown"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Created by</p>
+                    <p className="break-all font-medium text-foreground">{preview.created_by_user_id ?? "Unknown"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Source ID</p>
+                    <p className="break-all font-medium text-foreground">{preview.source_id ?? "None"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">API request</p>
+                    <p className="break-all font-medium text-foreground">{preview.request_id ?? "None"}</p>
+                  </div>
+                </div>
 
                 {(preview.services?.length || preview.infrastructure?.length) ? (
                   <div className="grid gap-3 md:grid-cols-2">

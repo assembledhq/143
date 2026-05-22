@@ -30,7 +30,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"preview_holding_container",
 }
 
@@ -73,7 +73,7 @@ var prPreviewStateTestCols = []string{
 var previewTargetTestCols = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
 	"resolved_config_digest", "source_type", "source_id", "source_url",
-	"created_by_user_id", "created_at",
+	"created_by_user_id", "request_id", "created_at",
 }
 
 var previewLinkTestCols = []string{
@@ -87,7 +87,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		id, sessionID, nil, orgID, userID, "bootstrap", "my-preview", "starting",
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now, nil,
+		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", "req-1", "", now, now, now, nil,
 		false,
 	}
 }
@@ -96,7 +96,7 @@ func newPreviewTargetRow(id, orgID, repoID, userID uuid.UUID, now time.Time) []a
 	return []any{
 		id, orgID, repoID, "feature/previews", "0123456789abcdef0123456789abcdef01234567", "default",
 		"sha256:config", "manual", "source-1", "https://example.com/source",
-		userID, now,
+		userID, "req-1", now,
 	}
 }
 
@@ -139,7 +139,7 @@ func TestPreviewStore_CreatePreviewTarget(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO preview_targets").
-		WithArgs(previewAnyArgs(10)...).
+		WithArgs(previewAnyArgs(11)...).
 		WillReturnRows(pgxmock.NewRows(previewTargetTestCols).AddRow(newPreviewTargetRow(targetID, orgID, repoID, userID, now)...))
 
 	err = store.CreatePreviewTarget(context.Background(), target)
@@ -244,7 +244,7 @@ func TestPreviewStore_CreatePreviewInstance(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(19)...).
+		WithArgs(previewAnyArgs(21)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(generatedID, sessionID, orgID, userID, now)...),
@@ -424,7 +424,7 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 			store := NewPreviewStore(mock)
 
 			mock.ExpectExec("UPDATE preview_instances SET status").
-				WithArgs(previewAnyArgs(4)...).
+				WithArgs(previewAnyArgs(5)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
 
@@ -467,7 +467,7 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalCascadesChildren(t *testing.T)
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -493,7 +493,7 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalUpdateError(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnError(errors.New("update failed"))
 	mock.ExpectRollback()
 
@@ -514,7 +514,7 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalRollbackOnCascadeError(t *test
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -538,7 +538,7 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalRollbackOnInfraCascadeError(t 
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -565,7 +565,7 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalCommitError(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -607,7 +607,7 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_NonTerminal(t *testing.T) {
 			store := NewPreviewStore(mock)
 
 			mock.ExpectExec("UPDATE preview_instances SET status").
-				WithArgs(previewAnyArgs(4)...).
+				WithArgs(previewAnyArgs(5)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
 
@@ -653,7 +653,7 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadesChildren(t *te
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -680,7 +680,7 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalUpdateError(t *testing
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnError(errors.New("update failed"))
 	mock.ExpectRollback()
 
@@ -702,7 +702,7 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadeError(t *testin
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -727,7 +727,7 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCommitError(t *testing
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(previewAnyArgs(5)...).
@@ -756,7 +756,7 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_NoCascadeWhenAlreadyTerminal(t
 	mock.ExpectBegin()
 	// Conditional update affects 0 rows (preview was already terminal).
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(previewAnyArgs(4)...).
+		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	// No cascade expected — children were already updated by the prior terminal write.
 	mock.ExpectRollback()

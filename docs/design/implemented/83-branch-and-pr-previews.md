@@ -9,18 +9,22 @@ The implemented branch preview primitive now has:
 
 - Durable `preview_targets` and `preview_links` records for stable branch/commit/config targets.
 - Target-owned `preview_instances` with nullable `session_id` and optional `preview_target_id`.
-- `POST /api/v1/previews` to create or reuse a target, reserve a runtime, honor bounded `ttl_seconds`, persist `Idempotency-Key`, support `restart=true`, validate supplied SHAs against GitHub, support source-metadata idempotency, and enqueue `start_branch_preview`.
+- `POST /api/v1/previews` to create or reuse a target, reserve a runtime, honor bounded `ttl_seconds`, persist `Idempotency-Key`, support `restart=true`, validate supplied SHAs against GitHub, validate committed `.143/config.json` preview config selection before target creation, support source-metadata idempotency, and enqueue `start_branch_preview`.
 - `GET /api/v1/previews` and `GET /api/v1/previews/{preview_id}` for recent target/runtime lists and stable target/runtime status, including repo/branch/source links, current phase, failure text, services, infrastructure, and recent startup logs.
 - `POST /api/v1/previews/{preview_id}/stop`, `/restart`, `/start-latest`, and `/bootstrap` for runtime control, latest branch-head starts, and preview access bootstrap.
 - Durable PR preview resolution at `/previews/github/{owner}/{repo}/pull/{number}` backed by `GET /api/v1/previews/github/{owner}/{repo}/pull/{number}`. The route resolves the PR head, opens a matching active runtime, flags stale active previews with `new_commits_available`, starts the latest head when allowed, and keeps retry/diagnostics on the same stable URL.
+- Generic stored preview-link resolution through `GET /api/v1/previews/links/{link_type}/{slug...}` and the matching `/previews/links/{link_type}/{slug...}` frontend route.
 - A `start_branch_preview` worker job that creates a cold sandbox, clones the GitHub repo, checks out the pinned commit, loads `.143/config.json`, and launches through the existing preview manager/provider path.
-- Config digest persistence on the target after the worker resolves the checked-out `.143/config.json`, with support for both single preview configs and named multi-config maps through `preview_config_name`.
-- Branch preview creation entry points in the command palette, repository page, session detail header, `/previews/new`, `/previews/[id]`, and the durable PR route.
+- Config digest persistence on the target after the worker resolves the checked-out `.143/config.json`, with support for both single preview configs and named multi-config maps through `preview_config_name`. The frontend create flow also resolves committed config options through `GET /api/v1/previews/configs` and presents a selector when named configs exist.
+- Branch preview creation entry points in the command palette, repository page, session detail header, PR header action, `/previews/new`, `/previews/[id]`, `/previews/links/{link_type}/{slug...}`, and the durable PR route.
 - Generated GitHub PR bodies get a stable app-owned preview link appended after the PR number is known.
-- Session preview reuse when a session-sourced branch preview matches an already-active session runtime at the same commit; the existing runtime is attached to the branch target instead of starting a cold clone.
+- Session preview reuse when a session-sourced branch preview matches an already-active session runtime at the same commit; the existing runtime is attached to the branch target instead of starting a cold clone. Session detail labels the action as `Open preview` or `Preview current sandbox` based on the running/unpushed session state.
 - Scoped preview API tokens stored as hashes in `preview_api_tokens`, with `previews:create`, `previews:read`, and `previews:stop` scopes plus optional repository allowlists. Preview API tokens can authenticate only `/api/v1/previews*` routes.
+- An admin Preview API settings page for creating, listing, and revoking scoped preview API tokens.
 - Separate standalone branch-preview quota counters for user/org accounting so standalone branch previews do not consume the session-preview quota surface, while worker saturation remains shared.
-- A small `cmd/preview` CLI for external callers: `143-preview create --repository-id UUID --branch BRANCH`.
+- Startup progress and diagnostics in preview detail pages, including phase steps, stable-link expired state, created/source/request metadata, services, infrastructure, and recent logs.
+- Metrics for branch preview creates, idempotency hits, stable-link opens with expiry state, checkout duration, install/build/start/readiness phase duration buckets, startup failures, runtime minutes on worker stop/cleanup paths, and startup concurrency deltas with org/repo dimensions.
+- A small `cmd/preview` CLI for external callers: `143 preview create --repo owner/name --branch BRANCH`, with `--repository-id` retained for direct UUID callers.
 
 Session previews continue to use their existing session-backed startup path while sharing the same runtime table, gateway, bootstrap token, lifecycle, worker routing machinery, and branch-preview target attachment when the user opens a branch-owned preview from session detail.
 

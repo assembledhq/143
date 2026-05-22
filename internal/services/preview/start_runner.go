@@ -158,37 +158,45 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("get GitHub token: %v", err))
 		return fmt.Errorf("get github token: %w", err)
 	}
+	if err := r.previews.UpdatePreviewPhase(ctx, payload.OrgID, payload.PreviewID, "checkout"); err != nil {
+		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("failed to persist checkout preview phase")
+	}
 	checkoutStarted := time.Now()
 	if err := r.sandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, target.Branch, token); err != nil {
-		metrics.RecordBranchPreviewStartupFailure(ctx, string(target.SourceType), repo.FullName, "clone")
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "clone")
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("clone repository: %v", err))
 		return fmt.Errorf("clone repository: %w", err)
 	}
 	var checkoutErr bytes.Buffer
 	exitCode, err := r.sandboxProvider.Exec(ctx, sb, "git checkout --detach "+target.CommitSHA, io.Discard, &checkoutErr)
 	if err != nil {
-		metrics.RecordBranchPreviewStartupFailure(ctx, string(target.SourceType), repo.FullName, "checkout")
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout")
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("checkout commit: %v", err))
 		return fmt.Errorf("checkout commit: %w", err)
 	}
 	if exitCode != 0 {
-		metrics.RecordBranchPreviewStartupFailure(ctx, string(target.SourceType), repo.FullName, "checkout")
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout")
 		msg := checkoutErr.String()
 		r.abort(ctx, reservation, sb.ID, "checkout commit failed: "+msg)
 		return fmt.Errorf("checkout commit failed with code %d: %s", exitCode, msg)
 	}
-	metrics.RecordBranchPreviewCheckout(ctx, string(target.SourceType), repo.FullName, time.Since(checkoutStarted))
+	metrics.RecordBranchPreviewCheckout(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, time.Since(checkoutStarted))
+	metrics.RecordBranchPreviewPhaseDuration(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout", time.Since(checkoutStarted))
 
+	if err := r.previews.UpdatePreviewPhase(ctx, payload.OrgID, payload.PreviewID, "config"); err != nil {
+		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("failed to persist config preview phase")
+	}
+	configStarted := time.Now()
 	cfg := payload.Config
 	if cfg == nil {
 		cfg, err = r.readWorkspacePreviewConfig(ctx, sb, uuid.Nil, target.PreviewConfigName)
 		if err != nil {
-			metrics.RecordBranchPreviewStartupFailure(ctx, string(target.SourceType), repo.FullName, "config")
+			metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config")
 			r.abort(ctx, reservation, sb.ID, fmt.Sprintf("read workspace config: %v", err))
 			return fmt.Errorf("PREVIEW_CONFIG_READ_FAILED: %w", err)
 		}
 		if cfg == nil {
-			metrics.RecordBranchPreviewStartupFailure(ctx, string(target.SourceType), repo.FullName, "config_missing")
+			metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config_missing")
 			r.abort(ctx, reservation, sb.ID, previewNoConfigMessage)
 			return fmt.Errorf("PREVIEW_NO_CONFIG: %s", previewNoConfigMessage)
 		}
@@ -196,6 +204,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	if target.PreviewConfigName != "" && cfg.Name == "" {
 		cfg.Name = target.PreviewConfigName
 	}
+	metrics.RecordBranchPreviewPhaseDuration(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config", time.Since(configStarted))
 	if err := r.previews.UpdatePreviewTargetConfigDigest(ctx, payload.OrgID, payload.PreviewTargetID, computeConfigDigest(cfg)); err != nil {
 		r.logger.Warn().Err(err).
 			Str("preview_id", payload.PreviewID.String()).
@@ -204,15 +213,20 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	}
 
 	input := StartPreviewInput{
-		SessionID:       uuid.Nil,
-		PreviewTargetID: payload.PreviewTargetID,
-		OrgID:           payload.OrgID,
-		UserID:          payload.UserID,
-		Config:          cfg,
-		Sandbox:         sb,
-		BaseCommitSHA:   target.CommitSHA,
-		ProfileName:     payload.ProfileName,
+		SessionID:                 uuid.Nil,
+		PreviewTargetID:           payload.PreviewTargetID,
+		OrgID:                     payload.OrgID,
+		UserID:                    payload.UserID,
+		Config:                    cfg,
+		Sandbox:                   sb,
+		BaseCommitSHA:             target.CommitSHA,
+		ProfileName:               payload.ProfileName,
+		RequestID:                 target.RequestID,
+		MetricsSource:             string(target.SourceType),
+		MetricsRepositoryFullName: repo.FullName,
 	}
+	metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, 1)
+	defer metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, -1)
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
 		classified := ClassifyLaunchFailure(err)

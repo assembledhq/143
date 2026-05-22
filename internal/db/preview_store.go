@@ -54,11 +54,12 @@ const terminalStatusFilter = `('stopped', 'expired', 'failed')`
 const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-0000-000000000000'::uuid) AS session_id, preview_target_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
+	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox,
+	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
 
 const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
 	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
-	created_by_user_id, created_at`
+	created_by_user_id, request_id, created_at`
 
 const previewLinkColumns = `id, org_id, preview_target_id, link_type, slug,
 	repository_id, pr_number, created_at, updated_at`
@@ -100,16 +101,17 @@ func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.P
 	query := fmt.Sprintf(`
 		INSERT INTO preview_targets (
 			org_id, repository_id, branch, commit_sha, preview_config_name,
-			resolved_config_digest, source_type, source_id, source_url, created_by_user_id
+			resolved_config_digest, source_type, source_id, source_url, created_by_user_id, request_id
 		) VALUES (
 			@org_id, @repository_id, @branch, @commit_sha, @preview_config_name,
-			@resolved_config_digest, @source_type, @source_id, @source_url, @created_by_user_id
+			@resolved_config_digest, @source_type, @source_id, @source_url, @created_by_user_id, @request_id
 		)
 		ON CONFLICT (org_id, repository_id, branch, commit_sha, preview_config_name)
 		DO UPDATE SET
 			source_type = EXCLUDED.source_type,
 			source_id = EXCLUDED.source_id,
-			source_url = EXCLUDED.source_url
+			source_url = EXCLUDED.source_url,
+			request_id = EXCLUDED.request_id
 		RETURNING %s`, previewTargetColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -123,6 +125,7 @@ func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.P
 		"source_id":              target.SourceID,
 		"source_url":             target.SourceURL,
 		"created_by_user_id":     target.CreatedByUserID,
+		"request_id":             target.RequestID,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview target: %w", err)
@@ -383,12 +386,14 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 			session_id, org_id, user_id, profile_name, name, status, provider,
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
-			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox
+			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox,
+			current_phase, request_id
 		) VALUES (
 			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
-			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox
+			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox,
+			@current_phase, @request_id
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -411,6 +416,8 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 		"cpu_limit_millis": p.CPULimitMillis,
 		"recycle_config":   p.RecycleConfig,
 		"recycle_sandbox":  p.RecycleSandbox,
+		"current_phase":    p.CurrentPhase,
+		"request_id":       p.RequestID,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview instance: %w", err)
@@ -436,12 +443,14 @@ func (s *PreviewStore) CreateBranchPreviewInstance(ctx context.Context, p *model
 			session_id, preview_target_id, org_id, user_id, profile_name, name, status, provider,
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
-			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox
+			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox,
+			current_phase, request_id
 		) VALUES (
 			NULL, @preview_target_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
-			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox
+			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox,
+			@current_phase, @request_id
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -464,6 +473,8 @@ func (s *PreviewStore) CreateBranchPreviewInstance(ctx context.Context, p *model
 		"cpu_limit_millis":  p.CPULimitMillis,
 		"recycle_config":    p.RecycleConfig,
 		"recycle_sandbox":   p.RecycleSandbox,
+		"current_phase":     p.CurrentPhase,
+		"request_id":        p.RequestID,
 	})
 	if err != nil {
 		return fmt.Errorf("insert branch preview instance: %w", err)
@@ -583,6 +594,24 @@ func (s *PreviewStore) UpdatePreviewWorkerNodeID(ctx context.Context, orgID, id 
 	return nil
 }
 
+// UpdatePreviewPhase records the current startup phase for status reloads and
+// support diagnostics. The update is scoped to active startup because terminal
+// status transitions own the final phase label.
+func (s *PreviewStore) UpdatePreviewPhase(ctx context.Context, orgID, id uuid.UUID, phase string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET current_phase = @phase, updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "phase": phase},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview phase: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found or terminal")
+	}
+	return nil
+}
+
 // UpdatePreviewStatus updates the status and optional error of a preview.
 // For terminal statuses (stopped, failed, expired), it also sets stopped_at
 // and cascades the terminal transition to non-terminal child preview_services
@@ -625,15 +654,16 @@ func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.U
 
 func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	var query string
+	phase := previewPhaseForStatus(status)
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	} else {
-		query = `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id": id, "org_id": orgID, "status": status, "error": errMsg,
+		"id": id, "org_id": orgID, "status": status, "phase": phase, "error": errMsg,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("update preview status: %w", err)
@@ -681,19 +711,37 @@ func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, i
 }
 
 func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
-	query := `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
+	phase := previewPhaseForStatus(status)
+	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id": id, "org_id": orgID, "status": status, "error": errMsg,
+		"id": id, "org_id": orgID, "status": status, "phase": phase, "error": errMsg,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("conditional update preview status: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+func previewPhaseForStatus(status models.PreviewStatus) string {
+	switch status {
+	case models.PreviewStatusReady, models.PreviewStatusPartiallyReady:
+		return "ready"
+	case models.PreviewStatusUnhealthy:
+		return "unhealthy"
+	case models.PreviewStatusStopped:
+		return "stopped"
+	case models.PreviewStatusExpired:
+		return "expired"
+	case models.PreviewStatusFailed:
+		return "failed"
+	default:
+		return "starting"
+	}
 }
 
 // UpdatePreviewAccess updates the last_accessed_at timestamp.

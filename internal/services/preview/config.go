@@ -78,6 +78,15 @@ type rawPreviewConfig struct {
 	Ready   *models.ReadinessProbe `json:"ready,omitempty"`
 }
 
+// ConfigOptions is lightweight metadata for presenting committed preview
+// config choices without launching a runtime.
+type ConfigOptions struct {
+	Names             []string `json:"names"`
+	DefaultName       string   `json:"default_name,omitempty"`
+	SelectedName      string   `json:"selected_name,omitempty"`
+	RequiresSelection bool     `json:"requires_selection"`
+}
+
 // isSingleService returns true if the config uses single-service top-level format.
 func (r *rawPreviewConfig) isSingleService() bool {
 	return len(r.Services) == 0 && len(r.Command) > 0
@@ -172,6 +181,55 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// InspectConfigOptions returns available named preview configs and the config
+// that would be selected for a request. It intentionally avoids full validation
+// so the create form can stay fast and only needs one GitHub content fetch.
+func InspectConfigOptions(data []byte, name string) (ConfigOptions, error) {
+	previewData, err := extractPreviewSection(data)
+	if err != nil {
+		return ConfigOptions{}, err
+	}
+	var probe struct {
+		Default string                     `json:"default"`
+		Configs map[string]json.RawMessage `json:"configs"`
+	}
+	if err := json.Unmarshal(previewData, &probe); err != nil {
+		return ConfigOptions{}, fmt.Errorf("parse preview config metadata: %w", err)
+	}
+	selectedName := strings.TrimSpace(name)
+	if len(probe.Configs) > 0 {
+		names := sortedPreviewConfigNames(probe.Configs)
+		defaultName := strings.TrimSpace(probe.Default)
+		if selectedName == "" {
+			selectedName = defaultName
+		}
+		if selectedName == "" && len(names) == 1 {
+			selectedName = names[0]
+		}
+		return ConfigOptions{
+			Names:             names,
+			DefaultName:       defaultName,
+			SelectedName:      selectedName,
+			RequiresSelection: selectedName == "",
+		}, nil
+	}
+	var raw rawPreviewConfig
+	if err := json.Unmarshal(previewData, &raw); err != nil {
+		return ConfigOptions{}, fmt.Errorf("parse preview config metadata: %w", err)
+	}
+	configName := strings.TrimSpace(raw.Name)
+	if configName == "" {
+		configName = "default"
+	}
+	if selectedName == "" {
+		selectedName = configName
+	}
+	return ConfigOptions{
+		Names:        []string{configName},
+		SelectedName: selectedName,
+	}, nil
 }
 
 func selectNamedPreviewSection(previewData []byte, name string) ([]byte, bool, error) {

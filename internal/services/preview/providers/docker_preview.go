@@ -233,70 +233,88 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	d.previews[handle] = state
 	d.mu.Unlock()
 
-	// Phase 1: Provision infrastructure containers.
 	infraCreds := make(map[string]preview.InfraCredential)
-	for name, infraCfg := range cfg.Infrastructure {
-		tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
-		if !ok {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
+	var svcEnvs map[string]map[string]string
+	if err := func() (phaseErr error) {
+		notifyPhaseStart(observer, "install_build")
+		defer func() { notifyPhaseEnd(observer, "install_build", phaseErr) }()
+
+		// Phase 1: Provision infrastructure containers.
+		for name, infraCfg := range cfg.Infrastructure {
+			tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
+			if !ok {
+				phaseErr = fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
+				return phaseErr
+			}
+
+			ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
+			if err != nil {
+				phaseErr = fmt.Errorf("provision infrastructure %q: %w", name, err)
+				return phaseErr
+			}
+			state.infra[name] = ih
+			infraCreds[name] = ih.Credential
 		}
 
-		ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
-		if err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("provision infrastructure %q: %w", name, err)
+		// Phase 2: Wait for infrastructure health.
+		for name, ih := range state.infra {
+			infraCfg := cfg.Infrastructure[name]
+			tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
+			if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
+				phaseErr = fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
+				return phaseErr
+			}
+			d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
 		}
-		state.infra[name] = ih
-		infraCreds[name] = ih.Credential
+
+		// Phase 3: Run init scripts.
+		for name, infraCfg := range cfg.Infrastructure {
+			if infraCfg.InitScript == "" {
+				continue
+			}
+			ih := state.infra[name]
+			if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
+				phaseErr = fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
+				return phaseErr
+			}
+			d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
+		}
+
+		// Phase 4: Build service environment with injected credentials.
+		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, extraEnv)
+		return nil
+	}(); err != nil {
+		d.cleanupState(handle)
+		return nil, err
 	}
-
-	// Phase 2: Wait for infrastructure health.
-	for name, ih := range state.infra {
-		infraCfg := cfg.Infrastructure[name]
-		tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
-		if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
-		}
-		d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
-	}
-
-	// Phase 3: Run init scripts.
-	for name, infraCfg := range cfg.Infrastructure {
-		if infraCfg.InitScript == "" {
-			continue
-		}
-		ih := state.infra[name]
-		if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
-		}
-		d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
-	}
-
-	// Phase 4: Build service environment with injected credentials.
-	svcEnvs := d.buildServiceEnvs(cfg, infraCreds, extraEnv)
 
 	// Phase 5: Start application services in dependency order
 	// (support services first, then primary).
 	primaryPort := 0
-	for name, svcCfg := range cfg.Services {
-		if name == cfg.Primary {
-			continue // primary starts last
+	if err := func() (phaseErr error) {
+		notifyPhaseStart(observer, "start_services")
+		defer func() { notifyPhaseEnd(observer, "start_services", phaseErr) }()
+		for name, svcCfg := range cfg.Services {
+			if name == cfg.Primary {
+				continue // primary starts last
+			}
+			if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
+				phaseErr = fmt.Errorf("start service %q: %w", name, err)
+				return phaseErr
+			}
 		}
-		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("start service %q: %w", name, err)
+		// Start primary service.
+		if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+			primaryPort = primaryCfg.Port
+			if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
+				phaseErr = fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
+				return phaseErr
+			}
 		}
-	}
-	// Start primary service.
-	if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
-		primaryPort = primaryCfg.Port
-		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
-		}
+		return nil
+	}(); err != nil {
+		d.cleanupState(handle)
+		return nil, err
 	}
 	state.primaryPort = primaryPort
 
@@ -308,66 +326,72 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	// The caller receives a PartiallyReady flag on the handle so the manager
 	// can set the correct status.
 	partiallyReady := false
-	if cfg.Progressive && len(cfg.Services) > 1 {
-		// Wait for primary first.
-		if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
-			timeout := 90 * time.Second
-			if primaryCfg.Ready.TimeoutSeconds > 0 {
-				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+	if err := func() (phaseErr error) {
+		notifyPhaseStart(observer, "readiness")
+		defer func() { notifyPhaseEnd(observer, "readiness", phaseErr) }()
+
+		if cfg.Progressive && len(cfg.Services) > 1 {
+			// Wait for primary first.
+			if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+				timeout := 90 * time.Second
+				if primaryCfg.Ready.TimeoutSeconds > 0 {
+					timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+				}
+				if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+					errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+					notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+					phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+					return phaseErr
+				}
+				if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
+					errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+					notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+					phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+					return phaseErr
+				}
+				d.mu.Lock()
+				state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+				pid := state.services[cfg.Primary].pid
+				d.mu.Unlock()
+				d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
+				notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
+				partiallyReady = true
 			}
-			if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
-				errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
-				notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
-				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
-			}
-			if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
-				errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
-				notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
-				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
-			}
-			d.mu.Lock()
-			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
-			pid := state.services[cfg.Primary].pid
-			d.mu.Unlock()
-			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
-			notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
-			partiallyReady = true
+
+			// Wait for support services in the background.
+			state.wg.Add(1)
+			go func() {
+				defer state.wg.Done()
+				for name, svcCfg := range cfg.Services {
+					if name == cfg.Primary {
+						continue
+					}
+					timeout := 90 * time.Second
+					if svcCfg.Ready.TimeoutSeconds > 0 {
+						timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+					}
+					bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
+					if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+						errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+						d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed (progressive)")
+						notifyServiceFailed(observer, name, errMsg, tail)
+					} else {
+						d.mu.Lock()
+						var pid int
+						if ss, ok := state.services[name]; ok {
+							ss.status = models.PreviewServiceStatusReady
+							pid = ss.pid
+						}
+						d.mu.Unlock()
+						d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
+						notifyServiceReady(observer, name, svcCfg.Port, pid)
+					}
+					cancel()
+				}
+			}()
+			return nil
 		}
 
-		// Wait for support services in the background.
-		state.wg.Add(1)
-		go func() {
-			defer state.wg.Done()
-			for name, svcCfg := range cfg.Services {
-				if name == cfg.Primary {
-					continue
-				}
-				timeout := 90 * time.Second
-				if svcCfg.Ready.TimeoutSeconds > 0 {
-					timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
-				}
-				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
-				if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
-					errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
-					d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed (progressive)")
-					notifyServiceFailed(observer, name, errMsg, tail)
-				} else {
-					d.mu.Lock()
-					var pid int
-					if ss, ok := state.services[name]; ok {
-						ss.status = models.PreviewServiceStatusReady
-						pid = ss.pid
-					}
-					d.mu.Unlock()
-					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
-					notifyServiceReady(observer, name, svcCfg.Port, pid)
-				}
-				cancel()
-			}
-		}()
-	} else {
 		// Standard: wait for all services before reporting ready.
 		for name, svcCfg := range cfg.Services {
 			timeout := 90 * time.Second
@@ -377,15 +401,15 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 				errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
 				notifyServiceFailed(observer, name, errMsg, tail)
-				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				return phaseErr
 			}
 			if name == cfg.Primary {
 				if err := d.verifyPrimaryReachable(ctx, state, name, svcCfg.Port); err != nil {
 					errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
 					notifyServiceFailed(observer, name, errMsg, tail)
-					d.cleanupState(handle)
-					return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+					phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+					return phaseErr
 				}
 			}
 			d.mu.Lock()
@@ -395,6 +419,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 			notifyServiceReady(observer, name, svcCfg.Port, pid)
 		}
+		return nil
+	}(); err != nil {
+		d.cleanupState(handle)
+		return nil, err
 	}
 
 	return &preview.PreviewHandle{
@@ -969,6 +997,29 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 		return
 	}
 	observer.OnServiceFailed(name, errMsg, tail)
+}
+
+type phaseObserver interface {
+	OnPhaseStart(name string)
+	OnPhaseEnd(name string, err error)
+}
+
+func notifyPhaseStart(observer preview.ServiceObserver, name string) {
+	if observer == nil {
+		return
+	}
+	if phaseObserver, ok := observer.(phaseObserver); ok {
+		phaseObserver.OnPhaseStart(name)
+	}
+}
+
+func notifyPhaseEnd(observer preview.ServiceObserver, name string, err error) {
+	if observer == nil {
+		return
+	}
+	if phaseObserver, ok := observer.(phaseObserver); ok {
+		phaseObserver.OnPhaseEnd(name, err)
+	}
 }
 
 // recordServiceReadinessFailure snapshots the live service output before
