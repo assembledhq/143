@@ -816,9 +816,12 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", candidate, err)
 			}
-			if _, err := ParseConfig(raw); err != nil {
-				t.Fatalf("committed .143/config.json failed to parse: %v", err)
-			}
+			cfg, err := ParseConfig(raw)
+			require.NoError(t, err, "committed .143/config.json should parse")
+			frontend, ok := cfg.Services["frontend"]
+			require.True(t, ok, "dogfood preview config should define the frontend service")
+			require.Contains(t, frontend.Env, "NEXT_PUBLIC_API_URL", "dogfood preview should explicitly neutralize public API origin inherited from the surrounding environment")
+			require.Equal(t, "", frontend.Env["NEXT_PUBLIC_API_URL"], "dogfood preview must force same-origin API calls so preview CSRF cookies match the request origin")
 			return
 		}
 		parent := filepath.Dir(dir)
@@ -844,6 +847,7 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
 			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
 			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
+			require.Contains(t, string(raw), "unset NEXT_PUBLIC_API_URL", "dogfood Next preview script should keep API calls same-origin even when run from a shell with public API env")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
 			return
