@@ -289,7 +289,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 		if !isHighSeverity(issue.Severity) || score.Score < 60 {
 			s.logger.Debug().
 				Str("org_id", orgID.String()).
-				Str("severity", issue.Severity).
+				Str("severity", string(issue.Severity)).
 				Float64("score", score.Score).
 				Msg("auto-trigger skipped: auto_simple gate not met")
 			return nil
@@ -334,9 +334,9 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 		PrimaryIssueID: &issue.ID,
 		OrgID:          orgID,
 		AgentType:      agentType,
-		Status:         "pending",
-		AutonomyLevel:  settings.AutonomyLevel,
-		TokenMode:      "low",
+		Status:         models.SessionStatusPending,
+		AutonomyLevel:  models.SessionAutonomy(settings.AutonomyLevel),
+		TokenMode:      models.SessionTokenModeLow,
 		ComplexityTier: &estimate.Tier,
 		RepositoryID:   issue.RepositoryID,
 	}
@@ -366,9 +366,9 @@ func computeCustomerImpact(customers, occurrences int) float64 {
 	return math.Min(score, 100)
 }
 
-// computeSeverity maps severity string to a numeric score.
-func computeSeverity(severity string) float64 {
-	switch strings.ToLower(severity) {
+// computeSeverity maps severity to a numeric score.
+func computeSeverity(severity models.IssueSeverity) float64 {
+	switch strings.ToLower(string(severity)) {
 	case "critical":
 		return 100
 	case "high":
@@ -405,7 +405,7 @@ func (s *Service) computeDirectionAlignment(ctx context.Context, issue *models.I
 		ProductDirection: productDirection,
 		Title:            issue.Title,
 		Description:      desc,
-		Severity:         issue.Severity,
+		Severity:         string(issue.Severity),
 		OccurrenceCount:  issue.OccurrenceCount,
 	})
 
@@ -445,7 +445,7 @@ func (s *Service) estimateComplexityViaLLM(ctx context.Context, issue *models.Is
 	userPrompt := prompts.ComplexityEstimateUserPrompt(prompts.ComplexityEstimateUserPromptData{
 		Title:                 issue.Title,
 		Description:           desc,
-		Severity:              issue.Severity,
+		Severity:              string(issue.Severity),
 		OccurrenceCount:       issue.OccurrenceCount,
 		AffectedCustomerCount: issue.AffectedCustomerCount,
 	})
@@ -478,7 +478,7 @@ func (s *Service) estimateComplexityViaLLM(ctx context.Context, issue *models.Is
 
 // heuristicComplexity uses simple rules to estimate complexity without an LLM.
 func heuristicComplexity(issue *models.Issue) (tier int, label string, confidence float64, reasoning string) {
-	switch strings.ToLower(issue.Severity) {
+	switch strings.ToLower(string(issue.Severity)) {
 	case "critical":
 		return 3, "moderate", 0.4, "critical severity issues typically require moderate effort"
 	case "high":
@@ -510,8 +510,8 @@ func defaultOrValue(val, def float64) float64 {
 }
 
 // isHighSeverity returns true for critical or high severity.
-func isHighSeverity(severity string) bool {
-	s := strings.ToLower(severity)
+func isHighSeverity(severity models.IssueSeverity) bool {
+	s := strings.ToLower(string(severity))
 	return s == "critical" || s == "high"
 }
 

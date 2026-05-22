@@ -188,6 +188,18 @@ func TestParseConfig_RepoConfigWithoutPreviewSection(t *testing.T) {
 	require.Contains(t, err.Error(), "missing preview section", "ParseConfig should explain that .143/config.json requires a preview section for preview parsing")
 }
 
+func TestParseConfig_RepoConfigWithOnlyDependenciesWithoutPreviewSection(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseConfig([]byte(`{
+		"dependencies": {
+			"golangci-lint": "2.10.1"
+		}
+	}`))
+	require.Error(t, err, "ParseConfig should reject .143/config.json dependency-only files that omit the preview section")
+	require.Contains(t, err.Error(), "missing preview section", "ParseConfig should recognize dependencies as repo config and explain that preview is missing")
+}
+
 func TestParseConfig_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -816,9 +828,12 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", candidate, err)
 			}
-			if _, err := ParseConfig(raw); err != nil {
-				t.Fatalf("committed .143/config.json failed to parse: %v", err)
-			}
+			cfg, err := ParseConfig(raw)
+			require.NoError(t, err, "committed .143/config.json should parse")
+			frontend, ok := cfg.Services["frontend"]
+			require.True(t, ok, "dogfood preview config should define the frontend service")
+			require.Contains(t, frontend.Env, "NEXT_PUBLIC_API_URL", "dogfood preview should explicitly neutralize public API origin inherited from the surrounding environment")
+			require.Equal(t, "", frontend.Env["NEXT_PUBLIC_API_URL"], "dogfood preview must force same-origin API calls so preview CSRF cookies match the request origin")
 			return
 		}
 		parent := filepath.Dir(dir)
@@ -840,7 +855,12 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 		if _, err := os.Stat(candidate); err == nil {
 			raw, err := os.ReadFile(candidate)
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
-			require.Contains(t, string(raw), "--hostname 0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
+			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
+			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
+			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
+			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
+			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
+			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
 			return
 		}
 		parent := filepath.Dir(dir)

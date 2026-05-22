@@ -49,7 +49,7 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -213,6 +213,9 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					(*string)(nil),                // pr_creation_error
 					"idle",                        // pr_push_state
 					(*string)(nil),                // pr_push_error
+					"idle",                        // branch_creation_state
+					(*string)(nil),                // branch_creation_error
+					(*string)(nil),                // branch_url
 					nil,                           // diff_collected_at
 					nil,                           // latest_diff_snapshot_id
 					false,                         // has_unpushed_changes
@@ -776,7 +779,7 @@ func TestPRServiceMaybeAutoArchiveSessionOnPRCloseHandlesSnapshotFailures(t *tes
 			name: "logs when snapshot cleanup fails",
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				snapshotKey := "snap-key"
-				row := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				row := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
 				setPRHealthSessionRowValue(row, "snapshot_key", &snapshotKey)
 
 				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
@@ -859,7 +862,7 @@ func TestPRServiceRunMergedPullRequestFollowUpsHandlesWarningPaths(t *testing.T)
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				issueID := uuid.New()
 				snapshotKey := "snap-key"
-				sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
 				setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
 				setPRHealthSessionRowValue(sessionRow, "agent_type", "claude-code")
 				setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")

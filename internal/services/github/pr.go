@@ -435,6 +435,12 @@ type CreatePRParams struct {
 	AuthorMode string `json:"author_mode,omitempty"`
 }
 
+type CreateBranchResult struct {
+	Name    string
+	URL     string
+	HeadSHA string
+}
+
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
 // session's sandbox snapshot, committing any uncommitted changes, pushing to
 // a new remote branch, and opening a pull request against the repo's default
@@ -639,8 +645,8 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		Title:          title,
 		Body:           &body,
 		Status:         models.PullRequestStatusOpen,
-		ReviewStatus:   "pending",
-		AuthoredBy:     authoredBy,
+		ReviewStatus:   models.PullRequestReviewStatusPending,
+		AuthoredBy:     models.GitIdentitySource(authoredBy),
 		HeadSHA:        &headSHA,
 		HeadRef:        &headRef,
 	}
@@ -684,17 +690,113 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		s.linearMilestones(ctx, run.OrgID, run.ID, "pr_opened", prNumber)
 	}
 
-	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
+	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusPRCreated); err != nil {
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
 
 	if issue != nil && run.PrimaryIssueID != nil {
-		if err := s.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
+		if err := s.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, models.IssueStatusInProgress); err != nil {
 			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status")
 		}
 	}
 
 	return pr, nil
+}
+
+// CreateBranch pushes the session snapshot to the same remote branch that
+// CreatePR would use, but deliberately skips opening or storing a PullRequest
+// row. A later CreatePR call can still open a PR from the same branch.
+func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, params ...CreatePRParams) (*CreateBranchResult, error) {
+	if s.sandboxProvider == nil || s.snapshots == nil {
+		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
+	}
+	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		return nil, ErrSnapshotNotCaptured
+	}
+	if run.RepositoryID == nil {
+		return nil, fmt.Errorf("session %s has no repository", run.ID)
+	}
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if err == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("CreateBranch: failed to look up issue, proceeding without it")
+		}
+	}
+	issue = issueWithLinearHumanKey(issue, run.LinkedIssues)
+
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *run.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get repository: %w", err)
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if s.orgs != nil {
+		if org, orgErr := s.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+	}
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve token: %w", err)
+	}
+
+	branchName := formatBranchName(run, issue)
+	commitMsg := formatCommitMessage(run, issue)
+	authorName, authorEmail := identity.CommitIdentity(resolution)
+	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
+		if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				commitMsg += "\n\n" + trailer
+			}
+		}
+	}
+
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if pushed != nil && pushed.CapturedSnapshotPath != "" {
+			_ = os.Remove(pushed.CapturedSnapshotPath)
+		}
+	}()
+
+	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after branch creation")
+	}
+	if pushed.CapturedSnapshotErr != nil {
+		s.logger.Warn().
+			Err(pushed.CapturedSnapshotErr).
+			Str("session_id", run.ID.String()).
+			Msg("post-branch sandbox snapshot capture failed; resume will see stale state")
+	} else if pushed.CapturedSnapshotPath != "" {
+		newSnapshotKey := fmt.Sprintf("snapshots/%s/%s/post-branch.tar.zst", run.OrgID, run.ID)
+		if setErr := s.sessions.SetPendingSnapshotKey(ctx, run.OrgID, run.ID, newSnapshotKey); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
+		} else {
+			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
+			pushed.CapturedSnapshotPath = ""
+		}
+	}
+
+	return &CreateBranchResult{
+		Name:    branchName,
+		URL:     fmt.Sprintf("https://github.com/%s/tree/%s", repo.FullName, url.PathEscape(branchName)),
+		HeadSHA: pushed.HeadSHA,
+	}, nil
 }
 
 // ErrNoPullRequest is returned by PushChangesToPR when the session has no
@@ -1265,6 +1367,7 @@ trap cleanup EXIT
 cd %[2]s
 git config user.name %[3]s
 git config user.email %[4]s
+git checkout -B %[7]s
 git add -A
 if ! git diff --cached --quiet; then
     git commit -F %[1]s
@@ -1439,7 +1542,7 @@ func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models
 			snapshotKey = run.SnapshotKey
 			if s.issues != nil {
 				if run.PrimaryIssueID != nil {
-					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, "fixed"); err != nil {
+					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, models.IssueStatusFixed); err != nil {
 						s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status to fixed")
 					}
 				}
@@ -1641,12 +1744,12 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		return nil
 	}
 
-	var reviewStatus string
+	var reviewStatus models.PullRequestReviewStatus
 	switch event.Review.State {
 	case "approved":
-		reviewStatus = "approved"
+		reviewStatus = models.PullRequestReviewStatusApproved
 	case "changes_requested":
-		reviewStatus = "changes_requested"
+		reviewStatus = models.PullRequestReviewStatusChangesRequested
 	default:
 		return nil
 	}
@@ -1658,7 +1761,7 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 	// If the PR was approved, reinforce memories that were active for this repo.
 	// This closes the feedback loop: memories that helped produce approved code
 	// get stronger, while unused memories naturally decay.
-	if reviewStatus == "approved" {
+	if reviewStatus == models.PullRequestReviewStatusApproved {
 		s.enqueueReinforceMemories(ctx, pr.OrgID, pr.GitHubRepo)
 	}
 
@@ -2785,7 +2888,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 	if issue != nil {
 		userData.IssueTitle = issue.Title
 		userData.IssueSource = string(issue.Source)
-		userData.IssueSeverity = issue.Severity
+		userData.IssueSeverity = string(issue.Severity)
 	}
 
 	// Include the diff — truncated to keep the prompt manageable.
@@ -2924,7 +3027,7 @@ func (s *PRService) formatPRBody(_ context.Context, run *models.Session, issue *
 	if issue != nil {
 		fmt.Fprintf(&b, "**Issue**: %s — %s", issue.Source, issue.Title)
 		if issue.Severity != "" {
-			fmt.Fprintf(&b, " (%s)", issue.Severity)
+			fmt.Fprintf(&b, " (%s)", string(issue.Severity))
 		}
 		b.WriteString("\n\n")
 	}
@@ -2950,7 +3053,7 @@ func buildLabels(issue *models.Issue) []string {
 		return labels
 	}
 	if issue.Severity != "" {
-		labels = append(labels, "severity:"+issue.Severity)
+		labels = append(labels, "severity:"+string(issue.Severity))
 	}
 	if issue.Source != "" {
 		labels = append(labels, "source:"+string(issue.Source))
@@ -2987,11 +3090,11 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 			continue // Not a 143-managed PR.
 		}
 
-		ciStatus := "failure"
+		ciStatus := models.PullRequestCIStatusFailure
 		if event.CheckSuite.Conclusion != nil {
 			switch *event.CheckSuite.Conclusion {
 			case "success", "neutral", "skipped":
-				ciStatus = "success"
+				ciStatus = models.PullRequestCIStatusSuccess
 			}
 		}
 

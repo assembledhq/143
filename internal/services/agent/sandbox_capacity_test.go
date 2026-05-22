@@ -100,6 +100,43 @@ func (f *fakeLiveSandboxCounter) CountLiveSandboxes(context.Context) (int, error
 	return f.count, nil
 }
 
+type sequenceLiveSandboxCounter struct {
+	counts []int
+	calls  atomic.Int64
+}
+
+func (s *sequenceLiveSandboxCounter) CountLiveSandboxes(context.Context) (int, error) {
+	call := int(s.calls.Add(1))
+	if call <= len(s.counts) {
+		return s.counts[call-1], nil
+	}
+	return s.counts[len(s.counts)-1], nil
+}
+
+type fakeSandboxPressureCleaner struct {
+	err   error
+	calls atomic.Int64
+}
+
+func (f *fakeSandboxPressureCleaner) ReapForCapacity(context.Context, time.Time) error {
+	f.calls.Add(1)
+	return f.err
+}
+
+type deadlineObservingSandboxPressureCleaner struct {
+	calls       atomic.Int64
+	sawDeadline atomic.Bool
+}
+
+func (f *deadlineObservingSandboxPressureCleaner) ReapForCapacity(ctx context.Context, _ time.Time) error {
+	f.calls.Add(1)
+	if _, ok := ctx.Deadline(); ok {
+		f.sawDeadline.Store(true)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func TestSandboxCapacityGate_AcquireAllowsBelowCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -139,6 +176,71 @@ func TestSandboxCapacityGate_AcquireRejectsWhenFull(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "Acquire should reject when live sandboxes are already at capacity")
 	require.Nil(t, reservation, "Acquire should not return a reservation when capacity is exhausted")
 	require.Equal(t, 0, gate.ReservedCount(), "Rejected acquire should not leak a reservation")
+}
+
+func TestSandboxCapacityGate_AcquireRunsPressureCleanupBeforeRejectingFullHost(t *testing.T) {
+	t.Parallel()
+
+	counter := &sequenceLiveSandboxCounter{counts: []int{2, 1}}
+	cleaner := &fakeSandboxPressureCleaner{}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:         counter,
+		PressureCleaner: cleaner,
+		MaxActive:       2,
+		NodeID:          "worker-1",
+		Logger:          zerolog.Nop(),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
+	require.NoError(t, err, "Acquire should retry admission after pressure cleanup frees a sandbox slot")
+	require.NotNil(t, reservation, "Acquire should return a reservation after pressure cleanup creates capacity")
+	require.Equal(t, int64(1), cleaner.calls.Load(), "Acquire should run pressure cleanup once when the host initially appears full")
+	require.Equal(t, int64(2), counter.calls.Load(), "Acquire should recount live sandboxes after pressure cleanup")
+	reservation.Release()
+}
+
+func TestSandboxCapacityGate_AcquireRunsPressureCleanupAtMostOnce(t *testing.T) {
+	t.Parallel()
+
+	counter := &sequenceLiveSandboxCounter{counts: []int{2, 2}}
+	cleaner := &fakeSandboxPressureCleaner{}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:         counter,
+		PressureCleaner: cleaner,
+		MaxActive:       2,
+		NodeID:          "worker-1",
+		Logger:          zerolog.Nop(),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "Acquire should reject when pressure cleanup does not free capacity")
+	require.Nil(t, reservation, "Acquire should not return a reservation when the host remains full after cleanup")
+	require.Equal(t, int64(1), cleaner.calls.Load(), "Acquire should not loop pressure cleanup indefinitely")
+	require.Equal(t, int64(2), counter.calls.Load(), "Acquire should recount exactly once after pressure cleanup")
+}
+
+func TestSandboxCapacityGate_AcquireBoundsPressureCleanupWithTimeout(t *testing.T) {
+	t.Parallel()
+
+	counter := &sequenceLiveSandboxCounter{counts: []int{2, 2}}
+	cleaner := &deadlineObservingSandboxPressureCleaner{}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:                counter,
+		PressureCleaner:        cleaner,
+		PressureCleanupTimeout: 20 * time.Millisecond,
+		MaxActive:              2,
+		NodeID:                 "worker-1",
+		Logger:                 zerolog.Nop(),
+	})
+
+	started := time.Now()
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "Acquire should reject when deadline-bounded pressure cleanup does not free capacity")
+	require.Nil(t, reservation, "Acquire should not return a reservation after timed-out pressure cleanup")
+	require.Less(t, time.Since(started), 500*time.Millisecond, "Acquire should bound pressure cleanup with the configured timeout")
+	require.Equal(t, int64(1), cleaner.calls.Load(), "Acquire should invoke pressure cleanup once")
+	require.True(t, cleaner.sawDeadline.Load(), "Acquire should pass a deadline-limited context to pressure cleanup")
+	require.Equal(t, int64(2), counter.calls.Load(), "Acquire should recount after deadline-bounded pressure cleanup")
 }
 
 func TestSandboxCapacityGate_AcquireRejectsOnCountFailure(t *testing.T) {

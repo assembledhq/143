@@ -90,7 +90,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
 	require.NoError(t, err, "UpdateResult should persist a diff snapshot when provenance is present")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -107,7 +107,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotBeginFailure(t *testing.T) {
 		DiffWorkspaceDirty: true,
 	}
 
-	err := store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", result)
+	err := store.UpdateResult(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted, result)
 	require.Error(t, err, "UpdateResult should return an error when transactions are unavailable")
 	require.Contains(t, err.Error(), "does not support transactions", "UpdateResult should surface the missing transaction support")
 }
@@ -241,7 +241,7 @@ func TestSessionStore_UpdateResult_PreservesDiffWhenNil(t *testing.T) {
 			),
 		)
 
-	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
 	require.NoError(t, err, "UpdateResult should succeed when diff is nil")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

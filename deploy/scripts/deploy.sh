@@ -81,9 +81,16 @@ warn_docker_dns_skipped() {
 # testing without touching the script that runs as root.
 DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
 
-run_sandbox_resolv_conf() {
+# App deploys must keep the Cloudflare-facing origin bound on 80/443. The
+# daemon hardening helpers below can restart Docker when daemon.json changes,
+# which recycles Caddy and creates a visible origin outage on a single app
+# host. Keep those checks out of routine app deploys unless an operator is
+# intentionally running maintenance.
+ALLOW_DEPLOY_DOCKER_DAEMON_RESTART="${ALLOW_DEPLOY_DOCKER_DAEMON_RESTART:-0}"
+
+run_worker_host_reconcile() {
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n /opt/143/deploy/scripts/sandbox-resolv-conf.sh"
+    "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
 }
 
 # --- Refresh secrets from .env.production.enc ---
@@ -123,7 +130,8 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "db" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for db role (set it or add to .env.production.enc)}"
-    printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
+    : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node primary private IP)}"
+    printf 'DB_PASSWORD=%s\nDB_BIND_IP=%s\n' "$DB_PASSWORD" "$DB_BIND_IP" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "redis" ]; then
     : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
@@ -140,12 +148,11 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${SANDBOX_GC_GRACE:=30m}"
     : "${SANDBOX_GC_HARD_MAX:=24h}"
     # Refresh the shared secrets in /opt/143/.env, then re-append the per-host
-    # identity from /opt/143/.env.local (NODE_ID, WORKER_PRIVATE_IP,
-    # PREVIEW_INTERNAL_BASE_URL) so docker compose can still interpolate them
-    # when it parses the compose file. .env.local is owned by provisioning
-    # and we abort if it's missing instead of silently coming up with an
-    # empty NODE_ID and WORKER_PRIVATE_IP=0.0.0.0 (would expose worker to
-    # the public internet).
+    # identity/runtime values from /opt/143/.env.local (NODE_ID,
+    # WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) so docker
+    # compose can still interpolate them when it parses the compose file.
+    # .env.local is owned by provisioning and we abort if it's missing instead
+    # of silently coming up with empty/unsafe defaults.
     printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
@@ -156,9 +163,18 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
           chmod 600 /opt/143/.env
           if [ ! -f /opt/143/.env.local ]; then
             echo "ERROR: /opt/143/.env.local is missing on this host." >&2
-            echo "       It holds NODE_ID, WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL." >&2
+            echo "       It holds NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID." >&2
             echo "       Re-run: make provision-worker HOST=<this-host>" >&2
             exit 1
+          fi
+          if ! grep -q "^DOCKER_GID=" /opt/143/.env.local; then
+            DOCKER_GID="$(getent group docker | cut -d: -f3)"
+            if [ -z "$DOCKER_GID" ]; then
+              echo "ERROR: could not resolve docker group GID on this worker." >&2
+              echo "       Re-run: make provision-worker HOST=<this-host>" >&2
+              exit 1
+            fi
+            printf "DOCKER_GID=%s\n" "$DOCKER_GID" >> /opt/143/.env.local
           fi
           cat /opt/143/.env.local >> /opt/143/.env
         '
@@ -204,10 +220,17 @@ if [ "$ROLE" = "logging" ]; then
   # so the rm still runs on hosts where files are already deploy-owned.
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "sudo -n chown -R deploy:deploy /opt/143/deploy/vmalert 2>&1 | sed 's/^/  chown: /' || true; \
-     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true"
+     sudo -n chown -R deploy:deploy /opt/143/deploy/grafana 2>&1 | sed 's/^/  chown: /' || true; \
+     sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -rf /opt/143/deploy/grafana/provisioning /opt/143/deploy/vmalert/rules && mkdir -p /opt/143/deploy/grafana /opt/143/deploy/vmalert"
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/grafana/provisioning" deploy@"$HOST":/opt/143/deploy/grafana/
   scp -r "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vmalert/rules" deploy@"$HOST":/opt/143/deploy/vmalert/
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/alertmanager_slack_relay.py" \
+    deploy@"$HOST":/opt/143/deploy/scripts/alertmanager_slack_relay.py.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/alertmanager_slack_relay.py.new /opt/143/deploy/scripts/alertmanager_slack_relay.py \
+     && chmod 644 /opt/143/deploy/scripts/alertmanager_slack_relay.py \
+     || { rm -f /opt/143/deploy/scripts/alertmanager_slack_relay.py.new; exit 1; }"
 fi
 if [ "$ROLE" = "app" ]; then
   # Sync Caddyfile so the remote always has the latest reverse-proxy config.
@@ -271,19 +294,23 @@ if [ "$ROLE" = "worker" ]; then
      && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      || { rm -f /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new; exit 1; }"
 
-  # Refresh /etc/143/sandbox-resolv.conf to match the version of the writer
-  # script in this deploy. This is required config, not optional hardening:
-  # stale DNS strands all new sandboxes on preview-infra lookups. Run it from
-  # the local deploy flow so legacy workers missing the new sudoers grant can
-  # use the same no-teardown repair path as other deploy-time sudo helpers.
-  echo "Refreshing sandbox resolv.conf..."
-  if ! run_sandbox_resolv_conf; then
-    echo "sandbox-resolv-conf.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  # Sync the canonical worker host reconciler. It owns the sandbox network,
+  # firewall, resolv.conf, sandbox-auth socket dir, and worker sysctl state.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/reconcile-worker-host.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/reconcile-worker-host.sh.new
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh \
+     && chmod +x /opt/143/deploy/scripts/reconcile-worker-host.sh \
+     || { rm -f /opt/143/deploy/scripts/reconcile-worker-host.sh.new; exit 1; }"
+
+  echo "Reconciling worker host invariants..."
+  if ! run_worker_host_reconcile; then
+    echo "reconcile-worker-host.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
-      echo "Retrying sandbox resolv.conf refresh after sudoers repair..."
-      run_sandbox_resolv_conf
+      echo "Retrying worker host reconciliation after sudoers repair..."
+      run_worker_host_reconcile
     else
-      echo "ERROR: sandbox-resolv-conf.sh failed and sudoers repair via root SSH did not complete."
+      echo "ERROR: reconcile-worker-host.sh failed and sudoers repair via root SSH did not complete."
       echo "  Run once from a machine with root SSH access:"
       echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
       echo "  Then re-run the deploy."
@@ -304,128 +331,136 @@ if [ "$ROLE" = "worker" ]; then
      || { rm -f /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 fi
 
-# --- Docker log rotation (idempotent) ---
-# Cap container log file growth so a chatty container can't fill the disk.
-# Docker's default json-file driver has no size limit. Logs ship to
-# VictoriaLogs (Vector → 30d retention) on app/worker/logging hosts; the
-# local file is just a buffer plus a crash-recovery window. db and redis
-# hosts have no Vector — the local file is the only copy — so db gets a
-# larger cap because postgresql.conf logs every connection, every query
-# >500ms, and every lock wait, and the entire trail is local-only.
-#
-# Sync the helper, then call it via deploy+sudo (matches sandbox-firewall.sh
-# pattern). The script is idempotent and only restarts docker when the
-# content of /etc/docker/daemon.json actually changes, so steady-state
-# deploys cost nothing.
-case "$ROLE" in
-  db) LOG_MAX_SIZE="500m" ;;  # postgres logs are verbose AND local-only
-  *)  LOG_MAX_SIZE="100m" ;;
-esac
-LOG_MAX_FILE="5"
-LOG_ROTATION_READY=1
+if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  echo "Skipping docker log rotation check on app deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 for explicit maintenance."
+else
+  # --- Docker log rotation (idempotent) ---
+  # Cap container log file growth so a chatty container can't fill the disk.
+  # Docker's default json-file driver has no size limit. Logs ship to
+  # VictoriaLogs (Vector → 30d retention) on app/worker/logging hosts; the
+  # local file is just a buffer plus a crash-recovery window. db and redis
+  # hosts have no Vector — the local file is the only copy — so db gets a
+  # larger cap because postgresql.conf logs every connection, every query
+  # >500ms, and every lock wait, and the entire trail is local-only.
+  #
+  # Sync the helper, then call it via deploy+sudo (matches sandbox-firewall.sh
+  # pattern). The script is idempotent and only restarts docker when the
+  # content of /etc/docker/daemon.json actually changes, so steady-state
+  # deploys cost nothing.
+  case "$ROLE" in
+    db) LOG_MAX_SIZE="500m" ;;  # postgres logs are verbose AND local-only
+    *)  LOG_MAX_SIZE="100m" ;;
+  esac
+  LOG_MAX_FILE="5"
+  LOG_ROTATION_READY=1
 
-# Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
-# avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
-# break the subsequent `sudo install-log-rotation.sh` exec.
-ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
-    deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
-  echo "install-log-rotation.sh sync failed; trying no-teardown deploy sudoers repair..."
-  if repair_deploy_sudoers; then
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
-      deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
-  else
-    warn_log_rotation_skipped
-    LOG_ROTATION_READY=0
-  fi
-fi
-if [ "$LOG_ROTATION_READY" -eq 1 ]; then
-  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
-     && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
-     || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"; then
-    warn_log_rotation_skipped
-    LOG_ROTATION_READY=0
-  fi
-fi
-
-if [ "$LOG_ROTATION_READY" -eq 1 ]; then
-  echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
-  # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
-  # prompt CI can't satisfy. If the repair path also isn't available, keep the
-  # deploy moving: log rotation is an operational hardening step, not the app
-  # or database rollout itself.
-  run_log_rotation() {
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
-  }
-  if ! run_log_rotation; then
-    echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  # Sync install-log-rotation.sh: stage to .new, atomic rename. Same ETXTBSY
+  # avoidance as sandbox-firewall.sh — a lingering FD on the old inode would
+  # break the subsequent `sudo install-log-rotation.sh` exec.
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+  if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new; then
+    echo "install-log-rotation.sh sync failed; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
-      echo "Retrying docker log rotation after sudoers repair..."
-      if ! run_log_rotation; then
-        warn_log_rotation_skipped
-      fi
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+      scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+        deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
     else
       warn_log_rotation_skipped
+      LOG_ROTATION_READY=0
+    fi
+  fi
+  if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+    if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
+       && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
+       || { rm -f /opt/143/deploy/scripts/install-log-rotation.sh.new; exit 1; }"; then
+      warn_log_rotation_skipped
+      LOG_ROTATION_READY=0
+    fi
+  fi
+
+  if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+    echo "Ensuring docker log rotation (max-size=$LOG_MAX_SIZE, max-file=$LOG_MAX_FILE)..."
+    # `sudo -n` so missing-sudoers fails fast instead of hanging on a password
+    # prompt CI can't satisfy. If the repair path also isn't available, keep the
+    # deploy moving: log rotation is an operational hardening step, not the app
+    # or database rollout itself.
+    run_log_rotation() {
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n /opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE $LOG_MAX_FILE"
+    }
+    if ! run_log_rotation; then
+      echo "install-log-rotation.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+      if repair_deploy_sudoers; then
+        echo "Retrying docker log rotation after sudoers repair..."
+        if ! run_log_rotation; then
+          warn_log_rotation_skipped
+        fi
+      else
+        warn_log_rotation_skipped
+      fi
     fi
   fi
 fi
 
-# --- Docker daemon DNS resolvers (idempotent) ---
-# Pin /etc/docker/daemon.json's `dns` list to multiple independent
-# resolvers so a single upstream DNS outage doesn't take every container's
-# outbound DNS down at once. The 2026-05-07T04:15Z incident hit three
-# workers simultaneously this way (sandboxes couldn't resolve chatgpt.com,
-# workers couldn't resolve github.com) because the embedded resolver at
-# 127.0.0.11 inherits a single host resolv.conf entry by default.
-#
-# Sync + invoke pattern mirrors install-log-rotation.sh above.
-DOCKER_DNS_READY=1
+if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  echo "Skipping docker daemon DNS check on app deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 for explicit maintenance."
+else
+  # --- Docker daemon DNS resolvers (idempotent) ---
+  # Pin /etc/docker/daemon.json's `dns` list to multiple independent
+  # resolvers so a single upstream DNS outage doesn't take every container's
+  # outbound DNS down at once. The 2026-05-07T04:15Z incident hit three
+  # workers simultaneously this way (sandboxes couldn't resolve chatgpt.com,
+  # workers couldn't resolve github.com) because the embedded resolver at
+  # 127.0.0.11 inherits a single host resolv.conf entry by default.
+  #
+  # Sync + invoke pattern mirrors install-log-rotation.sh above.
+  DOCKER_DNS_READY=1
 
-ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-  "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
-    deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new; then
-  echo "install-docker-dns.sh sync failed; trying no-teardown deploy sudoers repair..."
-  if repair_deploy_sudoers; then
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
-    scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
-      deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
-  else
-    warn_docker_dns_skipped
-    DOCKER_DNS_READY=0
-  fi
-fi
-if [ "$DOCKER_DNS_READY" -eq 1 ]; then
-  if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/install-docker-dns.sh.new /opt/143/deploy/scripts/install-docker-dns.sh \
-     && chmod +x /opt/143/deploy/scripts/install-docker-dns.sh \
-     || { rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new; exit 1; }"; then
-    warn_docker_dns_skipped
-    DOCKER_DNS_READY=0
-  fi
-fi
-
-if [ "$DOCKER_DNS_READY" -eq 1 ]; then
-  echo "Ensuring docker daemon DNS resolvers (${DOCKER_DNS_RESOLVERS[*]})..."
-  run_docker_dns() {
-    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-      "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh ${DOCKER_DNS_RESOLVERS[*]}"
-  }
-  if ! run_docker_dns; then
-    echo "install-docker-dns.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+  if ! scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new; then
+    echo "install-docker-dns.sh sync failed; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
-      echo "Retrying docker daemon DNS pinning after sudoers repair..."
-      if ! run_docker_dns; then
-        warn_docker_dns_skipped
-      fi
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
+      scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+        deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
     else
       warn_docker_dns_skipped
+      DOCKER_DNS_READY=0
+    fi
+  fi
+  if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+    if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "mv /opt/143/deploy/scripts/install-docker-dns.sh.new /opt/143/deploy/scripts/install-docker-dns.sh \
+       && chmod +x /opt/143/deploy/scripts/install-docker-dns.sh \
+       || { rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new; exit 1; }"; then
+      warn_docker_dns_skipped
+      DOCKER_DNS_READY=0
+    fi
+  fi
+
+  if [ "$DOCKER_DNS_READY" -eq 1 ]; then
+    echo "Ensuring docker daemon DNS resolvers (${DOCKER_DNS_RESOLVERS[*]})..."
+    run_docker_dns() {
+      ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+        "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh ${DOCKER_DNS_RESOLVERS[*]}"
+    }
+    if ! run_docker_dns; then
+      echo "install-docker-dns.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
+      if repair_deploy_sudoers; then
+        echo "Retrying docker daemon DNS pinning after sudoers repair..."
+        if ! run_docker_dns; then
+          warn_docker_dns_skipped
+        fi
+      else
+        warn_docker_dns_skipped
+      fi
     fi
   fi
 fi
@@ -433,6 +468,8 @@ fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
+  "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
+  "SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}" \
   "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
   "DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}" \
   "DEPLOY_DOCKER_VOLUME_PRUNE=${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" \
@@ -793,6 +830,16 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
   }
 
+  run_worker_session_deploy_guardrail() {
+    if [ "$ROLE" != "worker" ]; then
+      return 0
+    fi
+    echo "Checking active long-running sessions before worker deploy..."
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps \
+      -e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
+      "$HEALTH_SERVICE" /bin/deploy-guardrail worker-sessions < /dev/null
+  }
+
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
   # passes its health check, or fail after TIMEOUT seconds.
   wait_container_healthy() {
@@ -837,6 +884,51 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
   }
 
+  wait_vector_healthy() {
+    local cid="$1"
+    local timeout="${VECTOR_HEALTH_TIMEOUT:-90}"
+    local waited=0
+    local state health
+
+    echo "Waiting for Vector log collector health check (timeout ${timeout}s)..."
+    while [ "$waited" -le "$timeout" ]; do
+      state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo "missing")"
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo "missing")"
+
+      if [ "$state" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "none" ]; }; then
+        echo "Vector is healthy (state: $state, health: $health)."
+        return 0
+      fi
+
+      if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+        echo "ERROR: Vector is not running (state: $state, health: $health)"
+        docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
+        return 1
+      fi
+
+      if [ "$health" = "unhealthy" ]; then
+        echo "ERROR: Vector is not healthy (state: $state, health: $health)"
+        docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
+        docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
+{{.Output}}
+{{end}}{{end}}' "$cid" 2>&1 || true
+        return 1
+      fi
+
+      if [ "$waited" -ge "$timeout" ]; then
+        echo "ERROR: Vector is not healthy after ${timeout}s (state: $state, health: $health)"
+        docker compose -f "$COMPOSE_FILE" logs --tail=50 vector 2>&1 || true
+        docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
+{{.Output}}
+{{end}}{{end}}' "$cid" 2>&1 || true
+        return 1
+      fi
+
+      sleep 2
+      waited=$((waited + 2))
+    done
+  }
+
   # Ensure gVisor runtime is configured with the flags the sandbox depends on:
   #   --ignore-cgroups: Docker handles cgroup management (prevents EOF errors
   #     from cgroup conflicts).
@@ -870,40 +962,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
     # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
     docker compose -f "$COMPOSE_FILE" build sandbox-dns
-    # Ensure the shared sandbox egress network exists with the pinned subnet
-    # 172.30.0.0/24 (idempotent). The subnet is pinned so sandbox-dns can claim
-    # the static IP 172.30.0.2 declared in docker-compose.worker.yml — without
-    # the pin, Docker auto-assigns from its default pool and `docker compose
-    # up sandbox-dns` fails with "no configured subnet contains IP address
-    # 172.30.0.2". Do not disable bridge ICC here: on some Docker / gVisor
-    # combinations it blocks sandbox traffic to the sandbox-dns sidecar before
-    # DOCKER-USER rules can carve it out, which breaks all agent DNS.
-    # Mirrors the logic in provision.sh; deploys must validate too because
-    # workers provisioned before the pin landed (PR #815) still have an
-    # auto-assigned subnet.
-    EXISTING_SANDBOX_SUBNET=$(docker network inspect 143-sandbox \
-      -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)
-    if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-      docker network create --driver bridge \
-        --subnet 172.30.0.0/24 \
-        --label managed-by=143 143-sandbox
-    elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
-      echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
-      echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
-      echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
-      echo "    2. docker network rm 143-sandbox" >&2
-      echo "    3. Re-run deploy (or provision-worker) for this host." >&2
-      echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
-      exit 1
-    fi
-    # Install iptables-persistent on hosts that predate it (no-op otherwise).
-    sudo apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
-    # Re-apply sandbox egress firewall. Script is idempotent — safe to run
-    # on every deploy. Ensures rules exist even if someone flushed iptables
-    # or the sandbox network was recreated with a new subnet.
-    if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
-      sudo /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
-    fi
   elif [ "$ROLE" = "app" ]; then
     # Caddy is built locally (Dockerfile.caddy), so neither `docker compose pull`
     # nor an in-place `caddy reload` would pick up Dockerfile/base-image changes.
@@ -949,6 +1007,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     reconcile_caddy_service
 
   elif [ "$ROLE" = "worker" ]; then
+    run_worker_session_deploy_guardrail
+
     # Workers remain single-replica, but we drain the old replica before
     # replacement so accepted long-running sessions are not interrupted.
     #
@@ -1059,13 +1119,9 @@ EOS
       echo "ERROR: Vector container not found — logs will not be collected"
       exit 1
     fi
-    VECTOR_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VECTOR_ID")"
-    if [ "$VECTOR_STATUS" = "exited" ] || [ "$VECTOR_STATUS" = "dead" ]; then
-      echo "ERROR: Vector is not running (status: $VECTOR_STATUS)"
-      docker compose -f "$COMPOSE_FILE" logs --tail=20 vector 2>&1 || true
+    if ! wait_vector_healthy "$VECTOR_ID"; then
       exit 1
     fi
-    echo "Vector is running (status: $VECTOR_STATUS)."
   fi
 
   if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then

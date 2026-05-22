@@ -21,8 +21,8 @@ import (
 // login-page banner that advertises credentials that won't actually sign in
 // — LogStatus warns about this at boot.
 const (
-	defaultDemoEmail    = "dogfood@143.dev"
-	defaultDemoPassword = "preview-dogfood"
+	defaultDemoEmail    = "preview-admin@143.dev"
+	defaultDemoPassword = "preview"
 )
 
 type Config struct {
@@ -47,8 +47,8 @@ type Config struct {
 	// login-page banner when DemoMode is on. Defaults must match the seeded
 	// admin in .143/seed.sql and the constants below — override via env
 	// only if you also regenerate the bcrypt hash in the seed.
-	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"dogfood@143.dev"`
-	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview-dogfood"`
+	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
+	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
 	// WorkerProcessCount controls how many worker loops run inside a single
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
@@ -57,6 +57,13 @@ type Config struct {
 	// this worker node. 0 derives from the final WorkerProcessCount; values >0
 	// are explicit per-node caps.
 	WorkerMaxActiveSandboxes int `env:"WORKER_MAX_ACTIVE_SANDBOXES" envDefault:"0"`
+	// SessionExecutorImage is the server image used for executor containers.
+	// Production worker compose defaults this to the same 143-server tag as
+	// the worker so executor code and worker dispatcher code roll together.
+	SessionExecutorImage string `env:"SESSION_EXECUTOR_IMAGE"`
+	// SessionExecutorDockerNetwork optionally attaches executor containers to
+	// the same Docker network as worker-side dependencies such as chrome.
+	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
@@ -86,6 +93,26 @@ type Config struct {
 	// Linear OAuth
 	LinearOAuthClientID     string `env:"LINEAR_OAUTH_CLIENT_ID"`
 	LinearOAuthClientSecret string `env:"LINEAR_OAUTH_CLIENT_SECRET"`
+
+	// LinearWebhookSigningSecret is the per-OAuth-app HMAC secret Linear
+	// shows once in the OAuth application dashboard. The same secret signs
+	// every webhook delivery from every workspace the app is installed in —
+	// it is a property of the OAuth app, not of the install. In the SaaS /
+	// multi-tenant deployment this lives here next to the OAuth client
+	// credentials. Self-hosted deployments may instead store a per-org
+	// override in LinearConfig.WebhookSecret; verifyProviderSignature falls
+	// back to this global secret when the per-org override is empty so both
+	// deployment shapes work simultaneously.
+	LinearWebhookSigningSecret string `env:"LINEAR_WEBHOOK_SIGNING_SECRET"`
+
+	// LinearAgentEnabled is a process-wide kill switch for the Linear agent
+	// feature (issue assignment / @-mention triggers a 143 session). When
+	// false, the dispatcher records the webhook delivery for audit and
+	// returns 200 immediately without doing any work — even if individual
+	// orgs have opted in via org_settings.linear_agent.enabled. Lets us
+	// disable the inbound path globally during incidents without poking
+	// every org's settings. Defaults to false so phase-1 ships dark.
+	LinearAgentEnabled bool `env:"LINEAR_AGENT_ENABLED" envDefault:"false"`
 
 	// Sentry OAuth
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`

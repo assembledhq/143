@@ -51,6 +51,16 @@ type FatalError struct {
 func (e *FatalError) Error() string { return e.Err.Error() }
 func (e *FatalError) Unwrap() error { return e.Err }
 
+// HandoffError indicates the handler transferred durable ownership of the
+// running job to another fenced owner. The worker must skip all terminal job
+// writes because the new owner will renew and complete the same lock token.
+type HandoffError struct {
+	Err error
+}
+
+func (e *HandoffError) Error() string { return e.Err.Error() }
+func (e *HandoffError) Unwrap() error { return e.Err }
+
 type jobContextKey string
 
 const (
@@ -186,7 +196,10 @@ func (w *Worker) poll(ctx context.Context) {
 
 	handlerCtx := withJobOrgID(ctx, job.OrgID)
 	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
+	handlerCtx = jobctx.WithJobID(handlerCtx, job.ID)
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)
+	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(job.OwnerKind))
+	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != w.nodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
 	}
@@ -218,6 +231,12 @@ func (w *Worker) poll(ctx context.Context) {
 
 	if err == nil {
 		w.succeedJob(ctx, job.ID, *job.LockToken)
+		return
+	}
+
+	var handoff *HandoffError
+	if errors.As(err, &handoff) {
+		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job handed off to durable owner")
 		return
 	}
 

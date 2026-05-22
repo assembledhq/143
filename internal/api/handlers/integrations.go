@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -58,6 +59,7 @@ const (
 )
 
 type integrationCredentialStore interface {
+	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 }
 
@@ -93,7 +95,15 @@ type linearOrganization struct {
 }
 
 type linearViewer struct {
+	// Organization is the Linear workspace this token belongs to.
 	Organization linearOrganization `json:"organization"`
+	// ID and Name describe the *agent user* Linear provisioned at install
+	// time when the OAuth flow used actor=app. For a non-agent install
+	// these fields describe the human installer and we ignore them.
+	// Distinguishing the two cases happens upstream: HandleLinearOAuthCallback
+	// only stores AppUserID when AgentScopesGranted is true.
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type linearViewerData struct {
@@ -184,6 +194,7 @@ type IntegrationHandler struct {
 	linearJobStore                *db.JobStore
 	linearTeamKeyRefresher        func(ctx context.Context, orgID uuid.UUID) error
 	linearTeamKeyCacheInvalidator func(orgID uuid.UUID)
+	linearAgentBootstrapper       func(ctx context.Context, orgID uuid.UUID) error
 }
 
 // SetLinearJobStore wires a JobStore so the OAuth callback can enqueue an
@@ -211,6 +222,17 @@ func (h *IntegrationHandler) SetLinearTeamKeyRefresher(fn func(ctx context.Conte
 // (60s) bounds the worst-case staleness window on its own.
 func (h *IntegrationHandler) SetLinearTeamKeyCacheInvalidator(fn func(orgID uuid.UUID)) {
 	h.linearTeamKeyCacheInvalidator = fn
+}
+
+// SetLinearAgentBootstrapper wires the hook that runs after a successful
+// Linear OAuth callback that granted agent scopes. The hook flips the
+// per-org agent toggle to enabled when the admin hasn't expressed an
+// opinion yet and picks an org-default repo when the org has exactly one
+// connected GitHub repo — both are convenience defaults that remove the
+// "I re-authorized but nothing happens" cliff without overriding any
+// explicit user choice. Nil-safe.
+func (h *IntegrationHandler) SetLinearAgentBootstrapper(fn func(ctx context.Context, orgID uuid.UUID) error) {
+	h.linearAgentBootstrapper = fn
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -470,7 +492,7 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 		return
 	}
 
-	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, string(provider))
+	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, provider)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to look up integration", err)
 		return
@@ -481,7 +503,7 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 	}
 
 	for _, integration := range activeIntegrations {
-		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, string(models.IntegrationStatusInactive)); err != nil {
+		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, models.IntegrationStatusInactive); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect integration", err)
 			return
 		}
@@ -528,12 +550,31 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Single OAuth flow that grants the legacy read/write scopes used by
+	// the existing session-linking write-back plus the agent scopes
+	// (app:assignable, app:mentionable) used by the inbound agent feature.
+	// Linear treats scopes additively, so this flow is a strict superset
+	// of the previous one — orgs that only ever use the outbound
+	// integration pay nothing for the agent scopes being granted.
+	//
+	// Refresh tokens are issued automatically by Linear without any
+	// special scope. PR #807 attempted offline_access but Linear rejected
+	// it as "Invalid scope"; PR #816 dropped it and confirmed refresh
+	// works without it.
+	//
+	// actor=app provisions a dedicated agent user (`@143`) in the workspace
+	// and ties subsequent token-authored writes to it. Workspace-admin
+	// privileges are required by Linear; the install copy in the frontend
+	// must reflect that. See docs/design/implemented/69-linear-agent.md
+	// §"OAuth flow — single upgraded install" for the rationale on a single
+	// flow vs parallel flows.
 	params := url.Values{
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read,write"},
+		"scope":         {strings.Join(models.LinearAgentRequiredScopes, ",")},
 		"state":         {state},
+		"actor":         {"app"},
 	}
 
 	http.Redirect(w, r, linearAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
@@ -554,7 +595,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
-	workspaceID, workspaceName, err := h.fetchLinearWorkspace(r.Context(), token.AccessToken)
+	viewer, err := h.fetchLinearViewer(r.Context(), token.AccessToken)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LINEAR_API_FAILED", "failed to fetch linear workspace", err)
 		return
@@ -567,31 +608,76 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		return
 	}
 
+	// Build the credential. AppUser* fields are recorded only when the
+	// returned token actually carries the agent scopes — installing through
+	// a third-party OAuth tool that strips actor=app will give us a legacy
+	// scope set even though the GraphQL viewer call returned *something*.
+	// Storing AppUserID in that case would lie to downstream code that
+	// uses "AppUserID != \"\"" as the "agent installed" predicate.
 	linearConfig := models.LinearConfig{
 		AccessToken:   token.AccessToken,
 		RefreshToken:  token.RefreshToken,
 		TokenType:     token.TokenType,
 		Scope:         token.Scope,
-		WorkspaceID:   workspaceID,
-		WorkspaceName: workspaceName,
+		WorkspaceID:   viewer.WorkspaceID,
+		WorkspaceName: viewer.WorkspaceName,
+	}
+	if linearConfig.HasAgentScopes() {
+		linearConfig.AppUserID = viewer.AppUserID
+		linearConfig.AppUserName = viewer.AppUserName
+		linearConfig.AgentScopesGranted = true
 	}
 	if token.ExpiresIn > 0 {
 		linearConfig.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
+	mergedConfig, err := h.preserveExistingWebhookSecret(r.Context(), orgID, linearConfig)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to preserve linear webhook secret", err)
+		return
+	}
+	linearConfig = mergedConfig.(models.LinearConfig)
 	if err := h.credentialStore.Upsert(r.Context(), orgID, linearConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store linear credential", err)
 		return
 	}
 
-	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
+	integration, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
 	}
 
+	// Persist the Linear workspace id on integrations.config so the
+	// multi-tenant webhook handler can resolve org-by-workspace at request
+	// time. A single Linear OAuth app has one webhook URL across every
+	// workspace it's installed in; the payload's `organizationId` field is
+	// the only org-identifying signal available pre-HMAC. This is a
+	// Required write: if it fails, the shared Linear webhook URL would keep
+	// routing to an old org (or to no org), so the OAuth callback must not
+	// report a successful connection.
+	if viewer.WorkspaceID != "" {
+		if err := h.integrationStore.SetLinearWorkspaceID(r.Context(), orgID, integration.ID, viewer.WorkspaceID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to persist linear workspace routing key", err)
+			return
+		}
+	}
+
 	logger.Info().
 		Str("org_id", orgID.String()).
-		Str("workspace_id", workspaceID).
+		Str("workspace_id", viewer.WorkspaceID).
 		Msg("linear oauth callback completed; credentials stored and integration active")
+
+	// Auto-enable the agent and pick an org-default repo when the install
+	// just acquired agent scopes. Best-effort: failures here are logged but
+	// don't break the OAuth flow — the admin can always toggle/configure
+	// manually from Settings → Integrations → Linear → Agent.
+	if linearConfig.HasAgentScopes() && h.linearAgentBootstrapper != nil {
+		if err := h.linearAgentBootstrapper(r.Context(), orgID); err != nil {
+			logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Msg("linear agent bootstrap (enable + default repo) failed; admin can configure manually")
+		}
+	}
 
 	// Trigger an initial team-key refresh so detection's bare-identifier
 	// branch works on the very next session. Three-tier strategy:
@@ -615,7 +701,7 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 		bgCtx, bgCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
 		go func() {
 			defer bgCancel()
-			if err := h.linearTeamKeyRefresher(bgCtx, orgID); err != nil {
+			if err := h.refreshLinearTeamKeysAfterInstall(bgCtx, orgID); err != nil {
 				logger.Warn().Err(err).
 					Str("org_id", orgID.String()).
 					Msg("background refresh_linear_team_keys after install failed; worker fallback or 24h cron will retry")
@@ -632,6 +718,73 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)
+}
+
+const linearTeamKeyInstallRetryDelay = 100 * time.Millisecond
+
+func (h *IntegrationHandler) refreshLinearTeamKeysAfterInstall(ctx context.Context, orgID uuid.UUID) error {
+	if h.linearTeamKeyRefresher == nil {
+		return nil
+	}
+	err := h.linearTeamKeyRefresher(ctx, orgID)
+	if err == nil || !isTransientLinearIntegrationLookupMiss(err) {
+		return err
+	}
+
+	timer := time.NewTimer(linearTeamKeyInstallRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return h.linearTeamKeyRefresher(ctx, orgID)
+}
+
+func isTransientLinearIntegrationLookupMiss(err error) bool {
+	return errors.Is(err, linearservice.ErrIntegrationNotFound) ||
+		(err != nil && strings.Contains(err.Error(), "linear integration not found"))
+}
+
+func (h *IntegrationHandler) preserveExistingWebhookSecret(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) (models.ProviderConfig, error) {
+	if h.credentialStore == nil {
+		return cfg, nil
+	}
+
+	switch next := cfg.(type) {
+	case models.LinearConfig:
+		if next.WebhookSecret != "" {
+			return cfg, nil
+		}
+		existing, err := h.credentialStore.Get(ctx, orgID, models.ProviderLinear)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cfg, nil
+			}
+			return nil, err
+		}
+		if prior, ok := existing.Config.(models.LinearConfig); ok && prior.WebhookSecret != "" {
+			next.WebhookSecret = prior.WebhookSecret
+		}
+		return next, nil
+	case models.SentryConfig:
+		if next.WebhookSecret != "" {
+			return cfg, nil
+		}
+		existing, err := h.credentialStore.Get(ctx, orgID, models.ProviderSentry)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return cfg, nil
+			}
+			return nil, err
+		}
+		if prior, ok := existing.Config.(models.SentryConfig); ok && prior.WebhookSecret != "" {
+			next.WebhookSecret = prior.WebhookSecret
+		}
+		return next, nil
+	default:
+		return cfg, nil
+	}
 }
 
 func (h *IntegrationHandler) ConnectLinear(w http.ResponseWriter, r *http.Request) {
@@ -707,6 +860,12 @@ func (h *IntegrationHandler) HandleSentryOAuthCallback(w http.ResponseWriter, r 
 		OrgSlug:      orgSlug,
 		OrgName:      orgName,
 	}
+	mergedConfig, err := h.preserveExistingWebhookSecret(r.Context(), orgID, sentryConfig)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to preserve sentry webhook secret", err)
+		return
+	}
+	sentryConfig = mergedConfig.(models.SentryConfig)
 	if err := h.credentialStore.Upsert(r.Context(), orgID, sentryConfig); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store sentry credential", err)
 		return
@@ -931,7 +1090,7 @@ func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderGitHub)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_INTEGRATIONS_FAILED", "failed to list integrations", err)
 		return
@@ -1232,7 +1391,7 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 			Private:        ghRepo.Private,
 			CloneURL:       defaultCloneURL(ghRepo.FullName, ghRepo.CloneURL),
 			InstallationID: link.InstallationID,
-			Status:         string(models.RepositoryStatusActive),
+			Status:         models.RepositoryStatusActive,
 			Settings:       json.RawMessage(`{}`),
 		})
 	}
@@ -1319,31 +1478,66 @@ func (h *IntegrationHandler) githubInstallationLink(ctx context.Context, orgID u
 			return link, true
 		}
 	}
-	if installationID == 0 {
-		integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
-		if err != nil || len(integrations) == 0 {
-			return models.GitHubInstallationOrgLink{}, false
-		}
+
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderGitHub)
+	if err != nil || len(integrations) == 0 {
+		return models.GitHubInstallationOrgLink{}, false
+	}
+	for _, integration := range integrations {
 		var cfg struct {
 			InstallationID int64  `json:"installation_id"`
 			AccountLogin   string `json:"account_login"`
 		}
-		if integrations[0].Config == nil || json.Unmarshal(integrations[0].Config, &cfg) != nil || cfg.InstallationID == 0 {
-			return models.GitHubInstallationOrgLink{}, false
+		if integration.Config == nil || json.Unmarshal(integration.Config, &cfg) != nil || cfg.InstallationID == 0 {
+			continue
 		}
-		installationID = cfg.InstallationID
+		if installationID > 0 && cfg.InstallationID != installationID {
+			continue
+		}
+		if !h.githubInstallationAllowsConfigFallback(ctx, cfg.InstallationID) {
+			continue
+		}
 		if cfg.AccountLogin == "" {
 			cfg.AccountLogin = "unknown"
 		}
 		return models.GitHubInstallationOrgLink{
 			OrgID:          orgID,
-			IntegrationID:  &integrations[0].ID,
-			InstallationID: installationID,
+			IntegrationID:  &integration.ID,
+			InstallationID: cfg.InstallationID,
 			AccountLogin:   cfg.AccountLogin,
 			Status:         "active",
 		}, true
 	}
+
+	if h.repoStore != nil {
+		repoInstallationID, repoErr := h.repoStore.GetAnyInstallationIDByOrg(ctx, orgID)
+		if repoErr == nil && repoInstallationID > 0 && (installationID == 0 || repoInstallationID == installationID) {
+			accountLogin := "unknown"
+			return models.GitHubInstallationOrgLink{
+				OrgID:          orgID,
+				IntegrationID:  &integrations[0].ID,
+				InstallationID: repoInstallationID,
+				AccountLogin:   accountLogin,
+				Status:         "active",
+			}, true
+		}
+	}
+
 	return models.GitHubInstallationOrgLink{}, false
+}
+
+func (h *IntegrationHandler) githubInstallationAllowsConfigFallback(ctx context.Context, installationID int64) bool {
+	if h.githubInstallations == nil || installationID == 0 {
+		return true
+	}
+	installation, err := h.githubInstallations.GetByInstallationID(ctx, installationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return installation.Status == "" || installation.Status == "active"
 }
 
 func (h *IntegrationHandler) userIsAdminInOrg(ctx context.Context, userID, orgID uuid.UUID) bool {
@@ -1776,7 +1970,7 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	// reconnect after a 401-flip reuse the original row instead of leaving
 	// a stale errored row plus a fresh duplicate. Active-first ORDER BY in
 	// SQL keeps the existing "prefer active" precedence.
-	reusableIntegrations, err := h.integrationStore.ListReusableForReconnect(ctx, orgID, string(provider))
+	reusableIntegrations, err := h.integrationStore.ListReusableForReconnect(ctx, orgID, provider)
 	if err != nil {
 		return models.Integration{}, false, err
 	}
@@ -1847,7 +2041,7 @@ func (h *IntegrationHandler) convergeReusableRow(ctx context.Context, orgID uuid
 	statusErrored := integration.Status == models.IntegrationStatusError
 	switch {
 	case configChanged && statusErrored:
-		if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedConfig); err != nil {
+		if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, models.IntegrationStatusActive, clearedConfig); err != nil {
 			return integration, fmt.Errorf("converge integration %s: update status and config: %w", integration.ID, err)
 		}
 		integration.Config = clearedConfig
@@ -1858,7 +2052,7 @@ func (h *IntegrationHandler) convergeReusableRow(ctx context.Context, orgID uuid
 		}
 		integration.Config = clearedConfig
 	case statusErrored:
-		if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err != nil {
+		if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, models.IntegrationStatusActive); err != nil {
 			return integration, fmt.Errorf("converge integration %s: update status: %w", integration.ID, err)
 		}
 		integration.Status = models.IntegrationStatusActive
@@ -1955,43 +2149,62 @@ func (h *IntegrationHandler) exchangeLinearCode(ctx context.Context, code string
 	return &token, nil
 }
 
-func (h *IntegrationHandler) fetchLinearWorkspace(ctx context.Context, accessToken string) (string, string, error) {
-	queryBody := map[string]string{"query": "query ViewerOrg { viewer { organization { id name } } }"}
+// linearViewerInfo packages the post-token-exchange viewer GraphQL result.
+// Returned by fetchLinearViewer so callers can persist all of workspace +
+// agent-user metadata in a single round trip.
+type linearViewerInfo struct {
+	WorkspaceID   string
+	WorkspaceName string
+	// AppUserID and AppUserName describe the agent user Linear provisioned
+	// when the OAuth completed with actor=app. Empty for legacy (read/write
+	// only) installs. The OAuth callback only persists these when the
+	// returned scope string includes the agent scopes; otherwise the token
+	// is just a regular user token even though the GraphQL `viewer` query
+	// happens to return *some* identity.
+	AppUserID   string
+	AppUserName string
+}
+
+func (h *IntegrationHandler) fetchLinearViewer(ctx context.Context, accessToken string) (*linearViewerInfo, error) {
+	queryBody := map[string]string{"query": "query ViewerOrg { viewer { id name organization { id name } } }"}
 	body, err := json.Marshal(queryBody)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal linear viewer query: %w", err)
+		return nil, fmt.Errorf("marshal linear viewer query: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearGraphQLURL, bytes.NewBuffer(body))
 	if err != nil {
-		return "", "", fmt.Errorf("create linear viewer request: %w", err)
+		return nil, fmt.Errorf("create linear viewer request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("linear viewer request failed: %w", err)
+		return nil, fmt.Errorf("linear viewer request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", "", fmt.Errorf("linear viewer request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
+		return nil, fmt.Errorf("linear viewer request failed: status=%d body=%s", resp.StatusCode, string(responseBody))
 	}
 
 	var viewer linearViewerResponse
 	if err := json.NewDecoder(resp.Body).Decode(&viewer); err != nil {
-		return "", "", fmt.Errorf("decode linear viewer response: %w", err)
+		return nil, fmt.Errorf("decode linear viewer response: %w", err)
 	}
 
-	workspaceID := viewer.Data.Viewer.Organization.ID
-	workspaceName := viewer.Data.Viewer.Organization.Name
-	if workspaceID == "" {
-		return "", "", fmt.Errorf("linear viewer response missing organization id")
+	if viewer.Data.Viewer.Organization.ID == "" {
+		return nil, fmt.Errorf("linear viewer response missing organization id")
 	}
 
-	return workspaceID, workspaceName, nil
+	return &linearViewerInfo{
+		WorkspaceID:   viewer.Data.Viewer.Organization.ID,
+		WorkspaceName: viewer.Data.Viewer.Organization.Name,
+		AppUserID:     viewer.Data.Viewer.ID,
+		AppUserName:   viewer.Data.Viewer.Name,
+	}, nil
 }
 
 // --- Sentry token exchange ---

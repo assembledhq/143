@@ -83,7 +83,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		inFlightSummaries = append(inFlightSummaries, RunSummary{
 			ID:        run.ID,
 			IssueID:   run.PrimaryIssueID,
-			Status:    run.Status,
+			Status:    string(run.Status),
 			StartedAt: run.StartedAt,
 		})
 	}
@@ -97,7 +97,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 		outcomes = append(outcomes, OutcomeSummary{
 			RunID:              run.ID,
 			IssueID:            run.PrimaryIssueID,
-			Status:             run.Status,
+			Status:             string(run.Status),
 			ConfidenceScore:    run.ConfidenceScore,
 			FailureCategory:    run.FailureCategory,
 			FailureExplanation: run.FailureExplanation,
@@ -116,8 +116,8 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 				ID:           pr.ID,
 				SessionID:    pr.SessionID,
 				Title:        pr.Title,
-				Status:       pr.Status,
-				ReviewStatus: pr.ReviewStatus,
+				Status:       string(pr.Status),
+				ReviewStatus: string(pr.ReviewStatus),
 				MergedAt:     pr.MergedAt,
 			})
 		}
@@ -202,7 +202,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 // gatherSlackContext reads recent thread summaries from the Slack integration config.
 func (s *Service) gatherSlackContext(ctx context.Context, orgID uuid.UUID) ([]SlackThreadContext, []slackThreadData, error) {
-	integrations, err := s.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderSlack))
+	integrations, err := s.integrations.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderSlack)
 	if err != nil || len(integrations) == 0 {
 		return nil, nil, err
 	}
@@ -259,7 +259,7 @@ func summarizeIssue(issue models.Issue, descriptionMax int) IssueSummary {
 		Source:                string(issue.Source),
 		Title:                 issue.Title,
 		Description:           description,
-		Severity:              issue.Severity,
+		Severity:              string(issue.Severity),
 		OccurrenceCount:       issue.OccurrenceCount,
 		AffectedCustomerCount: issue.AffectedCustomerCount,
 		FirstSeenAt:           issue.FirstSeenAt.Format(time.RFC3339),

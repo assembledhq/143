@@ -1,31 +1,38 @@
 package models
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 )
 
+type Role string
+
 // Role constants for organization_memberships.role. Admin/member/viewer mirror
 // the legacy users.role values; builder is the new assignable non-admin role
 // that sits between member and viewer in the permission lattice.
 const (
-	RoleAdmin   = "admin"
-	RoleMember  = "member"
-	RoleBuilder = "builder"
-	RoleViewer  = "viewer"
+	RoleAdmin   Role = "admin"
+	RoleMember  Role = "member"
+	RoleBuilder Role = "builder"
+	RoleViewer  Role = "viewer"
 )
 
 // ValidRoles lists every legal membership role, in order of decreasing privilege.
-var ValidRoles = []string{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}
+var ValidRoles = []Role{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}
 
 // IsValidRole reports whether r is one of the known membership roles.
 func IsValidRole(r string) bool {
+	return Role(r).Validate() == nil
+}
+
+func (r Role) Validate() error {
 	switch r {
 	case RoleAdmin, RoleMember, RoleBuilder, RoleViewer:
-		return true
+		return nil
 	}
-	return false
+	return fmt.Errorf("invalid Role: %q", r)
 }
 
 // OrganizationMembership is the join row between a user identity and an org.
@@ -37,7 +44,7 @@ func IsValidRole(r string) bool {
 type OrganizationMembership struct {
 	UserID    uuid.UUID `db:"user_id"    json:"user_id"`
 	OrgID     uuid.UUID `db:"org_id"     json:"org_id"`
-	Role      string    `db:"role"       json:"role"`
+	Role      Role      `db:"role"       json:"role"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
 
@@ -47,7 +54,7 @@ type OrganizationMembership struct {
 type MembershipSummary struct {
 	OrgID   uuid.UUID `db:"org_id"   json:"org_id"`
 	OrgName string    `db:"org_name" json:"org_name"`
-	Role    string    `db:"role"     json:"role"`
+	Role    Role      `db:"role"     json:"role"`
 }
 
 // MembershipsResponse is the body of GET /api/v1/auth/memberships. It carries
@@ -60,6 +67,6 @@ type MembershipSummary struct {
 // org. ActiveRole is empty in the same case.
 type MembershipsResponse struct {
 	ActiveOrgID uuid.UUID           `json:"active_org_id"`
-	ActiveRole  string              `json:"active_role"`
+	ActiveRole  Role                `json:"active_role"`
 	Memberships []MembershipSummary `json:"memberships"`
 }

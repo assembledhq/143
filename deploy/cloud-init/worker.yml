@@ -21,9 +21,9 @@
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/worker.yml > /tmp/user-data.yml
 #
-# NODE_ID, WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL are *per-host*
-# identity. They are written to /opt/143/.env.local once at bootstrap and
-# preserved across deploys (deploy.sh only rewrites /opt/143/.env, then
+# NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID are
+# *per-host* values. They are written to /opt/143/.env.local once at bootstrap
+# and preserved across deploys (deploy.sh only rewrites /opt/143/.env, then
 # concatenates .env.local back in for docker compose). This split is what
 # lets the same .env.production.enc deploy to every worker in the fleet.
 # Workers must also stage /opt/143/.env.production.enc before the first
@@ -34,9 +34,9 @@ users:
   - name: deploy
     groups: docker
     shell: /bin/bash
-    # No sudo here — narrow NOPASSWD grant is installed by deploy/scripts/bootstrap.sh
-    # on the first `make provision-<role>` run. Cloud-init's runcmd doesn't need
-    # sudo (it runs as root and uses `su - deploy -c ...` for deploy-owned steps).
+    # Routine deploys run selected host reconciliation helpers through
+    # deploy+sudo. The narrow NOPASSWD grant is written below so workers
+    # created only from cloud-init do not require a follow-up root SSH repair.
     ssh_authorized_keys:
       - ${SSH_PUBLIC_KEY}
 
@@ -55,6 +55,7 @@ runcmd:
   - apt-get update && apt-get install -y runsc
   - runsc install -- --ignore-cgroups --host-uds=open
   - systemctl restart docker
+  - visudo -cf /etc/sudoers.d/99-deploy
 
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
   - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
@@ -78,28 +79,15 @@ runcmd:
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
   - su - deploy -c 'docker pull chromedp/headless-shell:latest'
 
-  # Create the shared sandbox egress network with the same pinned subnet used
-  # by provision.sh and deploy.sh. The subnet lets sandbox-dns claim the static
-  # 172.30.0.2 IP that /etc/143/sandbox-resolv.conf points at. Leave bridge ICC
-  # at Docker's default so gVisor sandboxes can reach sandbox-dns on the bridge.
-  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
-
-  # Apply host-level egress rules: block sandbox traffic to cloud metadata
-  # and RFC1918. Must run AFTER the network exists (reads its subnet).
-  - /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
-
-  # Write the resolv.conf that sandboxes bind-mount at /etc/resolv.conf.
-  # This must stay aligned with the sandbox-dns static IP in the worker compose
-  # file, so use the same shared writer as provision.sh and deploy.sh.
-  - /opt/143/deploy/scripts/sandbox-resolv-conf.sh
-
-  # Apply kernel tuning
-  - sysctl -p /etc/sysctl.d/99-worker.conf
+  # Reconcile worker host invariants before the first compose up. This is the
+  # same idempotent path used by provision.sh, deploy.sh, and manual repair.
+  - /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox
 
   # Concatenate per-host identity (.env.local) into the shared .env so docker
   # compose can interpolate ${NODE_ID}, ${WORKER_PRIVATE_IP}, etc. when it
   # parses docker-compose.worker.yml. Subsequent deploys (deploy.sh) repeat
   # this step so .env.local stays the source of truth for per-host values.
+  - su - deploy -c 'DOCKER_GID="$(getent group docker | cut -d: -f3)" && printf "DOCKER_GID=%s\n" "$DOCKER_GID" >> /opt/143/.env.local'
   - su - deploy -c 'cat /opt/143/.env.local >> /opt/143/.env'
 
   # Start the worker
@@ -152,3 +140,25 @@ write_files:
   - path: /etc/sysctl.d/99-worker.conf
     content: |
       vm.swappiness = 1
+
+  # Narrow NOPASSWD sudo for the deploy user. Keep this aligned with
+  # deploy/scripts/bootstrap.sh and repair-deploy-sudoers.sh: each entry mirrors
+  # a sudo call site used by routine worker deploys.
+  - path: /etc/sudoers.d/99-deploy
+    owner: root:root
+    permissions: '0440'
+    content: |
+      Cmnd_Alias DEPLOY_CMDS = \
+          /usr/bin/chown -R deploy\:deploy /opt/143/deploy/scripts, \
+          /usr/bin/chown -R deploy\:deploy /opt/143/deploy/vmalert, \
+          /usr/bin/chown -R deploy\:deploy /opt/143/deploy/grafana, \
+          /usr/bin/runsc install -- --ignore-cgroups --host-uds=open, \
+          /usr/bin/systemctl restart docker, \
+          /usr/bin/apt-get install -y --no-install-recommends iptables-persistent, \
+          /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox, \
+          /opt/143/deploy/scripts/sandbox-resolv-conf.sh, \
+          /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox, \
+          /opt/143/deploy/scripts/install-log-rotation.sh *, \
+          /opt/143/deploy/scripts/install-docker-dns.sh *
+
+      deploy ALL=(root) NOPASSWD: DEPLOY_CMDS

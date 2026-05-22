@@ -13,26 +13,27 @@ import (
 // Unlike projects (which are finite and goal-oriented), automations run on a
 // schedule and never "complete" — they are enabled or paused.
 type Automation struct {
-	ID              uuid.UUID               `db:"id"               json:"id"`
-	OrgID           uuid.UUID               `db:"org_id"           json:"org_id"`
-	RepositoryID    *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
-	Name            string                  `db:"name"             json:"name"`
-	Goal            string                  `db:"goal"             json:"goal"`
-	Scope           *string                 `db:"scope"            json:"scope,omitempty"`
-	IconType        AutomationIconType      `db:"icon_type"        json:"icon_type"`
-	IconValue       string                  `db:"icon_value"       json:"icon_value"`
-	AgentType       *string                 `db:"agent_type"       json:"agent_type,omitempty"`
-	ModelOverride   *string                 `db:"model_override"   json:"model_override,omitempty"`
-	ReasoningEffort *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
-	ExecutionMode   string                  `db:"execution_mode"   json:"execution_mode"`
-	MaxConcurrent   int                     `db:"max_concurrent"   json:"max_concurrent"`
-	BaseBranch      string                  `db:"base_branch"      json:"base_branch"`
-	IdentityScope   AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
-	ScheduleType    string                  `db:"schedule_type"    json:"schedule_type"`
-	IntervalValue   *int                    `db:"interval_value"   json:"interval_value,omitempty"`
-	IntervalUnit    *string                 `db:"interval_unit"    json:"interval_unit,omitempty"`
-	IntervalRunAt   *string                 `db:"interval_run_at"  json:"interval_run_at,omitempty"`
-	CronExpression  *string                 `db:"cron_expression"  json:"cron_expression,omitempty"`
+	ID               uuid.UUID               `db:"id"               json:"id"`
+	OrgID            uuid.UUID               `db:"org_id"           json:"org_id"`
+	RepositoryID     *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
+	Name             string                  `db:"name"             json:"name"`
+	Goal             string                  `db:"goal"             json:"goal"`
+	Scope            *string                 `db:"scope"            json:"scope,omitempty"`
+	IconType         AutomationIconType      `db:"icon_type"        json:"icon_type"`
+	IconValue        string                  `db:"icon_value"       json:"icon_value"`
+	AgentType        *string                 `db:"agent_type"       json:"agent_type,omitempty"`
+	ModelOverride    *string                 `db:"model_override"   json:"model_override,omitempty"`
+	ReasoningEffort  *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
+	ExecutionMode    AutomationExecutionMode `db:"execution_mode"   json:"execution_mode"`
+	MaxConcurrent    int                     `db:"max_concurrent"   json:"max_concurrent"`
+	BaseBranch       string                  `db:"base_branch"      json:"base_branch"`
+	IdentityScope    AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
+	PrePRReviewLoops int                     `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
+	ScheduleType     AutomationScheduleType  `db:"schedule_type"    json:"schedule_type"`
+	IntervalValue    *int                    `db:"interval_value"   json:"interval_value,omitempty"`
+	IntervalUnit     *ScheduleUnit           `db:"interval_unit"    json:"interval_unit,omitempty"`
+	IntervalRunAt    *string                 `db:"interval_run_at"  json:"interval_run_at,omitempty"`
+	CronExpression   *string                 `db:"cron_expression"  json:"cron_expression,omitempty"`
 	// Timezone is the IANA zone used to evaluate wall-clock schedule targets:
 	// cron_expression for cron rows, and interval_run_at for interval rows
 	// that specify one. An interval row without interval_run_at uses pure
@@ -55,20 +56,20 @@ type Automation struct {
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
 type AutomationRun struct {
-	ID                uuid.UUID       `db:"id"                    json:"id"`
-	AutomationID      uuid.UUID       `db:"automation_id"         json:"automation_id"`
-	OrgID             uuid.UUID       `db:"org_id"                json:"org_id"`
-	TriggeredAt       time.Time       `db:"triggered_at"          json:"triggered_at"`
-	TriggeredBy       string          `db:"triggered_by"          json:"triggered_by"`
-	TriggeredByUserID *uuid.UUID      `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
-	ScheduledTime     *time.Time      `db:"scheduled_time"        json:"scheduled_time,omitempty"`
-	GoalSnapshot      string          `db:"goal_snapshot"         json:"goal_snapshot"`
-	ConfigSnapshot    json.RawMessage `db:"config_snapshot"       json:"config_snapshot,omitempty"`
-	Status            string          `db:"status"                json:"status"`
-	CompletedAt       *time.Time      `db:"completed_at"          json:"completed_at,omitempty"`
-	ResultSummary     *string         `db:"result_summary"        json:"result_summary,omitempty"`
-	CreatedAt         time.Time       `db:"created_at"            json:"created_at"`
-	UpdatedAt         time.Time       `db:"updated_at"            json:"updated_at"`
+	ID                uuid.UUID             `db:"id"                    json:"id"`
+	AutomationID      uuid.UUID             `db:"automation_id"         json:"automation_id"`
+	OrgID             uuid.UUID             `db:"org_id"                json:"org_id"`
+	TriggeredAt       time.Time             `db:"triggered_at"          json:"triggered_at"`
+	TriggeredBy       AutomationTriggeredBy `db:"triggered_by"          json:"triggered_by"`
+	TriggeredByUserID *uuid.UUID            `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
+	ScheduledTime     *time.Time            `db:"scheduled_time"        json:"scheduled_time,omitempty"`
+	GoalSnapshot      string                `db:"goal_snapshot"         json:"goal_snapshot"`
+	ConfigSnapshot    json.RawMessage       `db:"config_snapshot"       json:"config_snapshot,omitempty"`
+	Status            AutomationRunStatus   `db:"status"                json:"status"`
+	CompletedAt       *time.Time            `db:"completed_at"          json:"completed_at,omitempty"`
+	ResultSummary     *string               `db:"result_summary"        json:"result_summary,omitempty"`
+	CreatedAt         time.Time             `db:"created_at"            json:"created_at"`
+	UpdatedAt         time.Time             `db:"updated_at"            json:"updated_at"`
 
 	// Session is a compact view of the session this run spawned, populated
 	// only by list/detail endpoints that join sessions (currently
@@ -91,7 +92,7 @@ type AutomationRun struct {
 type AutomationRunSession struct {
 	ID                  uuid.UUID       `json:"id"`
 	Title               *string         `json:"title,omitempty"`
-	Status              string          `json:"status"`
+	Status              SessionStatus   `json:"status"`
 	DiffStats           json.RawMessage `json:"diff_stats,omitempty"`
 	FailureExplanation  *string         `json:"failure_explanation,omitempty"`
 	FailureCategory     *string         `json:"failure_category,omitempty"`
@@ -104,26 +105,55 @@ type AutomationRunSession struct {
 	PR *PRSummary `json:"pr,omitempty"`
 }
 
-// AutomationRunStatus constants.
+type AutomationExecutionMode string
+
 const (
-	AutomationRunStatusPending       = "pending"
-	AutomationRunStatusRunning       = "running"
-	AutomationRunStatusCompleted     = "completed"
-	AutomationRunStatusCompletedNoop = "completed_noop"
-	AutomationRunStatusFailed        = "failed"
-	AutomationRunStatusSkipped       = "skipped"
+	AutomationExecutionModeSequential      AutomationExecutionMode = "sequential"
+	AutomationExecutionModeParallel        AutomationExecutionMode = "parallel"
+	AutomationExecutionModeDependencyGraph AutomationExecutionMode = "dependency_graph"
 )
 
-// AutomationTriggeredBy constants.
+func (m AutomationExecutionMode) Validate() error {
+	switch m {
+	case AutomationExecutionModeSequential, AutomationExecutionModeParallel, AutomationExecutionModeDependencyGraph:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation execution mode: %q", m)
+	}
+}
+
+type AutomationRunStatus string
+
 const (
-	AutomationTriggeredBySchedule = "schedule"
-	AutomationTriggeredByManual   = "manual"
+	AutomationRunStatusPending       AutomationRunStatus = "pending"
+	AutomationRunStatusRunning       AutomationRunStatus = "running"
+	AutomationRunStatusCompleted     AutomationRunStatus = "completed"
+	AutomationRunStatusCompletedNoop AutomationRunStatus = "completed_noop"
+	AutomationRunStatusFailed        AutomationRunStatus = "failed"
+	AutomationRunStatusSkipped       AutomationRunStatus = "skipped"
 )
 
-// AutomationScheduleType constants.
+type AutomationTriggeredBy string
+
 const (
-	AutomationScheduleInterval = "interval"
-	AutomationScheduleCron     = "cron"
+	AutomationTriggeredBySchedule AutomationTriggeredBy = "schedule"
+	AutomationTriggeredByManual   AutomationTriggeredBy = "manual"
+)
+
+func (t AutomationTriggeredBy) Validate() error {
+	switch t {
+	case AutomationTriggeredBySchedule, AutomationTriggeredByManual:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation triggered_by: %q", t)
+	}
+}
+
+type AutomationScheduleType string
+
+const (
+	AutomationScheduleInterval AutomationScheduleType = "interval"
+	AutomationScheduleCron     AutomationScheduleType = "cron"
 )
 
 // AutomationIdentityScope controls whose credentials an automation uses when
@@ -193,12 +223,13 @@ func AutomationIconValueOrDefault(v string) string {
 // instead of panicking inside chi middleware.
 func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 	data, err := json.Marshal(map[string]any{
-		"agent_type":       a.AgentType,
-		"model_override":   a.ModelOverride,
-		"reasoning_effort": a.ReasoningEffort,
-		"scope":            a.Scope,
-		"identity_scope":   a.IdentityScope.OrDefault(),
-		"base_branch":      a.BaseBranch,
+		"agent_type":          a.AgentType,
+		"model_override":      a.ModelOverride,
+		"reasoning_effort":    a.ReasoningEffort,
+		"scope":               a.Scope,
+		"identity_scope":      a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops": a.PrePRReviewLoops,
+		"base_branch":         a.BaseBranch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal automation config snapshot: %w", err)
@@ -206,13 +237,17 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 	return data, nil
 }
 
-func ValidateAutomationScheduleType(t string) error {
+func (t AutomationScheduleType) Validate() error {
 	switch t {
 	case AutomationScheduleInterval, AutomationScheduleCron:
 		return nil
 	default:
 		return fmt.Errorf("invalid schedule_type: %q (must be interval or cron)", t)
 	}
+}
+
+func ValidateAutomationScheduleType(t string) error {
+	return AutomationScheduleType(t).Validate()
 }
 
 // ValidateCronExpression parses the expression using gorhill/cronexpr so we
@@ -283,9 +318,9 @@ func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
 			if err := ValidateIntervalRunAt(*a.IntervalRunAt); err != nil {
 				return time.Time{}, err
 			}
-			return NextRunTimeAt(from, *a.IntervalValue, *a.IntervalUnit, *a.IntervalRunAt, a.Timezone)
+			return NextRunTimeAt(from, *a.IntervalValue, string(*a.IntervalUnit), *a.IntervalRunAt, a.Timezone)
 		}
-		return NextRunTime(from, *a.IntervalValue, *a.IntervalUnit), nil
+		return NextRunTime(from, *a.IntervalValue, string(*a.IntervalUnit)), nil
 	case AutomationScheduleCron:
 		if a.CronExpression == nil || *a.CronExpression == "" {
 			return time.Time{}, fmt.Errorf("cron schedule requires cron_expression")
@@ -300,7 +335,7 @@ func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
 	}
 }
 
-func ValidateAutomationRunStatus(s string) error {
+func (s AutomationRunStatus) Validate() error {
 	switch s {
 	case AutomationRunStatusPending, AutomationRunStatusRunning,
 		AutomationRunStatusCompleted, AutomationRunStatusCompletedNoop,
@@ -309,6 +344,10 @@ func ValidateAutomationRunStatus(s string) error {
 	default:
 		return fmt.Errorf("invalid automation run status: %q", s)
 	}
+}
+
+func ValidateAutomationRunStatus(s string) error {
+	return AutomationRunStatus(s).Validate()
 }
 
 // AutomationRunStatsBucket is a per-day aggregate over automation_runs. Dates

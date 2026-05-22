@@ -21,13 +21,11 @@ import (
 const (
 	defaultLowTokenMax  = 50_000
 	defaultHighTokenMax = 200_000
-
-	claudeCodeFileEditPermissionArg = " --permission-mode acceptEdits"
 )
 
 // resolveTokenLimit returns the appropriate max token limit based on
 // the token mode and optional org-specific context limits.
-func resolveTokenLimit(mode string, limits *models.ContextLimits) int {
+func resolveTokenLimit(mode models.SessionTokenMode, limits *models.ContextLimits) int {
 	low := defaultLowTokenMax
 	high := defaultHighTokenMax
 	if limits != nil {
@@ -38,7 +36,7 @@ func resolveTokenLimit(mode string, limits *models.ContextLimits) int {
 			high = limits.AgentHighTokenMax
 		}
 	}
-	if mode == "high" {
+	if mode == models.SessionTokenModeHigh {
 		return high
 	}
 	return low
@@ -115,13 +113,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 
 	var cmd string
 	effortArg := ""
+	permissionModeArg := claudeCodePermissionModeArg(sandbox)
 	if prompt.ReasoningEffort != "" {
 		effortArg = fmt.Sprintf(" --effort %s", shellEscapeSingle(string(prompt.ReasoningEffort)))
 	}
-	// Auto-approve file edits in the per-session gVisor sandbox without
-	// bypassing every Claude Code permission check. This removes the
-	// file-by-file approval loop while preserving Claude's remaining tool
-	// checks for network-capable actions such as WebFetch and arbitrary Bash.
 	if prompt.Continuation && prompt.ResumeSessionID != "" {
 		settingsArg, envPrefix, err := prepareClaudeHumanInputHooks(ctx, provider, sandbox, prompt)
 		if err != nil {
@@ -138,7 +133,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			envPrefix,
 			effortArg,
 			settingsArg,
-			claudeCodeFileEditPermissionArg,
+			permissionModeArg,
 			shellEscapeSingle(prompt.ResumeSessionID),
 			msg,
 		)
@@ -149,7 +144,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		// in that case so the agent has the full context). Write the prompt
 		// under $HOME (not WorkDir, which would pollute git status) and pipe
 		// it into claude via stdin.
-		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+		promptContent := composeFreshExecPrompt(prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
@@ -163,7 +158,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			envPrefix,
 			effortArg,
 			settingsArg,
-			claudeCodeFileEditPermissionArg,
+			permissionModeArg,
 			promptPath,
 		)
 	}
@@ -239,6 +234,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	return result, nil
 }
 
+func claudeCodePermissionModeArg(sandbox *agent.Sandbox) string {
+	return " --permission-mode " + agent.ClaudeCodePermissionModeBypassPermissions
+}
+
 func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, prompt *agent.AgentPrompt) (string, string, error) {
 	hookPath := fmt.Sprintf("%s/.143-claude-human-input-hook.mjs", sandbox.HomeDir)
 	settingsPath := fmt.Sprintf("%s/.143-claude-settings.json", sandbox.HomeDir)
@@ -294,13 +293,6 @@ func prepareClaudeHumanInputHooks(ctx context.Context, provider agent.SandboxPro
 
 var claudeHumanInputHookMatchers = []string{
 	"AskUserQuestion",
-	"Bash",
-	"Edit",
-	"MultiEdit",
-	"Write",
-	"WebFetch",
-	"WebSearch",
-	"NotebookEdit",
 }
 
 const claudeHumanInputHookScript = `#!/usr/bin/env node

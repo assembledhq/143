@@ -41,6 +41,10 @@ const pidFilePollInterval = 50 * time.Millisecond
 // the daemon is unresponsive at session teardown.
 const closeCleanupTimeout = 2 * time.Second
 
+// forceStopWaitTimeout bounds the post-kill wait for the Docker exec copy
+// goroutine to observe transport closure.
+const forceStopWaitTimeout = 5 * time.Second
+
 // dockerInteractiveHandle is the Docker-backed InteractiveCommandHandle. It
 // owns the hijacked exec connection, the demux goroutine, optional stdin
 // access, and any internal scaffolding needed to deliver the requested
@@ -185,6 +189,15 @@ func (d *DockerProvider) StartInteractiveCommand(ctx context.Context, sb *agent.
 	if wantStdin {
 		h.stdinW = attachResp.Conn
 	}
+
+	log := d.scopedLogger(sb)
+	log.Info().
+		Str("exec_id", execResp.ID).
+		Bool("tty", wantTTY).
+		Bool("stdin", wantStdin).
+		Bool("signal_shim", hasShim).
+		Str("pid_file", pidFile).
+		Msg("started interactive command in sandbox")
 
 	return h, nil
 }
@@ -332,6 +345,16 @@ func (h *dockerInteractiveHandle) Interrupt(ctx context.Context, spec agent.Canc
 		method = agent.CancellationMethodCtrlC
 	}
 
+	log := h.provider.scopedLogger(h.sandbox)
+	log.Info().
+		Str("exec_id", h.execID).
+		Str("method", string(method)).
+		Bool("tty", h.spec.TTY).
+		Bool("stdin_open", h.stdinW != nil).
+		Bool("signal_shim", h.hasShim).
+		Bool("interrupt_sent", true).
+		Msg("interrupting interactive command")
+
 	switch method {
 	case agent.CancellationMethodEscape:
 		if h.stdinW == nil {
@@ -360,6 +383,12 @@ func (h *dockerInteractiveHandle) signalTrackedChild(ctx context.Context, signal
 	if h.pidFile == "" {
 		return agent.ErrUnsupportedInterruptMethod
 	}
+	log := h.provider.scopedLogger(h.sandbox)
+	log.Info().
+		Str("exec_id", h.execID).
+		Str("signal", signal).
+		Str("pid_file", h.pidFile).
+		Msg("signaling tracked interactive command child")
 	deadline, cancel := context.WithTimeout(ctx, pidFileWriteTimeout)
 	defer cancel()
 	if err := h.waitForPIDFile(deadline); err != nil {
@@ -424,24 +453,71 @@ func (h *dockerInteractiveHandle) execSignal(ctx context.Context, signal string)
 // Wait return. The container itself stays alive — only the exec process
 // is torn down.
 func (h *dockerInteractiveHandle) Kill(ctx context.Context) error {
+	log := h.provider.scopedLogger(h.sandbox)
+	log.Warn().
+		Str("exec_id", h.execID).
+		Bool("tty", h.spec.TTY).
+		Bool("stdin_open", h.stdinW != nil).
+		Bool("signal_shim", h.hasShim).
+		Str("pid_file", h.pidFile).
+		Msg("force-stopping interactive command")
+
 	var killErr error
+	killSent := false
 	switch {
 	case h.hasShim:
-		if err := h.signalTrackedChild(ctx, "KILL"); err != nil && !errors.Is(err, agent.ErrUnsupportedInterruptMethod) {
+		if err := h.signalTrackedChildBounded(ctx, "KILL"); err != nil && !errors.Is(err, agent.ErrUnsupportedInterruptMethod) {
 			killErr = err
+		} else {
+			killSent = true
 		}
 	case h.stdinW != nil && h.spec.TTY:
 		// Best-effort byte-level interrupt; any error is non-fatal because
 		// we are about to drop the connection anyway.
 		_ = h.WriteInput(ctx, []byte{0x03})
 		_ = h.CloseInput(ctx)
+		killSent = true
 	}
 	if err := h.Close(); err != nil && killErr == nil {
 		// Close is currently always nil but keep the contract honest if a
 		// future implementation adds real teardown errors.
 		killErr = err
 	}
+	execClosed, forceStopTimeout, waitErr := h.waitForExecCloseAfterForceStop(ctx)
+	log.Warn().
+		Str("exec_id", h.execID).
+		Bool("kill_sent", killSent).
+		Bool("exec_closed", execClosed).
+		Bool("force_stop_timeout", forceStopTimeout).
+		Msg("interactive command force-stop transport state")
+	if forceStopTimeout && killErr == nil {
+		killErr = fmt.Errorf("wait for interactive exec close after force-stop: %w", waitErr)
+	}
 	return killErr
+}
+
+func (h *dockerInteractiveHandle) signalTrackedChildBounded(ctx context.Context, signal string) error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.signalTrackedChild(ctx, signal)
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("send sig%s to tracked child before force-stop timeout: %w", strings.ToLower(signal), ctx.Err())
+	}
+}
+
+func (h *dockerInteractiveHandle) waitForExecCloseAfterForceStop(ctx context.Context) (bool, bool, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, forceStopWaitTimeout)
+	defer cancel()
+	select {
+	case <-h.waitDone:
+		return true, false, nil
+	case <-waitCtx.Done():
+		return false, true, waitCtx.Err()
+	}
 }
 
 // Wait blocks until the command exits and returns the exit code.

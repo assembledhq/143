@@ -29,29 +29,58 @@ func (s Scope) IsPersonal() bool { return s.UserID != nil }
 // IsOrg reports whether the scope refers to the org-wide stack.
 func (s Scope) IsOrg() bool { return s.UserID == nil }
 
+type CodingCredentialScope string
+
 // CodingCredentialScopeOrg is the JSON tag used in the API surface for
 // org-scoped rows.
-const CodingCredentialScopeOrg = "org"
+const CodingCredentialScopeOrg CodingCredentialScope = "org"
 
 // CodingCredentialScopePersonal is the JSON tag used in the API surface for
 // user-scoped rows.
-const CodingCredentialScopePersonal = "personal"
+const CodingCredentialScopePersonal CodingCredentialScope = "personal"
+
+func (s CodingCredentialScope) Validate() error {
+	switch s {
+	case CodingCredentialScopeOrg, CodingCredentialScopePersonal:
+		return nil
+	default:
+		return fmt.Errorf("invalid scope: %q", s)
+	}
+}
 
 // Label renders a Scope for telemetry and API responses.
-func (s Scope) Label() string {
+func (s Scope) Label() CodingCredentialScope {
 	if s.IsPersonal() {
 		return CodingCredentialScopePersonal
 	}
 	return CodingCredentialScopeOrg
 }
 
+type CodingCredentialRowStatus string
+
 // CodingCredentialStatus enumerates the lifecycle of a row.
 const (
-	CodingCredentialStatusActive      = "active"
-	CodingCredentialStatusDisabled    = "disabled"
-	CodingCredentialStatusPendingAuth = "pending_auth"
-	CodingCredentialStatusInvalid     = "invalid"
+	CodingCredentialStatusActive      CodingCredentialRowStatus = "active"
+	CodingCredentialStatusDisabled    CodingCredentialRowStatus = "disabled"
+	CodingCredentialStatusPendingAuth CodingCredentialRowStatus = "pending_auth"
+	CodingCredentialStatusInvalid     CodingCredentialRowStatus = "invalid"
 )
+
+const (
+	CodingCredentialRowStatusActive      = CodingCredentialStatusActive
+	CodingCredentialRowStatusDisabled    = CodingCredentialStatusDisabled
+	CodingCredentialRowStatusPendingAuth = CodingCredentialStatusPendingAuth
+	CodingCredentialRowStatusInvalid     = CodingCredentialStatusInvalid
+)
+
+func (s CodingCredentialRowStatus) Validate() error {
+	switch s {
+	case CodingCredentialStatusActive, CodingCredentialStatusDisabled, CodingCredentialStatusPendingAuth, CodingCredentialStatusInvalid:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodingCredentialRowStatus: %q", s)
+	}
+}
 
 // CodingCredentialLabelMax bounds Label inputs at every API surface that
 // writes to coding_credentials. Matches the Codex/Claude subscription label
@@ -69,21 +98,21 @@ type CodingCredentialRateLimit struct {
 
 // CodingCredential is the DB row representation. Config is encrypted bytea.
 type CodingCredential struct {
-	ID                    uuid.UUID    `db:"id"`
-	OrgID                 uuid.UUID    `db:"org_id"`
-	UserID                *uuid.UUID   `db:"user_id"`
-	Provider              ProviderName `db:"provider"`
-	Label                 string       `db:"label"`
-	Config                []byte       `db:"config"`
-	Priority              int          `db:"priority"`
-	Status                string       `db:"status"`
-	CreatedBy             *uuid.UUID   `db:"created_by"`
-	LastVerifiedAt        *time.Time   `db:"last_verified_at"`
-	RateLimitedUntil      *time.Time   `db:"rate_limited_until"`
-	RateLimitedObservedAt *time.Time   `db:"rate_limited_observed_at"`
-	RateLimitMessage      *string      `db:"rate_limit_message"`
-	CreatedAt             time.Time    `db:"created_at"`
-	UpdatedAt             time.Time    `db:"updated_at"`
+	ID                    uuid.UUID                 `db:"id"`
+	OrgID                 uuid.UUID                 `db:"org_id"`
+	UserID                *uuid.UUID                `db:"user_id"`
+	Provider              ProviderName              `db:"provider"`
+	Label                 string                    `db:"label"`
+	Config                []byte                    `db:"config"`
+	Priority              int                       `db:"priority"`
+	Status                CodingCredentialRowStatus `db:"status"`
+	CreatedBy             *uuid.UUID                `db:"created_by"`
+	LastVerifiedAt        *time.Time                `db:"last_verified_at"`
+	RateLimitedUntil      *time.Time                `db:"rate_limited_until"`
+	RateLimitedObservedAt *time.Time                `db:"rate_limited_observed_at"`
+	RateLimitMessage      *string                   `db:"rate_limit_message"`
+	CreatedAt             time.Time                 `db:"created_at"`
+	UpdatedAt             time.Time                 `db:"updated_at"`
 }
 
 // DecryptedCodingCredential pairs DB metadata with the strongly-typed,
@@ -91,21 +120,21 @@ type CodingCredential struct {
 // directly — callers convert to CodingCredentialSummary before crossing
 // the API boundary.
 type DecryptedCodingCredential struct {
-	ID                    uuid.UUID      `json:"id"`
-	OrgID                 uuid.UUID      `json:"org_id"`
-	UserID                *uuid.UUID     `json:"user_id,omitempty"`
-	Provider              ProviderName   `json:"provider"`
-	Label                 string         `json:"label"`
-	Config                ProviderConfig `json:"-"`
-	Priority              int            `json:"priority"`
-	Status                string         `json:"status"`
-	CreatedBy             *uuid.UUID     `json:"created_by,omitempty"`
-	LastVerifiedAt        *time.Time     `json:"last_verified_at,omitempty"`
-	RateLimitedUntil      *time.Time     `json:"rate_limited_until,omitempty"`
-	RateLimitedObservedAt *time.Time     `json:"rate_limited_observed_at,omitempty"`
-	RateLimitMessage      *string        `json:"rate_limit_message,omitempty"`
-	CreatedAt             time.Time      `json:"created_at"`
-	UpdatedAt             time.Time      `json:"updated_at"`
+	ID                    uuid.UUID                 `json:"id"`
+	OrgID                 uuid.UUID                 `json:"org_id"`
+	UserID                *uuid.UUID                `json:"user_id,omitempty"`
+	Provider              ProviderName              `json:"provider"`
+	Label                 string                    `json:"label"`
+	Config                ProviderConfig            `json:"-"`
+	Priority              int                       `json:"priority"`
+	Status                CodingCredentialRowStatus `json:"status"`
+	CreatedBy             *uuid.UUID                `json:"created_by,omitempty"`
+	LastVerifiedAt        *time.Time                `json:"last_verified_at,omitempty"`
+	RateLimitedUntil      *time.Time                `json:"rate_limited_until,omitempty"`
+	RateLimitedObservedAt *time.Time                `json:"rate_limited_observed_at,omitempty"`
+	RateLimitMessage      *string                   `json:"rate_limit_message,omitempty"`
+	CreatedAt             time.Time                 `json:"created_at"`
+	UpdatedAt             time.Time                 `json:"updated_at"`
 }
 
 // Scope returns the Scope this credential belongs to.
@@ -117,47 +146,45 @@ func (c DecryptedCodingCredential) Scope() Scope {
 // of CodingAuth (the existing org-only summary) but adds scope/user_id so
 // the same row component can render personal and org stacks.
 type CodingCredentialSummary struct {
-	ID               uuid.UUID        `json:"id"`
-	OrgID            uuid.UUID        `json:"org_id"`
-	UserID           *uuid.UUID       `json:"user_id,omitempty"`
-	Scope            string           `json:"scope"` // "org" | "personal"
-	Priority         int              `json:"priority"`
-	Agent            AgentType        `json:"agent"`
-	AuthType         CodingAuthType   `json:"auth_type"`
-	Provider         ProviderName     `json:"provider"`
-	Label            string           `json:"label"`
-	Status           CodingAuthStatus `json:"status"`
-	IsDefault        bool             `json:"is_default"` // first runnable in this scope's stack
-	UsageNote        string           `json:"usage_note,omitempty"`
-	LastVerifiedAt   *time.Time       `json:"last_verified_at,omitempty"`
-	RateLimitedUntil *time.Time       `json:"rate_limited_until,omitempty"`
-	RateLimitMessage *string          `json:"rate_limit_message,omitempty"`
-	CreatedBy        *uuid.UUID       `json:"created_by,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	ID               uuid.UUID             `json:"id"`
+	OrgID            uuid.UUID             `json:"org_id"`
+	UserID           *uuid.UUID            `json:"user_id,omitempty"`
+	Scope            CodingCredentialScope `json:"scope"` // "org" | "personal"
+	Priority         int                   `json:"priority"`
+	Agent            AgentType             `json:"agent"`
+	AuthType         CodingAuthType        `json:"auth_type"`
+	Provider         ProviderName          `json:"provider"`
+	Label            string                `json:"label"`
+	Status           CodingAuthStatus      `json:"status"`
+	IsDefault        bool                  `json:"is_default"` // first runnable in this scope's stack
+	UsageNote        string                `json:"usage_note,omitempty"`
+	LastVerifiedAt   *time.Time            `json:"last_verified_at,omitempty"`
+	RateLimitedUntil *time.Time            `json:"rate_limited_until,omitempty"`
+	RateLimitMessage *string               `json:"rate_limit_message,omitempty"`
+	CreatedBy        *uuid.UUID            `json:"created_by,omitempty"`
+	CreatedAt        time.Time             `json:"created_at"`
+	UpdatedAt        time.Time             `json:"updated_at"`
 }
 
 // CreateCodingCredentialInput is the API body for POST /coding-credentials
 // when creating an API-key credential. Subscription credentials are created
 // through the provider-specific OAuth flow endpoints.
 type CreateCodingCredentialInput struct {
-	Scope         string            `json:"scope"` // "org" | "personal"
-	Agent         AgentType         `json:"agent"`
-	AuthType      CodingAuthType    `json:"auth_type"`
-	Label         string            `json:"label"`
-	APIKey        string            `json:"api_key,omitempty"`
-	APIType       string            `json:"api_type,omitempty"`
-	BaseURL       string            `json:"base_url,omitempty"`
-	AgentDefaults map[string]string `json:"agent_defaults,omitempty"`
+	Scope         CodingCredentialScope `json:"scope"` // "org" | "personal"
+	Agent         AgentType             `json:"agent"`
+	AuthType      CodingAuthType        `json:"auth_type"`
+	Label         string                `json:"label"`
+	APIKey        string                `json:"api_key,omitempty"`
+	APIType       string                `json:"api_type,omitempty"`
+	BaseURL       string                `json:"base_url,omitempty"`
+	AgentDefaults map[string]string     `json:"agent_defaults,omitempty"`
 }
 
 // Validate enforces the same shape rules as CreateCodingAuthInput plus a
 // scope check.
 func (i CreateCodingCredentialInput) Validate() error {
-	switch i.Scope {
-	case CodingCredentialScopeOrg, CodingCredentialScopePersonal:
-	default:
-		return fmt.Errorf("invalid scope: %q", i.Scope)
+	if err := i.Scope.Validate(); err != nil {
+		return err
 	}
 	if err := i.Agent.Validate(); err != nil {
 		return err
@@ -191,9 +218,9 @@ func (i CreateCodingCredentialInput) Validate() error {
 
 // UpdateCodingCredentialInput is the API body for PATCH /coding-credentials/{id}.
 type UpdateCodingCredentialInput struct {
-	Scope  string  `json:"scope"`
-	Label  *string `json:"label,omitempty"`
-	Status *string `json:"status,omitempty"`
+	Scope  CodingCredentialScope      `json:"scope"`
+	Label  *string                    `json:"label,omitempty"`
+	Status *CodingCredentialRowStatus `json:"status,omitempty"`
 }
 
 // Validate enforces the label length bound when one is provided. Scope and
@@ -209,11 +236,11 @@ func (i UpdateCodingCredentialInput) Validate() error {
 // MoveCodingCredentialInput is the body for PATCH /coding-credentials/{id}/move.
 // Exactly one of BeforeID, AfterID, ToTop, or ToBottom must be set.
 type MoveCodingCredentialInput struct {
-	Scope    string     `json:"scope"`
-	BeforeID *uuid.UUID `json:"before_id,omitempty"`
-	AfterID  *uuid.UUID `json:"after_id,omitempty"`
-	ToTop    bool       `json:"to_top,omitempty"`
-	ToBottom bool       `json:"to_bottom,omitempty"`
+	Scope    CodingCredentialScope `json:"scope"`
+	BeforeID *uuid.UUID            `json:"before_id,omitempty"`
+	AfterID  *uuid.UUID            `json:"after_id,omitempty"`
+	ToTop    bool                  `json:"to_top,omitempty"`
+	ToBottom bool                  `json:"to_bottom,omitempty"`
 }
 
 // Validate enforces "exactly one" cardinality.
@@ -239,8 +266,8 @@ func (m MoveCodingCredentialInput) Validate() error {
 
 // ReorderCodingCredentialsInput is the body for PATCH /coding-credentials/reorder.
 type ReorderCodingCredentialsInput struct {
-	Scope      string      `json:"scope"`
-	OrderedIDs []uuid.UUID `json:"ordered_ids"`
+	Scope      CodingCredentialScope `json:"scope"`
+	OrderedIDs []uuid.UUID           `json:"ordered_ids"`
 }
 
 // Validate rejects empty / duplicate / nil ids before the request reaches the
@@ -250,10 +277,8 @@ type ReorderCodingCredentialsInput struct {
 // already-applied UPDATEs. Catching the malformed shape here keeps the store
 // a single authoritative caller-side guard.
 func (i ReorderCodingCredentialsInput) Validate() error {
-	switch i.Scope {
-	case CodingCredentialScopeOrg, CodingCredentialScopePersonal:
-	default:
-		return fmt.Errorf("invalid scope: %q", i.Scope)
+	if err := i.Scope.Validate(); err != nil {
+		return err
 	}
 	if len(i.OrderedIDs) == 0 {
 		return errors.New("ordered_ids must contain at least one id")

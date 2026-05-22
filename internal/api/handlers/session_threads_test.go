@@ -102,7 +102,7 @@ type mockSessionStoreForThread struct {
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 }
 
 func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -116,7 +116,7 @@ func (m *mockSessionStoreForThread) ClaimIdle(ctx context.Context, orgID, sessio
 	if m.claimIdleFn != nil {
 		return m.claimIdleFn(ctx, orgID, sessionID)
 	}
-	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+	return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 }
 
 func (m *mockSessionStoreForThread) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -126,7 +126,7 @@ func (m *mockSessionStoreForThread) ClaimForResume(ctx context.Context, orgID, s
 	return models.Session{}, fmt.Errorf("no rows")
 }
 
-func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error {
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, sessionID, status)
 	}
@@ -134,8 +134,9 @@ func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, ses
 }
 
 type mockMessageStore struct {
-	createFn       func(ctx context.Context, msg *models.SessionMessage) error
-	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	createFn             func(ctx context.Context, msg *models.SessionMessage) error
+	listByThreadFn       func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	listWindowByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
 func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
@@ -150,6 +151,13 @@ func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uui
 		return m.listByThreadFn(ctx, orgID, threadID)
 	}
 	return nil, nil
+}
+
+func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+	if m.listWindowByThreadFn != nil {
+		return m.listWindowByThreadFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionMessageWindow{}, nil
 }
 
 type mockLogStore struct {
@@ -1442,6 +1450,63 @@ func TestSessionThreadHandler_GetThreadMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should use the route thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+		require.Equal(t, orgID, gotOrgID, "message window should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "message window should use the route thread")
+		require.Equal(t, int64(30), opts.BeforeID, "message window should pass the before cursor")
+		require.Equal(t, 25, opts.Limit, "message window should pass the requested limit")
+		return db.SessionMessageWindow{
+			Messages: []models.SessionMessage{
+				{ID: 21, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleAssistant, Content: "latest", CreatedAt: now},
+			},
+			NextOlderCursor:          "21",
+			HasOlder:                 true,
+			LatestAssistantMessageID: 21,
+			LiveEdgeMessageID:        21,
+		}, nil
+	}
+
+	req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?before=30&limit=25", "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+	w := httptest.NewRecorder()
+
+	handler.GetThreadMessages(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "window request should return success")
+	var resp models.ThreadMessageWindowResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 1, len(resp.Data), "response should include one message")
+	require.Equal(t, int64(21), resp.Data[0].ID, "response should include the requested message id")
+	require.Equal(t, models.MessageRoleAssistant, resp.Data[0].Role, "response should preserve message role")
+	require.Equal(t, "latest", resp.Data[0].Content, "response should preserve message content")
+	require.Equal(t, models.ThreadMessageWindowMeta{
+		NextOlderCursor:          "21",
+		HasOlder:                 true,
+		LatestAssistantMessageID: 21,
+		LiveEdgeMessageID:        21,
+		ThreadStatus:             string(models.ThreadStatusIdle),
+	}, resp.Meta, "response should include cursor and anchor metadata")
 }
 
 func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {

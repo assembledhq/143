@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Pause, Loader2 } from "lucide-react";
+import { Play, Pause, Loader2, Minus, Plus } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -74,7 +74,7 @@ function SettingsTab({
   const [goal, setGoal] = useState(automation.goal);
   const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
-  const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
+  const [intervalValue, setIntervalValue] = useState(String(automation.interval_value ?? 1));
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
@@ -93,6 +93,7 @@ function SettingsTab({
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
   const [model, setModel] = useState<string | undefined>(automation.model_override);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(automation.pre_pr_review_loops ?? 0);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
 
   const { data: settingsResponse } = useQuery({
@@ -104,9 +105,22 @@ function SettingsTab({
   const effectiveAgentType = model
     ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
     : automation.agent_type ?? defaultAgentType;
+  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  let prePRReviewDescription = "Off for agents without native review support.";
+  if (supportsNativeReviewLoop) {
+    prePRReviewDescription = effectivePrePRReviewLoops === 0
+      ? "Off"
+      : "Runs the coding agent's review/fix loop before opening a PR.";
+  }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const goalLength = automationGoalLengthState(goal);
+  const parsedIntervalValue = Number(intervalValue.trim());
+  const intervalValueIsValid = intervalValue.trim() !== ""
+    && Number.isInteger(parsedIntervalValue)
+    && parsedIntervalValue >= 1
+    && parsedIntervalValue <= 365;
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -116,12 +130,13 @@ function SettingsTab({
         icon_type: "emoji",
         icon_value: iconValue,
         scope: scope.trim() || undefined,
-        interval_value: intervalValue,
+        interval_value: parsedIntervalValue,
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
         model: model ?? "",
         identity_scope: identityScope,
+        pre_pr_review_loops: effectivePrePRReviewLoops,
         reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
@@ -132,17 +147,22 @@ function SettingsTab({
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-      <div className="space-y-1.5">
-        <Label>Emoji</Label>
-        <AutomationEmojiPicker
-          value={iconValue}
-          onChange={setIconValue}
-          className="w-full sm:w-64"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="name">Name</Label>
-        <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+      <div
+        data-testid="automation-settings-identity-row"
+        className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
+      >
+        <div className="space-y-1.5">
+          <Label>Emoji</Label>
+          <AutomationEmojiPicker
+            value={iconValue}
+            onChange={setIconValue}
+            className="w-16"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="name">Name</Label>
+          <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
       </div>
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
@@ -208,10 +228,8 @@ function SettingsTab({
               min={1}
               max={365}
               value={intervalValue}
-              onChange={(e) => {
-                const parsed = parseInt(e.target.value, 10);
-                setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
-              }}
+              onChange={(e) => setIntervalValue(e.target.value)}
+              aria-invalid={!intervalValueIsValid}
               className="w-20"
             />
             <Select
@@ -306,11 +324,53 @@ function SettingsTab({
           contentClassName="w-[var(--radix-popover-trigger-width)]"
         />
       </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Decrease review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+            disabled={!canManage || !supportsNativeReviewLoop}
+          >
+            <Minus className="h-4 w-4" />
+          </Button>
+          <Input
+            id="pre-pr-review-loops"
+            aria-label="Review passes"
+            type="number"
+            min={0}
+            max={5}
+            value={effectivePrePRReviewLoops}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+            }}
+            disabled={!canManage || !supportsNativeReviewLoop}
+            className="w-20 text-center"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            aria-label="Increase review passes"
+            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+            disabled={!canManage || !supportsNativeReviewLoop}
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {prePRReviewDescription}
+        </p>
+      </div>
       {canManage && (
         <div className="flex items-center gap-3 pt-2">
           <Button
             onClick={() => updateMutation.mutate()}
-            disabled={updateMutation.isPending || goalLength.isTooLong}
+            disabled={updateMutation.isPending || goalLength.isTooLong || !intervalValueIsValid}
           >
             {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Save changes

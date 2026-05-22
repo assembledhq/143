@@ -431,10 +431,10 @@ func TestProjectStore_UpdateStatus(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		status string
+		status models.ProjectStatus
 	}{
-		{name: "update to active", status: "active"},
-		{name: "update to completed", status: "completed"},
+		{name: "update to active", status: models.ProjectStatusActive},
+		{name: "update to completed", status: models.ProjectStatusCompleted},
 	}
 
 	for _, tt := range tests {

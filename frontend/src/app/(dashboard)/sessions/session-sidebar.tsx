@@ -5,7 +5,7 @@ import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -55,6 +55,63 @@ const filterTabs = [
 ];
 
 const newSessionOptionId = "new-session";
+const sessionSidebarOptionFrameClass = "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150";
+const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none";
+
+function SessionSidebarOptionFrame({
+  id,
+  ariaLabel,
+  ariaSelected,
+  className,
+  children,
+  optionRef,
+  onClick,
+}: {
+  id: string;
+  ariaLabel?: string;
+  ariaSelected: boolean;
+  className?: string;
+  children: ReactNode;
+  optionRef?: (node: HTMLDivElement | null) => void;
+  onClick?: MouseEventHandler<HTMLDivElement>;
+}) {
+  return (
+    <div
+      ref={optionRef}
+      id={id}
+      role="option"
+      aria-label={ariaLabel}
+      aria-selected={ariaSelected}
+      data-active={ariaSelected ? "true" : undefined}
+      className={cn(sessionSidebarOptionFrameClass, className)}
+      onClick={onClick}
+    >
+      {children}
+    </div>
+  );
+}
+
+function SessionSidebarLinkSurface({
+  href,
+  ariaCurrent,
+  className,
+  children,
+}: {
+  href: string;
+  ariaCurrent?: "page";
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={ariaCurrent}
+      className={cn(sessionSidebarLinkSurfaceClass, className)}
+    >
+      {children}
+    </Link>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Unread indicator logic
@@ -640,35 +697,40 @@ export function SessionSidebar() {
       >
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
-          <div
-            id={`session-sidebar-option-${newSessionOptionId}`}
-            role="option"
-            aria-label="New session draft"
-            aria-selected={!currentActiveSessionId}
-            className="mb-2 border-b border-border/60 pb-2"
-          >
-            <Link
-              href={`/sessions/new${filterSuffix}`}
-              aria-current="page"
-              className={cn(
-                "block rounded-lg border px-3 py-2.5 transition-all duration-150",
-                !currentActiveSessionId
-                  ? "border-primary/20 bg-primary/5 shadow-sm ring-1 ring-primary/10"
-                  : "border-border/50 bg-background text-muted-foreground hover:bg-background/80",
-              )}
+          <div className="mb-2 border-b border-border/60 pb-2">
+            <SessionSidebarOptionFrame
+              id={`session-sidebar-option-${newSessionOptionId}`}
+              ariaLabel="New session draft"
+              ariaSelected={!currentActiveSessionId}
+              className={!currentActiveSessionId ? "border-primary/20 bg-background shadow-sm ring-1 ring-primary/10" : undefined}
             >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <span
-                  className={cn(
-                    "inline-flex rounded-full h-2 w-2 shrink-0",
-                    !currentActiveSessionId ? "bg-primary/55" : "border border-muted-foreground/30",
-                  )}
-                />
-                <p className={cn("text-xs font-medium", !currentActiveSessionId ? "text-foreground" : "text-muted-foreground")}>
-                  New session
-                </p>
-              </div>
-            </Link>
+              <SessionSidebarLinkSurface
+                href={`/sessions/new${filterSuffix}`}
+                ariaCurrent="page"
+                className={
+                  !currentActiveSessionId
+                    ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                }
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span
+                    className={cn(
+                      "inline-flex rounded-full h-2 w-2 shrink-0",
+                      !currentActiveSessionId ? "bg-primary/55" : "border border-muted-foreground/30",
+                    )}
+                  />
+                  <p
+                    className={cn(
+                      "text-xs font-medium",
+                      !currentActiveSessionId ? "text-foreground" : "text-muted-foreground",
+                    )}
+                  >
+                    New session
+                  </p>
+                </div>
+              </SessionSidebarLinkSurface>
+            </SessionSidebarOptionFrame>
           </div>
         )}
 
@@ -724,20 +786,17 @@ export function SessionSidebar() {
                 }
               }}
             >
-              <div
-                ref={(node) => {
+              <SessionSidebarOptionFrame
+                id={`session-sidebar-option-${session.id}`}
+                ariaSelected={currentActiveSessionId === session.id}
+                optionRef={(node) => {
                   if (node) {
                     optionRefs.current.set(session.id, node);
                   } else {
                     optionRefs.current.delete(session.id);
                   }
                 }}
-                id={`session-sidebar-option-${session.id}`}
-                role="option"
-                aria-selected={currentActiveSessionId === session.id}
-                data-active={currentActiveSessionId === session.id ? "true" : undefined}
                 className={cn(
-                  "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150",
                   currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
                   isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
@@ -748,15 +807,14 @@ export function SessionSidebar() {
                   router.push(sessionHref);
                 }}
               >
-                <Link
+                <SessionSidebarLinkSurface
                   href={sessionHref}
-                  aria-current={isSelected ? "page" : undefined}
-                  className={cn(
-                    "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none",
+                  ariaCurrent={isSelected ? "page" : undefined}
+                  className={
                     isSelected
                       ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
                       : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
-                  )}
+                  }
                 >
                   <span
                     aria-hidden="true"
@@ -816,8 +874,8 @@ export function SessionSidebar() {
                       )}
                     </div>
                   </div>
-                </Link>
-              </div>
+                </SessionSidebarLinkSurface>
+              </SessionSidebarOptionFrame>
             </SwipeActionRow>
           );
         })}

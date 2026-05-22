@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
+	"github.com/assembledhq/143/internal/services/workspace"
 )
 
 func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
@@ -37,6 +39,55 @@ func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	require.NotEqual(t, -1, hold, "RunAgent should publish the turn hold")
 	require.NotEqual(t, -1, usage, "RunAgent should record container usage")
 	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
+}
+
+func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	reader := &blockingMentionIndexFileReader{release: release}
+	o := &Orchestrator{
+		fileReader:     reader,
+		mentionIndexes: workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{}),
+	}
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	liveSandbox := &Sandbox{ID: "container-1", WorkDir: "/workspace"}
+
+	done := make(chan struct{})
+	go func() {
+		o.warmMentionIndexFromSandboxAsync(context.Background(), session, liveSandbox, "snapshot-1", zerolog.Nop())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(25 * time.Millisecond):
+		close(release)
+		require.Fail(t, "async mention-index warmup should return before the workspace traversal completes")
+		return
+	}
+	close(release)
+}
+
+type blockingMentionIndexFileReader struct {
+	release chan struct{}
+}
+
+func (r *blockingMentionIndexFileReader) ListDir(ctx context.Context, _, _, _ string) ([]sandbox.FileEntry, error) {
+	select {
+	case <-r.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (r *blockingMentionIndexFileReader) ReadFile(context.Context, string, string, string) (string, bool, error) {
+	return "", false, errors.New("not used")
+}
+
+func (r *blockingMentionIndexFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
+	return sandbox.FileContextResult{}, errors.New("not used")
 }
 
 type testInternalSessionLogStore struct {
@@ -108,7 +159,7 @@ func (s testInternalIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (
 	return s.issue, nil
 }
 
-func (s testInternalIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s testInternalIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.IssueStatus) error {
 	return s.err
 }
 
@@ -293,7 +344,7 @@ func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
 
 	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
 		"OPENAI_API_KEY": "sk-openai",
-	})
+	}, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should accept the already-resolved Codex API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the selected unified credential is an API key")
@@ -310,7 +361,7 @@ func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T
 			creds: map[models.ProviderName]*models.DecryptedCredential{
 				models.ProviderOpenAI: {
 					OrgID:  orgID,
-					Status: models.CodingCredentialStatusActive,
+					Status: models.CredentialStatusActive,
 					Config: models.OpenAIConfig{APIKey: "sk-legacy-openai"},
 				},
 			},
@@ -331,7 +382,7 @@ func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T
 	}
 	envVars := env.Resolve(context.Background(), orgID, models.AgentTypeCodex, &userID)
 
-	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-legacy", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
+	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-legacy", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should continue to honor the documented legacy OpenAI API-key fallback")
 	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the legacy OpenAI credential as an API-key billing mode")
@@ -454,7 +505,7 @@ func TestSetupFreshSandbox_CodexAPIKeyDoesNotRePickSubscriptionAtSamePriority(t 
 	}
 	envVars := env.Resolve(context.Background(), orgID, models.AgentTypeCodex, &userID)
 
-	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should use the already-resolved Codex API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not re-pick a same-priority Codex subscription after env resolution selected an API key")
@@ -524,7 +575,7 @@ func TestSetupFreshSandbox_ClaudeAPIKeyDoesNotInjectLowerPrioritySubscription(t 
 
 	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{
 		"ANTHROPIC_API_KEY": "sk-ant-api-key",
-	})
+	}, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should accept the already-resolved Claude API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.claude/.credentials.json", "setupFreshSandbox should not inject a lower-priority Claude subscription over the selected API key")
@@ -593,7 +644,7 @@ func TestSetupFreshSandbox_ClaudeAPIKeyDoesNotRePickSubscriptionAtSamePriority(t
 	}
 	envVars := env.Resolve(context.Background(), orgID, models.AgentTypeClaudeCode, &userID)
 
-	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars)
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should use the already-resolved Claude API key")
 	require.NotContains(t, provider.writes, "/home/sandbox/.claude/.credentials.json", "setupFreshSandbox should not re-pick a same-priority subscription after env resolution selected an API key")
@@ -654,7 +705,7 @@ func TestSetupFreshSandbox_ClaudeSubscriptionUsesUnifiedPickedToken(t *testing.T
 		TriggeredByUserID: &userID,
 	}
 
-	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{})
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{}, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should inject the selected unified Claude subscription")
 	written := provider.writes["/home/sandbox/.claude/.credentials.json"]
@@ -713,7 +764,7 @@ func TestSetupFreshSandbox_ReturnsResolvedAuthBillingMode(t *testing.T) {
 		TriggeredByUserID: &userID,
 	}
 
-	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{})
+	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, map[string]string{}, nil)
 
 	require.NoError(t, err, "setupFreshSandbox should succeed for a fresh Claude subscription run")
 	require.Equal(t, TokenBillingModeSubscription, billingMode, "setupFreshSandbox should return the auth-selected billing mode for fresh runs")
@@ -1065,7 +1116,7 @@ func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
 				logger:       zerolog.Nop(),
 			}
 
-			_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil)
+			_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil, nil)
 			require.Error(t, err, "setupFreshSandbox should fail when the working branch cannot be created")
 			require.Contains(t, err.Error(), tt.wantErr, "setupFreshSandbox should surface the working-branch checkout failure")
 		})

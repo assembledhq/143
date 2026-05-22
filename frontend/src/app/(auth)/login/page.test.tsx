@@ -83,6 +83,9 @@ describe('LoginPage', () => {
       isLoading: false,
     });
 
+    document.cookie = 'csrf_token=; Max-Age=0; path=/';
+    document.cookie = 'csrf_token=test-csrf; path=/';
+
     Object.defineProperty(window, 'location', {
       value: createLocationMock(),
       writable: true,
@@ -103,6 +106,33 @@ describe('LoginPage', () => {
 
     expect(screen.getByRole('tab', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Sign up' })).toBeInTheDocument();
+  });
+
+  it('keeps the login form visible while auth status is still loading', () => {
+    useAuthMock.mockReturnValue({
+      user: null,
+      isLoading: true,
+      isAuthenticated: false,
+      logout: vi.fn(),
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('shows an email auth skeleton until csrf warmup finishes', () => {
+    document.cookie = 'csrf_token=; Max-Age=0; path=/';
+    useAuthProvidersMock.mockReturnValue({
+      providers: { github: true, google: true, email: true },
+      isLoading: true,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByTestId('email-auth-skeleton')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument();
   });
 
   it('shows GitHub button', () => {
@@ -135,8 +165,8 @@ describe('LoginPage', () => {
         google: false,
         email: true,
         demo: true,
-        demo_email: 'dogfood@143.dev',
-        demo_password: 'preview-dogfood',
+        demo_email: 'preview-admin@143.dev',
+        demo_password: 'preview',
       },
       isLoading: false,
     });
@@ -145,8 +175,8 @@ describe('LoginPage', () => {
 
     const banner = screen.getByTestId('demo-banner');
     expect(banner).toHaveTextContent('Demo environment');
-    expect(banner).toHaveTextContent('dogfood@143.dev');
-    expect(banner).toHaveTextContent('preview-dogfood');
+    expect(banner).toHaveTextContent('preview-admin@143.dev');
+    expect(banner).toHaveTextContent('preview');
   });
 
   it('renders banner text returned by /providers verbatim (server is source of truth)', () => {
@@ -167,7 +197,7 @@ describe('LoginPage', () => {
     const banner = screen.getByTestId('demo-banner');
     expect(banner).toHaveTextContent('override@example.com');
     expect(banner).toHaveTextContent('override-pw');
-    expect(banner).not.toHaveTextContent('dogfood@143.dev');
+    expect(banner).not.toHaveTextContent('preview-admin@143.dev');
   });
 
   it('hides demo banner when demo mode is off', () => {

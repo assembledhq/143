@@ -100,13 +100,14 @@ type CheckpointKind string
 
 const (
 	CheckpointKindNone         CheckpointKind = ""
+	CheckpointKindBootstrap    CheckpointKind = "bootstrap"
 	CheckpointKindTurnComplete CheckpointKind = "turn_complete"
 	CheckpointKindGracefulStop CheckpointKind = "graceful_stop"
 )
 
 func (k CheckpointKind) Validate() error {
 	switch k {
-	case CheckpointKindNone, CheckpointKindTurnComplete, CheckpointKindGracefulStop:
+	case CheckpointKindNone, CheckpointKindBootstrap, CheckpointKindTurnComplete, CheckpointKindGracefulStop:
 		return nil
 	default:
 		return fmt.Errorf("invalid CheckpointKind: %q", k)

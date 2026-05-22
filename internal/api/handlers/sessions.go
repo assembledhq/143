@@ -71,6 +71,7 @@ type SessionHandler struct {
 	orgStore           *db.OrganizationStore
 	jobStore           *db.JobStore
 	messageStore       *db.SessionMessageStore
+	reviewLoopStore    *db.SessionReviewLoopStore
 	reviewCommentStore *db.SessionReviewCommentStore
 	linkStore          *db.SessionIssueLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
@@ -896,9 +897,9 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		InteractionMode:   models.SessionInteractionModeSingleRun,
 		ValidationPolicy:  models.SessionValidationPolicyOnTurnComplete,
 		AgentType:         agentType,
-		Status:            "pending",
-		AutonomyLevel:     autonomyLevel,
-		TokenMode:         tokenMode,
+		Status:            models.SessionStatusPending,
+		AutonomyLevel:     models.SessionAutonomy(autonomyLevel),
+		TokenMode:         models.SessionTokenMode(tokenMode),
 		TriggeredByUserID: triggeredByUserID,
 		RepositoryID:      issue.RepositoryID,
 	}
@@ -1480,6 +1481,35 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: &pr})
 }
 
+// SetReviewLoopStore enables PR policy checks that depend on completed
+// first-party review loops.
+func (h *SessionHandler) SetReviewLoopStore(store *db.SessionReviewLoopStore) {
+	h.reviewLoopStore = store
+}
+
+func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseWriter, r *http.Request, settings models.OrgSettings, orgID, sessionID uuid.UUID, snapshotKey string) bool {
+	role := middleware.ActiveRoleFromContext(r.Context())
+	if role != string(models.RoleBuilder) || !settings.BuilderPermissions.EffectiveRequireReviewBeforePR() {
+		return true
+	}
+	if h.reviewLoopStore == nil {
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_POLICY_UNAVAILABLE", "review policy is not configured")
+		return false
+	}
+	loops, err := h.reviewLoopStore.ListLoopsBySession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_POLICY_CHECK_FAILED", "failed to check review status", err)
+		return false
+	}
+	for _, loop := range loops {
+		if loop.Status == models.ReviewLoopStatusClean && loop.LatestCheckpointKey != nil && *loop.LatestCheckpointKey == snapshotKey {
+			return true
+		}
+	}
+	writeError(w, r, http.StatusConflict, "REVIEW_REQUIRED_BEFORE_PR", "Builders must run Review for the current snapshot before publishing pull request changes")
+	return false
+}
+
 // CreatePR handles POST /sessions/{id}/pr — enqueues a job that pushes the
 // session's snapshot to GitHub and opens a pull request. The session must
 // still have a snapshot and must not already have an associated PR. While a
@@ -1499,7 +1529,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
 		return
 	}
@@ -1559,6 +1589,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !h.requireBuilderReviewForCurrentSnapshot(w, r, orgSettings, orgID, sessionID, *session.SnapshotKey) {
+		return
+	}
+
 	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
 		SessionID:            sessionID,
 		OrgID:                orgID,
@@ -1608,6 +1642,112 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
+// CreateBranch handles POST /sessions/{id}/branch — enqueues a job that
+// pushes the session snapshot to GitHub without opening a pull request.
+func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	if session.SandboxState == models.SandboxStateDestroyed {
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+		return
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+		return
+	}
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return
+	}
+	if session.Status == models.SessionStatusRunning {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before creating a branch")
+		return
+	}
+	switch session.BranchCreationState {
+	case models.BranchCreationStateQueued, models.BranchCreationStatePushing:
+		writeError(w, r, http.StatusConflict, "BRANCH_IN_FLIGHT", "branch creation already in progress")
+		return
+	}
+
+	var req struct {
+		AuthorMode  string `json:"author_mode,omitempty"`
+		ResumeToken string `json:"resume_token,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+	authorMode, err := parsePRAuthorMode(req.AuthorMode)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if h.orgStore != nil {
+		if org, orgErr := h.orgStore.GetByID(r.Context(), orgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
+		SessionID:            sessionID,
+		OrgID:                orgID,
+		Session:              &session,
+		OrgSettings:          orgSettings,
+		AuthorMode:           authorMode,
+		ResumeToken:          req.ResumeToken,
+		Action:               prAuthActionCreateBranch,
+		ActionDescription:    "create this branch",
+		ResumeExpiredMessage: "GitHub authorization completed, but the branch resume request expired. Please click Create branch again.",
+	}) {
+		return
+	}
+
+	payload := map[string]any{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if authorMode != prAuthorModeAuto {
+		payload["author_mode"] = string(authorMode)
+	}
+	dedupeKey := fmt.Sprintf("create_branch:%s", sessionID)
+	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "create_branch", payload, 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue branch creation job", err)
+		return
+	}
+	queued, err := h.runStore.TryMarkBranchCreationQueued(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
+		return
+	}
+	if !queued {
+		writeError(w, r, http.StatusConflict, "BRANCH_IN_FLIGHT", "branch creation already in progress")
+		return
+	}
+
+	sessionIDStr := sessionID.String()
+	details := sessionAuditSnapshot(&session, nil, map[string]any{
+		"job_type": "create_branch",
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionBranchRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
+		marshalAuditDetails(h.logger, details))
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
 // PushChangesToPR handles POST /sessions/{id}/pr/push — enqueues a job that
 // pushes any uncommitted/unpushed changes from the session sandbox up to the
 // existing PR's branch and updates the PR row's head_sha. The session must
@@ -1633,7 +1773,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
 		return
 	}
@@ -1650,7 +1790,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 	// hydrate could be stale relative to commits the running turn is about
 	// to make. Reject server-side so a racing client (or a stale tab whose
 	// session.status hadn't refreshed) can't slip through.
-	if session.Status == string(models.SessionStatusRunning) {
+	if session.Status == models.SessionStatusRunning {
 		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
 		return
 	}
@@ -1698,6 +1838,10 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 				orgSettings = parsed
 			}
 		}
+	}
+
+	if !h.requireBuilderReviewForCurrentSnapshot(w, r, orgSettings, orgID, sessionID, *session.SnapshotKey) {
+		return
 	}
 
 	if !h.requirePRAuthOrIntercept(w, r, prAuthInterceptParams{
@@ -2138,11 +2282,11 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Reject early if the session's sandbox snapshot has been destroyed
 	// (expired after 30 days). The session can no longer be resumed.
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", "this session's environment has expired and can no longer be continued")
 		return
 	}
-	if session.Status == string(models.SessionStatusAwaitingInput) && body.Message == "" {
+	if session.Status == models.SessionStatusAwaitingInput && body.Message == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_ANSWER", "answer text is required when replying to a pending session question")
 		return
 	}
@@ -2176,7 +2320,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	// entirely so we don't take row locks on session_messages for the common
 	// follow-up case. When there ARE comments to resolve, wrap both the
 	// insert and the resolve in a tx so the two are atomic.
-	if session.Status == string(models.SessionStatusRunning) {
+	if session.Status == models.SessionStatusRunning {
 		if len(resolveCommentIDs) == 0 {
 			if err := h.messageStore.Create(r.Context(), msg); err != nil {
 				writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
@@ -2256,7 +2400,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Try claiming an idle session first, then fall back to resuming a
 	// terminal session (completed/pr_created/failed/cancelled).
-	var revertStatus string
+	var revertStatus models.SessionStatus
 	claimed, claimErr := txRunStore.ClaimIdle(r.Context(), orgID, sessionID)
 	if claimErr != nil {
 		claimed, claimErr = txRunStore.ClaimForResume(r.Context(), orgID, sessionID)
@@ -2266,7 +2410,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		revertStatus = session.Status // preserve original status for revert
 	} else {
-		revertStatus = string(models.SessionStatusIdle)
+		revertStatus = models.SessionStatusIdle
 	}
 	// Update turn number from the claimed session (may differ after status transition).
 	session = claimed
@@ -2296,7 +2440,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	var answeredQuestion *models.SessionQuestion
 	var answeredHumanInput *models.HumanInputRequest
 	var humanInputRequestID *uuid.UUID
-	if revertStatus == string(models.SessionStatusAwaitingInput) && userID != nil && h.questionStore != nil {
+	if revertStatus == models.SessionStatusAwaitingInput && userID != nil && h.questionStore != nil {
 		if h.humanInputStore != nil {
 			request, err := txHumanInputStore.AnswerLatestPendingFreeTextBySession(r.Context(), orgID, sessionID, body.Message, *userID)
 			if err != nil {
@@ -2545,12 +2689,12 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if session.Status != string(models.SessionStatusIdle) {
+	if session.Status != models.SessionStatusIdle {
 		writeError(w, r, http.StatusConflict, "NOT_IDLE", "only idle sessions can be ended")
 		return
 	}
 
-	if err := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusCompleted)); err != nil {
+	if err := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, models.SessionStatusCompleted); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end session", err)
 		return
 	}
@@ -2578,7 +2722,7 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 	// Snapshot cleanup is handled by the reaper, which will find this session
 	// because it's now status=completed with sandbox_state=snapshotted.
 
-	session.Status = string(models.SessionStatusCompleted)
+	session.Status = models.SessionStatusCompleted
 	h.enrichSessionLinks(r.Context(), orgID, &session)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 }
@@ -2604,7 +2748,7 @@ func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if session.Status != string(models.SessionStatusRunning) {
+	if session.Status != models.SessionStatusRunning {
 		writeError(w, r, http.StatusConflict, "NOT_RUNNING", "only running sessions can be cancelled")
 		return
 	}
@@ -2717,7 +2861,7 @@ func (h *SessionHandler) enqueueRemoteCancel(ctx context.Context, orgID uuid.UUI
 	return nil
 }
 
-func isTerminalStatus(status string) bool {
+func isTerminalStatus(status models.SessionStatus) bool {
 	switch status {
 	case "completed", "pr_created", "failed", "cancelled", "skipped":
 		return true
@@ -2908,9 +3052,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		InteractionMode:         models.SessionInteractionModeInteractive,
 		ValidationPolicy:        models.SessionValidationPolicyOnSessionEnd,
 		AgentType:               agentType,
-		Status:                  "pending",
-		AutonomyLevel:           autonomyLevel,
-		TokenMode:               tokenMode,
+		Status:                  models.SessionStatusPending,
+		AutonomyLevel:           models.SessionAutonomy(autonomyLevel),
+		TokenMode:               models.SessionTokenMode(tokenMode),
 		ModelOverride:           modelOverride,
 		ReasoningEffort:         reasoningOverride,
 		TriggeredByUserID:       manualTriggeredByUserID,
@@ -3039,7 +3183,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			// fast path that surfaces the failure to the user immediately;
 			// the reaper is the eventual-consistency safety net.
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
+			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, models.SessionStatusFailed, &models.SessionResult{Error: &errMsg}); err != nil {
 				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; SessionReaper Phase 0 will reap the stuck-pending row within max_pending_age")
 			}
 			cancel()

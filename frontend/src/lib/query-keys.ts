@@ -26,6 +26,7 @@ export const queryKeys = {
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
+    reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
   },
   repositories: {
     all: ["repositories"] as const,
@@ -55,6 +56,8 @@ export const queryKeys = {
   integrations: {
     all: ["integrations"] as const,
     githubRepositories: (installationId?: number | null) => ["integrations", "github", "repositories", installationId ?? null] as const,
+    linearAgentStatus: ["integrations", "linear", "agent"] as const,
+    linearAgentMappings: ["integrations", "linear", "agent", "mappings"] as const,
     slackChannels: ["slack-channels"] as const,
   },
   autopilot: {

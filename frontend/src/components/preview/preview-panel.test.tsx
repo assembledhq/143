@@ -16,6 +16,7 @@ const mockGet = vi.hoisted(() => vi.fn());
 const mockStart = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockRestart = vi.hoisted(() => vi.fn());
+const mockSetLifetime = vi.hoisted(() => vi.fn());
 const mockBootstrap = vi.hoisted(() => vi.fn());
 const mockLogs = vi.hoisted(() => vi.fn());
 const mockConsoleBadgeState = vi.hoisted(() => ({ shouldThrow: false }));
@@ -28,6 +29,7 @@ vi.mock("@/lib/api", () => ({
         start: mockStart,
         stop: mockStop,
         restart: mockRestart,
+        setLifetime: mockSetLifetime,
         bootstrap: mockBootstrap,
         logs: mockLogs,
       },
@@ -137,6 +139,7 @@ describe("PreviewPanel component", () => {
     mockStart.mockResolvedValue({});
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
+    mockSetLifetime.mockResolvedValue({});
     mockBootstrap.mockResolvedValue({ token: "tok-1" });
     mockLogs.mockResolvedValue([]);
     mockConsoleBadgeState.shouldThrow = false;
@@ -218,10 +221,9 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    // Should also render the status badge
-    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.queryByText("Stopped")).not.toBeInTheDocument();
     expect(screen.getByText(/Started 5m ago/)).toBeInTheDocument();
-    expect(screen.getByText(/Stopped 1m ago/)).toBeInTheDocument();
+    expect(screen.getByText(/Stopped 1m ago/)).toHaveClass("rounded-full");
   });
 
   it("treats async start success as startup in progress and resumes polling", async () => {
@@ -425,7 +427,7 @@ describe("PreviewPanel component", () => {
     );
   });
 
-  it("renders width preset buttons in ready state", async () => {
+  it("renders a prominent preview link instead of viewport preset buttons in ready state", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     const { container } = renderWithProviders(
@@ -436,17 +438,15 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Ready")).toBeInTheDocument();
     });
 
-    // Width presets container with 4 icon buttons (Mobile, Tablet, Desktop, Full)
+    const previewLink = screen.getByRole("link", { name: /Open Preview/i });
+    expect(previewLink).toHaveAttribute("href", "http://prev-1.preview.test");
+    expect(previewLink).toHaveAttribute("target", "_blank");
+
+    // The old viewport preset group (Mobile, Tablet, Desktop, Full) should not render.
     const presetContainer = container.querySelector(
       ".flex.items-center.gap-0\\.5.rounded-md.border",
     );
-    expect(presetContainer).toBeInTheDocument();
-
-    // Check for the 4 preset icon buttons via tooltip trigger data attribute
-    const presetButtons = presetContainer!.querySelectorAll(
-      "[data-slot='tooltip-trigger']",
-    );
-    expect(presetButtons).toHaveLength(4);
+    expect(presetContainer).not.toBeInTheDocument();
   });
 
   it("renders ConsoleBadge in ready state", async () => {
@@ -490,6 +490,45 @@ describe("PreviewPanel component", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("ttl-warning")).toBeInTheDocument();
+    });
+  });
+
+  it("offers bounded preview lifetime controls from a hidden menu", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "ready",
+        expires_at: "2026-12-31T00:00:00Z",
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await user.click(await screen.findByRole("button", { name: "Preview lifetime" }));
+
+    expect(screen.getByText("Preview lifetime")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Keep for 15 min" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Keep for 30 min" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Stop in 5 min" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /1 hr/i })).not.toBeInTheDocument();
+  });
+
+  it("updates preview lifetime from the hidden menu", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "ready",
+        expires_at: "2026-12-31T00:00:00Z",
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await user.click(await screen.findByRole("button", { name: "Preview lifetime" }));
+    await user.click(screen.getByRole("menuitem", { name: "Stop in 5 min" }));
+
+    await waitFor(() => {
+      expect(mockSetLifetime).toHaveBeenCalledWith("sess-1", { duration_seconds: 300 });
     });
   });
 
@@ -584,6 +623,9 @@ describe("PreviewPanel component", () => {
 
     const startupLogRegion = screen.getByLabelText("Preview startup error logs");
     expect(startupLogRegion).toHaveTextContent(summary);
+    expect(startupLogRegion).toHaveClass("line-clamp-6");
+    expect(startupLogRegion).toHaveClass("overflow-y-hidden");
+    expect(startupLogRegion).not.toHaveClass("overflow-auto");
 
     await user.click(screen.getByRole("button", { name: "Show full error logs" }));
 
@@ -592,11 +634,15 @@ describe("PreviewPanel component", () => {
         /duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/,
       );
     });
+    expect(startupLogRegion).not.toHaveClass("line-clamp-6");
+    expect(startupLogRegion).toHaveClass("sm:max-h-[min(56vh,28rem)]");
+    expect(startupLogRegion).toHaveClass("overflow-y-hidden");
+    expect(startupLogRegion).not.toHaveClass("overflow-auto");
     expect(screen.getByRole("button", { name: "Show summary" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1");
   });
 
-  it("shows Failed badge when phase is failed", async () => {
+  it("does not show a standalone Failed badge when failure diagnostics are visible", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "failed", error: "err" }),
     );
@@ -604,8 +650,9 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
   });
 
   /* ---------- Query error state ---------- */
@@ -632,7 +679,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Service status indicators ---------- */
 
-  it("renders service status indicators when multiple services exist", async () => {
+  it("does not render ready-state service status indicators when multiple services exist", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "ready" }, [
         {
@@ -649,7 +696,7 @@ describe("PreviewPanel component", () => {
         {
           id: "svc-2",
           preview_instance_id: "prev-1",
-          service_name: "api",
+          service_name: "server",
           role: "support",
           status: "starting",
           command: ["go", "run", "."],
@@ -664,11 +711,12 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("frontend")).toBeInTheDocument();
+      expect(screen.getByText("Ready")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("api")).toBeInTheDocument();
-    expect(screen.getByText("(port binding)")).toBeInTheDocument();
+    expect(screen.queryByText("frontend")).not.toBeInTheDocument();
+    expect(screen.queryByText("server")).not.toBeInTheDocument();
+    expect(screen.queryByText("(port binding)")).not.toBeInTheDocument();
   });
 
   it("does not render service indicators when only one service exists", async () => {
@@ -713,7 +761,7 @@ describe("PreviewPanel component", () => {
     expect(badge.className).toContain("text-emerald-600");
   });
 
-  it("applies destructive color class for failed phase badge", async () => {
+  it("applies destructive color class to failed diagnostics", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "failed", error: "err" }),
     );
@@ -721,11 +769,11 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
-    const badge = screen.getByText("Failed").closest("[class]")!;
-    expect(badge.className).toContain("text-destructive");
+    const heading = screen.getByText("Preview failed to start").closest("[class]")!;
+    expect(heading.className).toContain("text-destructive");
   });
 
   it("uses one primary starting label in the startup canvas", async () => {
@@ -1215,36 +1263,6 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByText("Failed to restart preview: server error")).toBeInTheDocument();
     });
-  });
-
-  /* ---------- Width preset interactions ---------- */
-
-  it("changes iframe container max-width when a width preset is clicked", async () => {
-    const user = userEvent.setup();
-    mockGet.mockResolvedValue(makePreviewStatus({ status: "ready", id: "prev-1" }));
-
-    const { container } = renderWithProviders(
-      <PreviewPanel {...DEFAULT_PROPS} />,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
-    });
-
-    // Find the preset buttons container
-    const presetContainer = container.querySelector(
-      ".flex.items-center.gap-0\\.5.rounded-md.border",
-    )!;
-    const presetButtons = presetContainer.querySelectorAll("button");
-
-    // Click Mobile preset (first button, 375px)
-    await user.click(presetButtons[0]);
-
-    // The iframe wrapper div should have maxWidth 375px
-    const iframeWrapper = container.querySelector(
-      "[style*='max-width: 375px']",
-    );
-    expect(iframeWrapper).toBeInTheDocument();
   });
 
   /* ---------- Design mode toggle ---------- */

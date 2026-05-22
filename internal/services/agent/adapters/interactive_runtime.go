@@ -68,6 +68,17 @@ type InteractiveRunResult struct {
 	Stderr []byte
 }
 
+const maxStreamLineBytes = 16 * 1024 * 1024
+
+type streamLineTooLongError struct {
+	LineBytes int
+	MaxBytes  int
+}
+
+func (e *streamLineTooLongError) Error() string {
+	return fmt.Sprintf("agent output line exceeded retained limit: line_bytes=%d max_bytes=%d", e.LineBytes, e.MaxBytes)
+}
+
 // runInteractiveCommand starts the agent CLI inside the sandbox via the
 // provider's interactive capability, drives stdout/stderr through the
 // supplied line handlers, registers the handle with the cancel registry
@@ -189,14 +200,16 @@ func runInteractiveCommand(ctx context.Context, sandbox *agent.Sandbox, spec Int
 
 // streamLines reads from r and invokes handler for each newline-delimited
 // line. Empty lines are skipped. The trailing partial line (no newline) is
-// flushed once the reader hits EOF. Returns any scanner error so callers
-// can distinguish a clean EOF from a truncated stream (e.g. the 1 MiB line
-// ceiling being exceeded by a runaway tool output).
+// flushed once the reader hits EOF.
 //
-// Buffer policy: bufio.Scanner's default 64 KiB ceiling truncates legitimate
-// agent output (stream-JSON events with large tool inputs/outputs routinely
-// exceed that). 1 MiB matches the previous lineSplitter ceiling used by the
-// docker provider and is small enough to bound runaway memory.
+// Some agent CLIs emit one JSONL event per tool completion, with the entire
+// command output embedded in that one line. Those lines can be many megabytes
+// long, so this must not use bufio.Scanner: Scanner has a fixed token ceiling
+// and stops reading once a line exceeds it, which can backpressure the Docker
+// exec stream and wedge the agent. ReadSlice lets us keep draining fixed-size
+// chunks while only assembling the current logical line. Lines above
+// maxStreamLineBytes are drained but not retained, and a clear error is
+// returned after the stream reaches EOF.
 func streamLines(r io.Reader, handler LineHandler) error {
 	if r == nil {
 		return nil
@@ -209,18 +222,75 @@ func streamLines(r io.Reader, handler LineHandler) error {
 		}
 		return nil
 	}
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+
+	reader := bufio.NewReaderSize(r, 64*1024)
+	var line bytes.Buffer
+	lineBytes := 0
+	discardingLine := false
+	var retainedErr error
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 {
+			content := fragment
+			if err == nil {
+				content = trimLineEnding(content)
+			}
+			lineBytes += len(content)
+			if !discardingLine {
+				if line.Len()+len(content) <= maxStreamLineBytes {
+					if _, writeErr := line.Write(content); writeErr != nil {
+						return writeErr
+					}
+				} else {
+					discardingLine = true
+					line = bytes.Buffer{}
+				}
+			}
 		}
-		// scanner reuses its internal buffer; copy before handing off so
-		// handlers can retain the slice without aliasing.
-		buf := make([]byte, len(line))
-		copy(buf, line)
-		handler(buf)
+		switch {
+		case err == nil:
+			if lineErr := finishStreamLine(&line, handler, lineBytes, discardingLine); lineErr != nil && retainedErr == nil {
+				retainedErr = lineErr
+			}
+			lineBytes = 0
+			discardingLine = false
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			if lineBytes > 0 || line.Len() > 0 {
+				if lineErr := finishStreamLine(&line, handler, lineBytes, discardingLine); lineErr != nil && retainedErr == nil {
+					retainedErr = lineErr
+				}
+			}
+			return retainedErr
+		default:
+			return err
+		}
 	}
-	return scanner.Err()
+}
+
+func finishStreamLine(line *bytes.Buffer, handler LineHandler, lineBytes int, discarding bool) error {
+	if discarding {
+		*line = bytes.Buffer{}
+		return &streamLineTooLongError{LineBytes: lineBytes, MaxBytes: maxStreamLineBytes}
+	}
+	raw := line.Bytes()
+	raw = bytes.TrimSuffix(raw, []byte("\r"))
+	defer func() { *line = bytes.Buffer{} }()
+	if len(raw) == 0 {
+		return nil
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	buf := make([]byte, len(raw))
+	copy(buf, raw)
+	handler(buf)
+	return nil
+}
+
+func trimLineEnding(fragment []byte) []byte {
+	fragment = bytes.TrimSuffix(fragment, []byte("\n"))
+	fragment = bytes.TrimSuffix(fragment, []byte("\r"))
+	return fragment
 }

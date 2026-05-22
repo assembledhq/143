@@ -1,10 +1,10 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowDown,
@@ -14,6 +14,8 @@ import {
   FileCode2,
   FolderTree,
   GitPullRequest,
+  GitBranch,
+  ChevronDown,
   Loader2,
   RefreshCw,
   CheckCircle2,
@@ -21,6 +23,7 @@ import {
   XCircle,
   X,
   Plus,
+  Minus,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -35,6 +38,12 @@ import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import {
@@ -78,6 +87,7 @@ import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
+import { useFileDropzone } from "@/hooks/use-file-dropzone";
 import {
   COMPOSER_TRIGGER_SPECS,
   findActiveTrigger,
@@ -103,6 +113,11 @@ import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimeli
 import type { DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
+  classifyPRSnapshotState,
+  prErrorTitle,
+  snapshotPRMessage,
+} from "@/lib/session-pr-snapshot";
+import {
   readStoredSessionActiveThread,
   readStoredSessionScrollPosition,
   resolveInitialSessionThreadId,
@@ -115,7 +130,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -147,11 +162,14 @@ import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 
-// Defer the diff viewer (shiki + diff-parser) until the user actually opens
-// review mode. Saves ~100KB+ from the initial session-detail bundle for the
-// common case of just chatting with the agent.
+const loadReviewDiffView = () =>
+  import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
+
+// Defer the diff viewer until the user actually opens review mode. Saves
+// review-specific code from the initial session-detail bundle for the common
+// case of just chatting with the agent.
 const ReviewDiffView = dynamic(
-  () => import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView })),
+  loadReviewDiffView,
   {
     ssr: false,
     loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
@@ -285,6 +303,42 @@ export function getInitialComposerSelectedModel(thread: SessionThread): string {
   return thread.model_override ?? "";
 }
 
+export function hasCleanReviewLoopForSnapshot(loops: SessionReviewLoop[] | undefined, snapshotKey: string | undefined): boolean {
+  if (!snapshotKey) return false;
+  return (loops ?? []).some((loop) => loop.status === "clean" && loop.latest_checkpoint_key === snapshotKey);
+}
+
+function reviewLoopThreadLabel(agentType: string): string {
+  switch (agentType) {
+    case "claude_code":
+      return "Claude Review";
+    case "codex":
+      return "Codex Review";
+    default:
+      return "Review";
+  }
+}
+
+function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session): PendingThreadPreview | null {
+  if (!loop.thread_id) {
+    return null;
+  }
+  return {
+    id: loop.thread_id,
+    session_id: loop.session_id,
+    org_id: loop.org_id,
+    agent_type: loop.agent_type,
+    label: reviewLoopThreadLabel(loop.agent_type),
+    status: "running",
+    current_turn: 1,
+    created_at: loop.started_at,
+    cost_cents: 0,
+    pending_message_count: 0,
+    cancel_requested_at: undefined,
+    model_override: session?.agent_type === loop.agent_type ? session.model_override : undefined,
+  };
+}
+
 export function trackInFlightAgentUpdate(
   ref: { current: Promise<unknown> | null },
   promise: Promise<unknown>,
@@ -362,6 +416,7 @@ type PRAuthInterceptDetails = {
 // backend has rejected the action.
 type PRAuthPromptState =
   | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | ({ purpose: "create_branch" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
   | { purpose: "merge_pr" };
 
@@ -373,12 +428,10 @@ type PRActionErrorState = {
 type AddTabTriggerSource = "strip" | "header";
 type PendingThreadPreview = Pick<
   SessionThread,
-  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "model_override"
+  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override"
 >;
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
-const SNAPSHOT_EXPIRED_PR_MESSAGE =
-  "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.";
 
 function mergePendingMessages(
   baseMessages: SessionMessage[],
@@ -414,78 +467,12 @@ function messageReconciliationKey(message: SessionMessage): string {
     commands: message.commands ?? [],
   });
 }
-const SNAPSHOT_NOT_CAPTURED_PR_MESSAGE =
-  "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.";
-const SNAPSHOT_UNAVAILABLE_PR_MESSAGE =
-  "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again.";
-
-type PRSnapshotState = "expired" | "not_captured" | "unavailable";
-
 function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetails {
   if (!value || typeof value !== "object") return false;
   const details = value as Partial<PRAuthInterceptDetails>;
   return typeof details.connect_url === "string" &&
     typeof details.resume_token === "string" &&
     typeof details.can_fallback_to_app === "boolean";
-}
-
-function classifyPRSnapshotState({
-  sessionSnapshotKey,
-  sessionSandboxState,
-  serverMessage,
-  localCode,
-  allowImplicitMissingSnapshot = false,
-}: {
-  sessionSnapshotKey?: string | null;
-  sessionSandboxState?: string | null;
-  serverMessage?: string | null;
-  localCode?: string;
-  allowImplicitMissingSnapshot?: boolean;
-}): PRSnapshotState | null {
-  if (localCode === "SNAPSHOT_EXPIRED") return "expired";
-  if (localCode === "SNAPSHOT_NOT_CAPTURED") return "not_captured";
-  if (localCode === "SNAPSHOT_UNAVAILABLE") return "unavailable";
-  if (serverMessage === SNAPSHOT_EXPIRED_PR_MESSAGE) return "expired";
-  if (serverMessage === SNAPSHOT_NOT_CAPTURED_PR_MESSAGE) return "not_captured";
-  if (serverMessage === SNAPSHOT_UNAVAILABLE_PR_MESSAGE) return "unavailable";
-  if (/^session state expired\b/i.test(serverMessage || "")) return "unavailable";
-  if (!sessionSnapshotKey) {
-    if (!allowImplicitMissingSnapshot) return null;
-    return sessionSandboxState === "destroyed" ? "expired" : "not_captured";
-  }
-  return null;
-}
-
-function snapshotPRMessage(state: PRSnapshotState | null, message?: string | null): string {
-  if (message && !/^session state expired\b/i.test(message)) {
-    return message;
-  }
-  switch (state) {
-    case "expired":
-      return SNAPSHOT_EXPIRED_PR_MESSAGE;
-    case "not_captured":
-      return SNAPSHOT_NOT_CAPTURED_PR_MESSAGE;
-    case "unavailable":
-      return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
-    default:
-      return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
-  }
-}
-
-function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string): string {
-  if (snapshotState === "expired" || errorCode === "SNAPSHOT_EXPIRED") {
-    return "Session snapshot expired";
-  }
-  if (snapshotState === "not_captured" || errorCode === "SNAPSHOT_NOT_CAPTURED") {
-    return "No reusable checkpoint saved";
-  }
-  if (snapshotState === "unavailable" || errorCode === "SNAPSHOT_UNAVAILABLE") {
-    return "Saved checkpoint unavailable";
-  }
-  if (errorCode === "PR_RESUME_EXPIRED") {
-    return "Couldn't resume PR creation";
-  }
-  return "Couldn't create the PR";
 }
 
 function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
@@ -1285,6 +1272,18 @@ function SessionComposer({
     });
   }
 
+  const fileDropzone = useFileDropzone({
+    enabled: canSendMessage,
+    onFilesDropped: onPasteFiles,
+    onAfterDrop: () => {
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+      });
+    },
+  });
+
   const firstError = uploadError || sendError;
   const errorMessage = typeof firstError === "string"
     ? firstError
@@ -1418,7 +1417,12 @@ function SessionComposer({
         <div
           ref={composerInputSurfaceRef}
           data-testid="session-composer-input-surface"
-          className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}
+          {...fileDropzone.dropzoneProps}
+          className={cn(
+            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
+            fileDropzone.isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
+          )}
         >
           {openComments.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
@@ -1776,7 +1780,7 @@ function SessionComposer({
             <input
               ref={uploadInputRef}
               type="file"
-              accept="image/*,.pdf,.txt,.md,.json,.csv"
+              accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
               multiple
               className="hidden"
               onChange={onUpload}
@@ -1814,6 +1818,7 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
+const THREAD_MESSAGE_WINDOW_LIMIT = 60;
 // Sliding window for the SSE log overlay buffer. The persisted logs are
 // fetched separately via the timeline query; streamedLogs only holds the
 // not-yet-persisted overlay that bridges the gap between an SSE push and the
@@ -1832,6 +1837,25 @@ function normalizeTranscriptContent(content: string): string {
     .map((line) => line.replace(/[ \t\r]+$/g, ""))
     .join("\n")
     .replace(/\n+$/g, "");
+}
+
+export function flattenThreadMessageWindows(
+  pages: ThreadMessageWindowResponse[] | undefined,
+): SessionMessage[] {
+  return pages?.slice().reverse().flatMap((page) => page.data ?? []) ?? [];
+}
+
+export function filterThreadLogsForLoadedMessages(
+  logs: SessionLog[],
+  messages: SessionMessage[],
+): SessionLog[] {
+  if (messages.length === 0) return [];
+  const loadedTurns = new Set(messages.map((message) => message.turn_number));
+  return logs.filter((log) => loadedTurns.has(log.turn_number));
+}
+
+function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
+  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
 }
 
 function SessionTimelineSkeleton() {
@@ -1915,6 +1939,7 @@ function ChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
+  const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
@@ -1935,12 +1960,25 @@ function ChatPanel({
     refetchInterval: isActive && !activeThreadId ? 3000 : false,
   });
 
-  const threadMessagesQuery = useQuery({
-    queryKey: activeThreadId ? queryKeys.sessions.threadMessages(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages"],
-    queryFn: () => api.sessions.getThreadMessages(sessionId, activeThreadId!),
+  const threadMessagesQuery = useInfiniteQuery({
+    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages", "window"],
+    queryFn: ({ pageParam }) =>
+      api.sessions.getThreadMessageWindow(
+        sessionId,
+        activeThreadId!,
+        pageParam
+          ? { before: pageParam as string, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+          : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+      ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
     enabled: !!activeThreadId,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
+
+  const threadMessages = useMemo(() => {
+    return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
+  }, [threadMessagesQuery.data?.pages]);
 
   const threadLogsQuery = useQuery({
     queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
@@ -2033,9 +2071,13 @@ function ChatPanel({
       const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
         .filter((request) => request.thread_id === activeThreadId)
         .map((request) => ({ kind: "human_input" as const, data: request }));
-      return sortTimelineEntries([...buildTimeline(
-        mergePendingMessages(threadMessagesQuery.data?.data ?? [], optimisticForCurrentView),
+      const loadedThreadLogs = filterThreadLogsForLoadedMessages(
         threadLogsQuery.data?.data ?? [],
+        threadMessages,
+      );
+      return sortTimelineEntries([...buildTimeline(
+        mergePendingMessages(threadMessages, optimisticForCurrentView),
+        loadedThreadLogs,
       ), ...threadHumanInputEntries]);
     }
     const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
@@ -2057,7 +2099,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessagesQuery.data?.data, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
+  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
@@ -2215,6 +2257,27 @@ function ChatPanel({
       el.scrollTop = 0;
     }
   }, []);
+
+  const loadOlderThreadMessages = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) {
+      olderMessagesPrependSnapshotRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
+    void threadMessagesQuery.fetchNextPage();
+  }, [threadMessagesQuery]);
+
+  useLayoutEffect(() => {
+    const snapshot = olderMessagesPrependSnapshotRef.current;
+    const el = scrollRef.current;
+    if (!snapshot || !el || threadMessagesQuery.isFetchingNextPage) {
+      return;
+    }
+    olderMessagesPrependSnapshotRef.current = null;
+    el.scrollTop = snapshot.scrollTop + (el.scrollHeight - snapshot.scrollHeight);
+  }, [threadMessages.length, threadMessagesQuery.isFetchingNextPage]);
 
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
@@ -2442,6 +2505,16 @@ function ChatPanel({
     });
 
     if (anchor.kind === "saved_position") {
+      const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      if (
+        activeThreadId &&
+        threadMessagesQuery.hasNextPage &&
+        !threadMessagesQuery.isFetchingNextPage &&
+        anchor.scrollTop > maxScrollTop
+      ) {
+        void threadMessagesQuery.fetchNextPage();
+        return;
+      }
       el.scrollTop = anchor.scrollTop;
       syncScrollState(el);
       initialAnchorAppliedRef.current = true;
@@ -2460,7 +2533,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2498,6 +2571,24 @@ function ChatPanel({
           <SessionTimelineSkeleton />
         ) : (
           <>
+            {activeThreadId && threadMessagesQuery.hasNextPage ? (
+              <div className="flex justify-center pb-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadOlderThreadMessages}
+                  disabled={threadMessagesQuery.isFetchingNextPage}
+                >
+                  {threadMessagesQuery.isFetchingNextPage ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                  Load older
+                </Button>
+              </div>
+            ) : null}
             {showFreshThreadShell ? <FreshThreadShell /> : null}
             <ChatTimeline
               entries={timelineEntries}
@@ -2616,12 +2707,18 @@ const SESSION_HEADER_HEIGHT_CLASSNAME = "h-14";
 const TRANSCRIPT_STEP_PX = 72;
 const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
+const REVIEW_AGENT_KEYS = ["codex", "claude_code"] as const;
+
+function getDefaultReviewAgentType(sessionAgentType?: string): string {
+  return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";
+}
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
   const { user, isLoading: isAuthLoading } = useAuth();
   const canListTeamMembers = user?.role === "admin" || user?.role === "member";
-  const canShipPR = canListTeamMembers;
+  const canShipPR = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
+  const canManagePR = user?.role === "admin" || user?.role === "member";
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -2630,6 +2727,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
   const [centerMode, setCenterMode] = useState<"chat" | "review">(
     reviewParam === "active" ? "review" : "chat"
+  );
+  const [hasMountedChatPanel, setHasMountedChatPanel] = useState(
+    reviewParam !== "active"
   );
   const [detailTab, setDetailTab] = useState<DetailTab>(
     previewParam === "1" ? "preview" : "overview"
@@ -2642,6 +2742,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
+  const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
+  const [reviewPasses, setReviewPasses] = useState(2);
+  const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -2656,6 +2759,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (suppressNextReviewParamClearRef.current) {
         suppressNextReviewParamClearRef.current = false;
       } else {
+        setHasMountedChatPanel(true);
         setCenterMode("chat");
       }
     }
@@ -2663,10 +2767,30 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [reviewParam]);
 
   useEffect(() => {
+    const urlReviewParam =
+      typeof window === "undefined"
+        ? null
+        : new URLSearchParams(window.location.search).get("review");
+    const nextReviewParam =
+      typeof window === "undefined" || window.location.search === ""
+        ? previousReviewParamRef.current
+        : urlReviewParam;
+    const isDirectReview = nextReviewParam === "active";
+    setHasMountedChatPanel(!isDirectReview);
+    previousReviewParamRef.current = nextReviewParam;
+    if (isDirectReview) {
+      setCenterMode("review");
+    }
+  }, [id]);
+
+  useEffect(() => {
     const syncReviewModeFromHistory = () => {
       const nextReviewParam = new URLSearchParams(window.location.search).get("review");
       suppressNextReviewParamClearRef.current = false;
       previousReviewParamRef.current = nextReviewParam;
+      if (nextReviewParam !== "active") {
+        setHasMountedChatPanel(true);
+      }
       setCenterMode(nextReviewParam === "active" ? "review" : "chat");
     };
 
@@ -2725,6 +2849,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
     suppressNextReviewParamClearRef.current = false;
+    setHasMountedChatPanel(true);
     setCenterMode("chat");
     setReviewParam(null);
   }, [setReviewParam]);
@@ -2740,6 +2865,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
+  const [localBranchState, setLocalBranchState] = useState<"idle" | "submitting" | "queued">("idle");
+  const [localBranchActionError, setLocalBranchActionError] = useState<PRActionErrorState | null>(null);
   const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
@@ -2763,12 +2890,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       const waitingForPushServer = localPushState !== "idle" &&
         s.pr_push_state !== "failed" &&
         s.pr_push_state !== "succeeded";
+      const branchInFlight = s.branch_creation_state === "queued" || s.branch_creation_state === "pushing";
+      const waitingForBranchServer = localBranchState !== "idle" &&
+        s.branch_creation_state !== "failed" &&
+        s.branch_creation_state !== "succeeded";
 
       // Poll while PR creation OR push-changes is in flight so the state
       // machine advances without waiting for the user to navigate. Keep
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
-      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer ? 2000 : false;
+      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer ? 2000 : false;
     },
   });
 
@@ -2784,7 +2915,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
   const session = data?.data;
   const members = membersData?.data ?? [];
-  const shouldLoadDiff = !!session && (
+  const shouldLoadDiff = (
     centerMode === "review" ||
     detailTab === "changes"
   );
@@ -2798,25 +2929,65 @@ export function SessionDetailContent({ id }: { id: string }) {
       session.diff_stats?.files_changed ?? "",
     ].join(":");
   }, [session]);
+  const fetchedDiffBeforeRevisionRef = useRef(false);
+  const observedDiffRevisionKeyRef = useRef<string | null>(null);
   const {
     data: diffData,
     isLoading: isDiffLoading,
     isFetching: isDiffFetching,
     isError: isDiffError,
+    isFetchedAfterMount: isDiffFetchedAfterMount,
     error: diffError,
     refetch: refetchDiff,
   } = useQuery({
-    queryKey: queryKeys.sessions.diff(id, diffRevisionKey),
-    queryFn: () => api.sessions.getDiff(id),
+    queryKey: queryKeys.sessions.diff(id),
+    queryFn: () => {
+      if (!diffRevisionKey) {
+        fetchedDiffBeforeRevisionRef.current = true;
+      }
+      return api.sessions.getDiff(id);
+    },
     enabled: shouldLoadDiff,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     retry: false,
   });
+  useEffect(() => {
+    fetchedDiffBeforeRevisionRef.current = false;
+    observedDiffRevisionKeyRef.current = null;
+  }, [id]);
+  useEffect(() => {
+    if (centerMode === "review") {
+      void loadReviewDiffView();
+    }
+  }, [centerMode]);
   const retryDiffLoad = useCallback(() => {
+    fetchedDiffBeforeRevisionRef.current = false;
     void refetchDiff();
   }, [refetchDiff]);
   const sessionDiffPayload = diffData?.data;
+  useEffect(() => {
+    if (!shouldLoadDiff || !diffRevisionKey) {
+      return;
+    }
+
+    if (observedDiffRevisionKeyRef.current === diffRevisionKey) {
+      return;
+    }
+
+    const isInitialRevision = observedDiffRevisionKeyRef.current === null;
+    observedDiffRevisionKeyRef.current = diffRevisionKey;
+
+    if (isInitialRevision && fetchedDiffBeforeRevisionRef.current) {
+      return;
+    }
+    if (isInitialRevision && (!sessionDiffPayload || isDiffFetchedAfterMount)) {
+      return;
+    }
+
+    fetchedDiffBeforeRevisionRef.current = false;
+    void refetchDiff();
+  }, [diffRevisionKey, isDiffFetchedAfterMount, refetchDiff, sessionDiffPayload, shouldLoadDiff]);
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
   const chromeThreads = useMemo(() => {
@@ -2826,7 +2997,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     return [...threads, pendingThreadPreview];
   }, [pendingThreadPreview, threads]);
   const nonInteractiveThreadIds = useMemo(
-    () => new Set(pendingThreadPreview ? [pendingThreadPreview.id] : []),
+    () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
     [pendingThreadPreview],
   );
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -2837,8 +3008,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [viewedThreadIdsLoadedForSessionId, setViewedThreadIdsLoadedForSessionId] = useState<string | null>(() => (
     typeof window === "undefined" ? null : id
   ));
-  const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
-  const activeThreadIndex = activeThread ? threads.findIndex((thread) => thread.id === activeThread.id) : -1;
+  const activeThread = chromeThreads.find((thread) => thread.id === activeThreadId) ?? null;
+  const activeThreadIndex = activeThread ? chromeThreads.findIndex((thread) => thread.id === activeThread.id) : -1;
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
   const currentTitle = session ? sessionTitle(session) : "";
@@ -2890,7 +3061,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
 
-    if (threads.length === 0) {
+    if (chromeThreads.length === 0) {
       if (activeThreadId !== null) {
         setActiveThreadId(null);
       }
@@ -2919,10 +3090,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
 
-    if (!activeThreadId || !threads.some((thread) => thread.id === activeThreadId)) {
-      setActiveThreadId(threads[0].id);
+    if (!activeThreadId || !chromeThreads.some((thread) => thread.id === activeThreadId)) {
+      setActiveThreadId(chromeThreads[0].id);
     }
-  }, [activeThreadId, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
 
   useEffect(() => {
     if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
@@ -3128,6 +3299,29 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRPushStateRef.current = current;
   }, [session?.pr_push_state, session?.pr_push_error, prUrl, queryClient, id, pullRequestId]);
+  const prevBranchStateRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevBranchStateRef.current;
+    const current = session?.branch_creation_state;
+    if (current === "succeeded") {
+      if (localBranchState !== "idle") {
+        setLocalBranchState("idle");
+      }
+      if (prev && prev !== current) {
+        toast.success("Branch created", session?.branch_url ? {
+          action: { label: "View \u2197", onClick: () => window.open(session.branch_url, "_blank", "noopener,noreferrer") },
+        } : undefined);
+      }
+    } else if (current === "failed") {
+      if (localBranchState !== "idle") {
+        setLocalBranchState("idle");
+      }
+      if (prev && prev !== current) {
+        toast.error(session?.branch_creation_error || "Failed to create branch", { duration: PR_ERROR_TOAST_DURATION_MS });
+      }
+    }
+    prevBranchStateRef.current = current;
+  }, [localBranchState, session?.branch_creation_state, session?.branch_creation_error, session?.branch_url]);
   const startRepairMutation = useMutation({
     mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
       if (!pullRequestId) {
@@ -3292,17 +3486,60 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (id) {
       api.sessions.recordView(id).then(() => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      }).catch(() => {});
+      }).catch((err) => {
+        console.error("failed to record session view", err);
+      });
     }
   }, [id, queryClient]);
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const canCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
+  const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
+  const canUseNativeReviewLoop = !!session && session.agent_type !== "pm_agent";
+  const sessionID = session?.id;
+  const sessionAgentType = session?.agent_type;
+  const reviewAgentOptions = useMemo(
+    () => REVIEW_AGENT_KEYS.map((agentType) => AGENTS_BY_KEY[agentType]).filter(Boolean),
+    [],
+  );
+
+  useEffect(() => {
+    if (!sessionAgentType) {
+      return;
+    }
+    setReviewAgentType(getDefaultReviewAgentType(sessionAgentType));
+  }, [sessionID, sessionAgentType]);
+
+  const { data: reviewLoopsData } = useQuery({
+    queryKey: queryKeys.sessions.reviewLoops(id),
+    queryFn: () => api.sessions.listReviewLoops(id),
+    enabled: !!session,
+  });
+  const { data: orgSettingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+    enabled: user?.role === "builder",
+  });
+  const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
+  const hasCleanReviewLoop = hasCleanReviewLoopForSnapshot(reviewLoopsData?.data, session?.snapshot_key);
+  const builderRequiresReviewBeforePR = user?.role === "builder" && (orgSettings.builder_permissions?.require_review_before_pr ?? true);
+  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || hasCleanReviewLoop;
+  const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
+  const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
+  const reviewLoopRunning = latestReviewLoop?.status === "running";
+  const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
+  const reviewUnavailableReason = reviewLoopRunning
+    ? "Review loop is running"
+    : !hasSnapshot
+      ? "A reusable sandbox snapshot is required before review"
+      : isRunning
+        ? "Review can start after the current turn finishes"
+        : undefined;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -3358,6 +3595,85 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const createBranchMutation = useMutation({
+    mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
+      api.sessions.createBranch(id, options),
+    onMutate: () => {
+      setLocalBranchActionError(null);
+      setLocalBranchState("submitting");
+    },
+    onSuccess: (_data, options) => {
+      setLocalBranchActionError(null);
+      setLocalBranchState("queued");
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (err, options) => {
+      if (err instanceof ApiError &&
+        (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
+        isPRAuthInterceptDetails(err.details)) {
+        setLocalBranchState("idle");
+        setLocalBranchActionError(null);
+        setPRAuthPrompt({ ...err.details, purpose: "create_branch" });
+        clearPRResumeParams();
+        return;
+      }
+      setLocalBranchState("idle");
+      const msg = err instanceof Error ? err.message : "Failed to create branch";
+      setLocalBranchActionError({
+        code: err instanceof ApiError ? err.code : undefined,
+        message: msg,
+      });
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
+      toast.error(msg, { duration: PR_ERROR_TOAST_DURATION_MS });
+    },
+  });
+
+  const startReviewLoopMutation = useMutation({
+    mutationFn: () =>
+      api.sessions.startReviewLoop(id, {
+        agent_type: reviewAgentType,
+        model: session?.agent_type === reviewAgentType ? session?.model_override : undefined,
+        max_passes: reviewPasses,
+      }),
+    onSuccess: (response) => {
+      toast.success("Review loop started");
+      setReviewSetupOpen(false);
+      const reviewThread = buildReviewLoopThreadPreview(response.data, session);
+      if (reviewThread) {
+        setPendingThreadPreview(reviewThread);
+        queryClient.setQueryData<SingleResponse<SessionDetail>>(queryKeys.sessions.detail(id), (existing) => {
+          if (!existing) return existing;
+          const existingThreads = existing.data.threads ?? [];
+          return {
+            ...existing,
+            data: {
+              ...existing.data,
+              threads: [...existingThreads.filter((thread) => thread.id !== reviewThread.id), reviewThread],
+            },
+          };
+        });
+        setActiveThreadId(reviewThread.id);
+        setComposerSelectedModel(getInitialComposerSelectedModel(reviewThread));
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.reviewLoops(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threads(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : "Review loop could not be started";
+      toast.error(msg);
+    },
+  });
+  const reviewActionDisabled = !canStartReviewLoop || startReviewLoopMutation.isPending;
+  const reviewActionDisabledReason = startReviewLoopMutation.isPending
+    ? "Starting review loop..."
+    : reviewUnavailableReason;
+
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
       api.sessions.pushChangesToPR(id, options),
@@ -3405,9 +3721,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     // any state change during the GitHub round-trip (e.g. another tab
     // creating the PR, or the PR getting closed). Fall back to the current
     // PR state for legacy tokens that predate the resume_action param.
-    const action: "create_pr" | "push_changes" =
+    const action: "create_pr" | "create_branch" | "push_changes" =
       resumeActionParam === "push_changes"
         ? "push_changes"
+        : resumeActionParam === "create_branch"
+          ? "create_branch"
         : resumeActionParam === "create_pr"
           ? "create_pr"
           : hasPR && prStatus === "open" && !!session?.has_unpushed_changes
@@ -3421,15 +3739,21 @@ export function SessionDetailContent({ id }: { id: string }) {
       // effect re-runs when these dependencies flip, so the replay still
       // happens — just on the next tick when the session is actually ready.
       const pushAvailable = hasPR && prStatus === "open" && !!session?.has_unpushed_changes;
-      if (!pushAvailable || !hasSnapshot || isRunning) return;
+      if (!pushAvailable || !hasSnapshot || isRunning || !builderReviewAllowsPR) return;
       resumeAttemptRef.current = resumePRParam;
       pushChangesMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+      return;
+    }
+    if (action === "create_branch") {
+      if (!canCreatePR) return;
+      resumeAttemptRef.current = resumePRParam;
+      createBranchMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
       return;
     }
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [canCreatePR, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
+  }, [builderReviewAllowsPR, canCreatePR, createBranchMutation, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const diffStats = useMemo(() => {
     const stats = session?.diff_stats ?? sessionDiffPayload?.diff_stats;
@@ -3746,17 +4070,36 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: ({ response, resolvedIDs }, vars, context) => {
       setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
       if (vars.activeThreadId) {
-        queryClient.setQueryData<ListResponse<SessionMessage>>(
-          queryKeys.sessions.threadMessages(id, vars.activeThreadId),
+        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
+          threadMessageWindowQueryKey(id, vars.activeThreadId),
           (previous) => {
-            const existing = previous?.data ?? [];
+            const pages = previous?.pages ?? [];
+            const firstPage = pages[0] ?? {
+              data: [],
+              meta: {
+                has_older: false,
+                thread_status: activeThread?.status ?? session?.status ?? "idle",
+              },
+            };
+            const existing = firstPage.data ?? [];
             const responseKey = messageReconciliationKey(response.data);
             const withoutDuplicate = existing.filter((message) =>
               message.id !== response.data.id && messageReconciliationKey(message) !== responseKey
             );
             return {
-              data: [...withoutDuplicate, response.data],
-              meta: previous?.meta ?? {},
+              pages: [
+                {
+                  ...firstPage,
+                  data: [...withoutDuplicate, response.data],
+                  meta: {
+                    ...firstPage.meta,
+                    live_edge_message_id: response.data.id,
+                    thread_status: activeThread?.status ?? firstPage.meta.thread_status,
+                  },
+                },
+                ...pages.slice(1),
+              ],
+              pageParams: previous?.pageParams ?? [undefined],
             };
           },
         );
@@ -4284,6 +4627,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     createPRMutation.mutate(undefined);
   }, [createPRMutation, ghBlocked, localPRState]);
 
+  const createBranch = useCallback(() => {
+    if (localBranchState !== "idle" || createBranchMutation.isPending || !canCreatePR) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_branch" });
+      return;
+    }
+    createBranchMutation.mutate(undefined);
+  }, [canCreatePR, createBranchMutation, ghBlocked, localBranchState]);
+
   const pushChangesFromKeyboard = useCallback(() => {
     if (localPushState !== "idle" || pushChangesMutation.isPending) {
       return;
@@ -4342,10 +4696,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: canShipPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: canShipPR && !!prHealth?.can_fix_tests && pendingPRAction === null,
-      canResolveConflicts: canShipPR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
-      canMerge: canShipPR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      canPush: canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: canManagePR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canResolveConflicts: canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
@@ -4400,6 +4754,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
     canShipPR && (
+      canAttemptCreatePR ||
       canCreatePR ||
       showExpiredPRAction ||
       queueingPR ||
@@ -4434,6 +4789,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionLabel = "Finalizing PR…";
     prActionSpinning = true;
     prActionDisabled = true;
+  } else if (canAttemptCreatePR && !builderReviewAllowsPR) {
+    prActionDisabled = true;
+    prActionTitle = "Run Review successfully before creating a PR";
   } else if (prState === "failed") {
     prActionLabel = "Retry";
     prActionTitle = session.pr_creation_error || "PR creation failed";
@@ -4441,6 +4799,24 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionDisabled = true;
     prActionTitle = "Connect your GitHub account to create PRs";
   }
+
+  const branchState = session.branch_creation_state;
+  const queueingBranch = localBranchState === "submitting";
+  const creatingBranch =
+    (localBranchState === "queued" && branchState !== "failed" && branchState !== "succeeded") ||
+    branchState === "queued" ||
+    branchState === "pushing";
+  const branchActionDisabled = prActionDisabled || queueingBranch || creatingBranch || createBranchMutation.isPending;
+  const branchActionLabel = queueingBranch
+    ? "Queueing branch..."
+    : creatingBranch
+      ? "Creating branch..."
+      : branchState === "failed" || localBranchActionError
+        ? "Retry branch"
+        : "Create branch";
+  const branchActionTitle = localBranchActionError?.message ||
+    (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
+  const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
 
   // Push-changes button derived state. Mirrors the PR creation block above
   // but operates on session.pr_push_state and the backend-derived
@@ -4455,8 +4831,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = canShipPR && pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = canShipPR && pushAvailable && (canPushChanges || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
+  const canPushChanges = canShipPR && builderReviewAllowsPR && pushAvailable && hasSnapshot && !isRunning;
+  const showPushAction = canShipPR && pushAvailable && (canPushChanges || !builderReviewAllowsPR || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
   let pushActionLabel = "Push changes";
   let pushActionSpinning = false;
   let pushActionDisabled = false;
@@ -4483,6 +4859,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   } else if (ghBlocked) {
     pushActionDisabled = true;
     pushActionTitle = "Connect your GitHub account to push changes";
+  } else if (pushAvailable && !builderReviewAllowsPR) {
+    pushActionDisabled = true;
+    pushActionTitle = "Run Review successfully before pushing changes";
   } else if (isRunning) {
     pushActionDisabled = true;
     pushActionTitle = "Wait for the session to finish before pushing";
@@ -4549,8 +4928,8 @@ export function SessionDetailContent({ id }: { id: string }) {
             ref={detailTabsRef}
             aria-label="Session detail tabs"
             className={cn(
-              "min-w-0 flex-1 overflow-x-auto overflow-y-hidden pb-1",
-              detailTabsOverflow ? "mask-fade-r" : "scrollbar-hide",
+              "flex h-full min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden scrollbar-hide",
+              detailTabsOverflow && "mask-fade-r",
             )}
           >
             <TabsList variant="line" size="sm" className="border-b-0 min-w-max">
@@ -4582,25 +4961,66 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </Button>
               </>
             ) : showPRAction && !prErrorNotice ? (
-              <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs gap-1.5"
-                  disabled={prActionDisabled}
-                  title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
-                  onClick={() => createPRMutation.mutate(undefined)}
-                >
-                  {prActionSpinning ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : prState === "failed" || localPRActionError ? (
-                    <AlertTriangle className="h-3 w-3" />
-                  ) : (
-                    <GitPullRequest className="h-3 w-3" />
-                  )}
-                  {prActionLabel}
-                </Button>
-              </DisabledTooltip>
+              <>
+                {branchURL ? (
+                  <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View branch">
+                    <a href={branchURL} target="_blank" rel="noopener noreferrer">
+                      <GitBranch className="h-3 w-3" />
+                      View branch
+                    </a>
+                  </Button>
+                ) : null}
+                <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
+                  <div className="inline-flex">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      disabled={prActionDisabled}
+                      title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
+                      onClick={() => createPRMutation.mutate(undefined)}
+                    >
+                      {prActionSpinning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : prState === "failed" || localPRActionError ? (
+                        <AlertTriangle className="h-3 w-3" />
+                      ) : (
+                        <GitPullRequest className="h-3 w-3" />
+                      )}
+                      {prActionLabel}
+                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="h-7 w-7 rounded-l-none"
+                          disabled={prActionDisabled}
+                          aria-label="More publish actions"
+                          title="More publish actions"
+                        >
+                          <ChevronDown className="h-3 w-3" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          className="text-xs"
+                          onClick={createBranch}
+                          disabled={branchActionDisabled}
+                          title={branchActionTitle}
+                        >
+                          {queueingBranch || creatingBranch ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <GitBranch className="h-3.5 w-3.5" />
+                          )}
+                          {branchActionLabel}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </DisabledTooltip>
+              </>
             ) : null}
             <Button
               variant="ghost"
@@ -4652,6 +5072,44 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          {canManageSession && canUseNativeReviewLoop && !hasPR ? (
+            <Card className="border-border/60">
+              <CardContent className="p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                        <ClipboardList className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-foreground">Review work</p>
+                        <p className="text-xs text-muted-foreground">
+                          Review and fix with a selected agent before creating a PR.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full gap-1.5 sm:w-auto"
+                      disabled={reviewActionDisabled}
+                      onClick={() => setReviewSetupOpen(true)}
+                    >
+                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <ClipboardList className="h-3.5 w-3.5" />
+                      )}
+                      Review
+                    </Button>
+                  </DisabledTooltip>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
@@ -4664,6 +5122,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
                 onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
+                reviewAction={canManageSession && canUseNativeReviewLoop ? {
+                  disabled: reviewActionDisabled,
+                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+                  title: reviewActionDisabledReason,
+                  onClick: () => setReviewSetupOpen(true),
+                } : undefined}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
                   disabled: pushActionDisabled,
@@ -4887,34 +5351,36 @@ export function SessionDetailContent({ id }: { id: string }) {
         ) : null}
         {/* Center content — either chat or diff review */}
         <div className="flex-1 min-h-0 relative">
-          {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
-          <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            {threads.length > 0 && activeThread === null ? (
-              <div className="flex h-full items-center justify-center">
-                <div className="text-center space-y-2">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-                  <p className="text-xs text-muted-foreground">Loading thread...</p>
+          {/* Chat panel stays mounted after first chat exposure to preserve scroll and live transcript state. */}
+          {hasMountedChatPanel ? (
+            <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
+              {threads.length > 0 && activeThread === null ? (
+                <div className="flex h-full items-center justify-center">
+                  <div className="text-center space-y-2">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
+                    <p className="text-xs text-muted-foreground">Loading thread...</p>
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <MemoizedChatPanel
-                key={activeThread ? `${id}:${activeThread.id}` : id}
-                session={session}
-                sessionId={id}
-                activeThread={activeThread ?? undefined}
-                isActive={isActive}
-                isStopRequested={isStopRequested}
-                stopOutcome={sessionStopOutcome}
-                viewerScope={viewerScope}
-                optimisticMessages={optimisticMessages}
-                onDiffClick={handleChatDiffClick}
-                onApprovePlan={handleApprovePlan}
-                onAdjustPlan={handleAdjustPlan}
-                onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
-                onRegisterKeyboardControls={registerChatPanelKeyboardControls}
-              />
-            )}
-          </div>
+              ) : (
+                <MemoizedChatPanel
+                  key={activeThread ? `${id}:${activeThread.id}` : id}
+                  session={session}
+                  sessionId={id}
+                  activeThread={activeThread ?? undefined}
+                  isActive={isActive}
+                  isStopRequested={isStopRequested}
+                  stopOutcome={sessionStopOutcome}
+                  viewerScope={viewerScope}
+                  optimisticMessages={optimisticMessages}
+                  onDiffClick={handleChatDiffClick}
+                  onApprovePlan={handleApprovePlan}
+                  onAdjustPlan={handleAdjustPlan}
+                  onRegisterScrollToLiveEdge={registerChatPanelScrollToLiveEdge}
+                  onRegisterKeyboardControls={registerChatPanelKeyboardControls}
+                />
+              )}
+            </div>
+          ) : null}
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
             <div className="h-full animate-in fade-in duration-150 flex flex-col">
@@ -5056,6 +5522,114 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
+      <Dialog open={reviewSetupOpen} onOpenChange={setReviewSetupOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Review</DialogTitle>
+            <DialogDescription>
+              Run a selected agent&apos;s native review loop in this session&apos;s sandbox. The loop opens a dedicated review tab and keeps changes on the same branch.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="review-agent-type">Coding agent</Label>
+              <Select
+                value={reviewAgentType}
+                onValueChange={setReviewAgentType}
+                disabled={startReviewLoopMutation.isPending}
+              >
+                <SelectTrigger id="review-agent-type" aria-label="Review coding agent" className="h-9 w-full">
+                  <SelectValue placeholder="Select coding agent" />
+                </SelectTrigger>
+                <SelectContent>
+                  {reviewAgentOptions.map((agent) => (
+                    <SelectItem key={agent.key} value={agent.key}>
+                      {agent.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Reviews the current working tree, fixes findings, and stops early if the follow-up pass is clean.
+              </p>
+              {session.agent_type === reviewAgentType ? (
+                <p className="text-xs text-muted-foreground">
+                  This is the same agent used by the main session.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Separate from the main session&apos;s {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} agent.
+                </p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="review-pass-count">Review passes</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  aria-label="Decrease review passes"
+                  disabled={reviewPasses <= 1 || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.max(1, current - 1))}
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </Button>
+                <Input
+                  id="review-pass-count"
+                  aria-label="Review passes"
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={reviewPasses}
+                  disabled={startReviewLoopMutation.isPending}
+                  onChange={(event) => {
+                    const next = Number.parseInt(event.target.value, 10);
+                    if (Number.isNaN(next)) {
+                      setReviewPasses(1);
+                      return;
+                    }
+                    setReviewPasses(Math.min(5, Math.max(1, next)));
+                  }}
+                  className="h-9 text-center"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  aria-label="Increase review passes"
+                  disabled={reviewPasses >= 5 || startReviewLoopMutation.isPending}
+                  onClick={() => setReviewPasses((current) => Math.min(5, current + 1))}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={startReviewLoopMutation.isPending}
+              onClick={() => setReviewSetupOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={reviewActionDisabled}
+              onClick={() => startReviewLoopMutation.mutate()}
+            >
+              {startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Start review
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {session.agent_type !== "pm_agent" ? (
         <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
           <SheetContent
@@ -5267,6 +5841,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 ? "Merge this pull request as yourself?"
                 : prAuthPrompt?.purpose === "push_changes"
                   ? "Push these changes as yourself?"
+                  : prAuthPrompt?.purpose === "create_branch"
+                    ? "Create this branch as yourself?"
                   : "Open this pull request as yourself?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -5276,6 +5852,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   ? prAuthPrompt.can_fallback_to_app
                     ? "Authorize GitHub once to push as you. If you skip this, 143 can still push the commits as the app."
                     : "Authorize GitHub once to push as you."
+                  : prAuthPrompt?.purpose === "create_branch"
+                    ? prAuthPrompt.can_fallback_to_app
+                      ? "Authorize GitHub once to create branches as you. If you skip this, 143 can still push the branch as the app."
+                      : "Authorize GitHub once to create branches as you."
                   : prAuthPrompt?.can_fallback_to_app
                     ? "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."
                     : "Authorize GitHub once to open PRs as you."}
@@ -5304,12 +5884,23 @@ export function SessionDetailContent({ id }: { id: string }) {
                 Push as 143
               </AlertDialogCancel>
             ) : null}
+            {prAuthPrompt?.purpose === "create_branch" && prAuthPrompt.can_fallback_to_app ? (
+              <AlertDialogCancel
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPRAuthPrompt(null);
+                  createBranchMutation.mutate({ authorMode: "app" });
+                }}
+              >
+                Create as 143
+              </AlertDialogCancel>
+            ) : null}
             <AlertDialogAction
               onClick={(event) => {
                 event.preventDefault();
                 if (!prAuthPrompt) return;
                 const resumeToken =
-                  prAuthPrompt.purpose === "create_pr" || prAuthPrompt.purpose === "push_changes"
+                  prAuthPrompt.purpose === "create_pr" || prAuthPrompt.purpose === "create_branch" || prAuthPrompt.purpose === "push_changes"
                     ? prAuthPrompt.resume_token
                     : undefined;
                 api.githubStatus.connect(resumeToken || undefined);

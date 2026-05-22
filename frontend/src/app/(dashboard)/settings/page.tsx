@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -83,6 +84,7 @@ function PRAuthorshipSettings() {
   const currentAuthorship = settings.pr_authorship ?? "user_preferred";
   const currentDraftDefault = settings.pr_draft_default ?? false;
   const currentAutoArchive = settings.auto_archive_on_pr_close ?? false;
+  const requireBuilderReview = settings.builder_permissions?.require_review_before_pr ?? true;
 
   const { save, status } = useOrgSettingsAutosave();
 
@@ -153,6 +155,22 @@ function PRAuthorshipSettings() {
             <p className="text-xs text-muted-foreground pl-6">
               Automatically archive sessions when their associated pull request is merged or closed.
             </p>
+          </div>
+          <div className="flex items-start justify-between gap-4 border-t border-border pt-4">
+            <div className="space-y-1">
+              <Label htmlFor="builder-review-before-pr">Require builder review before PR</Label>
+              <p className="text-xs text-muted-foreground">
+                Builders must run Review successfully before creating a pull request.
+              </p>
+            </div>
+            <Switch
+              id="builder-review-before-pr"
+              checked={requireBuilderReview}
+              onCheckedChange={(checked) =>
+                save({ settings: { builder_permissions: { require_review_before_pr: checked } } })
+              }
+              aria-label="Require builder review before PR"
+            />
           </div>
         </CardContent>
       </Card>

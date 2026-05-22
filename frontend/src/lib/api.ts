@@ -354,6 +354,11 @@ export const api = {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
       } : undefined),
+    createBranch: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/branch`, options ? {
+        ...(options.authorMode ? { author_mode: options.authorMode } : {}),
+        ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
+      } : undefined),
     pushChangesToPR: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr/push`, options ? {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
@@ -435,6 +440,14 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
+    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest'; before?: string; limit?: number } = { position: 'latest' }) => {
+      const searchParams = new URLSearchParams();
+      if (params.position) searchParams.set('position', params.position);
+      if (params.before) searchParams.set('before', params.before);
+      if (params.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
+    },
     getThreadLogs: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs`),
     listThreadFileEvents: (sessionId: string, since?: string) => {
@@ -443,6 +456,14 @@ export const api = {
     },
     listReviewComments: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
+    listReviewLoops: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`),
+    startReviewLoop: (sessionId: string, body: { agent_type?: string; model?: string; max_passes: number }) =>
+      post<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`, body),
+    getReviewLoop: (sessionId: string, loopId: string) =>
+      get<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}`),
+    cancelReviewLoop: (sessionId: string, loopId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}/cancel`, {}),
     createReviewComment: (sessionId: string, body: { file_path: string; line_number: number; side?: string; body: string }) =>
       post<import('./types').SingleResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`, body),
     updateReviewComment: (sessionId: string, commentId: string, body: { body?: string; resolved?: boolean }) =>
@@ -478,10 +499,11 @@ export const api = {
           .then(r => r.data),
       stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
       restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),
+      setLifetime: (sessionId: string, body: { duration_seconds: number }) =>
+        patch(`/api/v1/sessions/${sessionId}/preview/lifetime`, body),
       bootstrap: (sessionId: string) =>
         post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/sessions/${sessionId}/preview/bootstrap`)
           .then(r => r.data),
-      extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
           .then(r => r.data ?? []),
@@ -636,6 +658,18 @@ export const api = {
         github_ids: githubIds,
         allow_transfer: allowTransfer,
       }),
+    getLinearAgentStatus: () =>
+      get<import('./types').SingleResponse<import('./types').LinearAgentStatus>>('/api/v1/integrations/linear/agent'),
+    updateLinearAgentSettings: (body: { enabled?: boolean; default_repo_id?: string | null }) =>
+      request('/api/v1/integrations/linear/agent', {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    listLinearAgentMappings: () =>
+      get<import('./types').ListResponse<import('./types').LinearTeamRepoMapping>>('/api/v1/integrations/linear/agent/mappings'),
+    upsertLinearAgentMapping: (body: { linear_team_id: string; linear_project_id?: string; repository_id: string; default_branch?: string; priority?: number }) =>
+      post<import('./types').SingleResponse<import('./types').LinearTeamRepoMapping>>('/api/v1/integrations/linear/agent/mappings', body),
+    deleteLinearAgentMapping: (id: string) => del(`/api/v1/integrations/linear/agent/mappings/${id}`),
   },
   codexAuth: {
     // `scope` defaults to "org" on the server; pass "personal" to write the

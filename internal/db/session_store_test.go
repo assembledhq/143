@@ -34,7 +34,7 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -95,6 +95,9 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // pr_creation_error
 		"idle",         // pr_push_state
 		(*string)(nil), // pr_push_error
+		"idle",         // branch_creation_state
+		(*string)(nil), // branch_creation_error
+		(*string)(nil), // branch_url
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
 		false,          // has_unpushed_changes
@@ -942,7 +945,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 			),
 		)
 
-	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -972,7 +975,7 @@ func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
 			),
 		)
 
-	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{
 		ModelUsed: &modelUsed,
 	})
 	require.NoError(t, err, "UpdateResult should persist model_used when provided")
@@ -999,7 +1002,7 @@ func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
-	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should succeed for terminal transitions")
+	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should succeed for terminal transitions")
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), 10).
@@ -1026,7 +1029,7 @@ func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)
 
-	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "running")
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusRunning)
 	require.Error(t, err, "UpdateStatus should surface query failures")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -1046,7 +1049,7 @@ func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
-	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "completed")
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted)
 	require.Error(t, err, "UpdateStatus should surface row collection failures")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -1070,7 +1073,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(context.DeadlineExceeded)
 
-		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", &models.SessionResult{})
+		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted, &models.SessionResult{})
 		require.Error(t, err, "UpdateResult should surface query failures")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
@@ -1102,7 +1105,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),
 			)
 
-		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should tolerate best-effort Redis publish failures")
+		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should tolerate best-effort Redis publish failures")
 
 		mock.ExpectQuery("UPDATE sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1112,7 +1115,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
-		err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{})
+		err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{})
 		require.Error(t, err, "UpdateResult should surface row collection failures")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
@@ -1226,7 +1229,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
-				row[4] = string(models.SessionStatusRunning)
+				row[4] = models.SessionStatusRunning
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1240,7 +1243,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
-				row[4] = string(models.SessionStatusRunning)
+				row[4] = models.SessionStatusRunning
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -2289,7 +2292,7 @@ func TestSessionStore_ListOrphanedContainers(t *testing.T) {
 	// turn_holding_container is intentionally NOT part of the WHERE —
 	// crashed-turn rows (stuck with the flag TRUE) must be reachable so
 	// the reconciler can clear them via its IsAlive + CAS pipeline.
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND NOT EXISTS`).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND status <> 'running'\s+AND COALESCE\(recovery_state, ''\) NOT IN \('queued', 'recovering'\)\s+AND NOT EXISTS`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).

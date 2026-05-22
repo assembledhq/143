@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -110,6 +113,7 @@ type fakeLinearClient struct {
 	hasGitHubErr           error
 	findOrphanCommentID    string
 	findOrphanCommentErr   error
+	agentSessionUpdateErr  error
 }
 
 func newFakeLinearClient() *fakeLinearClient {
@@ -188,6 +192,26 @@ func (f *fakeLinearClient) HasGitHubIntegrationAttachment(context.Context, strin
 	return f.hasGitHubAttachment, f.hasGitHubErr
 }
 
+// AgentActivityCreate / AgentSessionUpdate / AgentSessionGet are the agent
+// surface added in phase 1 of the linear-agent rollout. The milestone tests
+// don't exercise the inbound agent path; these stubs satisfy the interface
+// without doing useful work.
+func (f *fakeLinearClient) AgentActivityCreate(context.Context, AgentActivityInput) (AgentActivityResult, error) {
+	return AgentActivityResult{}, nil
+}
+
+func (f *fakeLinearClient) AgentSessionUpdate(context.Context, AgentSessionUpdateInput) error {
+	return f.agentSessionUpdateErr
+}
+
+func (f *fakeLinearClient) AgentSessionGet(context.Context, string) (*FetchedAgentSession, error) {
+	return nil, ErrAgentSessionNotFound
+}
+
+func (f *fakeLinearClient) FetchComment(context.Context, string) (*FetchedComment, error) {
+	return nil, ErrCommentNotFound
+}
+
 // fakeIntegrationReader / fakeCredentialReader return a stable "Linear is
 // active" combo so HandleMilestone reaches the API call path. Both are
 // intentionally minimal — the LinearPrivate short-circuit in HandleMilestone
@@ -195,7 +219,7 @@ func (f *fakeLinearClient) HasGitHubIntegrationAttachment(context.Context, strin
 // disabled-flag tests pin.
 type fakeIntegrationReader struct{}
 
-func (fakeIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+func (fakeIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	return models.Integration{Status: "active"}, nil
 }
 
@@ -244,6 +268,76 @@ func newPrimaryLink() models.SessionIssueLink {
 
 func newSession() *models.Session {
 	return &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+}
+
+func TestHandleAgentMilestoneLogsExternalURLPinFailures(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	var logs bytes.Buffer
+	client := newFakeLinearClient()
+	client.agentSessionUpdateErr = errors.New("linear update failed")
+	svc, _, _ := buildTestService(t, client)
+	svc.logger = zerolog.New(&logs)
+	svc.agentSessions = db.NewLinearAgentSessionStore(mock)
+	svc.agentActivities = db.NewLinearAgentActivityLogStore(mock)
+
+	session := newSession()
+	rowID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	sessionID := session.ID
+
+	mock.ExpectQuery("SELECT id, org_id").
+		WithArgs(session.OrgID, session.ID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, session.OrgID, integrationID, "as_1",
+			"iss_1", "ACS-1",
+			"app_1", "user_1",
+			&sessionID, "pending", &now,
+			now, now,
+		))
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("UPDATE linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = svc.HandleAgentMilestone(context.Background(), MilestoneInput{
+		Event:    MilestonePROpened,
+		Session:  session,
+		Link:     newPrimaryLink(),
+		PRNumber: 42,
+	})
+	require.NoError(t, err, "agent milestone external URL pin failures should remain best-effort")
+	require.Contains(t, logs.String(), "agent milestone: failed to pin external URLs on AgentSession", "best-effort AgentSessionUpdate failures should be logged for operators")
+	require.NoError(t, mock.ExpectationsWereMet(), "agent milestone should emit the activity before attempting the external URL pin")
+}
+
+// TestPinExternalURLsForEvent pins the set of milestone events on which we
+// pin the 143 session deep-link onto the AgentSession header. The set must
+// include Started so the link lands as early as possible, and PROpened so a
+// failed first pin gets a second chance. Terminal events are excluded
+// because re-pinning right before close is overhead with no UX benefit.
+func TestPinExternalURLsForEvent(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, pinExternalURLsForEvent(MilestoneStarted), "Started must pin so the deep link surfaces before the run finishes")
+	require.True(t, pinExternalURLsForEvent(MilestonePROpened), "PROpened must pin as a retry of the Started pin")
+	require.False(t, pinExternalURLsForEvent(MilestoneLinked), "Linked is suppressed entirely")
+	require.False(t, pinExternalURLsForEvent(MilestonePRMerged), "terminal events do not need to re-pin")
+	require.False(t, pinExternalURLsForEvent(MilestoneEndedNoPR), "terminal events do not need to re-pin")
+	require.False(t, pinExternalURLsForEvent(MilestoneFailed), "terminal events do not need to re-pin")
 }
 
 func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
@@ -1147,6 +1241,20 @@ func TestSessionURL_BuildsAbsoluteFromAppBaseURL(t *testing.T) {
 	bare := &Service{}
 	if got := bare.SessionURL(id); got != "/sessions/"+id.String() {
 		t.Errorf("relative fallback: got %q", got)
+	}
+}
+
+func TestAgentSessionDebugURL_BuildsAbsoluteFromAppBaseURL(t *testing.T) {
+	t.Parallel()
+
+	configured := &Service{appBaseURL: "https://app.test.example/"}
+	if got := configured.AgentSessionDebugURL("as/1"); got != "https://app.test.example/api/v1/integrations/linear/agent/sessions/as%2F1" {
+		t.Errorf("absolute debug URL: got %q", got)
+	}
+
+	bare := &Service{}
+	if got := bare.AgentSessionDebugURL("as_1"); got != "/api/v1/integrations/linear/agent/sessions/as_1" {
+		t.Errorf("relative debug URL fallback: got %q", got)
 	}
 }
 

@@ -27,7 +27,7 @@ func encryptedCodingConfig(t *testing.T, store *CodingCredentialStore, cfg model
 	return data
 }
 
-func codingCredentialRow(t *testing.T, store *CodingCredentialStore, orgID uuid.UUID, userID *uuid.UUID, id uuid.UUID, provider models.ProviderName, cfg models.ProviderConfig, priority int, status string) []any {
+func codingCredentialRow(t *testing.T, store *CodingCredentialStore, orgID uuid.UUID, userID *uuid.UUID, id uuid.UUID, provider models.ProviderName, cfg models.ProviderConfig, priority int, status models.CodingCredentialRowStatus) []any {
 	t.Helper()
 
 	now := time.Now().UTC()

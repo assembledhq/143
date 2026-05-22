@@ -13,6 +13,7 @@ your-repo/
 This file lets you tell 143 how to:
 
 - start a live preview of your app
+- install supported sandbox tools before agent work
 - run bootstrap commands before agent work
 - run extra deterministic validation commands during validation
 
@@ -25,6 +26,7 @@ Keep these rules in mind:
 - The file must be valid JSON. No comments, no trailing commas.
 - Commit it to the repo so 143 can read it in sessions.
 - Never put secrets directly in the file. Use managed preview credentials instead.
+- Use `dependencies` only for supported tools that need to be available on `PATH` before bootstrap or validation commands run.
 - Use `bootstrap` and `validation` only for deterministic setup and checks.
 - Use `preview` only when you want a live app preview in the session UI.
 
@@ -34,6 +36,9 @@ If you only want validation setup, start here:
 
 ```json
 {
+  "dependencies": {
+    "golangci-lint": "2.10.1"
+  },
   "bootstrap": {
     "commands": ["npm ci"]
   },
@@ -71,9 +76,10 @@ If you also want a preview:
 
 ## How To Think About The File
 
-There are three top-level sections today:
+There are four top-level sections today:
 
 - `preview`: how 143 starts and routes a live preview
+- `dependencies`: supported tools for 143 to install before agent work
 - `bootstrap`: commands to prepare the workspace
 - `validation`: extra commands to run during validation
 
@@ -119,6 +125,21 @@ Use this when the repo has a single web app and no extra local services.
 
 Use this when the repo does not need preview support, but does need predictable setup and checks.
 
+### Go repo with pinned golangci-lint
+
+```json
+{
+  "dependencies": {
+    "golangci-lint": "2.10.1"
+  },
+  "validation": {
+    "commands": ["golangci-lint run ./...", "go test ./..."]
+  }
+}
+```
+
+Use this when the repo's validation expects a specific linter version that is not part of the base sandbox image.
+
 ### Full-stack preview with a local Postgres sidecar
 
 ```json
@@ -161,6 +182,12 @@ Use this when your app needs a database but you do not want to point previews at
 
 ## Choosing The Right Section
 
+Use `dependencies` when a validation or bootstrap command needs a supported tool installed into the sandbox before it runs.
+
+Good examples:
+
+- `"golangci-lint": "2.10.1"`
+
 Use `bootstrap` when the repo needs a one-time setup step before normal work can succeed.
 
 Good examples:
@@ -189,6 +216,7 @@ Good examples:
 
 If you're unsure, these defaults are usually right:
 
+- Prefer `dependencies` for supported tool binaries that 143 can install consistently.
 - Start with `bootstrap.commands` if installs are required.
 - Add `validation.commands` for fast, deterministic checks.
 - Keep preview credentials as `{ "mode": "none" }` unless secrets are actually required.
@@ -198,6 +226,7 @@ If you're unsure, these defaults are usually right:
 ## Common Mistakes
 
 - Putting secrets directly in `env` or in the config file itself
+- Using `"latest"` or blank strings for dependency versions
 - Using blank command strings in `bootstrap.commands` or `validation.commands`
 - Reusing the same port across preview services
 - Setting `cwd` or `init_script` to a path outside the repo
@@ -216,6 +245,7 @@ This section describes the current config surface supported by the repo config p
 ```json
 {
   "preview": { "...": "optional" },
+  "dependencies": { "...": "optional" },
   "bootstrap": { "...": "optional" },
   "validation": { "...": "optional" }
 }
@@ -224,8 +254,30 @@ This section describes the current config surface supported by the repo config p
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `preview` | object | no | Required only if you want preview support. |
+| `dependencies` | object | no | Optional supported sandbox tool installs, keyed by tool name. |
 | `bootstrap` | object | no | Optional repo setup commands. |
 | `validation` | object | no | Optional extra validation commands. |
+
+### `dependencies`
+
+```json
+{
+  "dependencies": {
+    "golangci-lint": "2.10.1"
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `dependencies.<tool>` | `string` | yes | Exact version pin for a supported tool. |
+
+Rules:
+
+- Supported tools today: `golangci-lint`.
+- Dependency names and versions are trimmed.
+- Blank versions and `"latest"` are rejected.
+- Unknown dependency names are logged and skipped so one typo does not abort the session.
 
 ### `bootstrap`
 

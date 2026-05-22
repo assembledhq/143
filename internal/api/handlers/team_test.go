@@ -56,7 +56,7 @@ func (m *mockTeamUserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, github
 
 type mockTeamMembershipStore struct {
 	getFn               func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
-	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error)
+	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role models.Role) (string, error)
 	removeGuardedFn     func(ctx context.Context, userID, orgID uuid.UUID) (string, int, error)
 	countForUserFn      func(ctx context.Context, userID uuid.UUID) (int, error)
 }
@@ -67,7 +67,7 @@ func (m *mockTeamMembershipStore) Get(ctx context.Context, userID, orgID uuid.UU
 	}
 	return models.OrganizationMembership{}, pgx.ErrNoRows
 }
-func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
+func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, role models.Role) (string, error) {
 	if m.updateRoleGuardedFn != nil {
 		return m.updateRoleGuardedFn(ctx, userID, orgID, role)
 	}
@@ -117,10 +117,10 @@ func (m *mockTeamRepositoryStore) GetAnyInstallationIDByOrg(ctx context.Context,
 }
 
 type mockTeamIntegrationStore struct {
-	listByOrgAndProviderFn func(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error)
+	listByOrgAndProviderFn func(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error)
 }
 
-func (m *mockTeamIntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error) {
+func (m *mockTeamIntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error) {
 	if m.listByOrgAndProviderFn != nil {
 		return m.listByOrgAndProviderFn(ctx, orgID, provider)
 	}
@@ -210,7 +210,7 @@ func TestTeamHandler_GitHubInviteStatus_FallsBackToRepositoryInstallationID(t *t
 	orgID := uuid.New()
 	h := newTeamHandler(nil, nil, nil, nil, nil)
 	h.integrations = &mockTeamIntegrationStore{
-		listByOrgAndProviderFn: func(ctx context.Context, gotOrgID uuid.UUID, provider string) ([]models.Integration, error) {
+		listByOrgAndProviderFn: func(ctx context.Context, gotOrgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error) {
 			return []models.Integration{{
 				ID:       uuid.New(),
 				OrgID:    gotOrgID,
@@ -290,9 +290,9 @@ func TestTeamHandler_GetGitHubInstallationID_FallbackCases(t *testing.T) {
 		{
 			name: "falls back after integrations without installation id",
 			integrations: &mockTeamIntegrationStore{
-				listByOrgAndProviderFn: func(ctx context.Context, gotOrgID uuid.UUID, provider string) ([]models.Integration, error) {
+				listByOrgAndProviderFn: func(ctx context.Context, gotOrgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error) {
 					require.Equal(t, orgID, gotOrgID, "integration lookup should stay org-scoped")
-					require.Equal(t, string(models.IntegrationProviderGitHub), provider, "integration lookup should target github")
+					require.Equal(t, models.IntegrationProviderGitHub, provider, "integration lookup should target github")
 					return []models.Integration{{
 						ID:       uuid.New(),
 						OrgID:    gotOrgID,
@@ -464,7 +464,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.Role) (string, error) {
 					return "", pgx.ErrNoRows
 				},
 			},
@@ -477,7 +477,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.Role) (string, error) {
 					return "admin", db.ErrLastAdmin
 				},
 			},
@@ -495,7 +495,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.Role) (string, error) {
 					return "member", nil
 				},
 			},
@@ -512,8 +512,8 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, role string) (string, error) {
-					require.Equal(t, "builder", role, "ChangeRole should pass the builder role through to the membership store")
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, role models.Role) (string, error) {
+					require.Equal(t, models.RoleBuilder, role, "ChangeRole should pass the builder role through to the membership store")
 					return "member", nil
 				},
 			},
@@ -640,7 +640,7 @@ func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
 	memberID := uuid.New()
 
 	h := newTeamHandler(nil, &mockTeamMembershipStore{
-		updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+		updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.Role) (string, error) {
 			return "", fmt.Errorf("boom")
 		},
 	}, nil, nil, nil)
@@ -676,7 +676,7 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+			updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ models.Role) (string, error) {
 				return "member", nil
 			},
 		},
@@ -696,7 +696,7 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	var resp models.SingleResponse[models.User]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, memberID, resp.Data.ID)
-	require.Equal(t, "viewer", resp.Data.Role)
+	require.Equal(t, models.RoleViewer, resp.Data.Role)
 }
 
 func TestTeamHandler_CreateInvitation_AcceptsBuilderRole(t *testing.T) {
@@ -708,7 +708,7 @@ func TestTeamHandler_CreateInvitation_AcceptsBuilderRole(t *testing.T) {
 
 	h := newTeamHandler(nil, &mockTeamMembershipStore{}, nil, &mockTeamInvitationStore{
 		createFn: func(_ context.Context, inv *models.Invitation) error {
-			createdRoles = append(createdRoles, inv.Role)
+			createdRoles = append(createdRoles, string(inv.Role))
 			inv.ID = uuid.New()
 			inv.Status = "pending"
 			inv.CreatedAt = time.Now()

@@ -123,6 +123,52 @@ func TestJobStore_Enqueue(t *testing.T) {
 	}
 }
 
+func TestJobStore_WorkerLoadSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("WITH worker_nodes AS").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"worker_node_id",
+			"node_status",
+			"running_sessions",
+			"turn_held_sessions",
+			"sandbox_containers",
+			"active_previews",
+			"preview_held_containers",
+			"running_jobs",
+			"running_session_jobs",
+		}).
+			AddRow("worker-1", "active", int64(2), int64(1), int64(3), int64(4), int64(2), int64(5), int64(2)).
+			AddRow("unassigned", "", int64(1), int64(0), int64(1), int64(0), int64(0), int64(0), int64(0)))
+
+	samples, err := store.WorkerLoadSamples(context.Background())
+	require.NoError(t, err, "WorkerLoadSamples should not return an error")
+	require.Equal(t, []WorkerLoadSample{
+		{
+			WorkerNodeID:          "worker-1",
+			NodeStatus:            "active",
+			RunningSessions:       2,
+			TurnHeldSessions:      1,
+			SandboxContainers:     3,
+			ActivePreviews:        4,
+			PreviewHeldContainers: 2,
+			RunningJobs:           5,
+			RunningSessionJobs:    2,
+		},
+		{
+			WorkerNodeID:      "unassigned",
+			RunningSessions:   1,
+			SandboxContainers: 1,
+		},
+	}, samples, "WorkerLoadSamples should return the expected per-worker load samples")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // TestJobStore_EnqueueWithOpts_PinsTargetNode verifies that EnqueueWithOpts
 // passes TargetNodeID through to the INSERT so node-affinity routing actually
 // records the pin. The plain Enqueue wrapper doesn't take a target — its
@@ -309,11 +355,11 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -329,11 +375,11 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
-						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
 						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", "worker-1", now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", now, now, completedAt,
 					))
 			},
 		},
@@ -412,6 +458,20 @@ func TestJobStore_RenewLease(t *testing.T) {
 				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectQuery("WITH target AS[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs[\\s\\S]*owner_kind = 'worker'").
+					WithArgs(uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken, "referenced session is already terminal; stopping session job lease renewal").
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+			},
+		},
+		{
+			name: "terminalizes session job when referenced session is already terminal",
+			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectQuery("WITH target AS[\\s\\S]*s.status IN \\('completed', 'failed', 'cancelled', 'skipped'\\)[\\s\\S]*UPDATE session_executors[\\s\\S]*UPDATE jobs").
+					WithArgs(uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken, "referenced session is already terminal; stopping session job lease renewal").
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
 			},
 		},
 		{
@@ -456,6 +516,54 @@ func TestJobStore_RenewLease(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestJobStore_RenewLease_GuardsSessionJobsAgainstTerminalSessions(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "job_type NOT IN ('run_agent', 'continue_session')", "RenewLease should only apply session terminal-state checks to session runner jobs")
+	require.Contains(t, sql, "payload->>'session_id'", "RenewLease should inspect the durable session reference in session job payloads")
+	require.Contains(t, sql, "s.status NOT IN ('completed', 'failed', 'cancelled', 'skipped')", "RenewLease should refuse renewal when the referenced session is terminal")
+	require.Contains(t, sql, "s.org_id = jobs.org_id", "RenewLease should scope the session guard to the job org")
+}
+
+func TestJobStore_TerminalizeRunningSessionJobs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	reason := "runtime-control watchdog failed terminal session"
+
+	mock.ExpectQuery("UPDATE session_executors[\\s\\S]*UPDATE jobs[\\s\\S]*owner_kind = 'worker'[\\s\\S]*SELECT COUNT").
+		WithArgs(orgID, sessionID, reason).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(2)))
+
+	updated, err := store.TerminalizeRunningSessionJobs(context.Background(), orgID, sessionID, reason)
+	require.NoError(t, err, "TerminalizeRunningSessionJobs should not return an error")
+	require.Equal(t, int64(2), updated, "TerminalizeRunningSessionJobs should return the affected row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_TerminalizeRunningSessionJobs_ClosesExecutorOwnership(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "UPDATE session_executors", "TerminalizeRunningSessionJobs should terminalize active executor rows for executor-owned session jobs")
+	require.Contains(t, sql, "se.status IN ('starting', 'running', 'draining')", "TerminalizeRunningSessionJobs should only close active executor rows")
+	require.Contains(t, sql, "se.lock_token = target.lock_token", "TerminalizeRunningSessionJobs should fence executor terminalization with the job lock token")
+	require.Contains(t, sql, "owner_kind = 'worker'", "TerminalizeRunningSessionJobs should reset job ownership after leaving active executor ownership")
 }
 
 func TestJobStore_MarkSucceededWithLease(t *testing.T) {

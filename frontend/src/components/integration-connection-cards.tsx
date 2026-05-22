@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { RefreshCw, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
@@ -38,6 +38,7 @@ type RepoCallbacks = {
 type SourceControlIntegrationCardProps = IntegrationCallbacks & RepoCallbacks & {
   githubConnected: boolean;
   githubRepos?: GithubRepoChip[];
+  githubExtra?: ReactNode;
   onConnectGitHub: () => void;
   onSyncRepos?: () => void;
   isSyncing?: boolean;
@@ -56,6 +57,7 @@ export type IntegrationAuthErrorInfo = {
 type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   sentryConnected: boolean;
   linearConnected: boolean;
+  linearExtra?: ReactNode;
   linearLoading: boolean;
   linearAuthError?: IntegrationAuthErrorInfo | null;
   slackConnected: boolean;
@@ -407,6 +409,7 @@ export function SourceControlIntegrationCard({
   onDisconnectRepo,
   onReconnectRepo,
   pendingRepoID,
+  githubExtra,
 }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
@@ -420,12 +423,15 @@ export function SourceControlIntegrationCard({
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
           extra: githubConnected ? (
-            <ConnectedReposList
-              repos={githubRepos}
-              onDisconnectRepo={onDisconnectRepo}
-              onReconnectRepo={onReconnectRepo}
-              pendingRepoID={pendingRepoID}
-            />
+            <>
+              <ConnectedReposList
+                repos={githubRepos}
+                onDisconnectRepo={onDisconnectRepo}
+                onReconnectRepo={onReconnectRepo}
+                pendingRepoID={pendingRepoID}
+              />
+              {githubExtra}
+            </>
           ) : undefined,
           action: (
             <div className="flex items-center gap-1.5">
@@ -466,6 +472,7 @@ type OptionalIntegrationDescriptor = {
   connected: boolean;
   loading?: boolean;
   authError?: IntegrationAuthErrorInfo | null;
+  extra?: ReactNode;
   onConnect: () => void;
 };
 
@@ -481,7 +488,12 @@ function buildOptionalIntegrationItems(
       description: meta.description,
       logo: <IntegrationLogo name={meta.name} src={meta.logoSrc} />,
       badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-      extra: d.authError ? <IntegrationAuthErrorAlert info={d.authError} /> : undefined,
+      extra: (
+        <>
+          {d.authError ? <IntegrationAuthErrorAlert info={d.authError} /> : null}
+          {d.extra}
+        </>
+      ),
       action: (
         <IntegrationAction
           connected={d.connected}
@@ -505,7 +517,7 @@ function optionalDescriptorsFromProps(
 ): OptionalIntegrationDescriptor[] {
   return [
     { key: "sentry", connected: p.sentryConnected, onConnect: p.onConnectSentry },
-    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, onConnect: p.onConnectLinear },
+    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, extra: p.linearExtra, onConnect: p.onConnectLinear },
     { key: "slack", connected: p.slackConnected, onConnect: p.onConnectSlack },
     { key: "notion", connected: p.notionConnected, loading: p.notionLoading, onConnect: p.onConnectNotion },
     { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, onConnect: p.onConnectCircleCI },
@@ -527,12 +539,15 @@ export function AllIntegrationCards(props: AllIntegrationCardsProps) {
     logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
     badge: <Badge variant="outline" className="text-xs">Required</Badge>,
     extra: props.githubConnected ? (
-      <ConnectedReposList
-        repos={props.githubRepos ?? []}
-        onDisconnectRepo={props.readOnly ? undefined : props.onDisconnectRepo}
-        onReconnectRepo={props.readOnly ? undefined : props.onReconnectRepo}
-        pendingRepoID={props.pendingRepoID}
-      />
+      <>
+        <ConnectedReposList
+          repos={props.githubRepos ?? []}
+          onDisconnectRepo={props.readOnly ? undefined : props.onDisconnectRepo}
+          onReconnectRepo={props.readOnly ? undefined : props.onReconnectRepo}
+          pendingRepoID={props.pendingRepoID}
+        />
+        {props.githubExtra}
+      </>
     ) : undefined,
     action: (
       <IntegrationAction

@@ -17,6 +17,52 @@ func usesRawTaskPrompt(input *agent.AgentInput) bool {
 	return input != nil && (input.PromptStyle == agent.PromptStyleRawTask || input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual))
 }
 
+// composeFreshExecPrompt builds the prompt-file body for the headless
+// fresh-exec path shared by Claude Code and Codex (`claude --print < file`,
+// `codex exec - < file`).
+//
+// Default layout is `<systemPrompt>\n\n---\n\n<userPrompt>`. When the user
+// prompt opens with a slash command (e.g. `/review …`), the layout is flipped
+// to `<userPrompt>\n\n---\n\n<systemPrompt>` so the CLI sees the slash token
+// at position 0 of the input and dispatches its native handler. Both CLIs
+// only recognize slash commands when they appear at the start of the user
+// turn; burying `/review` behind a multi-line system preamble caused the
+// review-loop opener to be treated as plain text instead of invoking the
+// native review command.
+func composeFreshExecPrompt(systemPrompt, userPrompt string) string {
+	if userPromptStartsWithSlashCommand(userPrompt) {
+		if strings.TrimSpace(systemPrompt) == "" {
+			return userPrompt
+		}
+		return fmt.Sprintf("%s\n\n---\n\n%s", userPrompt, systemPrompt)
+	}
+	return fmt.Sprintf("%s\n\n---\n\n%s", systemPrompt, userPrompt)
+}
+
+// userPromptStartsWithSlashCommand reports whether the first non-whitespace
+// content of userPrompt is a slash-command token (`/<name>` followed by a
+// space, newline, or end-of-string). Mirrors the recognition rule used by
+// commandTokenPresent so this helper agrees with how the upstream CLIs
+// detect commands.
+func userPromptStartsWithSlashCommand(userPrompt string) bool {
+	trimmed := strings.TrimLeft(userPrompt, " \t\n\r")
+	if len(trimmed) < 2 || trimmed[0] != '/' {
+		return false
+	}
+	for i := 1; i < len(trimmed); i++ {
+		c := trimmed[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			return i > 1
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == ':':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // buildSystemPrompt constructs the system prompt with instructions and context.
 func buildSystemPrompt(input *agent.AgentInput) string {
 	var b strings.Builder

@@ -885,16 +885,16 @@ func TestAuthHandler_Providers(t *testing.T) {
 			cfg: &config.Config{
 				GitHubOAuthClientID: "gh-id",
 				DemoMode:            true,
-				DemoEmail:           "dogfood@143.dev",
-				DemoPassword:        "preview-dogfood",
+				DemoEmail:           "preview-admin@143.dev",
+				DemoPassword:        "preview",
 			},
 			expected: map[string]any{
 				"github":        false,
 				"google":        false,
 				"email":         true,
 				"demo":          true,
-				"demo_email":    "dogfood@143.dev",
-				"demo_password": "preview-dogfood",
+				"demo_email":    "preview-admin@143.dev",
+				"demo_password": "preview",
 			},
 		},
 	}
@@ -1007,7 +1007,7 @@ func TestAuthHandler_Me(t *testing.T) {
 				var resp models.SingleResponse[models.UserWithSettings]
 				require.NoError(t, json.Unmarshal(body, &resp), "response body should be valid JSON")
 				require.Equal(t, settingsOrgID, resp.Data.OrgID, "/auth/me should preserve the active membership org id")
-				require.Equal(t, "admin", resp.Data.Role, "/auth/me should preserve the active membership role")
+				require.Equal(t, models.RoleAdmin, resp.Data.Role, "/auth/me should preserve the active membership role")
 				require.Equal(t, models.UserSettings{
 					CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
 						models.AgentTypeCodex: models.ReasoningEffortXHigh,
@@ -1295,11 +1295,11 @@ func TestAuthHandler_Memberships(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 		require.Equal(t, activeOrgID, resp.Data.ActiveOrgID)
-		require.Equal(t, "admin", resp.Data.ActiveRole)
+		require.Equal(t, models.RoleAdmin, resp.Data.ActiveRole)
 		require.Len(t, resp.Data.Memberships, 2)
 		require.Equal(t, activeOrgID, resp.Data.Memberships[0].OrgID)
 		require.Equal(t, "Acme", resp.Data.Memberships[0].OrgName)
-		require.Equal(t, "admin", resp.Data.Memberships[0].Role)
+		require.Equal(t, models.RoleAdmin, resp.Data.Memberships[0].Role)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 

@@ -113,6 +113,77 @@ describe("AutomationDetailPage", () => {
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
   });
 
+  it("allows the interval value to be cleared while editing", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "hours",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    const intervalInput = screen.getByLabelText("Interval value");
+    await user.clear(intervalInput);
+
+    expect(intervalInput).toHaveValue(null);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+
+    await user.type(intervalInput, "2");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({ interval_value: 2 });
+    });
+  });
+
   it("hides member-only automation actions from builders", async () => {
     currentUserRole.value = "builder";
     server.use(
@@ -423,6 +494,62 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(updateBody).toMatchObject({ icon_type: "emoji", icon_value: "🚀" });
     });
+  });
+
+  it("keeps the settings emoji selector small on the same row as the name field", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await screen.findByText("Weekly audit");
+    await userEvent.click(screen.getByRole("tab", { name: "Settings" }));
+
+    const identityRow = screen.getByTestId("automation-settings-identity-row");
+    expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
+    expect(screen.getByRole("button", { name: "Automation emoji" })).toHaveClass("h-9", "w-16");
+    expect(screen.getByLabelText("Name")).toHaveValue("Weekly audit");
   });
 
   it("updates the automation emoji from the header picker without changing tabs", async () => {

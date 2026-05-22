@@ -25,7 +25,7 @@ func NewAutomationStore(db TxStarter) *AutomationStore {
 const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	icon_type, icon_value,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-	identity_scope, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, created_at, updated_at, deleted_at`
 
@@ -43,7 +43,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
 		&a.IconType, &a.IconValue,
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
-		&a.IdentityScope, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
+		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
 	)
@@ -68,41 +68,42 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 			org_id, repository_id, name, goal, scope,
 			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-			identity_scope, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+			identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			next_run_at, enabled, created_by, priority
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
-			@identity_scope, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
+			@identity_scope, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@next_run_at, @enabled, @created_by, @priority
 		) RETURNING id, created_at, updated_at`
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":           a.OrgID,
-		"repository_id":    a.RepositoryID,
-		"name":             a.Name,
-		"goal":             a.Goal,
-		"scope":            a.Scope,
-		"icon_type":        a.IconType.OrDefault(),
-		"icon_value":       models.AutomationIconValueOrDefault(a.IconValue),
-		"agent_type":       a.AgentType,
-		"model_override":   a.ModelOverride,
-		"reasoning_effort": a.ReasoningEffort,
-		"execution_mode":   a.ExecutionMode,
-		"max_concurrent":   a.MaxConcurrent,
-		"base_branch":      a.BaseBranch,
-		"identity_scope":   a.IdentityScope.OrDefault(),
-		"schedule_type":    a.ScheduleType,
-		"interval_value":   a.IntervalValue,
-		"interval_unit":    a.IntervalUnit,
-		"interval_run_at":  a.IntervalRunAt,
-		"cron_expression":  a.CronExpression,
-		"timezone":         a.Timezone,
-		"next_run_at":      a.NextRunAt,
-		"enabled":          a.Enabled,
-		"created_by":       a.CreatedBy,
-		"priority":         a.Priority,
+		"org_id":              a.OrgID,
+		"repository_id":       a.RepositoryID,
+		"name":                a.Name,
+		"goal":                a.Goal,
+		"scope":               a.Scope,
+		"icon_type":           a.IconType.OrDefault(),
+		"icon_value":          models.AutomationIconValueOrDefault(a.IconValue),
+		"agent_type":          a.AgentType,
+		"model_override":      a.ModelOverride,
+		"reasoning_effort":    a.ReasoningEffort,
+		"execution_mode":      a.ExecutionMode,
+		"max_concurrent":      a.MaxConcurrent,
+		"base_branch":         a.BaseBranch,
+		"identity_scope":      a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops": a.PrePRReviewLoops,
+		"schedule_type":       a.ScheduleType,
+		"interval_value":      a.IntervalValue,
+		"interval_unit":       a.IntervalUnit,
+		"interval_run_at":     a.IntervalRunAt,
+		"cron_expression":     a.CronExpression,
+		"timezone":            a.Timezone,
+		"next_run_at":         a.NextRunAt,
+		"enabled":             a.Enabled,
+		"created_by":          a.CreatedBy,
+		"priority":            a.Priority,
 	})
 	return row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 }
@@ -186,6 +187,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			agent_type = @agent_type, model_override = @model_override, reasoning_effort = @reasoning_effort,
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch, identity_scope = @identity_scope,
+			pre_pr_review_loops = @pre_pr_review_loops,
 			schedule_type = @schedule_type, interval_value = @interval_value,
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
 			timezone = @timezone, next_run_at = @next_run_at,
@@ -194,32 +196,33 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":               a.ID,
-		"org_id":           a.OrgID,
-		"name":             a.Name,
-		"goal":             a.Goal,
-		"scope":            a.Scope,
-		"repository_id":    a.RepositoryID,
-		"icon_type":        a.IconType.OrDefault(),
-		"icon_value":       models.AutomationIconValueOrDefault(a.IconValue),
-		"agent_type":       a.AgentType,
-		"model_override":   a.ModelOverride,
-		"reasoning_effort": a.ReasoningEffort,
-		"execution_mode":   a.ExecutionMode,
-		"max_concurrent":   a.MaxConcurrent,
-		"base_branch":      a.BaseBranch,
-		"identity_scope":   a.IdentityScope.OrDefault(),
-		"schedule_type":    a.ScheduleType,
-		"interval_value":   a.IntervalValue,
-		"interval_unit":    a.IntervalUnit,
-		"interval_run_at":  a.IntervalRunAt,
-		"cron_expression":  a.CronExpression,
-		"timezone":         a.Timezone,
-		"next_run_at":      a.NextRunAt,
-		"enabled":          a.Enabled,
-		"paused_by":        a.PausedBy,
-		"paused_at":        a.PausedAt,
-		"priority":         a.Priority,
+		"id":                  a.ID,
+		"org_id":              a.OrgID,
+		"name":                a.Name,
+		"goal":                a.Goal,
+		"scope":               a.Scope,
+		"repository_id":       a.RepositoryID,
+		"icon_type":           a.IconType.OrDefault(),
+		"icon_value":          models.AutomationIconValueOrDefault(a.IconValue),
+		"agent_type":          a.AgentType,
+		"model_override":      a.ModelOverride,
+		"reasoning_effort":    a.ReasoningEffort,
+		"execution_mode":      a.ExecutionMode,
+		"max_concurrent":      a.MaxConcurrent,
+		"base_branch":         a.BaseBranch,
+		"identity_scope":      a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops": a.PrePRReviewLoops,
+		"schedule_type":       a.ScheduleType,
+		"interval_value":      a.IntervalValue,
+		"interval_unit":       a.IntervalUnit,
+		"interval_run_at":     a.IntervalRunAt,
+		"cron_expression":     a.CronExpression,
+		"timezone":            a.Timezone,
+		"next_run_at":         a.NextRunAt,
+		"enabled":             a.Enabled,
+		"paused_by":           a.PausedBy,
+		"paused_at":           a.PausedAt,
+		"priority":            a.Priority,
 	})
 	return err
 }
@@ -413,9 +416,9 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	}
 	type affectedRow struct {
 		id             uuid.UUID
-		scheduleType   string
+		scheduleType   models.AutomationScheduleType
 		intervalValue  *int
-		intervalUnit   *string
+		intervalUnit   *models.ScheduleUnit
 		intervalRunAt  *string
 		cronExpression *string
 		timezone       string
@@ -645,6 +648,16 @@ func (s *AutomationRunStore) GetByID(ctx context.Context, orgID, automationID, r
 	return scanAutomationRun(row)
 }
 
+func (s *AutomationRunStore) GetByRunID(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
+	query := fmt.Sprintf(`SELECT %s FROM automation_runs
+		WHERE id = @id AND org_id = @org_id`, automationRunColumns)
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     runID,
+		"org_id": orgID,
+	})
+	return scanAutomationRun(row)
+}
+
 type AutomationRunFilters struct {
 	Limit  int
 	Cursor string
@@ -783,7 +796,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		// skipped, in-flight before the worker creates the session).
 		sessionID                  *uuid.UUID
 		sessionTitle               *string
-		sessionStatus              *string
+		sessionStatus              *models.SessionStatus
 		sessionDiffStats           []byte
 		sessionFailureExplanation  *string
 		sessionFailureCategory     *string
@@ -795,8 +808,8 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		// the inner LATERAL is also a LEFT JOIN.
 		prNumber   *int
 		prURL      *string
-		prStatus   *string
-		prCIStatus *string
+		prStatus   *models.PullRequestStatus
+		prCIStatus *models.PullRequestCIStatus
 	)
 
 	err := row.Scan(
@@ -860,7 +873,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 
 // UpdateStatus updates a run's status. Scoped by org_id so a leaked run UUID
 // from another tenant cannot be mutated.
-func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string, completedAt *time.Time, resultSummary *string) error {
+func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) error {
 	query := `UPDATE automation_runs SET status = @status, completed_at = @completed_at, result_summary = @result_summary, updated_at = now()
 		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -884,7 +897,7 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 // for both without risk, and a later terminal transition that accidentally
 // drops one of them still won't clobber a value written by an earlier writer.
 // Pass non-nil values for terminal transitions.
-func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
+func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
 	query := `UPDATE automation_runs
 		SET status = @to_status,
 			completed_at = COALESCE(@completed_at, completed_at),

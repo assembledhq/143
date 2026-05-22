@@ -34,7 +34,7 @@ func (envCredentialProvider) defaultActiveStatus(cred *models.DecryptedCredentia
 	}
 	if cred.Status == "" {
 		copy := *cred
-		copy.Status = models.CodingCredentialStatusActive
+		copy.Status = models.CredentialStatusActive
 		return &copy
 	}
 	return cred
@@ -44,7 +44,7 @@ func (envCredentialProvider) defaultActiveStatuses(creds []models.DecryptedCrede
 	out := make([]models.DecryptedCredential, len(creds))
 	for i, c := range creds {
 		if c.Status == "" {
-			c.Status = models.CodingCredentialStatusActive
+			c.Status = models.CredentialStatusActive
 		}
 		out[i] = c
 	}
@@ -89,7 +89,7 @@ func defaultUserActiveStatus(cred *models.DecryptedUserCredential) *models.Decry
 	}
 	if cred.Status == "" {
 		copy := *cred
-		copy.Status = models.CodingCredentialStatusActive
+		copy.Status = models.CredentialStatusActive
 		return &copy
 	}
 	return cred
@@ -265,11 +265,12 @@ func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, scope models.
 }
 
 type envSandboxProvider struct {
-	execExitCode   int
-	execErr        error
-	writeErrByPath map[string]error
-	writes         map[string][]byte
-	commands       []string
+	execExitCode    int
+	execErr         error
+	execStdoutByCmd map[string]string
+	writeErrByPath  map[string]error
+	writes          map[string][]byte
+	commands        []string
 }
 
 func (m *envSandboxProvider) Name() string { return "env-sandbox" }
@@ -282,13 +283,22 @@ func (m *envSandboxProvider) CloneRepo(_ context.Context, _ *Sandbox, _, _, _ st
 	return nil
 }
 
-func (m *envSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, _, stderr io.Writer) (int, error) {
+func (m *envSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	m.commands = append(m.commands, cmd)
 	if m.execErr != nil {
 		return 0, m.execErr
 	}
+	if stdout != nil {
+		if out := m.execStdoutByCmd[cmd]; out != "" {
+			if _, err := io.WriteString(stdout, out); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if m.execExitCode != 0 && stderr != nil {
-		_, _ = io.WriteString(stderr, "mkdir failed")
+		if _, err := io.WriteString(stderr, "mkdir failed"); err != nil {
+			return 0, err
+		}
 	}
 	return m.execExitCode, nil
 }
@@ -1275,12 +1285,12 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 			name: "disabled personal row is skipped",
 			userCred: &envUserCredentialProvider{
 				personal: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "personal"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "personal"}},
 				},
 			},
 			orgCred: &envCredentialProvider{
 				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
 				},
 			},
 			wantKey: "org",
@@ -1289,12 +1299,12 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 			name: "invalid team row is skipped, falls through to org",
 			userCred: &envUserCredentialProvider{
 				team: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusInvalid, Config: models.AnthropicConfig{APIKey: "team"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusInvalid, Config: models.AnthropicConfig{APIKey: "team"}},
 				},
 			},
 			orgCred: &envCredentialProvider{
 				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
 				},
 			},
 			wantKey: "org",
@@ -1304,7 +1314,7 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 			userCred: &envUserCredentialProvider{},
 			orgCred: &envCredentialProvider{
 				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "org"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "org"}},
 				},
 			},
 			wantNil: true,
@@ -1345,7 +1355,7 @@ func TestAgentEnvUnifiedResolverEmptyDoesNotFallbackToLegacy(t *testing.T) {
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
 			models.ProviderAnthropic: {
 				ID:     legacyCredID,
-				Status: models.CodingCredentialStatusActive,
+				Status: models.CredentialStatusActive,
 				Config: models.AnthropicConfig{APIKey: "legacy-key"},
 			},
 		},
@@ -1386,7 +1396,7 @@ func TestAgentEnvUnifiedListErrorFallsBackToLegacy(t *testing.T) {
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
 			models.ProviderAnthropic: {
 				ID:     legacyCredID,
-				Status: models.CodingCredentialStatusActive,
+				Status: models.CredentialStatusActive,
 				Config: models.AnthropicConfig{APIKey: "legacy-key"},
 			},
 		},
@@ -1414,7 +1424,7 @@ func TestAgentEnvLegacyFallbackWhenUnifiedUnwired(t *testing.T) {
 
 	userCred := &envUserCredentialProvider{
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
-			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
+			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
 		},
 	}
 
@@ -1537,6 +1547,123 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentEnvInjectClaudeCodeAuthRequiresSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	credID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+	coding := &envCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       credID,
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "claude-access",
+						RefreshToken: "claude-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+	}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: coding,
+		Logger:            zerolog.Nop(),
+	})
+
+	injected, err := env.InjectClaudeCodeAuth(ctx, orgID, sandbox)
+
+	require.False(t, injected, "Claude auth injection should not report success when sandbox provider is missing")
+	require.Error(t, err, "Claude auth injection should return a configuration error instead of panicking")
+	require.Contains(t, err.Error(), "sandbox provider", "Claude auth injection error should identify the missing dependency")
+}
+
+func TestAgentEnvInjectClaudeCodeAuthWithEnvSetsPermissionModeFromModelAndVersion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	tests := []struct {
+		name     string
+		model    string
+		expected string
+	}{
+		{
+			name:     "supported sonnet model uses bypass",
+			model:    models.ClaudeCodeModelSonnet46,
+			expected: ClaudeCodePermissionModeBypassPermissions,
+		},
+		{
+			name:     "unsupported haiku model still uses bypass",
+			model:    models.ClaudeCodeModelHaiku45,
+			expected: ClaudeCodePermissionModeBypassPermissions,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			credID := uuid.New()
+			sandbox := &Sandbox{HomeDir: "/home/test"}
+			provider := &envSandboxProvider{
+				execStdoutByCmd: map[string]string{"claude --version": "2.1.139\n"},
+			}
+			coding := &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderAnthropicSubscription: {
+						{
+							ID:       credID,
+							OrgID:    orgID,
+							Provider: models.ProviderAnthropicSubscription,
+							Status:   models.CodingCredentialStatusActive,
+							Config: models.AnthropicSubscriptionConfig{
+								AccessToken:  "claude-access",
+								RefreshToken: "claude-refresh",
+								ExpiresAt:    time.Now().Add(time.Hour),
+								AccountType:  "claude_max",
+							},
+						},
+					},
+				},
+			}
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: coding,
+				Provider:          provider,
+				Logger:            zerolog.Nop(),
+			})
+
+			injected, err := env.InjectClaudeCodeAuthWithEnv(ctx, orgID, sandbox, map[string]string{
+				models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode): tt.model,
+			})
+
+			require.NoError(t, err, "Claude auth injection should succeed")
+			require.True(t, injected, "Claude auth injection should write the subscription credentials")
+			require.Equal(t, tt.expected, sandbox.Metadata[SandboxMetadataClaudeCodePermissionMode], "permission mode should reflect model and CLI compatibility")
+			require.Equal(t, "2.1.139", sandbox.Metadata[SandboxMetadataClaudeCodeVersion], "CLI version should be cached after detection")
+		})
+	}
+}
+
+func TestAgentEnvPrepareClaudeCodeAPIKeyFallbackRequiresSandboxProvider(t *testing.T) {
+	t.Parallel()
+
+	env := NewAgentEnv(AgentEnvDeps{Logger: zerolog.Nop()})
+
+	err := env.PrepareClaudeCodeAPIKeyFallback(context.Background(), &Sandbox{HomeDir: "/home/test"}, map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-test",
+	})
+
+	require.Error(t, err, "Claude API-key fallback preparation should return a configuration error instead of panicking")
+	require.Contains(t, err.Error(), "sandbox provider", "Claude fallback error should identify the missing dependency")
 }
 
 // TestAgentEnvInjectCodexAuth_ErrorClassification verifies that

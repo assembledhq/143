@@ -1,10 +1,13 @@
 package pm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,13 +37,13 @@ func resolveAgentType(settings models.OrgSettings, override *models.AgentType) m
 type issueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error)
-	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error
 }
 
 type sessionStore interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	Create(ctx context.Context, run *models.Session) error
-	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
+	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error
 	UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error)
 	ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error)
@@ -79,7 +82,7 @@ type projectStore interface {
 	GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error)
 	Update(ctx context.Context, p *models.Project) error
 	UpdateProgress(ctx context.Context, orgID, projectID uuid.UUID) error
-	UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status models.ProjectStatus) error
 }
 
 type projectTaskStore interface {
@@ -87,7 +90,7 @@ type projectTaskStore interface {
 	GetByID(ctx context.Context, orgID, taskID uuid.UUID) (models.ProjectTask, error)
 	ListByProject(ctx context.Context, orgID, projectID uuid.UUID, filters db.ProjectTaskFilters) ([]models.ProjectTask, error)
 	Update(ctx context.Context, t *models.ProjectTask) error
-	CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) (int, error)
+	CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status models.ProjectTaskStatus) (int, error)
 	GetMaxBatchNumber(ctx context.Context, orgID, projectID uuid.UUID) (int, error)
 }
 
@@ -111,7 +114,7 @@ type pmDocumentStore interface {
 }
 
 type integrationStore interface {
-	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error)
+	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error)
 }
 
 type credentialStore interface {
@@ -197,15 +200,140 @@ func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, 
 		}
 		return agent.TokenBillingModeSubscription, nil
 	case models.AgentTypeClaudeCode:
-		if env["ANTHROPIC_API_KEY"] != "" {
-			return agent.TokenBillingModeAPIKey, nil
+		injected, err := s.env.InjectClaudeCodeAuthWithEnv(ctx, orgID, sb, env)
+		if err != nil {
+			if fallbackErr := s.env.PrepareClaudeCodeAPIKeyFallback(ctx, sb, env); fallbackErr == nil {
+				s.logger.Warn().
+					Err(err).
+					Str("org_id", orgID.String()).
+					Msg("PM Claude subscription injection failed; continuing with Anthropic API-key fallback")
+				return agent.TokenBillingModeAPIKey, nil
+			}
+			return agent.TokenBillingModeUnknown, &agent.AuthError{
+				AgentType: agentType,
+				Detail:    fmt.Sprintf("failed to prepare Claude subscription authentication: %v", err),
+			}
 		}
-		return agent.TokenBillingModeUnknown, nil
+		if injected {
+			return agent.TokenBillingModeSubscription, nil
+		}
+		if err := s.env.PrepareClaudeCodeAPIKeyFallback(ctx, sb, env); err == nil {
+			return agent.TokenBillingModeAPIKey, nil
+		} else if agent.IsClaudeCodeFallbackUnavailable(err) {
+			return agent.TokenBillingModeUnknown, nil
+		} else {
+			return agent.TokenBillingModeUnknown, &agent.AuthError{
+				AgentType: agentType,
+				Detail:    fmt.Sprintf("failed to prepare Anthropic API-key fallback: %v", err),
+			}
+		}
 	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
 		return agent.TokenBillingModeAPIKey, nil
 	default:
 		return agent.TokenBillingModeUnknown, nil
 	}
+}
+
+func (s *Service) executeAgentWithCredentialFallback(
+	ctx context.Context,
+	orgID uuid.UUID,
+	agentType models.AgentType,
+	settings models.OrgSettings,
+	sbCfg agent.SandboxConfig,
+	sb *agent.Sandbox,
+	adapter agent.AgentAdapter,
+	execCtx context.Context,
+	prompt *agent.AgentPrompt,
+	logCh chan<- agent.LogEntry,
+) (*agent.AgentResult, error) {
+	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
+	signal := agent.CredentialFailureSignalFromResult(result, time.Now())
+	if !signal.RateLimited {
+		s.shedCredentialFailure(ctx, orgID, agentType, result)
+		return result, err
+	}
+
+	s.shedCredentialFailure(ctx, orgID, agentType, result)
+	refreshedEnv := s.refreshPMCredentialEnv(ctx, orgID, agentType, sbCfg)
+	if authErr := s.finalizeSandboxEnv(agentType, refreshedEnv); authErr != nil {
+		return result, authErr
+	}
+	sb.Env = refreshedEnv
+	authBillingMode, authErr := s.prepareAgentAuthForRetry(ctx, orgID, agentType, sb, refreshedEnv)
+	if authErr != nil {
+		return result, authErr
+	}
+	prompt.UsageHint = buildPMTokenUsageHint(settings, agentType, refreshedEnv, authBillingMode)
+
+	s.logger.Info().
+		Str("org_id", orgID.String()).
+		Str("agent_type", string(agentType)).
+		Msg("retrying PM agent with fallback credential after rate-limit signal")
+
+	retryResult, retryErr := adapter.Execute(execCtx, sb, prompt, logCh)
+	if agent.CredentialFailureSignalFromResult(retryResult, time.Now()).RateLimited {
+		s.shedCredentialFailure(ctx, orgID, agentType, retryResult)
+		refreshedEnv = s.refreshPMCredentialEnv(ctx, orgID, agentType, sbCfg)
+		if authErr := s.finalizeSandboxEnv(agentType, refreshedEnv); authErr != nil {
+			return retryResult, authErr
+		}
+	}
+	return retryResult, retryErr
+}
+
+func (s *Service) refreshPMCredentialEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sbCfg agent.SandboxConfig) map[string]string {
+	refreshedEnv := agent.RefreshAgentCredentialEnv(sbCfg.Env, s.env.Resolve(ctx, orgID, agentType, nil), agentType)
+	if refreshedEnv == nil {
+		refreshedEnv = make(map[string]string)
+	}
+	if _, ok := refreshedEnv["HOME"]; !ok {
+		refreshedEnv["HOME"] = sbCfg.HomeDir
+	}
+	return refreshedEnv
+}
+
+func (s *Service) shedCredentialFailure(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, result *agent.AgentResult) {
+	if s.env == nil || result == nil {
+		return
+	}
+	provider := agent.CodingProviderForAgent(agentType)
+	if provider == "" {
+		return
+	}
+	signal := agent.CredentialFailureSignalFromResult(result, time.Now())
+	switch {
+	case signal.AuthRejected:
+		s.env.ShedAuthRejectedWithContext(ctx, orgID, nil, provider)
+	case signal.RateLimited:
+		s.env.ShedRateLimitedWithSignal(ctx, orgID, nil, provider, signal)
+	}
+}
+
+func (s *Service) prepareAgentAuthForRetry(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox, env map[string]string) (agent.TokenBillingMode, error) {
+	if agentType == models.AgentTypeCodex && env["OPENAI_API_KEY"] != "" {
+		if err := s.removeCodexAuthFile(ctx, sb); err != nil {
+			return agent.TokenBillingModeUnknown, err
+		}
+	}
+	return s.injectRequiredAgentAuth(ctx, orgID, agentType, sb, env)
+}
+
+func (s *Service) removeCodexAuthFile(ctx context.Context, sb *agent.Sandbox) error {
+	authPath := path.Join(sb.HomeDir, ".codex", "auth.json")
+	cmd := fmt.Sprintf("rm -f '%s'", pmShellEscapeSingleQuote(authPath))
+	var stdout, stderr bytes.Buffer
+	exitCode, err := s.sandbox.Exec(ctx, sb, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale codex auth: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale codex auth: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func pmShellEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
 }
 
 func buildPMTokenUsageHint(settings models.OrgSettings, agentType models.AgentType, env map[string]string, billingMode agent.TokenBillingMode) agent.TokenUsageHint {
@@ -388,11 +516,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	pmSession := &models.Session{
 		OrgID:         orgID,
 		AgentType:     models.AgentTypePMAgent,
-		Status:        "running",
+		Status:        models.SessionStatusRunning,
 		Title:         strPtr("PM Analysis"),
 		RepositoryID:  &repo.ID,
-		AutonomyLevel: string(models.SessionAutonomyFull),
-		TokenMode:     "high",
+		AutonomyLevel: models.SessionAutonomyFull,
+		TokenMode:     models.SessionTokenModeHigh,
 	}
 	if err := s.sessions.Create(ctx, pmSession); err != nil {
 		s.logger.Error().Err(err).Msg("failed to create PM session — continuing without session logging")
@@ -413,7 +541,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 			result := &models.SessionResult{
 				Error: strPtr(errMsg),
 			}
-			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "failed", result); err != nil {
+			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, models.SessionStatusFailed, result); err != nil {
 				s.logger.Error().Err(err).Msg("failed to mark PM session as failed")
 			}
 			if s.sessionLogs != nil {
@@ -568,7 +696,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}()
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := s.executeAgentWithCredentialFallback(ctx, orgID, agentType, ctxBundle.settings, sbCfg, sb, adapter, execCtx, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 	if err != nil {
@@ -670,7 +798,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		sessionResult := &models.SessionResult{
 			TokenUsage: plan.TokenUsage,
 		}
-		if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "completed", sessionResult); err != nil {
+		if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, models.SessionStatusCompleted, sessionResult); err != nil {
 			s.logger.Error().Err(err).Msg("failed to mark PM session as completed")
 		}
 	}
@@ -693,7 +821,7 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 		log := &models.SessionLog{
 			SessionID: pmSession.ID,
 			OrgID:     pmSession.OrgID,
-			Level:     entry.Level,
+			Level:     models.SessionLogLevel(entry.Level),
 			Message:   entry.Message,
 			Metadata:  metadata,
 		}

@@ -362,7 +362,7 @@ func TestGetValidToken_RefreshTokenRevoked(t *testing.T) {
 	require.Equal(t, "wks-1", persisted.WorkspaceID, "workspace metadata must survive the revocation write")
 
 	require.NotEmpty(t, intg.statusCfgCalls, "MarkIntegrationUnauthorized should fire so the UI shows the reconnect banner")
-	require.Equal(t, string(models.IntegrationStatusError), intg.statusCfgCalls[0].status)
+	require.Equal(t, models.IntegrationStatusError, intg.statusCfgCalls[0].status)
 
 	_, token, err := svc.GetValidToken(context.Background(), orgID)
 	require.ErrorIs(t, err, ErrNoRefreshToken, "subsequent calls after revocation should stay in the reconnect path")
@@ -746,6 +746,18 @@ func (f *fakeRetryClient) IssueRecentHumanEdits(context.Context, string, time.Ti
 func (f *fakeRetryClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
 	panic("not used in retry tests")
 }
+func (f *fakeRetryClient) AgentActivityCreate(context.Context, AgentActivityInput) (AgentActivityResult, error) {
+	panic("not used in retry tests")
+}
+func (f *fakeRetryClient) AgentSessionUpdate(context.Context, AgentSessionUpdateInput) error {
+	panic("not used in retry tests")
+}
+func (f *fakeRetryClient) AgentSessionGet(context.Context, string) (*FetchedAgentSession, error) {
+	panic("not used in retry tests")
+}
+func (f *fakeRetryClient) FetchComment(context.Context, string) (*FetchedComment, error) {
+	panic("not used in retry tests")
+}
 
 // TestMergeRefreshedConfig_PreservesMetadataAndRotatesAuth pins the
 // merge contract that the rest of the refresh flow depends on:
@@ -993,5 +1005,5 @@ func TestMarkRefreshTokenRevoked_PersistFailureStillFlipsIntegration(t *testing.
 	require.ErrorIs(t, err, ErrRefreshTokenRevoked, "revocation classification must survive the credential write failure")
 
 	require.NotEmpty(t, intg.statusCfgCalls, "integration row must be flipped to errored even when zeroing the refresh token failed — otherwise the UI banner never shows")
-	require.Equal(t, string(models.IntegrationStatusError), intg.statusCfgCalls[0].status)
+	require.Equal(t, models.IntegrationStatusError, intg.statusCfgCalls[0].status)
 }

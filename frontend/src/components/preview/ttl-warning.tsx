@@ -113,7 +113,7 @@ export function TTLWarning({
   }, [expiresAt, recycleScheduledAt]);
 
   const extendMutation = useMutation({
-    mutationFn: () => api.sessions.preview.extend(sessionId),
+    mutationFn: () => api.sessions.preview.setLifetime(sessionId, { duration_seconds: 30 * 60 }),
     onSuccess: () => {
       setExtendError(null);
       queryClient.invalidateQueries({

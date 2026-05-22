@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { landingTypography as type } from "./landing-typography";
 
 interface FooterProps {
   isDark: boolean;
@@ -8,21 +9,21 @@ export default function Footer({ isDark }: FooterProps) {
   return (
     <footer
       className="px-6 sm:px-10 py-12 sm:py-16"
-      style={{ background: isDark ? "#08080f" : "#d4e6f5" }}
+      style={{ background: isDark ? "#08080f" : "#eef4f8" }}
     >
       <div className="max-w-5xl mx-auto">
         <div className="flex flex-col sm:flex-row justify-between gap-10">
           {/* Brand */}
           <div className="space-y-3">
             <p
-              className={`text-sm font-medium ${isDark ? "text-white/80" : "text-slate-800"}`}
+              className={`${type.navBrand} ${isDark ? "text-white/80" : "text-slate-800"}`}
             >
               143
             </p>
             <p
-              className={`text-xs leading-relaxed max-w-xs ${isDark ? "text-white/30" : "text-slate-500"}`}
+              className={`${type.footerLink} leading-relaxed max-w-xs ${isDark ? "text-white/30" : "text-slate-500"}`}
             >
-              Open-source autopilot for coding agents.
+              Open-source coding-agent infrastructure for teams.
               <br />
               Built by{" "}
               <a
@@ -41,7 +42,7 @@ export default function Footer({ isDark }: FooterProps) {
           <div className="flex gap-16">
             <div className="space-y-3">
               <p
-                className={`text-xs font-medium uppercase tracking-wider ${isDark ? "text-white/40" : "text-slate-500"}`}
+                className={`${type.footerLink} font-medium uppercase tracking-wider ${isDark ? "text-white/40" : "text-slate-500"}`}
               >
                 Project
               </p>
@@ -49,7 +50,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/about"
-                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     About
                   </Link>
@@ -59,7 +60,7 @@ export default function Footer({ isDark }: FooterProps) {
                     href="https://github.com/assembledhq/143"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     GitHub
                   </a>
@@ -69,7 +70,7 @@ export default function Footer({ isDark }: FooterProps) {
                     href="https://github.com/assembledhq/143/blob/main/LICENSE"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     MIT License
                   </a>
@@ -79,7 +80,7 @@ export default function Footer({ isDark }: FooterProps) {
 
             <div className="space-y-3">
               <p
-                className={`text-xs font-medium uppercase tracking-wider ${isDark ? "text-white/40" : "text-slate-500"}`}
+                className={`${type.footerLink} font-medium uppercase tracking-wider ${isDark ? "text-white/40" : "text-slate-500"}`}
               >
                 Legal
               </p>
@@ -87,7 +88,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/privacy"
-                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     Privacy
                   </Link>
@@ -95,7 +96,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/terms"
-                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     Terms
                   </Link>
@@ -103,7 +104,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/security"
-                    className={`text-xs ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     Security
                   </Link>
@@ -118,7 +119,7 @@ export default function Footer({ isDark }: FooterProps) {
           className={`mt-12 pt-6 border-t ${isDark ? "border-white/5" : "border-slate-300/50"}`}
         >
           <p
-            className={`text-xs ${isDark ? "text-white/20" : "text-slate-400"}`}
+            className={`${type.footerLink} ${isDark ? "text-white/20" : "text-slate-400"}`}
           >
             &copy; {new Date().getFullYear()} Assembled, Inc.
           </p>

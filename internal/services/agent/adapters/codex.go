@@ -102,7 +102,7 @@ func buildCodexPromptContent(prompt *agent.AgentPrompt) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, userPrompt), nil
+	return composeFreshExecPrompt(prompt.SystemPrompt, userPrompt), nil
 }
 
 func appendCodexHumanInputAnswer(message string, answer *agent.HumanInputAnswer) (string, error) {
@@ -147,6 +147,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// by Docker + gVisor, and bwrap fails because gVisor doesn't support the
 	// unprivileged user namespaces that bwrap requires.
 	var cmd string
+	modelArgs := codexModelArgs(sandbox.Env, prompt.UsageHint.EffectiveModel)
 	reasoningArg := ""
 	if prompt.ReasoningEffort != "" {
 		reasoningArg = fmt.Sprintf(" -c '%s'", shellEscapeSingle(fmt.Sprintf(`model_reasoning_effort="%s"`, prompt.ReasoningEffort)))
@@ -166,7 +167,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write follow-up prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s '%s' - < '%s'",
+			"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s%s '%s' - < '%s'",
+			modelArgs,
 			reasoningArg,
 			shellEscapeCodex(prompt.ResumeSessionID),
 			shellEscapeCodex(promptPath),
@@ -185,7 +187,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s - < '%s'",
+			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s%s - < '%s'",
+			modelArgs,
 			reasoningArg,
 			shellEscapeCodex(promptPath),
 		)
@@ -257,6 +260,21 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
 
 	return result, nil
+}
+
+func codexModelArgs(env map[string]string, effectiveModel string) string {
+	model := effectiveModel
+	if env != nil && env["OPENAI_MODEL"] != "" {
+		model = env["OPENAI_MODEL"]
+	}
+	if model == "" {
+		return ""
+	}
+	spec := models.CodexRuntimeModel(model)
+	if spec.PriorityTier {
+		return fmt.Sprintf(" -m '%s' -c '%s'", shellEscapeCodex(spec.Model), shellEscapeSingle(`service_tier="priority"`))
+	}
+	return fmt.Sprintf(" -m '%s'", shellEscapeCodex(spec.Model))
 }
 
 // isDuplicateOutput returns true if content matches the previous output of the
@@ -492,9 +510,10 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 				}
 			case "command_execution":
 				metadata := map[string]interface{}{
-					"tool":   "command_execution",
-					"input":  map[string]interface{}{"command": event.Item.Command},
-					"status": event.Item.Status,
+					"tool":    "command_execution",
+					"item_id": event.Item.ID,
+					"input":   map[string]interface{}{"command": event.Item.Command},
+					"status":  event.Item.Status,
 				}
 				if event.Item.ExitCode != nil {
 					metadata["exit_code"] = *event.Item.ExitCode
@@ -510,7 +529,7 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 						Timestamp: time.Now(),
 						Level:     "output",
 						Message:   event.Item.AggregatedOutput,
-						Metadata:  map[string]interface{}{"type": "tool_result"},
+						Metadata:  map[string]interface{}{"type": "tool_result", "item_id": event.Item.ID},
 					}
 				}
 			default:

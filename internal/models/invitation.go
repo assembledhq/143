@@ -24,6 +24,24 @@ func (m InvitationAcceptanceMethod) Validate() error {
 	}
 }
 
+type InvitationStatus string
+
+const (
+	InvitationStatusPending  InvitationStatus = "pending"
+	InvitationStatusAccepted InvitationStatus = "accepted"
+	InvitationStatusRevoked  InvitationStatus = "revoked"
+	InvitationStatusExpired  InvitationStatus = "expired"
+)
+
+func (s InvitationStatus) Validate() error {
+	switch s {
+	case InvitationStatusPending, InvitationStatusAccepted, InvitationStatusRevoked, InvitationStatusExpired:
+		return nil
+	default:
+		return fmt.Errorf("invalid invitation status: %s", s)
+	}
+}
+
 // Invitation is the DB row representation of an invitation to join an org.
 // Either Email or GitHubUsername must be set; both may be set when the inviter
 // provides both identifiers.
@@ -33,10 +51,10 @@ type Invitation struct {
 	Email            *string                    `db:"email"             json:"email,omitempty"`
 	GitHubUsername   *string                    `db:"github_username"   json:"github_username,omitempty"`
 	AcceptanceMethod InvitationAcceptanceMethod `db:"acceptance_method" json:"acceptance_method"`
-	Role             string                     `db:"role"              json:"role"`
+	Role             Role                       `db:"role"              json:"role"`
 	InvitedBy        uuid.UUID                  `db:"invited_by"        json:"-"`
 	Token            string                     `db:"token"             json:"-"`
-	Status           string                     `db:"status"            json:"status"`
+	Status           InvitationStatus           `db:"status"            json:"status"`
 	ExpiresAt        time.Time                  `db:"expires_at"        json:"expires_at"`
 	CreatedAt        time.Time                  `db:"created_at"        json:"created_at"`
 	AcceptedAt       *time.Time                 `db:"accepted_at"       json:"accepted_at,omitempty"`
@@ -48,8 +66,8 @@ type InvitationResponse struct {
 	Email            *string                    `json:"email,omitempty"`
 	GitHubUsername   *string                    `json:"github_username,omitempty"`
 	AcceptanceMethod InvitationAcceptanceMethod `json:"acceptance_method"`
-	Role             string                     `json:"role"`
-	Status           string                     `json:"status"`
+	Role             Role                       `json:"role"`
+	Status           InvitationStatus           `json:"status"`
 	InvitedBy        UserBrief                  `json:"invited_by"`
 	ExpiresAt        time.Time                  `json:"expires_at"`
 	CreatedAt        time.Time                  `json:"created_at"`
@@ -70,7 +88,7 @@ type PendingInvitationForUserRow struct {
 	ID          uuid.UUID `db:"id"`
 	OrgID       uuid.UUID `db:"org_id"`
 	OrgName     string    `db:"org_name"`
-	Role        string    `db:"role"`
+	Role        Role      `db:"role"`
 	InvitedBy   uuid.UUID `db:"invited_by"`
 	InviterName string    `db:"inviter_name"`
 	ExpiresAt   time.Time `db:"expires_at"`
@@ -90,7 +108,7 @@ type PendingInvitationForUser struct {
 	ID        uuid.UUID `json:"id"`
 	OrgID     uuid.UUID `json:"org_id"`
 	OrgName   string    `json:"org_name"`
-	Role      string    `json:"role"`
+	Role      Role      `json:"role"`
 	InvitedBy UserBrief `json:"invited_by"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`

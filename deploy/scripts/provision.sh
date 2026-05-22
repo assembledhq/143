@@ -2,13 +2,15 @@
 set -euo pipefail
 
 # Provision a node by running bootstrap.sh + copying config files via SSH.
-# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
+# Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision|--tailscale-only]
 #
 # Roles: app, worker, db, logging, redis
 # This is the SSH-based alternative to cloud-init for already-running servers.
 #
 # Pass --reprovision to tear down existing containers and volumes before reprovisioning.
 # Without --reprovision, the script will abort if services are already running.
+# Pass --tailscale-only to enroll an already-provisioned host in Tailscale without
+# changing Docker containers, volumes, or application env files.
 #
 # No env vars required by default — the script reads your age key from
 # ~/.config/sops/age/keys.txt and all other secrets from .env.production.enc.
@@ -25,7 +27,8 @@ set -euo pipefail
 ROLE="$1"
 HOST="$2"
 SSH_KEY="$3"
-REPROVISION="${4:-}"
+MODE="${4:-}"
+REPROVISION="$MODE"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
@@ -43,6 +46,11 @@ case "$ROLE" in
   logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
   redis)   COMPOSE_FILE="docker-compose.redis.yml" ;;
   *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
+esac
+
+case "$MODE" in
+  ""|"--reprovision"|"--tailscale-only") ;;
+  *) echo "Unknown mode: $MODE (expected --reprovision or --tailscale-only)"; exit 1 ;;
 esac
 
 # Logging nodes use only public runtime images, but they still rely on values
@@ -68,14 +76,14 @@ if [ -f "$ENC_FILE" ]; then
   echo "Reading secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
 
-  # Source decrypted values, but don't overwrite existing env vars
+  # Source decrypted values, but don't overwrite non-empty env vars.
   while IFS= read -r line; do
     # Skip empty lines and comments
     [[ -z "$line" || "$line" == \#* ]] && continue
     key="${line%%=*}"
     value="${line#*=}"
-    # Only set if not already in environment
-    if [ -z "${!key+x}" ]; then
+    # Make exports empty vars for forwarding, so allow secrets to fill empties.
+    if [ -z "${!key:-}" ]; then
       export "$key=$value"
     fi
   done <<< "$DECRYPTED"
@@ -84,6 +92,79 @@ else
   echo "Falling back to environment variables."
 fi
 
+apply_tailscale_worker_host_map() {
+  if [ "$ROLE" != "worker" ] || [ -z "${TS_WORKER_HOSTS:-}" ]; then
+    return
+  fi
+
+  # TS_WORKER_HOSTS is a comma-separated list of worker management hosts that
+  # should join the tailnet. Entries may be either "<host>" or
+  # "<node-id>:<host>" so the same production secret can also pin NODE_ID.
+  # Example: TS_WORKER_HOSTS="worker-usw-1:87.99.158.39,worker-ec2-1:54.1.2.3"
+  IFS=',' read -ra mappings <<< "$TS_WORKER_HOSTS"
+  for mapping in "${mappings[@]}"; do
+    map_node_id=""
+    map_host="$mapping"
+    if [[ "$mapping" == *:* ]]; then
+      map_node_id="${mapping%%:*}"
+      map_host="${mapping#*:}"
+    fi
+
+    if [ "$map_host" = "$HOST" ]; then
+      : "${WORKER_PRIVATE_IP_SOURCE:=tailscale}"
+      if [ -n "$map_node_id" ]; then
+        : "${NODE_ID:=$map_node_id}"
+      fi
+      return
+    fi
+  done
+}
+
+apply_tailscale_role_defaults() {
+  apply_tailscale_worker_host_map
+
+  case "$ROLE" in
+    app)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_APP:-}}"
+      : "${TS_TAG:=${TS_TAG_APP:-tag:prod-app}}"
+      ;;
+    db)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_DB:-}}"
+      : "${TS_TAG:=${TS_TAG_DB:-tag:prod-db}}"
+      if [ -n "${TS_AUTH_KEY:-}" ]; then
+        : "${DB_BIND_IP:?DB_BIND_IP is required for db Tailscale route advertisement}"
+        : "${TS_ADVERTISE_ROUTES:=${DB_BIND_IP}/32}"
+      fi
+      ;;
+    redis)
+      : "${TS_AUTH_KEY:=${TS_AUTH_KEY_REDIS:-}}"
+      : "${TS_TAG:=${TS_TAG_REDIS:-tag:prod-redis}}"
+      if [ -n "${TS_AUTH_KEY:-}" ]; then
+        : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis Tailscale route advertisement}"
+        : "${TS_ADVERTISE_ROUTES:=${REDIS_PRIVATE_IP}/32}"
+      fi
+      ;;
+    worker)
+      if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+        : "${TS_AUTH_KEY:=${TS_AUTH_KEY_WORKER:-}}"
+        : "${TS_TAG:=${TS_TAG_WORKER:-tag:prod-worker}}"
+        TS_ACCEPT_ROUTES=true
+      fi
+      ;;
+  esac
+
+  if [ "$ROLE" = "worker" ] && [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_WORKER is required for Tailscale worker provisioning}"
+  fi
+  if [ "$ROLE" = "db" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_DB is required when TS_ADVERTISE_ROUTES is set}"
+  fi
+  if [ "$ROLE" = "redis" ] && [ -n "${TS_ADVERTISE_ROUTES:-}" ]; then
+    : "${TS_AUTH_KEY:?TS_AUTH_KEY or TS_AUTH_KEY_REDIS is required when TS_ADVERTISE_ROUTES is set}"
+  fi
+}
+
+apply_tailscale_role_defaults
 apply_worker_bucket_overrides "$ROLE" "$HOST"
 if [ "$ROLE" = "worker" ]; then
   : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"
@@ -94,51 +175,122 @@ if [ "$ROLE" = "worker" ]; then
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
-if [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
   : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" = "logging" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
   GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-$DISABLED_WARNING_WEBHOOK_URL}"
   GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
 fi
-if [ "$ROLE" = "redis" ]; then
+if [ "$ROLE" = "db" ]; then
+  : "${DB_BIND_IP:?DB_BIND_IP is required for db role (set it to the db node primary private IP)}"
+fi
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "redis" ]; then
   : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
   : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis role (Redis node private IP)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
+if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
-# Per-host identity for workers. These are written to /opt/143/.env.local and
-# preserved across deploys (deploy.sh never overwrites .env.local). Auto-detect
-# WORKER_PRIVATE_IP from the host's outbound source address if the caller
-# didn't supply one. NODE_ID and PREVIEW_INTERNAL_BASE_URL get sensible
-# defaults derived from WORKER_PRIVATE_IP — override either via env var if
-# needed. Resolved values are echoed before writing so the operator can
-# eyeball them and Ctrl-C if something looks wrong.
-if [ "$ROLE" = "worker" ]; then
+wait_for_docker_daemon() {
+  echo "--- Waiting for Docker daemon ---"
+  ssh "${SSH_OPTS[@]}" root@"$HOST" << 'WAIT_DOCKER'
+    set -euo pipefail
+    if ! systemctl enable --now docker; then
+      echo "ERROR: failed to start Docker." >&2
+      systemctl status docker --no-pager >&2 || true
+      journalctl -u docker --no-pager -n 100 >&2 || true
+      exit 1
+    fi
+
+    for i in $(seq 1 30); do
+      if su - deploy -c 'docker info >/dev/null 2>&1'; then
+        echo "Docker daemon is ready."
+        exit 0
+      fi
+      sleep 2
+    done
+
+    echo "ERROR: Docker daemon did not become ready for deploy within 60s." >&2
+    systemctl status docker --no-pager >&2 || true
+    journalctl -u docker --no-pager -n 100 >&2 || true
+    exit 1
+WAIT_DOCKER
+}
+
+configure_tailscale_if_requested() {
+  if [ -z "${TS_AUTH_KEY:-}" ]; then
+    return
+  fi
+
+  local ts_hostname="${TS_HOSTNAME:-143-${ROLE}-${HOST//./-}}"
+  local ts_tag="${TS_TAG:-tag:prod-${ROLE}}"
+  local ts_advertise_routes="${TS_ADVERTISE_ROUTES:-}"
+  local ts_accept_routes="${TS_ACCEPT_ROUTES:-false}"
+  echo "--- Configuring Tailscale ($ts_hostname, $ts_tag) ---"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$TS_AUTH_KEY" "$ts_hostname" "$ts_tag" "$ts_advertise_routes" "$ts_accept_routes" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" '
+        set -euo pipefail
+        read -r TS_AUTH_KEY
+        read -r TS_HOSTNAME
+        read -r TS_TAG
+        read -r TS_ADVERTISE_ROUTES
+        read -r TS_ACCEPT_ROUTES
+        export TS_AUTH_KEY TS_HOSTNAME TS_TAG TS_ADVERTISE_ROUTES TS_ACCEPT_ROUTES
+        /opt/143/deploy/scripts/install-tailscale.sh
+      '
+}
+
+if [ "$MODE" = "--tailscale-only" ]; then
+  : "${TS_AUTH_KEY:?TS_AUTH_KEY or a role-specific TS_AUTH_KEY_* is required for Tailscale enrollment}"
+
+  echo "=== Enrolling $ROLE node at $HOST in Tailscale only ==="
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "mkdir -p /opt/143/deploy/scripts"
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-tailscale.sh" root@"$HOST":/opt/143/deploy/scripts/install-tailscale.sh
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "chmod +x /opt/143/deploy/scripts/install-tailscale.sh"
+  configure_tailscale_if_requested
+  echo ""
+  echo "=== Tailscale enrollment applied for $ROLE node at $HOST ==="
+  exit 0
+fi
+
+resolve_worker_identity() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
   if [ -z "${WORKER_PRIVATE_IP:-}" ]; then
-    echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
-    # Enumerate every private IPv4 on a real network interface, deliberately
-    # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
-    # filter would silently return 172.17.0.1 (docker0) on hosts where the
-    # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
-    # the *public* IP because the default route goes through the public NIC.
-    # We collect candidates (no awk `exit`) so multi-homed hosts surface as
-    # an error rather than silently picking whichever NIC enumerates first.
-    WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
-      'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+    if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+      echo "Auto-detecting WORKER_PRIVATE_IP from Tailscale (100.64.0.0/10) via SSH..."
+      WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
+        'command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true')"
+    else
+      echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
+      # Enumerate every private IPv4 on a real network interface, deliberately
+      # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
+      # filter would silently return 172.17.0.1 (docker0) on hosts where the
+      # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
+      # the *public* IP because the default route goes through the public NIC.
+      # We collect candidates (no awk `exit`) so multi-homed hosts surface as
+      # an error rather than silently picking whichever NIC enumerates first.
+      WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
+        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+    fi
     CANDIDATE_COUNT="$(printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | grep -c . || true)"
     if [ "$CANDIDATE_COUNT" -eq 0 ]; then
       echo "ERROR: could not auto-detect WORKER_PRIVATE_IP on $HOST."
+      if [ "${WORKER_PRIVATE_IP_SOURCE:-private}" = "tailscale" ]; then
+        echo "       Tailscale discovery was requested, but no tailscale ip -4 address was available."
+      fi
       echo "       Set WORKER_PRIVATE_IP=<ip> and re-run."
       exit 1
     elif [ "$CANDIDATE_COUNT" -gt 1 ]; then
@@ -169,7 +321,24 @@ if [ "$ROLE" = "worker" ]; then
   echo "  WORKER_PRIVATE_IP         = $WORKER_PRIVATE_IP"
   echo "  NODE_ID                   = $NODE_ID"
   echo "  PREVIEW_INTERNAL_BASE_URL = $PREVIEW_INTERNAL_BASE_URL"
-fi
+}
+
+resolve_worker_docker_gid() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
+  if [ -z "${DOCKER_GID:-}" ]; then
+    DOCKER_GID="$(ssh "${SSH_OPTS[@]}" root@"$HOST" "getent group docker | cut -d: -f3")"
+  fi
+  if [[ ! "$DOCKER_GID" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: could not resolve numeric DOCKER_GID for docker.sock access on $HOST." >&2
+    echo "       Expected 'getent group docker | cut -d: -f3' to return a number; got '$DOCKER_GID'." >&2
+    exit 1
+  fi
+
+  echo "  DOCKER_GID                = $DOCKER_GID"
+}
 
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
@@ -315,7 +484,7 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
 
 # Step 2a: Cap docker container log files (max-size/max-file in
 # /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
@@ -338,6 +507,14 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.
 # next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
 # operators and networks.
 ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
+wait_for_docker_daemon
+
+# Optional Tailscale enrollment. This runs before worker identity resolution
+# so a new west-region worker can use WORKER_PRIVATE_IP_SOURCE=tailscale and
+# publish its 100.64.0.0/10 address as the internal preview endpoint.
+configure_tailscale_if_requested
+resolve_worker_identity
+resolve_worker_docker_gid
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -356,7 +533,7 @@ if [ "$ROLE" = "logging" ]; then
     "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "logging" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
-  printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
+  printf 'DB_PASSWORD=%s\nDB_BIND_IP=%s\n' "$DB_PASSWORD" "$DB_BIND_IP" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "redis" ]; then
   printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
@@ -373,11 +550,12 @@ elif [ "$ROLE" = "worker" ]; then
     "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
-  # Per-host identity (NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL)
-  # lives in .env.local and survives every deploy — the secret refresh in
-  # deploy.sh only rewrites /opt/143/.env, then re-appends .env.local.
-  printf 'NODE_ID=%s\nWORKER_PRIVATE_IP=%s\nPREVIEW_INTERNAL_BASE_URL=%s\n' \
-    "$NODE_ID" "$WORKER_PRIVATE_IP" "$PREVIEW_INTERNAL_BASE_URL" \
+  # Per-host identity/runtime values (NODE_ID, WORKER_PRIVATE_IP,
+  # PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) live in .env.local and survive
+  # every deploy — the secret refresh in deploy.sh only rewrites /opt/143/.env,
+  # then re-appends .env.local.
+  printf 'NODE_ID=%s\nWORKER_PRIVATE_IP=%s\nPREVIEW_INTERNAL_BASE_URL=%s\nDOCKER_GID=%s\n' \
+    "$NODE_ID" "$WORKER_PRIVATE_IP" "$PREVIEW_INTERNAL_BASE_URL" "$DOCKER_GID" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env.local && chown deploy:deploy /opt/143/.env.local && chmod 600 /opt/143/.env.local'
 
   # Concatenate so docker compose can interpolate ${WORKER_PRIVATE_IP} etc.
@@ -431,77 +609,7 @@ PULL_APP
       set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
-      # Ensure the shared sandbox bridge exists with a pinned subnet.
-      #
-      # The subnet is hard-coded to 172.30.0.0/24 so sandbox-dns can be
-      # given the stable static IP 172.30.0.2 in docker-compose.worker.yml,
-      # which /etc/143/sandbox-resolv.conf below points at. Without a pinned
-      # subnet Docker auto-assigns from its default pool and the static IP
-      # mapping breaks.
-      #
-      # Leave Docker's bridge ICC setting at its default. On some Docker /
-      # gVisor combinations, disabling bridge ICC blocks sandbox traffic to
-      # the sandbox-dns sidecar before DOCKER-USER can carve it out, which
-      # breaks all agent DNS resolution.
-      # docker inspect returns "" on a missing network (with exit 1 swallowed
-      # by `|| true`) and the subnet string on an existing one. Distinguishing
-      # the two via a single call keeps us from spawning two `su - deploy`
-      # login shells per provision.
-      EXISTING_SANDBOX_SUBNET=$(su - deploy -c 'docker network inspect 143-sandbox -f "{{range .IPAM.Config}}{{.Subnet}}{{end}}" 2>/dev/null' || true)
-      if [ -z "$EXISTING_SANDBOX_SUBNET" ]; then
-        su - deploy -c 'docker network create --driver bridge --subnet 172.30.0.0/24 --label managed-by=143 143-sandbox'
-      elif [ "$EXISTING_SANDBOX_SUBNET" != "172.30.0.0/24" ]; then
-        echo "ERROR: 143-sandbox network has subnet '$EXISTING_SANDBOX_SUBNET'; expected 172.30.0.0/24." >&2
-        echo "  This worker was provisioned before the pinned-subnet change. To upgrade:" >&2
-        echo "    1. docker compose -f /opt/143/docker-compose.worker.yml down" >&2
-        echo "    2. docker network rm 143-sandbox" >&2
-        echo "    3. Re-run provision-worker for this host." >&2
-        echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
-        exit 1
-      fi
-      # Install iptables-persistent so the egress block survives reboots.
-      apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
-      # Apply sandbox egress firewall. Script is idempotent and reads the
-      # network's current subnet, so safe to re-run on every provision.
-      if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
-        /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
-      fi
-      # Provision /etc/143/sandbox-resolv.conf via the shared writer so the
-      # provisioning path and routine deploys agree byte-for-byte on its
-      # contents. See deploy/scripts/sandbox-resolv-conf.sh for the full
-      # rationale (gVisor + Docker embedded DNS + sandbox-dns sidecar). The
-      # file was scp'd to /opt/143 in Step 2 and runs as root here.
-      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
-      # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
-      # credential sockets. The worker container bind-mounts this path
-      # in (see docker-compose.worker.yml); the orchestrator running as
-      # appuser uid 1000 opens one Unix-domain socket per session here,
-      # and the docker daemon bind-mounts the per-session subdir into
-      # the sandbox container at /run/143-auth/. SANDBOX_AUTH_SOCKET_DIR
-      # points the server at this path.
-      #
-      # /run is tmpfs on systemd hosts (and /var/run is a symlink to it),
-      # so the directory disappears on every reboot. We register it with
-      # systemd-tmpfiles so it's recreated at boot — and via --create
-      # below, immediately on first provision. Mode 0750 satisfies the
-      # orchestrator's startup assertion (assertParentDirPerms in
-      # internal/services/sandboxauth/server.go); owner 1000:1000 matches
-      # the worker container's appuser so MkdirAll on per-session subdirs
-      # succeeds.
-      cat > /etc/tmpfiles.d/143-sandbox-auth.conf <<'TMPFILES'
-d /var/run/143 0755 root root -
-d /var/run/143/sandbox-auth 0750 1000 1000 -
-TMPFILES
-      systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
-      # Belt-and-suspenders: if the directory already existed (e.g. Docker
-      # auto-created the bind-mount source as root:root 0755 before this
-      # provision step ran, or an older provision left it 0755), tmpfiles
-      # --create's adjustment isn't always reliable across systemd
-      # versions. Force the desired ownership and mode explicitly so the
-      # orchestrator's assertParentDirPerms check passes on first boot.
-      mkdir -p /var/run/143/sandbox-auth
-      chown 1000:1000 /var/run/143/sandbox-auth
-      chmod 0750 /var/run/143/sandbox-auth
+      /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox
 PULL_WORKER
     ;;
   db|logging|redis)

@@ -108,17 +108,17 @@ type AutopilotSessionRef struct {
 
 type AutopilotAgentRunRef struct {
 	ID          uuid.UUID            `json:"id"`
-	Status      string               `json:"status"`
+	Status      SessionStatus        `json:"status"`
 	TriggerMode AutopilotTriggerMode `json:"trigger_mode"`
 	StartedAt   *time.Time           `json:"started_at,omitempty"`
 }
 
 type AutopilotPullRequestRef struct {
-	ID       uuid.UUID  `json:"id"`
-	Number   int        `json:"number"`
-	URL      string     `json:"url"`
-	Status   string     `json:"status"`
-	MergedAt *time.Time `json:"merged_at,omitempty"`
+	ID       uuid.UUID         `json:"id"`
+	Number   int               `json:"number"`
+	URL      string            `json:"url"`
+	Status   PullRequestStatus `json:"status"`
+	MergedAt *time.Time        `json:"merged_at,omitempty"`
 }
 
 type AutopilotQueueRow struct {
@@ -127,7 +127,7 @@ type AutopilotQueueRow struct {
 	Source               AutopilotIssueSource     `json:"source"`
 	Title                string                   `json:"title"`
 	Repo                 *AutopilotRepoRef        `json:"repo,omitempty"`
-	IssueStatus          string                   `json:"issue_status"`
+	IssueStatus          IssueStatus              `json:"issue_status"`
 	CustomerImpact       AutopilotCustomerImpact  `json:"customer_impact"`
 	ImplementationEase   string                   `json:"implementation_ease"`
 	LowHangingFruit      AutopilotLowHangingFruit `json:"low_hanging_fruit"`

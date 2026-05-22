@@ -1,4 +1,7 @@
 {
+  "dependencies": {
+    "golangci-lint": "2.10.1"
+  },
   "preview": {
     "name": "manado",
     "primary": "frontend",
@@ -8,6 +11,7 @@
         "port": 3000,
         "env": {
           "API_PROXY_TARGET": "http://localhost:8080",
+          "NEXT_PUBLIC_API_URL": "",
           "NODE_OPTIONS": "--max-old-space-size=1280"
         },
         "ready": {

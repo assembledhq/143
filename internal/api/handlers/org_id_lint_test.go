@@ -93,6 +93,19 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"PreviewHandler.CaptureMultiViewport": "delegates to getActivePreview which uses OrgIDFromContext",
 		"PreviewHandler.ComputeVisualDiff":    "delegates to getActivePreview which uses OrgIDFromContext",
 		"PreviewHandler.RunAssertions":        "delegates to getActivePreview which uses OrgIDFromContext",
+
+		// Linear agent settings — every handler delegates to requireOrgID,
+		// which calls OrgIDFromContext and additionally rejects uuid.Nil
+		// with a 401 (defense in depth against an upstream middleware
+		// regression). The helper centralizes the check so the same
+		// shape applies to every endpoint.
+		"LinearAgentSettingsHandler.GetStatus":     "delegates to requireOrgID which uses OrgIDFromContext",
+		"LinearAgentSettingsHandler.ListMappings":  "delegates to requireOrgID which uses OrgIDFromContext",
+		"LinearAgentSettingsHandler.UpsertMapping": "delegates to requireOrgID which uses OrgIDFromContext",
+		"LinearAgentSettingsHandler.PatchSettings": "delegates to requireOrgID which uses OrgIDFromContext",
+		"LinearAgentSettingsHandler.ListSessions":  "delegates to requireOrgID which uses OrgIDFromContext",
+		"LinearAgentSettingsHandler.GetSession":    "delegates to requireOrgID which uses OrgIDFromContext",
+		"LinearAgentSettingsHandler.DeleteMapping": "delegates to requireOrgID which uses OrgIDFromContext",
 	}
 
 	fset := token.NewFileSet()

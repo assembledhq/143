@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -158,6 +159,7 @@ func (m *mockCodingCredentialProvider) ListResolvable(ctx context.Context, orgID
 func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, orgIDScope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var candidates []models.DecryptedCodingCredential
 	for _, provider := range providers {
 		for _, cred := range m.resolvable[provider] {
 			if cred.Status != models.CodingCredentialStatusActive {
@@ -169,9 +171,26 @@ func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, or
 			if limit, ok := m.rateLimitedIDs[cred.ID]; ok && limit.Until.After(time.Now()) {
 				continue
 			}
-			picked := cred
-			return &picked, nil
+			candidates = append(candidates, cred)
 		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftPersonal := candidates[i].UserID != nil
+		rightPersonal := candidates[j].UserID != nil
+		if leftPersonal != rightPersonal {
+			return leftPersonal
+		}
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+		}
+		return false
+	})
+	if len(candidates) > 0 {
+		picked := candidates[0]
+		return &picked, nil
 	}
 	return nil, errors.New("all eligible coding credentials are currently shed")
 }
@@ -251,7 +270,7 @@ func (m *mockCredentialProvider) withDefaultStatus(cred *models.DecryptedCredent
 		return cred
 	}
 	copy := *cred
-	copy.Status = models.CodingCredentialStatusActive
+	copy.Status = models.CredentialStatusActive
 	return &copy
 }
 
@@ -283,6 +302,7 @@ type mockSessionStore struct {
 	turnUpdates            []turnUpdate
 	runtimeBegins          []runtimeBegin
 	progressUpdates        []runtimeProgressUpdate
+	stopRequests           []models.RuntimeStopReason
 	extensionGrants        []runtimeExtensionGrant
 	checkpoints            []checkpointUpdate
 	recoveryStates         []recoveryStateUpdate
@@ -377,7 +397,7 @@ type recoveryStateUpdate struct {
 }
 
 type resultUpdate struct {
-	status string
+	status models.SessionStatus
 	result *models.SessionResult
 }
 
@@ -393,18 +413,18 @@ type turnUpdate struct {
 	snapshotKey    string
 }
 
-func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.statusUpdates = append(m.statusUpdates, status)
+	m.statusUpdates = append(m.statusUpdates, string(status))
 	return nil
 }
 
-func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.eventHook != nil {
-		m.eventHook("session_result:" + status)
+		m.eventHook("session_result:" + string(status))
 	}
 	m.resultUpdates = append(m.resultUpdates, resultUpdate{status: status, result: result})
 	return nil
@@ -480,6 +500,13 @@ func (m *mockSessionStore) RecordRuntimeProgress(ctx context.Context, orgID, ses
 	return nil
 }
 
+func (m *mockSessionStore) MarkRuntimeStopRequested(ctx context.Context, orgID, sessionID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopRequests = append(m.stopRequests, reason)
+	return nil
+}
+
 func (m *mockSessionStore) GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -504,6 +531,9 @@ func (m *mockSessionStore) PublishCheckpoint(ctx context.Context, orgID, session
 	if !published {
 		return false, nil
 	}
+	if m.eventHook != nil {
+		m.eventHook("checkpoint:" + string(kind))
+	}
 	m.checkpoints = append(m.checkpoints, checkpointUpdate{
 		agentSessionID: agentSessionID,
 		snapshotKey:    snapshotKey,
@@ -526,7 +556,7 @@ func (m *mockSessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessi
 	return nil
 }
 
-func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
+func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
 	return nil
 }
 
@@ -1057,10 +1087,10 @@ type mockProjectTaskUpdater struct {
 	statuses []string
 }
 
-func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
+func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.statuses = append(m.statuses, status)
+	m.statuses = append(m.statuses, string(status))
 	return nil
 }
 
@@ -1087,13 +1117,13 @@ func (m *mockIssueStore) GetByID(ctx context.Context, orgID, issueID uuid.UUID) 
 	return m.issue, nil
 }
 
-func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
 	}
-	m.statusUpdates = append(m.statusUpdates, status)
+	m.statusUpdates = append(m.statusUpdates, string(status))
 	return nil
 }
 
@@ -1279,6 +1309,10 @@ type mockSessionThreadStore struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}
+	completeTurnCalls []struct {
+		threadID uuid.UUID
+		turn     int
+	}
 }
 
 func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -1291,7 +1325,13 @@ func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uui
 	return nil
 }
 
-func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, _ uuid.UUID, _ int, _ string) error {
+func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, threadID uuid.UUID, turn int, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.completeTurnCalls = append(m.completeTurnCalls, struct {
+		threadID uuid.UUID
+		turn     int
+	}{threadID: threadID, turn: turn})
 	return nil
 }
 
@@ -1316,6 +1356,20 @@ func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
 	for _, c := range m.updateStatusCalls {
 		out = append(out, c.status)
 	}
+	return out
+}
+
+func (m *mockSessionThreadStore) completedTurns() []struct {
+	threadID uuid.UUID
+	turn     int
+} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]struct {
+		threadID uuid.UUID
+		turn     int
+	}, len(m.completeTurnCalls))
+	copy(out, m.completeTurnCalls)
 	return out
 }
 
@@ -1406,7 +1460,11 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	})
 }
 
-func findLogEvent(t *testing.T, logs *bytes.Buffer, message string) map[string]any {
+type logEventBuffer interface {
+	Bytes() []byte
+}
+
+func findLogEvent(t *testing.T, logs logEventBuffer, message string) map[string]any {
 	t.Helper()
 	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -1464,7 +1522,7 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	// Result should be "completed" with high confidence.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 	require.NotNil(t, results[0].result.ConfidenceScore)
 	require.InDelta(t, 0.9, *results[0].result.ConfidenceScore, 0.01)
 
@@ -1480,6 +1538,117 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeAmp
+
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	d.issues.issue = issue
+
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
+		if len(seenKeys) == 1 {
+			return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+		}
+		return &agent.AgentResult{
+			Diff:            "--- a/main.go\n+++ b/main.go",
+			Summary:         "completed with fallback",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should retry with a fallback credential after a rate-limit result")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "RunAgent should refresh agent credentials before retrying")
+	require.Len(t, d.sessions.getResultUpdates(), 1, "RunAgent should persist one successful result after fallback retry")
+}
+
+func TestRunAgent_RateLimitFallbackExhaustionFailsWithBlockedAuth(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeAmp
+
+	firstCredID := uuid.New()
+	secondCredID := uuid.New()
+	codingCreds := &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAmp: {
+				{
+					ID:        firstCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-first"},
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        secondCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderAmp,
+					Config:    models.AmpConfig{APIKey: "amp-fallback"},
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+				},
+			},
+		},
+	}
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
+	d.codingCreds = codingCreds
+	d.issues.issue = issue
+
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["AMP_API_KEY"])
+		return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when every fallback credential is rate limited")
+	require.Contains(t, err.Error(), "all Amp auths are rate limited", "RunAgent should return the clear blocked-auth message")
+	require.Equal(t, []string{"amp-first", "amp-fallback"}, seenKeys, "RunAgent should try the next credential before blocking")
+	require.Contains(t, codingCreds.rateLimitedIDs, firstCredID, "RunAgent should mark the first credential rate-limited")
+	require.Contains(t, codingCreds.rateLimitedIDs, secondCredID, "RunAgent should mark the fallback credential rate-limited")
 }
 
 func TestRunAgent_MaterializesUploadedAttachments(t *testing.T) {
@@ -1634,8 +1803,8 @@ func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 
@@ -1643,7 +1812,7 @@ func TestRunAgent_SuccessLogIncludesPlatformHealthFields(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should complete successfully")
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "RunAgent should emit agent run finished log")
 	require.Equal(t, string(models.AgentTypeClaudeCode), completion["agent_type"], "completion log should include agent type")
 	require.Equal(t, "completed", completion["outcome"], "completion log should include platform outcome")
@@ -1663,8 +1832,8 @@ func TestRunAgent_InteractiveSuccessLogIncludesPlatformHealthFields(t *testing.T
 	run.InteractionMode = models.SessionInteractionModeInteractive
 	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.issues.issue = issue
@@ -1683,7 +1852,7 @@ func TestRunAgent_InteractiveSuccessLogIncludesPlatformHealthFields(t *testing.T
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err, "interactive RunAgent should complete successfully")
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "interactive RunAgent should emit agent run finished log")
 	require.Equal(t, string(models.AgentTypeClaudeCode), completion["agent_type"], "interactive completion log should include agent type")
 	require.Equal(t, "idle", completion["outcome"], "interactive completion log should include idle outcome")
@@ -1775,8 +1944,8 @@ func TestRunAgent_LogsDuplicateMarkerFailureAndSucceeds(t *testing.T) {
 		}, nil
 	}
 
-	var buf bytes.Buffer
-	logger := zerolog.New(&buf)
+	buf := &syncBuffer{}
+	logger := zerolog.New(buf)
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         d.provider,
 		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -1813,7 +1982,7 @@ func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusRunning)
+	session.Status = models.SessionStatusRunning
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	session.AgentSessionID = strPtr("agent-session-1")
@@ -1865,7 +2034,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.Status = string(models.SessionStatusRunning)
+	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -1883,7 +2052,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should follow the normal run result path")
-	require.Equal(t, "completed", results[0].status, "restart should complete the run from scratch")
+	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete the run from scratch")
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
@@ -1893,7 +2062,7 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.Status = string(models.SessionStatusRunning)
+	run.Status = models.SessionStatusRunning
 	run.RecoveryAttemptCount = 3
 	threadID := uuid.New()
 	run.PrimaryThreadID = &threadID
@@ -1911,7 +2080,7 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "exhausted recovery should mark the session failed")
-	require.Equal(t, "failed", results[0].status, "exhausted recovery should be terminal")
+	require.Equal(t, models.SessionStatusFailed, results[0].status, "exhausted recovery should be terminal")
 
 	failures := d.sessions.getFailureUpdates()
 	require.Len(t, failures, 1, "exhausted recovery should record structured failure metadata")
@@ -1929,7 +2098,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
-	run.Status = string(models.SessionStatusRunning)
+	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
 	d.sessions.countRunning = 1
@@ -1968,7 +2137,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should still complete the run")
-	require.Equal(t, "completed", results[0].status, "restart should complete successfully under a single-slot concurrency limit")
+	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete successfully under a single-slot concurrency limit")
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
@@ -1978,7 +2147,7 @@ func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T)
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusRunning)
+	session.Status = models.SessionStatusRunning
 	session.CurrentTurn = 1
 	session.AgentSessionID = strPtr("agent-session-1")
 	session.SnapshotKey = strPtr("snapshots/test/recover-init-failure.tar")
@@ -2134,7 +2303,7 @@ func TestRunAgent_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	require.Equal(t, 0, d.sessions.finalizeCalls)
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive winner — must NOT clear container_id (would kill the active turn)")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "loser must not mark the session failed — winner owns the row")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "loser must not mark the session failed — winner owns the row")
 	}
 }
 
@@ -2174,7 +2343,7 @@ func TestRunAgent_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must still destroy the losing sandbox")
 	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusPending), "stale-orphan path must revert the session to pending so the retry re-enters the fresh run path")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "stale-orphan path must not mark the session failed")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "stale-orphan path must not mark the session failed")
 	}
 }
 
@@ -2538,7 +2707,7 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -2576,6 +2745,11 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 		createdCfg = cfg
 		return &agent.Sandbox{ID: "resume-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
+	d.provider.Files["/home/sandbox/backend/.143/config.json"] = []byte(`{
+		"dependencies": {
+			"golangci-lint": "2.10.1"
+		}
+	}`)
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
 			Summary:         "continued",
@@ -2593,7 +2767,183 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	require.Equal(t, "noreply@143.dev", createdCfg.Env[sandboxauth.GitEmailEnvVar], "ContinueSession should set the git author email for the sandbox")
 	require.Contains(t, createdCfg.Env["PATH"], "/home/sandbox/.local/bin", "ContinueSession should prepend the gh wrapper directory to PATH")
 	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "ContinueSession should rerun git-bootstrap after cloning the fresh workspace")
+	require.Condition(t, func() bool {
+		for _, cmd := range d.provider.ExecCalls {
+			if strings.Contains(cmd, "github.com/golangci/golangci-lint/releases/download/v2.10.1") {
+				return true
+			}
+		}
+		return false
+	}, "ContinueSession should install repo-declared sandbox dependencies after cloning the fresh workspace")
 	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
+}
+
+func TestContinueSession_PRRepairReconstructsFromExpectedHead(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+	pendingSnapshotKey := "snapshots/post-pr-upload.tar.zst"
+	session.PendingSnapshotKey = &pendingSnapshotKey
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please fix these tests.",
+		},
+	}
+	var cloneBranch string
+	d.provider.CloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+		cloneBranch = branch
+		return nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "expected-head-sha\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		PRRepair: &agent.PRRepairContinueOptions{
+			PullRequestID:     uuid.New(),
+			PullRequestNumber: 42,
+			CommandType:       models.PullRequestRepairActionTypeFixTests,
+			HealthVersion:     12,
+			HeadSHA:           "expected-head-sha",
+			WorkspaceMode:     models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+		},
+	})
+	require.NoError(t, err, "ContinueSession should reconstruct PR repairs even while a post-PR snapshot upload is pending")
+	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should start from the repository target branch before fetching the PR head")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head into the session working branch")
+	require.NotContains(t, d.provider.ExecCalls, "git checkout -b '143/00000000/nullpointerexception-in-handler'", "PR repair reconstruction should not create a branch from the target branch tip")
+}
+
+func TestContinueSession_PRRepairReconstructionClearsRecordedContainer(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+	containerID := "live-container"
+	session.ContainerID = &containerID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please resolve the conflicts.",
+		},
+	}
+	var clearedContainer string
+	d.sessions.clearContainerIDFn = func(expected string) (bool, error) {
+		clearedContainer = expected
+		return true, nil
+	}
+	var destroyedContainer string
+	d.provider.DestroyFn = func(ctx context.Context, sb *agent.Sandbox) error {
+		if sb.ID == containerID {
+			destroyedContainer = sb.ID
+		}
+		return nil
+	}
+	var cloneBranch string
+	d.provider.CloneRepoFn = func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
+		cloneBranch = branch
+		return nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "expected-head-sha\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		PRRepair: &agent.PRRepairContinueOptions{
+			PullRequestID:     uuid.New(),
+			PullRequestNumber: 42,
+			CommandType:       models.PullRequestRepairActionTypeResolveConflicts,
+			HealthVersion:     12,
+			HeadSHA:           "expected-head-sha",
+			WorkspaceMode:     models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+		},
+	})
+	require.NoError(t, err, "ContinueSession should reconstruct PR repairs from a fresh workspace even when the session has a recorded container")
+	require.Equal(t, containerID, clearedContainer, "PR repair reconstruction should clear the recorded container before creating a fresh workspace")
+	require.Equal(t, containerID, destroyedContainer, "PR repair reconstruction should destroy the unheld recorded container after clearing it from the session row")
+	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should clone from the repository target branch")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head in the fresh workspace")
+}
+
+func TestContinueSession_PRRepairStaleHeadDoesNotInvokeAgent(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please resolve the conflicts.",
+		},
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "newer-head-sha\n")
+		}
+		return 0, nil
+	}
+	agentInvoked := false
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		agentInvoked = true
+		return &agent.AgentResult{Summary: "should not run", ConfidenceScore: 0.1, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		PRRepair: &agent.PRRepairContinueOptions{
+			PullRequestID:     uuid.New(),
+			PullRequestNumber: 42,
+			CommandType:       models.PullRequestRepairActionTypeResolveConflicts,
+			HealthVersion:     12,
+			HeadSHA:           "expected-head-sha",
+			WorkspaceMode:     models.PullRequestRepairWorkspaceModePRHeadReconstruction,
+		},
+	})
+	require.ErrorIs(t, err, agent.ErrStalePullRequestHead, "ContinueSession should surface stale PR head as a typed error")
+	require.False(t, agentInvoked, "ContinueSession must not invoke the agent when the checked-out PR head is stale")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "stale PR head should not be persisted as a session failure")
 }
 
 func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testing.T) {
@@ -2602,7 +2952,7 @@ func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testin
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "snapshots/session.tar"
 	agentSessionID := "agent-session-1"
@@ -2622,9 +2972,6 @@ func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testin
 	}
 	d.messages.messages = []models.SessionMessage{
 		{
-			ID:         1,
-			SessionID:  session.ID,
-			OrgID:      orgID,
 			TurnNumber: 1,
 			Role:       models.MessageRoleAssistant,
 			Content:    "previous response",
@@ -2658,7 +3005,7 @@ func TestContinueSession_AllowsAttachmentOnlyFollowUp(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "snapshots/session.tar"
 	agentSessionID := "agent-session-1"
@@ -2715,7 +3062,7 @@ func TestContinueSession_MaterializesAttachmentsFromMultiplePendingMessages(t *t
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "snapshots/session.tar"
 	agentSessionID := "agent-session-1"
@@ -2771,7 +3118,7 @@ func TestContinueSession_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeAmp
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -2848,7 +3195,7 @@ func TestContinueSession_RateLimitFallbackExhaustionCreatesBlockedMessage(t *tes
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeAmp
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -2923,7 +3270,7 @@ func TestContinueSession_FreshResumeLegacyGitHubAuthStillBootstrapsBranchGuard(t
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 
@@ -3228,7 +3575,7 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	// The first result update is from failRun, setting status to "failed".
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 		}
 	}
@@ -3245,6 +3592,44 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
+func TestRunAgent_FailedExecutionDrainsInitialQueuedPrompt(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.getByIDFn = func(orgID, sessionID uuid.UUID) (models.Session, error) {
+		return models.Session{
+			ID:     sessionID,
+			OrgID:  orgID,
+			Status: models.SessionStatusFailed,
+		}, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		err := d.messages.Create(ctx, &models.SessionMessage{
+			SessionID: run.ID,
+			OrgID:     run.OrgID,
+			Role:      models.MessageRoleUser,
+			Content:   "queued while initial run was active",
+		})
+		require.NoError(t, err, "test setup should append the prompted user message")
+		return nil, errors.New("agent crashed after prompt")
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should return the execution error")
+	require.Contains(t, err.Error(), "execute agent", "RunAgent should wrap the adapter execution error")
+
+	enqueued := d.jobs.getEnqueued()
+	require.Contains(t, enqueued, "analyze_failure", "failed run should still enqueue failure analysis")
+	require.Contains(t, enqueued, "continue_session", "failed initial run should drain queued prompted messages")
+	payload, ok := d.jobs.getPayload("continue_session").(map[string]string)
+	require.True(t, ok, "continue_session payload should be string-keyed")
+	require.Equal(t, run.ID.String(), payload["session_id"], "continue_session payload should target the failed initial session")
+}
+
 func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	t.Parallel()
 
@@ -3252,8 +3637,8 @@ func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -3264,7 +3649,7 @@ func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.Error(t, err, "RunAgent should fail when the adapter fails")
 
-	failure := findLogEvent(t, &logs, "agent run failed")
+	failure := findLogEvent(t, logs, "agent run failed")
 	require.NotNil(t, failure, "RunAgent should emit agent run failed log")
 	require.Equal(t, string(models.AgentTypeClaudeCode), failure["agent_type"], "failure log should include agent type")
 	require.Equal(t, "failed", failure["outcome"], "failure log should include platform outcome")
@@ -3297,7 +3682,7 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	// Result should be "needs_human_guidance".
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "needs_human_guidance", results[0].status)
+	require.Equal(t, models.SessionStatusNeedsHumanGuidance, results[0].status)
 
 	// No open_pr job should be enqueued.
 	for _, jt := range d.jobs.getEnqueued() {
@@ -3329,7 +3714,7 @@ func TestRunAgent_MediumConfidence(t *testing.T) {
 	// Medium confidence (0.65 >= default aggressive auto_proceed 0.4) proceeds as completed.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
 	// open_pr job should be enqueued.
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
@@ -3384,7 +3769,7 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 		}
 	}
@@ -3697,7 +4082,7 @@ func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusPRCreated)
+	session.Status = models.SessionStatusPRCreated
 	session.SnapshotKey = strPtr("snapshots/test/old-pre-pr.tar.zst")
 	session.PendingSnapshotKey = strPtr("snapshots/test/post-pr.tar.zst")
 
@@ -3719,7 +4104,7 @@ func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testin
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 
 	d := defaultDeps()
 	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
@@ -3801,7 +4186,7 @@ func TestRevertThread_UpdatesWorkspaceSnapshot(t *testing.T) {
 	session := &models.Session{
 		ID:            sessionID,
 		OrgID:         orgID,
-		Status:        string(models.SessionStatusIdle),
+		Status:        models.SessionStatusIdle,
 		SnapshotKey:   &snapshotKey,
 		BaseCommitSHA: &baseCommitSHA,
 	}
@@ -3835,7 +4220,7 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	agentSessionID := "existing-agent-session"
 	snapshotKey := "existing-snapshot"
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.AgentSessionID = &agentSessionID
 	session.SnapshotKey = &snapshotKey
 	session.CurrentTurn = 1
@@ -3898,7 +4283,7 @@ func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedS
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// Snapshot present (Path A) but no captured agent session id — exactly
 	// the case where the adapter would otherwise lose conversation context.
@@ -3980,7 +4365,7 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	snapshotKey := "existing-snapshot"
 	session.SnapshotKey = &snapshotKey
@@ -4085,7 +4470,7 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 2
 	snapshotKey := "existing-snapshot"
 	session.SnapshotKey = &snapshotKey
@@ -4151,7 +4536,7 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	session.AgentType = models.AgentTypeClaudeCode
 	session.ModelOverride = strPtr("claude-sonnet-4-6")
 	session.AgentSessionID = strPtr("parent-claude-session")
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -4225,11 +4610,11 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	missingCommand := models.SessionInputCommand{
 		Kind:      "command",
@@ -4304,13 +4689,13 @@ func TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead(t *testing.
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	stale := "stale-container-8d0c678c"
 	session.ContainerID = &stale
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4364,13 +4749,13 @@ func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "preview-container-on-other-host"
 	session.ContainerID = &containerID
 	otherNode := "worker-host-c"
 	session.WorkerNodeID = &otherNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = "worker-host-7" // we are NOT the recorded owner
@@ -4417,13 +4802,13 @@ func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *te
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "container-on-dead-worker"
 	session.ContainerID = &containerID
 	deadNode := "worker-dead"
 	session.WorkerNodeID = &deadNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = "worker-recovery"
@@ -4485,13 +4870,13 @@ func TestContinueSession_ReusePathRetriesWhenIsAliveProbeErrors(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4546,13 +4931,13 @@ func TestContinueSession_ReusePathRetriesWhenClearContainerIDErrors(t *testing.T
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	stale := "stale-container-clear-err"
 	session.ContainerID = &stale
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4606,13 +4991,13 @@ func TestContinueSession_ReusePathRetriesWhenClearContainerIDCASLost(t *testing.
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	stale := "stale-container-cas-lost"
 	session.ContainerID = &stale
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -4696,7 +5081,7 @@ func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 	questions := d.questions.getQuestions()
 	require.Len(t, questions, 1)
 	require.Equal(t, "Should I refactor this function too?", questions[0].QuestionText)
-	require.Equal(t, "pending", questions[0].Status)
+	require.Equal(t, models.SessionQuestionStatusPending, questions[0].Status)
 
 	// Status should have been set to "awaiting_input" after the pause checkpoint.
 	statuses := d.sessions.getStatusUpdates()
@@ -4722,7 +5107,7 @@ func TestRunAgent_UnknownAgentType(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 		}
 	}
@@ -4753,7 +5138,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	// Score == 0.4 should proceed (>= aggressive auto_proceed threshold).
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
@@ -4832,9 +5217,18 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	}
 
 	var capturedCfg agent.SandboxConfig
+	var capturedSandbox *agent.Sandbox
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "sub-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+		capturedSandbox = &agent.Sandbox{ID: "sub-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}
+		return capturedSandbox, nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "claude --version" {
+			_, writeErr := stdout.Write([]byte("2.1.139\n"))
+			require.NoError(t, writeErr, "version mock should write stdout")
+		}
+		return 0, nil
 	}
 
 	orch := buildOrchestrator(d)
@@ -4871,6 +5265,10 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	require.Contains(t, d.provider.ExecCalls,
 		"mkdir -p '/home/sandbox/.claude' && install -m 600 /dev/null '/home/sandbox/.claude/.credentials.json'",
 		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
+	require.Equal(t, agent.ClaudeCodePermissionModeBypassPermissions, capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodePermissionMode],
+		"Claude Max subscription should use bypass mode for non-interactive sandbox execution")
+	require.Equal(t, "2.1.139", capturedSandbox.Metadata[agent.SandboxMetadataClaudeCodeVersion],
+		"detected Claude Code CLI version should be cached in sandbox metadata")
 }
 
 func TestRunAgent_ClaudeUnifiedAPIKeyIsNotOverriddenBySubscription(t *testing.T) {
@@ -5196,7 +5594,7 @@ func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
 	defer d.sessions.mu.Unlock()
 	require.NotEmpty(t, d.sessions.resultUpdates, "run should have a result update")
 	lastResult := d.sessions.resultUpdates[len(d.sessions.resultUpdates)-1]
-	require.Equal(t, "failed", lastResult.status, "run should be marked as failed")
+	require.Equal(t, models.SessionStatusFailed, lastResult.status, "run should be marked as failed")
 }
 
 func TestRunAgent_CodexSandboxHasHomeEnv(t *testing.T) {
@@ -5252,7 +5650,7 @@ func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	// Should complete without cloning.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 }
 
 func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
@@ -5314,7 +5712,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	session.ReasoningEffort = func() *models.ReasoningEffort {
@@ -5386,6 +5784,89 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
 }
 
+func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.PrimaryThreadID = nil
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+
+	d := defaultDeps()
+	d.cancels = cancelReg
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue this stopped turn.",
+		},
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("cancelled-continue-snapshot"))), nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
+		return 1, errors.New("exec not available in test")
+	}
+
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:        "partial continued work",
+			ExitCode:       1,
+			AgentSessionID: "agent-continued-cancel",
+		}, ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &threadID})
+	}()
+
+	<-adapterStarted
+	require.True(t, cancelReg.CancelSession(session.ID), "cancel should find the continued session")
+
+	err := <-done
+	require.Error(t, err, "ContinueSession should return the cancellation error")
+	require.Contains(t, err.Error(), "cancelled", "ContinueSession should classify the result as user cancelled")
+
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "cancelled continue_session should return the session to idle with a checkpoint")
+	require.NotEmpty(t, turnUpdates[0].snapshotKey, "cancelled continue_session should persist a snapshot")
+
+	completedTurns := d.sessionThreads.completedTurns()
+	require.Len(t, completedTurns, 1, "cancelled continue_session should return the triggering thread to idle")
+	require.Equal(t, threadID, completedTurns[0].threadID, "cancelled continue_session should use the payload thread id when the session row has no PrimaryThreadID")
+	require.Equal(t, 2, completedTurns[0].turn, "cancelled continue_session should advance the triggering thread turn")
+}
+
 // TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
 // regression test for the multi-tab dispatch bug: a sibling thread further
 // along in turns (Main on turn 9 with assistant replies through turn 11) used
@@ -5408,7 +5889,7 @@ func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T)
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 11
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -5472,7 +5953,7 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
 	session.ReasoningEffort = func() *models.ReasoningEffort {
@@ -5544,7 +6025,7 @@ func TestContinueSession_OmitsReasoningEffortWhenUnset(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session-nil-effort.tar")
 	session.ReasoningEffort = nil
@@ -5594,7 +6075,7 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -5659,7 +6140,7 @@ func TestContinueSession_ClaudeSnapshotRestoresTopLevelConfigFromBackup(t *testi
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session-with-claude-backup.tar")
 	session.AgentSessionID = strPtr("claude-session-abc")
@@ -5723,11 +6204,11 @@ func TestContinueSession_AppendsNonReviewRevisionContextToUserMessage(t *testing
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-append"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	revisionContextJSON, err := json.Marshal(agent.RevisionContext{
 		FormattedFeedback: "Please address the code review notes.",
@@ -5771,11 +6252,11 @@ func TestContinueSession_IgnoresMalformedRevisionContext(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-invalid-revision"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 	session.RevisionContext = json.RawMessage(`{"review_context":`)
 
 	d := defaultDeps()
@@ -5820,11 +6301,11 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 	// No SnapshotKey: proves the reuse branch takes precedence over hydrate.
 
 	d := defaultDeps()
@@ -5908,11 +6389,11 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-base-sha"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	const expectedBaseSHA = "feedfacecafe1234"
 	baseSHA := expectedBaseSHA
@@ -5969,11 +6450,11 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	existing := "preview-container-xyz"
 	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.creds = &mockCredentialProvider{
@@ -6055,7 +6536,7 @@ func TestContinueSession_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// No ContainerID, no SnapshotKey: forces the fresh-Create path that
 	// goes through prepareSandboxGitHubAuth → Listen before AcquireTurnHold.
@@ -6108,7 +6589,7 @@ func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6142,7 +6623,7 @@ func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive winner — must not clear container_id")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "ContinueSession loser must not mark the session failed — winner owns the row")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "ContinueSession loser must not mark the session failed — winner owns the row")
 	}
 	for _, status := range d.sessions.statusUpdates {
 		require.NotEqual(t, string(models.SessionStatusIdle), status, "loser must not flip the session back to idle — winner is mid-turn")
@@ -6162,7 +6643,7 @@ func TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6218,7 +6699,7 @@ func TestContinueSession_AcquireHoldLosesRaceToPreviewRetries(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6256,7 +6737,7 @@ func TestContinueSession_AcquireHoldLosesRaceToPreviewRetries(t *testing.T) {
 	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusIdle), "preview race should revert session status so retry re-enters cleanly")
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive preview container must not be cleared")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "preview race should not mark the session failed")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "preview race should not mark the session failed")
 	}
 }
 
@@ -6275,7 +6756,7 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// SnapshotKey forces the hydrate path, which fails when the snapshot
 	// store can't fulfil the restore (the orchestrator's mock provider
@@ -6333,7 +6814,7 @@ func TestContinueSession_AcquireHoldErrorFailsTurn(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	// No ContainerID and no SnapshotKey — forces the Create path, which is
 	// the leak-prone branch: on hold error we must tear the new container down.
@@ -6366,7 +6847,7 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6404,7 +6885,7 @@ func TestContinueSession_SetWorkerNodeIDFailureResetsThread(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	threadID := uuid.New()
@@ -6497,7 +6978,7 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			orgID := testOrg()
 			issue := testIssue(orgID)
 			session := testRun(orgID, issue.ID)
-			session.Status = string(models.SessionStatusIdle)
+			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 			c.prepSession(session)
 
@@ -6619,7 +7100,7 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			orgID := testOrg()
 			issue := testIssue(orgID)
 			session := testRun(orgID, issue.ID)
-			session.Status = string(models.SessionStatusIdle)
+			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 
 			d := defaultDeps()
@@ -6695,7 +7176,7 @@ func TestContinueSession_DeadLetterHookIdempotent(t *testing.T) {
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()
@@ -6803,7 +7284,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			issue := testIssue(orgID)
 			session := testRun(orgID, issue.ID)
 			session.AgentType = models.AgentTypeCodex
-			session.Status = string(models.SessionStatusIdle)
+			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 			// Reuse-path setup: container exists on this node and is alive,
 			// so the orchestrator skips the IsAlive bail and proceeds to
@@ -6812,7 +7293,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			session.ContainerID = &containerID
 			thisNode := "worker-this-node"
 			session.WorkerNodeID = &thisNode
-			session.SandboxState = string(models.SandboxStateRunning)
+			session.SandboxState = models.SandboxStateRunning
 
 			d := defaultDeps()
 			d.nodeID = thisNode
@@ -6878,7 +7359,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			countFailedResult := func() int {
 				var n int
 				for _, r := range d.sessions.getResultUpdates() {
-					if r.status == "failed" {
+					if r.status == models.SessionStatusFailed {
 						n++
 					}
 				}
@@ -6948,13 +7429,13 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeCodex
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "alive-container-on-this-node"
 	session.ContainerID = &containerID
 	thisNode := "worker-this-node"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode
@@ -6986,7 +7467,7 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 	// poll rather than burning attempts.
 	failedResults := 0
 	for _, r := range d.sessions.getResultUpdates() {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			failedResults++
 		}
 	}
@@ -7086,7 +7567,7 @@ func TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *testing.T) 
 			countFailedResult := func() int {
 				var n int
 				for _, r := range d.sessions.getResultUpdates() {
-					if r.status == "failed" {
+					if r.status == models.SessionStatusFailed {
 						n++
 					}
 				}
@@ -7177,7 +7658,7 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
@@ -7313,6 +7794,75 @@ func TestRunAgent_CodexTokenExpiredRetryKeepsTriggeredUserScope(t *testing.T) {
 	require.Equal(t, "personal-access", tokens["access_token"], "retry injection should use the triggering user's personal subscription")
 }
 
+func TestRunAgent_CodexSubscriptionUsageLimitRetriesWithFallbackCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeCodex
+
+	subCredID := uuid.New()
+	apiCredID := uuid.New()
+	codingCreds := &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenAISubscription: {
+				{
+					ID:        subCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderOpenAISubscription,
+					Priority:  1,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+					Config: models.OpenAISubscriptionConfig{
+						AccessToken:  "sub-access",
+						RefreshToken: "sub-refresh",
+						ExpiresAt:    time.Now().Add(time.Hour),
+					},
+				},
+			},
+			models.ProviderOpenAI: {
+				{
+					ID:        apiCredID,
+					OrgID:     orgID,
+					Provider:  models.ProviderOpenAI,
+					Priority:  2,
+					Status:    models.CodingCredentialStatusActive,
+					CreatedAt: time.Now(),
+					Config:    models.OpenAIConfig{APIKey: "sk-fallback"},
+				},
+			},
+		},
+	}
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeCodex
+	d.codexAuth = nil
+	d.codingCreds = codingCreds
+
+	var seenKeys []string
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		seenKeys = append(seenKeys, sandbox.Env["OPENAI_API_KEY"])
+		if len(seenKeys) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:50 AM.",
+			}, errors.New("usage limit")
+		}
+		return &agent.AgentResult{
+			Diff:            "--- a/main.go\n+++ b/main.go",
+			Summary:         "codex fallback succeeded",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should retry Codex with the fallback credential after a subscription usage-limit result")
+	require.Equal(t, []string{"", "sk-fallback"}, seenKeys, "RunAgent should move from subscription auth.json to the OpenAI API-key fallback in the same attempt")
+	require.Contains(t, codingCreds.rateLimitedIDs, subCredID, "RunAgent should mark the subscription credential rate-limited after usage-limit output")
+	require.NotContains(t, codingCreds.rateLimitedIDs, apiCredID, "RunAgent should not mark the successful API-key fallback rate-limited")
+}
+
 func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 	t.Parallel()
 
@@ -7322,8 +7872,8 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 
 	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.cancels = cancelReg
@@ -7374,7 +7924,7 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "cancelled RunAgent should emit agent run finished log")
 	require.Equal(t, "cancelled", completion["outcome"], "cancelled completion log should include cancelled outcome")
 	require.Equal(t, string(models.RuntimeStopReasonUserCancel), completion["stop_reason"], "cancelled completion log should include user cancel stop reason")
@@ -7577,8 +8127,8 @@ func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
 	startedAt := time.Now().Add(-10 * time.Minute)
 	run.StartedAt = &startedAt
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -7594,7 +8144,7 @@ func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
 
-	timeout := findLogEvent(t, &logs, "session exceeded configured timeout")
+	timeout := findLogEvent(t, logs, "session exceeded configured timeout")
 	require.NotNil(t, timeout, "timeout RunAgent should emit the canonical timeout log line")
 	require.Equal(t, string(models.AgentTypeClaudeCode), timeout["agent_type"], "timeout log should include agent type")
 	require.Equal(t, "timeout", timeout["outcome"], "timeout log should include platform outcome")
@@ -7605,7 +8155,7 @@ func TestRunAgent_TimeoutLogIncludesPlatformHealthFields(t *testing.T) {
 	// The canonical timeout log is the only failure event emitted on this
 	// path. Emitting a second "agent run failed" log would double-count
 	// timeouts in dashboards/alerts that key off either message.
-	require.Nil(t, findLogEvent(t, &logs, "agent run failed"), "timeout path should not also emit agent run failed log")
+	require.Nil(t, findLogEvent(t, logs, "agent run failed"), "timeout path should not also emit agent run failed log")
 }
 
 func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
@@ -7639,7 +8189,7 @@ func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 			require.NotNil(t, r.result)
 			require.NotNil(t, r.result.Error)
@@ -7669,7 +8219,7 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	session.Origin = models.SessionOriginManual
 	session.InteractionMode = models.SessionInteractionModeInteractive
 	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 	startedAt := time.Now().Add(-10 * time.Minute)
@@ -7737,8 +8287,8 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 
 	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
 
-	var logs bytes.Buffer
-	logger := zerolog.New(&logs)
+	logs := &syncBuffer{}
+	logger := zerolog.New(logs)
 	d := defaultDeps()
 	d.logger = &logger
 	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}}
@@ -7776,7 +8326,7 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category, "policy stop should use the timeout family category")
 	require.Contains(t, failures[0].explanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
 
-	completion := findLogEvent(t, &logs, "agent run finished")
+	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "policy-stopped RunAgent should emit agent run finished log")
 	require.Equal(t, "runtime_policy_stopped", completion["outcome"], "policy stop completion log should include policy outcome")
 	require.Equal(t, string(models.RuntimeStopReasonNoProgress), completion["stop_reason"], "policy stop completion log should include runtime stop reason")
@@ -7878,6 +8428,124 @@ func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {
 	require.Empty(t, d.sessions.getCheckpointUpdates(), "RunAgent should not publish checkpoint metadata when no snapshot was actually persisted")
 }
 
+func TestRunAgent_PublishesBootstrapCheckpointAfterSetupSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	attachmentKey := orgID.String() + "/2026-05/bootstrap.png"
+	attachmentURL := "/api/v1/uploads/files/" + attachmentKey
+
+	var (
+		eventMu sync.Mutex
+		events  []string
+	)
+	recordEvent := func(event string) {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		events = append(events, event)
+	}
+
+	d := defaultDeps()
+	d.sessions.eventHook = recordEvent
+	d.uploads = &mockUploadStore{
+		files: map[string]mockUploadFile{
+			attachmentKey: {
+				body:        []byte("png-data"),
+				contentType: "image/png",
+			},
+		},
+	}
+	d.messages.messages = []models.SessionMessage{{
+		ID:          1,
+		SessionID:   run.ID,
+		OrgID:       orgID,
+		TurnNumber:  0,
+		Role:        models.MessageRoleUser,
+		Content:     "Use this screenshot.",
+		Attachments: []string{attachmentURL},
+	}}
+	d.provider.WriteFileFn = func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
+		recordEvent("attachment")
+		d.provider.Files[path] = append([]byte(nil), data...)
+		return nil
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		recordEvent("snapshot")
+		return io.NopCloser(bytes.NewReader([]byte("bootstrap-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		recordEvent("execute")
+		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should succeed after publishing a bootstrap checkpoint")
+	checkpoints := d.sessions.getCheckpointUpdates()
+	require.Len(t, checkpoints, 2, "RunAgent should publish bootstrap and turn-complete checkpoints")
+	require.Equal(t, models.CheckpointKindBootstrap, checkpoints[0].kind, "first checkpoint should capture post-setup sandbox state")
+	require.Equal(t, models.CheckpointKindTurnComplete, checkpoints[1].kind, "last checkpoint should still capture turn completion")
+	require.NotEmpty(t, checkpoints[0].snapshotKey, "bootstrap checkpoint should publish only a persisted snapshot key")
+
+	eventMu.Lock()
+	gotEvents := append([]string(nil), events...)
+	eventMu.Unlock()
+	require.Less(t, indexOfEvent(gotEvents, "attachment"), indexOfEvent(gotEvents, "checkpoint:bootstrap"), "bootstrap checkpoint should be published after attachment materialization")
+	require.Less(t, indexOfEvent(gotEvents, "checkpoint:bootstrap"), indexOfEvent(gotEvents, "execute"), "bootstrap checkpoint should be durable before agent execution starts")
+}
+
+func TestRunAgent_DoesNotPublishBootstrapCheckpointWhenSnapshotPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return nil, errors.New("snapshot failed")
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+
+	require.NoError(t, err, "RunAgent should continue when the best-effort bootstrap snapshot fails")
+	for _, checkpoint := range d.sessions.getCheckpointUpdates() {
+		require.NotEqual(t, models.CheckpointKindBootstrap, checkpoint.kind, "RunAgent should not publish bootstrap metadata without a persisted snapshot")
+	}
+}
+
+func TestRunAgent_ExecutorOwnedBootstrapCheckpointMetadataFailureBlocksExecution(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	lockToken := uuid.New()
+
+	d := defaultDeps()
+	d.sessions.publishCheckpointErr = errors.New("checkpoint metadata unavailable")
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("bootstrap-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatal("executor-owned run must not start agent execution without durable bootstrap metadata")
+		return nil, nil
+	}
+	ctx := jobctx.WithLockToken(context.Background(), lockToken)
+	ctx = jobctx.WithOwnerKind(ctx, string(models.JobOwnerKindSessionExecutor))
+
+	err := buildOrchestrator(d).RunAgent(ctx, run)
+
+	require.Error(t, err, "executor-owned RunAgent should fail when bootstrap checkpoint metadata is not durable")
+	require.Contains(t, err.Error(), "bootstrap checkpoint", "error should describe the missing durable bootstrap checkpoint")
+}
+
 func TestRunAgent_PublishesCheckpointForHumanInputPauseWithNonZeroExit(t *testing.T) {
 	t.Parallel()
 
@@ -7939,7 +8607,7 @@ func TestRunAgent_DoesNotMarkAwaitingInputWhenHumanInputCheckpointFails(t *testi
 	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "RunAgent should not expose an answerable request without a durable checkpoint")
 	results := d.sessions.getResultUpdates()
 	require.NotEmpty(t, results, "RunAgent should persist a terminal result when checkpoint persistence fails")
-	require.Equal(t, string(models.SessionStatusFailed), results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
+	require.Equal(t, models.SessionStatusFailed, results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
 	require.Contains(t, d.sessionThreads.statuses(), models.ThreadStatusFailed, "RunAgent should fail the active thread when the human-input pause cannot be made answerable")
 }
 
@@ -8009,7 +8677,7 @@ func TestRunAgent_DoesNotMarkAwaitingInputWhenHumanInputCheckpointMetadataFails(
 			require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "RunAgent should not expose an answerable request when metadata persistence fails")
 			results := d.sessions.getResultUpdates()
 			require.NotEmpty(t, results, "RunAgent should persist a terminal result when metadata persistence fails")
-			require.Equal(t, string(models.SessionStatusFailed), results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
+			require.Equal(t, models.SessionStatusFailed, results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
 			require.Contains(t, d.sessionThreads.statuses(), models.ThreadStatusFailed, "RunAgent should fail the active thread when metadata persistence fails")
 		})
 	}
@@ -8173,7 +8841,7 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 
 	// No failed-status update should have been recorded.
 	for _, r := range d.sessions.getResultUpdates() {
-		require.NotEqual(t, "failed", r.status, "cancelled-with-expired-ctx should not mark session failed")
+		require.NotEqual(t, models.SessionStatusFailed, r.status, "cancelled-with-expired-ctx should not mark session failed")
 	}
 	// No analyze_failure job should have been enqueued.
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")
@@ -8643,7 +9311,7 @@ func TestContinueSession_AmpMissingAPIKeyFailsFast(t *testing.T) {
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
 	session.AgentType = models.AgentTypeAmp
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 
 	d := defaultDeps()

@@ -1,5 +1,6 @@
 api:
   enabled: true
+  address: "0.0.0.0:8686"
 
 sources:
   docker_logs:
@@ -66,7 +67,7 @@ transforms:
 
       # Add server identity
       .server = get_env_var("SERVER_ROLE") ?? "unknown"
-      .hostname, err = get_hostname()
+      .hostname = get_hostname() ?? "unknown"
       # Preserve the docker compose service value at .service if the
       # application log didn't supply its own — keeps existing dashboards /
       # _stream_fields working unchanged for log lines that don't set it.

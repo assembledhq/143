@@ -48,6 +48,19 @@ export interface UserSettings {
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
 }
 
+export interface ThreadMessageWindowMeta {
+  next_older_cursor?: string;
+  has_older: boolean;
+  latest_assistant_message_id?: number;
+  live_edge_message_id?: number;
+  thread_status: string;
+}
+
+export interface ThreadMessageWindowResponse {
+  data: SessionMessage[];
+  meta: ThreadMessageWindowMeta;
+}
+
 export type UserSettingsUpdateRequest = UserSettings;
 
 export interface AuthProviders {
@@ -122,6 +135,26 @@ export interface GitHubRepositoryClaimCandidate {
   owner_org_id?: string;
   owner_org_name?: string;
   can_transfer: boolean;
+}
+
+export interface LinearAgentStatus {
+  enabled: boolean;
+  agent_scopes_granted: boolean;
+  app_user_name?: string;
+  has_linear_integration: boolean;
+  default_repo_id?: string;
+}
+
+export interface LinearTeamRepoMapping {
+  id: string;
+  org_id: string;
+  linear_team_id: string;
+  linear_project_id?: string;
+  repository_id: string;
+  default_branch?: string;
+  priority: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Issue {
@@ -262,8 +295,12 @@ export interface Session {
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_push_error?: string;
+  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_error?: string;
+  branch_url?: string;
   has_unpushed_changes?: boolean;
   target_branch?: string;
+  working_branch?: string;
   repository_id?: string;
   linked_issues?: Array<{
     id: string;
@@ -361,6 +398,54 @@ export interface SessionThreadFileEvent {
   before_hash?: string;
   after_hash?: string;
   observed_at: string;
+}
+
+export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
+export type ReviewLoopSource = 'manual' | 'automation';
+export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
+export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
+
+export interface SessionReviewLoop {
+  id: string;
+  org_id: string;
+  session_id: string;
+  automation_run_id?: string;
+  thread_id?: string;
+  status: ReviewLoopStatus;
+  source: ReviewLoopSource;
+  agent_type: string;
+  max_passes: number;
+  completed_passes: number;
+  review_required: boolean;
+  bypassed_by_user_id?: string;
+  bypass_reason?: string;
+  loop_start_checkpoint_key?: string;
+  latest_checkpoint_key?: string;
+  latest_summary?: string;
+  started_by_user_id?: string;
+  started_at: string;
+  completed_at?: string;
+  passes?: SessionReviewLoopPass[];
+}
+
+export interface SessionReviewLoopPass {
+  id: string;
+  org_id: string;
+  loop_id: string;
+  session_id: string;
+  pass_index: number;
+  review_message_id?: number;
+  decision_message_id?: number;
+  fix_message_id?: number;
+  status: ReviewLoopPassStatus;
+  agent_decision?: ReviewLoopDecision;
+  review_output?: string;
+  fix_summary?: string;
+  review_started_at?: string;
+  review_completed_at?: string;
+  fix_started_at?: string;
+  fix_completed_at?: string;
+  summary?: string;
 }
 
 export interface ForkResult {
@@ -585,7 +670,7 @@ export interface PullRequestHealthResponse {
 
 export interface PullRequestRepairResponse {
   session_id: string;
-  mode: "existing" | "resumed" | "revision";
+  mode: "existing" | "resumed" | "reconstructed";
   reused_in_flight: boolean;
   head_sha: string;
   base_sha: string;
@@ -686,6 +771,9 @@ export interface OrgSettings {
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
+  builder_permissions?: {
+    require_review_before_pr?: boolean;
+  };
 }
 
 export interface ProductContext {
@@ -1557,6 +1645,7 @@ export interface Automation {
   max_concurrent: number;
   base_branch: string;
   identity_scope: AutomationIdentityScope;
+  pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';

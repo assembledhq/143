@@ -22,6 +22,8 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
+	"github.com/assembledhq/143/internal/repoconfig"
+	"github.com/assembledhq/143/internal/sandboxdeps"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -33,8 +35,9 @@ import (
 )
 
 const (
-	defaultMaxConcurrent = 10
-	planModePrefix       = "[PLAN_MODE]\n"
+	defaultMaxConcurrent    = 10
+	mentionIndexWarmTimeout = 2 * time.Second
+	planModePrefix          = "[PLAN_MODE]\n"
 )
 
 // ErrConcurrencyLimit is returned when an org has reached its maximum
@@ -67,6 +70,12 @@ var ErrRecoveryAttemptsExhausted = errors.New("session recovery attempts exhaust
 // prefer to wait. The worker handler wraps this in a RetryableError so the
 // job is requeued without consuming an attempt.
 var ErrSnapshotPending = errors.New("snapshot upload pending")
+
+// ErrStalePullRequestHead is returned by PR repair reconstruction when the
+// fetched pull-request ref does not match the health snapshot's expected head.
+// The worker uses it to refresh GitHub state instead of running the agent
+// against the wrong checkout.
+var ErrStalePullRequestHead = errors.New("stale pull request head")
 
 // ErrSandboxRaceLoser is returned from RunAgent / ContinueSession when
 // AcquireTurnHold's COALESCE reveals that another holder published a
@@ -284,8 +293,8 @@ type SandboxAuthServer interface {
 
 // SessionStore defines the agent run DB operations needed by the orchestrator.
 type SessionStore interface {
-	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
-	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
+	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error
+	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
@@ -293,10 +302,11 @@ type SessionStore interface {
 	RequestCancel(ctx context.Context, orgID, sessionID uuid.UUID) error
 	ConsumeCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
 	RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error
+	MarkRuntimeStopRequested(ctx context.Context, orgID, sessionID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time) error
 	GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error)
 	PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error)
 	UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error
-	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
+	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
 	// SetGitIdentity records which credential authority issued the session's
@@ -401,7 +411,7 @@ type OrgStore interface {
 // IssueStore defines the issue read operations.
 type IssueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
-	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error
 }
 
 // RepositoryStore defines the repository read operations.
@@ -450,7 +460,7 @@ type MemoryContextResult struct {
 // ProjectTaskUpdater is called after an agent run completes to update
 // the associated project task, if any.
 type ProjectTaskUpdater interface {
-	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
+	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
 // AutomationRunUpdater is called after an agent run completes to bubble the
@@ -459,7 +469,7 @@ type ProjectTaskUpdater interface {
 // success and failure paths so the run's completed_at + result_summary stay
 // consistent with whatever the orchestrator persisted to the session.
 type AutomationRunUpdater interface {
-	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
+	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
@@ -652,6 +662,7 @@ type ContinueSessionOptions struct {
 	ModelOverride        *string
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
+	PRRepair             *PRRepairContinueOptions
 	HumanInputRequestID  *uuid.UUID
 
 	// ThreadID, when set, identifies the agent tab this turn belongs to.
@@ -669,6 +680,16 @@ type ContinueSessionOptions struct {
 	// swallowed by the orchestrator: per-tab bookkeeping is operational,
 	// not critical to the turn itself.
 	OnTurnComplete func(result *AgentResult)
+}
+
+type PRRepairContinueOptions struct {
+	PullRequestID     uuid.UUID
+	RepairRunID       uuid.UUID
+	PullRequestNumber int
+	CommandType       models.PullRequestRepairActionType
+	HealthVersion     int64
+	HeadSHA           string
+	WorkspaceMode     models.PullRequestRepairWorkspaceMode
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -754,6 +775,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 			Orgs:              cfg.Orgs,
 			OrgSettingsCache:  cfg.OrgSettingsCache,
 			CodexAuth:         cfg.CodexAuth,
+			ClaudeCodeAuth:    cfg.ClaudeCodeAuth,
 			Provider:          cfg.Provider,
 			Logger:            cfg.Logger,
 		})
@@ -816,6 +838,30 @@ func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session 
 	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
 		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
 	}
+}
+
+func (o *Orchestrator) warmMentionIndexFromSandboxAsync(ctx context.Context, session *models.Session, liveSandbox *Sandbox, snapshotKey string, log zerolog.Logger) {
+	if o == nil || o.mentionIndexes == nil || o.fileReader == nil || session == nil || liveSandbox == nil || snapshotKey == "" {
+		return
+	}
+
+	sessionCopy := *session
+	sandboxCopy := *liveSandbox
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warn().Interface("panic", r).Str("snapshot_key", snapshotKey).Msg("panic warming proactive mention index")
+			}
+		}()
+
+		baseCtx := context.Background()
+		if ctx != nil {
+			baseCtx = context.WithoutCancel(ctx)
+		}
+		warmCtx, cancel := context.WithTimeout(baseCtx, mentionIndexWarmTimeout)
+		defer cancel()
+		o.warmMentionIndexFromSandbox(warmCtx, &sessionCopy, &sandboxCopy, snapshotKey, log)
+	}()
 }
 
 func defaultSandboxPATH() string {
@@ -993,6 +1039,39 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 	}
 }
 
+// installSandboxDependencies reads .143/config.json from the sandbox
+// workspace and installs the tools the repo declared (golangci-lint, etc.)
+// before bootstrap/validation commands run. Best-effort: a missing config,
+// malformed config, unknown dependency name, or install failure is logged
+// but never aborts the session — the agent can still run, just without the
+// linter. See sandboxdeps for the install/check contract.
+func (o *Orchestrator) installSandboxDependencies(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) {
+	if sandbox == nil || workDir == "" {
+		return
+	}
+	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
+	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
+	if err != nil {
+		if isSandboxFileMissing(err) {
+			return
+		}
+		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
+		return
+	}
+	cfg, err := repoconfig.Parse(raw)
+	if err != nil {
+		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
+		return
+	}
+	if len(cfg.Dependencies) == 0 {
+		return
+	}
+	exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+	}
+	sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
+}
+
 // RecoverSession resumes an interrupted session from its latest committed
 // checkpoint when one exists. If the session has no durable checkpoint yet,
 // it restarts the run from scratch.
@@ -1013,6 +1092,10 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		log.Warn().
 			Int("recovery_attempt_count", session.RecoveryAttemptCount).
 			Int("max_recovery_attempts", maxNoCheckpointRecoveryAttempts).
+			Bool("checkpoint_available", false).
+			Bool("restart_from_scratch", true).
+			Int("checkpoint_turn", session.CurrentTurn).
+			Str("checkpoint_capability", string(session.CheckpointCapability)).
 			Msg("no-checkpoint recovery exhausted; failing session")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -1038,11 +1121,21 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	}()
 
 	if !ok {
-		log.Info().Msg("recovery requested with no durable checkpoint; restarting session from scratch")
+		log.Info().
+			Bool("checkpoint_available", false).
+			Bool("restart_from_scratch", true).
+			Int("recovery_attempt_count", session.RecoveryAttemptCount).
+			Int("checkpoint_turn", session.CurrentTurn).
+			Str("checkpoint_capability", string(session.CheckpointCapability)).
+			Msg("recovery requested with no durable checkpoint; restarting session from scratch")
 		return o.RunAgent(ctx, session)
 	}
 
-	event := log.Info().Int("checkpoint_turn", checkpoint.Turn)
+	event := log.Info().
+		Bool("checkpoint_available", true).
+		Bool("restart_from_scratch", false).
+		Int("checkpoint_turn", checkpoint.Turn).
+		Str("checkpoint_capability", string(session.CheckpointCapability))
 	if checkpoint.SnapshotKey != "" {
 		event = event.Str("snapshot_key", checkpoint.SnapshotKey)
 	}
@@ -1054,10 +1147,10 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	return o.ContinueSession(ctx, session, nil)
 }
 
-func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus string, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
+func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus models.SessionStatus, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
 	if err := controller.Begin(ctx, startedAt, capability); err != nil {
 		if rollbackErr := o.sessions.UpdateStatus(ctx, orgID, sessionID, fallbackStatus); rollbackErr != nil {
-			log.Warn().Err(rollbackErr).Str("fallback_status", fallbackStatus).Msg("failed to roll back session status after runtime initialization error")
+			log.Warn().Err(rollbackErr).Str("fallback_status", string(fallbackStatus)).Msg("failed to roll back session status after runtime initialization error")
 		}
 		return fmt.Errorf("begin runtime control: %w", err)
 	}
@@ -1799,7 +1892,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the start time locally so the timeout branch below can log a
 	// meaningful elapsed duration regardless of whether run.StartedAt was
 	// populated by the caller.
-	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
+	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusRunning); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
 	var primaryThreadID *uuid.UUID
@@ -1813,7 +1906,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 	if run.PrimaryIssueID != nil && o.issues != nil {
-		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
+		if err := o.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, models.IssueStatusInProgress); err != nil {
 			log.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update primary issue status to in_progress")
 		}
 	}
@@ -1835,7 +1928,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
-	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, string(models.SessionStatusPending), checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
+	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
 		return err
 	}
 
@@ -1845,6 +1938,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.failRun(ctx, run, fmt.Sprintf("resolve issue context: %s", err))
 		return fmt.Errorf("resolve issue context: %w", err)
 	}
+	drainInitialQueuedMessages := false
+	initialProcessedMessageID := int64(0)
 	var messages []models.SessionMessage
 	if o.sessionMessages != nil {
 		messages, err = o.sessionMessages.ListBySession(ctx, run.OrgID, run.ID)
@@ -1854,6 +1949,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 	latestMsg := latestUserMessage(messages)
+	if latestMsg != nil {
+		initialProcessedMessageID = latestMsg.ID
+	}
 	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestMsg, issueSnapshot)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("resolve prompt seed: %s", err))
@@ -2093,11 +2191,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Msg("another holder published container_id first; diagnosing whether the winner is alive or a stale orphan")
 		diagErr := o.diagnoseAcquireHoldRaceLoss(ctx, run.OrgID, run.ID, actualContainerID, log)
 		if errors.Is(diagErr, ErrSandboxPreviewRace) {
-			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusPending); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to pending after preview won sandbox race")
 			}
 		} else if errors.Is(diagErr, ErrStaleSandboxIDCleared) {
-			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, string(models.SessionStatusPending)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusPending); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to pending after stale sandbox cleanup")
 			}
 		}
@@ -2108,6 +2206,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if o.usageTracker != nil {
 		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
+	defer func() {
+		if !drainInitialQueuedMessages {
+			return
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer drainCancel()
+		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, nil, log)
+	}()
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
@@ -2240,6 +2346,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -2275,6 +2382,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// skills doc is injected into the prompt (BuildIntegrationSkills). No
 	// per-CLI config file injection needed — all agents can shell out directly.
 	input.Attachments = o.materializeAttachmentsForMessages(ctx, run.OrgID, sandbox, turnNumber, []models.SessionMessage{derefMessage(latestMsg)}, log)
+	if err := o.publishBootstrapCheckpoint(ctx, run, sandbox, runtimeTracker, log); err != nil {
+		return err
+	}
 	prompt, err := adapter.PreparePrompt(ctx, input)
 	if err != nil {
 		o.failRun(ctx, run, fmt.Sprintf("prepare prompt: %s", err))
@@ -2308,7 +2418,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, primaryThreadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+	}
+
+	// From this point every exit releases the initial turn hold and leaves the
+	// session in a drainable post-execution state. Prompts appended while
+	// run_agent was active need a continuation even when this turn fails,
+	// times out, or is cancelled.
+	drainInitialQueuedMessages = true
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -2410,12 +2529,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
 	} else if snapshotKey != "" {
-		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC())
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC(), "")
 		lockToken, _ := jobctx.LockTokenFromContext(ctx)
 		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
 		}
-		o.warmMentionIndexFromSandbox(ctx, run, sandbox, snapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(ctx, run, sandbox, snapshotKey, log)
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -2433,12 +2552,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// Store the successful result.
 	runResult := o.buildRunResult(ctx, run, sandbox, result)
-	status := "completed"
+	status := models.SessionStatusCompleted
 	isInteractive := run.IsInteractive() && snapshotKey != ""
 
 	// 11. Confidence gating: use org-configured auto-proceed threshold.
 	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
-		status = "needs_human_guidance"
+		status = models.SessionStatusNeedsHumanGuidance
 	}
 
 	if isInteractive {
@@ -2494,9 +2613,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	logAgentRunFinished(log, run, status, runStartedAt, func(event *zerolog.Event) {
+	logAgentRunFinished(log, run, string(status), runStartedAt, func(event *zerolog.Event) {
 		event.
-			Str("status", status).
+			Str("status", string(status)).
 			Float64("confidence", result.ConfidenceScore).
 			Float64("threshold", confidenceThresholds.AutoProceed)
 	})
@@ -2571,7 +2690,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// been mutated yet — this is the cleanest place for the gate. The status
 	// stays where the user left it (typically `pr_created`); no failure
 	// message is registered because this is a transient wait, not an error.
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+	prRepairOpts := (*PRRepairContinueOptions)(nil)
+	if opts != nil && opts.PRRepair != nil {
+		prRepairOpts = opts.PRRepair
+	}
+	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
+
+	if !prHeadReconstruction && session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
 	}
@@ -2588,11 +2713,31 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		executionSession.AgentSessionID = opts.ThreadAgentSessionID
 		session = &executionSession
 	}
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil && (session.PrimaryThreadID == nil || *session.PrimaryThreadID == uuid.Nil) {
+		threadID := *opts.ThreadID
+		session.PrimaryThreadID = &threadID
+	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
-	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&
+	hasSnapshot := !prHeadReconstruction &&
+		session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
-		session.SandboxState != string(models.SandboxStateDestroyed)
+		session.SandboxState != models.SandboxStateDestroyed
+	if prHeadReconstruction && session.ContainerID != nil && *session.ContainerID != "" {
+		recordedContainerID := *session.ContainerID
+		cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, recordedContainerID)
+		if clearErr != nil {
+			return fmt.Errorf("clear recorded sandbox before pull request repair reconstruction: %w", clearErr)
+		}
+		if !cleared {
+			return fmt.Errorf("recorded sandbox %s is held by another owner; cannot reconstruct pull request repair workspace", recordedContainerID)
+		}
+		if destroyErr := o.provider.Destroy(context.Background(), &Sandbox{ID: recordedContainerID, Provider: o.provider.Name()}); destroyErr != nil {
+			log.Warn().Err(destroyErr).Str("container_id", recordedContainerID).Msg("failed to destroy recorded sandbox before pull request repair reconstruction")
+		}
+		session.ContainerID = nil
+		session.WorkerNodeID = nil
+	}
 	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 
 	var capacityReservation *SandboxCapacityReservation
@@ -2614,7 +2759,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// timeout branch below can log a meaningful elapsed regardless of
 	// whether session.StartedAt is populated (it's set from the first
 	// turn; on a later turn this captures THIS turn's elapsed).
-	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, "running"); err != nil {
+	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusRunning); err != nil {
 		return fmt.Errorf("update session status to running: %w", err)
 	}
 	// turnStartedAt scopes elapsed to THIS turn only — it excludes any time
@@ -2627,12 +2772,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
 	fallbackStatus := session.Status
 	if fallbackStatus == "" {
-		fallbackStatus = string(models.SessionStatusIdle)
+		fallbackStatus = models.SessionStatusIdle
 	}
 	if err := o.beginRuntimeControl(ctx, runtimeController, session.OrgID, session.ID, fallbackStatus, checkpointCapabilityForAgent(session.AgentType), turnStartedAt, log); err != nil {
 		return err
 	}
-	if err := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateRunning)); err != nil {
+	if err := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateRunning); err != nil {
 		log.Warn().Err(err).Msg("failed to update sandbox state to running")
 	}
 
@@ -2777,7 +2922,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 		}
 		authLog.Msg("agent auth pre-flight failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
 		}
 		if o.sessionMessages != nil {
@@ -2804,10 +2949,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	slug, slugErr := o.sessionRepoSlug(ctx, session)
 	if slugErr != nil {
 		log.Error().Err(slugErr).Msg("sandbox workdir resolution failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after workdir resolution failure")
 		}
-		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
 		}
 		o.registerSandboxFailureMessage(
@@ -2862,7 +3007,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 						Str("stale_container_id", *session.ContainerID).
 						Str("dead_target_node", deadTargetNode).
 						Msg("ClearContainerID failed during dead-node continue_session recovery; retrying for another recovery attempt")
-					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusPending); revertErr != nil {
 						log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery clear failure")
 					}
 					return ErrSandboxOnDifferentNode
@@ -2872,7 +3017,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 						Str("stale_container_id", *session.ContainerID).
 						Str("dead_target_node", deadTargetNode).
 						Msg("ClearContainerID CAS lost during dead-node continue_session recovery; retrying against the current row")
-					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+					if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusPending); revertErr != nil {
 						log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery CAS miss")
 					}
 					return ErrStaleSandboxIDCleared
@@ -2881,7 +3026,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					Str("stale_container_id", *session.ContainerID).
 					Str("dead_target_node", deadTargetNode).
 					Msg("cleared container_id from dead-node continue_session recovery; signaling retry to hydrate on this worker")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusPending); revertErr != nil {
 					log.Error().Err(revertErr).Msg("failed to revert session to pending after dead-node recovery clear")
 				}
 				return ErrStaleSandboxIDCleared
@@ -2891,7 +3036,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Str("recorded_node", recordedNode).
 				Str("this_node", o.nodeID).
 				Msg("continue_session claimed on the wrong worker; recorded container_id belongs to a sibling node — releasing for the correct worker to pick up")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusPending); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to pending after wrong-node detection")
 			}
 			return ErrSandboxOnDifferentNode
@@ -2983,10 +3128,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		repo, repoErr := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 		if repoErr != nil {
 			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring repo lookup failure")
 			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
 				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring repo lookup failure")
 			}
 			o.registerSandboxFailureMessage(
@@ -3006,10 +3151,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			token, tokenErr := o.github.GetInstallationToken(ctx, repo.InstallationID)
 			if tokenErr != nil {
 				log.Error().Err(tokenErr).Msg("failed to get installation token for continue-session auth wiring")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 					log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring token failure")
 				}
-				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
 					log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring token failure")
 				}
 				o.registerSandboxFailureMessage(
@@ -3026,10 +3171,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring failure")
 			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
 				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring failure")
 			}
 			o.registerSandboxFailureMessage(
@@ -3069,10 +3214,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after hydrate failure")
 			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
 				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after hydrate failure")
 			}
 			o.registerSandboxFailureMessage(
@@ -3091,10 +3236,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
 			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
 				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
 			}
 			o.registerSandboxFailureMessage(
@@ -3155,7 +3300,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// turn's auth wiring, so it's our responsibility to release it.
 		// Server.Close is idempotent and a no-op when no listener exists.
 		o.closeSandboxAuth(session.ID, log)
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after turn hold DB error")
 		}
 		o.registerSandboxFailureMessage(
@@ -3190,7 +3335,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// active) or CAS-clears a stale orphan and signals retry.
 		diagErr := o.diagnoseAcquireHoldRaceLoss(ctx, session.OrgID, session.ID, actualContainerID, log)
 		if errors.Is(diagErr, ErrSandboxPreviewRace) {
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after preview won sandbox race")
 			}
 		}
@@ -3267,7 +3412,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// "Agent is working..." in the UI at the same time.
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cleanupCancel()
-			if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
 			}
 			// Mirror the session revert onto the active thread. The handler
@@ -3340,6 +3485,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+			o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
 		}
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
@@ -3459,13 +3605,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env)
+		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, prRepairOpts)
 		if err != nil {
+			if errors.Is(err, ErrStalePullRequestHead) {
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to restore session status after stale PR head")
+				}
+				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
+					log.Warn().Err(revertErr).Msg("failed to restore sandbox state after stale PR head")
+				}
+				return err
+			}
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
@@ -3583,19 +3739,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	if parseCredentialFailureSignal(result, time.Now()).RateLimited {
-		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
-		var retried bool
-		result, err, retried = o.retryContinueOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, log)
-		if retried && parseCredentialFailureSignal(result, time.Now()).RateLimited {
-			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
-			if authErr := o.blockedContinueAfterRateLimitExhaustion(ctx, session, threadID, sandboxCfg, log); authErr != nil {
-				err = authErr
-			}
-		} else {
-			o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
-		}
-	} else {
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 	}
 
@@ -3694,12 +3839,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	} else if newSnapshotKey != "" {
-		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC())
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC(), "")
 		lockToken, _ := jobctx.LockTokenFromContext(ctx)
 		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
-		o.warmMentionIndexFromSandbox(ctx, session, sandbox, newSnapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(ctx, session, sandbox, newSnapshotKey, log)
 	}
 
 	// 9. Update turn complete — sets status to idle.
@@ -3739,6 +3884,13 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if processed == nil || o.jobs == nil || o.sessionMessages == nil {
 		return
 	}
+	o.drainQueuedMessagesAfterProcessedID(ctx, session, processed.ID, threadID, log)
+}
+
+func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, session *models.Session, processedMessageID int64, threadID *uuid.UUID, log zerolog.Logger) {
+	if o.jobs == nil || o.sessionMessages == nil {
+		return
+	}
 	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
@@ -3747,7 +3899,7 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	var queued *models.SessionMessage
 	for i := range messages {
 		m := messages[i]
-		if m.Role != models.MessageRoleUser || m.ID <= processed.ID {
+		if m.Role != models.MessageRoleUser || m.ID <= processedMessageID {
 			continue
 		}
 		// On the thread path, a queued message is bound to the same thread —
@@ -3770,9 +3922,8 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 
 	// Confirm the session is in a state that can accept another turn before
 	// enqueueing. Skipping the GetByID would still be safe (the worker would
-	// refuse a job for a terminal session), but it would create a noisy
-	// dead-letter trail on every cancelled run that left the session marked
-	// failed/cancelled.
+	// refuse a job for a non-resumable terminal session), but it would create a
+	// noisy dead-letter trail on skipped sessions and future terminal states.
 	current, getErr := o.sessions.GetByID(ctx, session.OrgID, session.ID)
 	if getErr != nil {
 		log.Warn().Err(getErr).Msg("failed to fetch session for queue drain status check")
@@ -3797,7 +3948,7 @@ func (o *Orchestrator) drainQueuedMessages(ctx context.Context, session *models.
 	if requestID := o.answerQueuedHumanInputRequest(ctx, session, queued, threadID, log); requestID != nil {
 		payload["human_input_request_id"] = requestID.String()
 	}
-	dedupeKey := continueSessionDrainDedupeKey(session.ID, processed.ID)
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
 	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 	}
@@ -3834,20 +3985,18 @@ func (o *Orchestrator) answerQueuedHumanInputRequest(ctx context.Context, sessio
 }
 
 // drainAcceptableStatus returns true for session states that can absorb
-// another continue_session turn: running (the in-flight job will pick the
-// queued message up via latest-message reads) and idle (a fresh
-// continue_session can claim it). Terminal states are skipped — a queued
-// message after a failed/cancelled session waits for the user to take an
-// explicit action.
-func drainAcceptableStatus(status string) bool {
+// another continue_session turn. Running and idle are the common paths; the
+// resumable statuses cover prompts that arrived during an initial run_agent
+// and must be picked up after that run lands in a terminal or paused state.
+func drainAcceptableStatus(status models.SessionStatus) bool {
 	switch status {
-	case string(models.SessionStatusIdle),
-		string(models.SessionStatusRunning),
-		string(models.SessionStatusAwaitingInput),
-		string(models.SessionStatusNeedsHumanGuidance):
+	case models.SessionStatusIdle,
+		models.SessionStatusRunning,
+		models.SessionStatusAwaitingInput,
+		models.SessionStatusNeedsHumanGuidance:
 		return true
 	}
-	return false
+	return status.IsResumable()
 }
 
 // continueSessionDedupeKey mirrors db.ContinueSessionDedupeKey. The agent
@@ -3871,7 +4020,7 @@ func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64
 // full name (for memory lookup). Handles sessions with or without a repository.
 // The resolved env is passed in from the caller so auth injection honors the
 // exact credential selection already baked into SandboxConfig.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) (models.Issue, string, TokenBillingMode, error) {
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -3910,7 +4059,12 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("clone repo: %w", err)
 		}
 		workingBranch := sessionWorkingBranch(session, &issue)
-		if workingBranch != "" {
+		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
+			if err := o.checkoutPullRequestHead(ctx, sandbox, workingBranch, repairOpts); err != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, err
+			}
+			session.WorkingBranch = &workingBranch
+		} else if workingBranch != "" {
 			var checkoutOut, checkoutErr bytes.Buffer
 			exitCode, execErr := o.provider.Exec(ctx, sandbox, fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch)), &checkoutOut, &checkoutErr)
 			if execErr != nil {
@@ -3941,6 +4095,59 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	}
 
 	return issue, repoFullName, authBillingMode, nil
+}
+
+func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, workingBranch string, repairOpts *PRRepairContinueOptions) error {
+	if repairOpts == nil {
+		return nil
+	}
+	if repairOpts.HeadSHA == "" {
+		return fmt.Errorf("pull request repair reconstruction missing expected head SHA")
+	}
+	if workingBranch == "" {
+		return fmt.Errorf("pull request repair reconstruction missing working branch")
+	}
+
+	if repairOpts.PullRequestNumber <= 0 {
+		return fmt.Errorf("pull request repair reconstruction missing pull request number")
+	}
+	return o.checkoutExpectedPullRequestHead(ctx, sandbox, repairOpts.PullRequestNumber, workingBranch, repairOpts.HeadSHA)
+}
+
+func (o *Orchestrator) checkoutExpectedPullRequestHead(ctx context.Context, sandbox *Sandbox, pullRequestNumber int, workingBranch, expectedHeadSHA string) error {
+	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags origin 'pull/%d/head'", pullRequestNumber)
+	var fetchErr bytes.Buffer
+	fetchExit, fetchExecErr := o.provider.Exec(ctx, sandbox, fetchCmd, io.Discard, &fetchErr)
+	if fetchExecErr != nil {
+		return fmt.Errorf("fetch pull request head: %w", fetchExecErr)
+	}
+	if fetchExit != 0 {
+		return fmt.Errorf("fetch pull request head: exit=%d stderr=%s", fetchExit, fetchErr.String())
+	}
+
+	checkoutCmd := fmt.Sprintf("git checkout -B '%s' FETCH_HEAD", shellEscapeSingleQuote(workingBranch))
+	var checkoutErr bytes.Buffer
+	checkoutExit, checkoutExecErr := o.provider.Exec(ctx, sandbox, checkoutCmd, io.Discard, &checkoutErr)
+	if checkoutExecErr != nil {
+		return fmt.Errorf("checkout pull request head: %w", checkoutExecErr)
+	}
+	if checkoutExit != 0 {
+		return fmt.Errorf("checkout pull request head: exit=%d stderr=%s", checkoutExit, checkoutErr.String())
+	}
+
+	var headOut, headErr bytes.Buffer
+	headExit, headExecErr := o.provider.Exec(ctx, sandbox, "git rev-parse HEAD", &headOut, &headErr)
+	if headExecErr != nil {
+		return fmt.Errorf("verify pull request head: %w", headExecErr)
+	}
+	if headExit != 0 {
+		return fmt.Errorf("verify pull request head: exit=%d stderr=%s", headExit, headErr.String())
+	}
+	actual := strings.TrimSpace(headOut.String())
+	if actual != expectedHeadSHA {
+		return fmt.Errorf("%w: expected %s, got %s", ErrStalePullRequestHead, expectedHeadSHA, actual)
+	}
+	return nil
 }
 
 // sessionRepoSlug returns the repo-name slug for the session's repository. The
@@ -4086,7 +4293,7 @@ func (o *Orchestrator) registerSandboxInfraFailure(
 // Setting "snapshotted" here would either lie about peer-held
 // containers or race the next attempt's own state writes.
 func (o *Orchestrator) abandonReuseForRetry(ctx context.Context, session *models.Session, log zerolog.Logger, reason string) error {
-	if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusPending)); revertErr != nil {
+	if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusPending); revertErr != nil {
 		log.Error().Err(revertErr).
 			Str("reason", reason).
 			Msg("failed to revert session to pending after reuse-path abandon; the reaper will re-sync the row")
@@ -4252,13 +4459,13 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 	return references
 }
 
-func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
+func outcomeFromRunStatus(status models.SessionStatus) models.PMDecisionOutcome {
 	switch status {
-	case "completed":
+	case models.SessionStatusCompleted:
 		return models.PMDecisionOutcomeSucceeded
-	case "failed":
+	case models.SessionStatusFailed:
 		return models.PMDecisionOutcomeFailed
-	case "needs_human_guidance":
+	case models.SessionStatusNeedsHumanGuidance:
 		return models.PMDecisionOutcomeStillOpen
 	default:
 		return ""
@@ -4287,8 +4494,8 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, agentType models.AgentType, threadID *uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
 	for entry := range logCh {
 		if tracker != nil {
-			if progressType, strength, ok := runtimeProgressFromLog(entry); ok {
-				tracker.Record(progressType, strength, entry.Timestamp)
+			if progressType, strength, toolID, ok := runtimeProgressFromLog(entry); ok {
+				tracker.Record(progressType, strength, entry.Timestamp, toolID, runtimeToolSummaryFromLog(entry))
 			}
 		}
 		effectiveThreadID := threadID
@@ -4324,7 +4531,7 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, a
 			SessionID:  runID,
 			OrgID:      orgID,
 			ThreadID:   effectiveThreadID,
-			Level:      entry.Level,
+			Level:      models.SessionLogLevel(entry.Level),
 			Message:    entry.Message,
 			Metadata:   metadata,
 			TurnNumber: turnNumber,
@@ -4599,7 +4806,7 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
-	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, "failed", result); err != nil {
+	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
@@ -4969,9 +5176,10 @@ func cloneStringMap(in map[string]string) map[string]string {
 // sandbox if an active Claude Code subscription exists for this org. The
 // Claude Code CLI prefers the credentials file over ANTHROPIC_API_KEY env
 // vars, so when a subscription is present the file path wins even though
-// resolveAgentEnv still sets ANTHROPIC_API_KEY as a fallback. Returns (true, nil) when the file
-// was written, (false, nil) when no subscription exists so the API-key
-// fallback should be used, or (false, err) on failure.
+// resolveAgentEnv still sets ANTHROPIC_API_KEY as a fallback. Returns the
+// injection result plus the Claude subscription account type when the file was
+// written, false when no subscription exists so the API-key fallback should be
+// used, or an error on failure.
 //
 // Credentials file schema: the shape (claudeAiOauth.{accessToken,
 // refreshToken, expiresAt, scopes, subscriptionType, rateLimitTier}) mirrors
@@ -4980,20 +5188,21 @@ func cloneStringMap(in map[string]string) map[string]string {
 // uses; we translate from the space-separated `scope` response string when
 // the tokens are issued. If Anthropic ever changes this format, update this
 // marshal block and the AnthropicSubscription struct together.
-func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, string, error) {
 	if o.claudeCodeAuth == nil {
-		return false, nil
+		return false, "", nil
 	}
 
 	sub, _, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
 	if err != nil {
-		return false, fmt.Errorf("get claude code subscription token: %w", err)
+		return false, "", fmt.Errorf("get claude code subscription token: %w", err)
 	}
 	if sub == nil {
-		return false, nil
+		return false, "", nil
 	}
 
-	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+	injected, err := o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
+	return injected, sub.AccountType, err
 }
 
 func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, sub models.AnthropicSubscription) (bool, error) {
@@ -5054,9 +5263,9 @@ func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID,
 	return true, nil
 }
 
-func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
+func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
 	if o.env == nil || o.env.codingCredentials == nil {
-		return false, nil
+		return false, "", nil
 	}
 
 	if picked, ok := o.env.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
@@ -5068,18 +5277,18 @@ func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uu
 		models.ProviderAnthropicSubscription,
 	})
 	if !handled || picked == nil {
-		return false, nil
+		return false, "", nil
 	}
 	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
 }
 
-func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, error) {
+func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, string, error) {
 	if picked.Provider != models.ProviderAnthropicSubscription {
-		return false, nil
+		return false, "", nil
 	}
 	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
 	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
-		return false, nil
+		return false, "", nil
 	}
 	sub := models.AnthropicSubscription{
 		AccessToken:   cfg.AccessToken,
@@ -5102,9 +5311,9 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 				sub = *refreshed
 			} else if sub.IsExpired() {
 				if err != nil {
-					return false, fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
+					return false, "", fmt.Errorf("refresh unified claude subscription %s: %w", picked.ID, err)
 				}
-				return false, fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
+				return false, "", fmt.Errorf("refresh unified claude subscription %s returned no token", picked.ID)
 			} else if err != nil {
 				o.logger.Warn().
 					Err(err).
@@ -5112,10 +5321,11 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 					Msg("unified claude subscription refresh failed; using cached token")
 			}
 		} else if sub.IsExpired() {
-			return false, fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
+			return false, "", fmt.Errorf("unified claude subscription %s is expired and no refresh provider is configured", picked.ID)
 		}
 	}
-	return o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+	injected, err := o.writeClaudeCodeAuth(ctx, orgID, sandbox, sub)
+	return injected, sub.AccountType, err
 }
 
 // ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
@@ -5124,11 +5334,14 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
 // path is configured.
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
+	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, claudeCodeVersion))
 		return TokenBillingModeAPIKey, nil
 	}
 
-	injected, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
+	injected, accountType, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
@@ -5147,10 +5360,11 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("unified claude code auth injection: %w", err)
 	}
 	if injected {
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, accountType, model, claudeCodeVersion))
 		return TokenBillingModeSubscription, nil
 	}
 
-	injected, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	injected, accountType, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
@@ -5177,6 +5391,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("claude code auth injection: %w", err)
 	}
 	if injected {
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, accountType, model, claudeCodeVersion))
 		return TokenBillingModeSubscription, nil
 	}
 
@@ -5209,6 +5424,10 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
 
+func IsClaudeCodeFallbackUnavailable(err error) bool {
+	return errors.Is(err, errClaudeCodeFallbackUnavailable)
+}
+
 func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) error {
 	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
@@ -5217,7 +5436,17 @@ func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run 
 	if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
 		return err
 	}
+	version := o.detectClaudeCodeVersion(ctx, sandbox)
+	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
+	setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, version))
 	return nil
+}
+
+func (o *Orchestrator) detectClaudeCodeVersion(ctx context.Context, sandbox *Sandbox) string {
+	if o == nil {
+		return ""
+	}
+	return detectClaudeCodeVersion(ctx, sandbox, o.provider, o.logger)
 }
 
 func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
@@ -5380,10 +5609,10 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
 			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
 		}
-		o.warmMentionIndexFromSandbox(bgCtx, session, sandbox, snapshotKey, log)
+		o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
-			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
 			o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 		} else {
 			log.Info().Int("turn", turnNumber).Msg("cancelled session returned to idle")
@@ -5394,7 +5623,7 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 			}
 		}
 	} else {
-		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
+		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
 		o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
 	}
 }
@@ -5445,7 +5674,7 @@ func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *model
 		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
 	}
 
-	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusAwaitingInput)); err != nil {
+	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusAwaitingInput); err != nil {
 		log.Warn().Err(err).Msg("failed to mark session awaiting human input")
 		wrappedErr := fmt.Errorf("human input awaiting status: %w", err)
 		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
@@ -5497,6 +5726,40 @@ func (o *Orchestrator) snapshotSessionOnTurnSuccess(ctx context.Context, session
 		return "", 0, nil
 	}
 	return o.snapshotSession(ctx, session, sandbox, result)
+}
+
+func (o *Orchestrator) publishBootstrapCheckpoint(ctx context.Context, session *models.Session, sandbox *Sandbox, runtimeTracker *runtimeProgressTracker, log zerolog.Logger) error {
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, session, sandbox, nil)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Msg("failed to publish bootstrap checkpoint; session will recover from the next durable checkpoint")
+		return nil
+	}
+	if snapshotKey == "" {
+		return nil
+	}
+	if runtimeTracker != nil {
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthWeak, time.Now().UTC(), "")
+	}
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	agentSessionID := ""
+	if session.AgentSessionID != nil {
+		agentSessionID = *session.AgentSessionID
+	}
+	published, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindBootstrap, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to publish bootstrap checkpoint metadata")
+		if ownerKind, ok := jobctx.OwnerKindFromContext(ctx); ok && ownerKind == string(models.JobOwnerKindSessionExecutor) {
+			return fmt.Errorf("publish bootstrap checkpoint metadata: %w", err)
+		}
+		return nil
+	}
+	if !published {
+		log.Warn().Msg("bootstrap checkpoint metadata was not published")
+		if ownerKind, ok := jobctx.OwnerKindFromContext(ctx); ok && ownerKind == string(models.JobOwnerKindSessionExecutor) {
+			return fmt.Errorf("publish bootstrap checkpoint metadata: lost fenced ownership")
+		}
+	}
+	return nil
 }
 
 // snapshotSession snapshots the sandbox workspace to object storage for multi-turn support.
@@ -5697,7 +5960,7 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 
 // tokenLimitForMode returns the max token limit based on the session's token mode.
 // Optional context limits from org settings override the defaults when provided.
-func tokenLimitForMode(mode string, limits ...models.ContextLimits) int {
+func tokenLimitForMode(mode models.SessionTokenMode, limits ...models.ContextLimits) int {
 	var lowMax, highMax int
 	if len(limits) > 0 && limits[0].AgentLowTokenMax > 0 {
 		lowMax = limits[0].AgentLowTokenMax
@@ -5711,7 +5974,7 @@ func tokenLimitForMode(mode string, limits ...models.ContextLimits) int {
 	}
 
 	switch mode {
-	case "high":
+	case models.SessionTokenModeHigh:
 		return highMax
 	default:
 		return lowMax
@@ -5999,7 +6262,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	return result, err
 }
 
-func (o *Orchestrator) retryContinueOnCredentialRateLimit(
+func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	ctx context.Context,
 	session *models.Session,
 	threadID *uuid.UUID,
@@ -6011,6 +6274,7 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	prompt *AgentPrompt,
 	result *AgentResult,
 	err error,
+	createBlockedMessage bool,
 	log zerolog.Logger,
 ) (*AgentResult, error, bool) {
 	signal := parseCredentialFailureSignal(result, time.Now())
@@ -6018,10 +6282,14 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 		return result, err, false
 	}
 
-	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
+	o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+
+	refreshedEnv := o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
 	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
-		logCredentialRateLimitBlockedContinue(log, session, authErr)
-		o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+		logCredentialRateLimitBlocked(log, session, authErr)
+		if createBlockedMessage {
+			o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+		}
 		return result, authErr, false
 	}
 
@@ -6034,7 +6302,7 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	log.Info().
 		Str("session_id", session.ID.String()).
 		Str("agent_type", string(session.AgentType)).
-		Msg("retrying continue_session with fallback credential after rate-limit signal")
+		Msg("retrying agent session with fallback credential after rate-limit signal")
 
 	retryLogCh := make(chan LogEntry, 100)
 	var retryLogWg sync.WaitGroup
@@ -6048,21 +6316,21 @@ func (o *Orchestrator) retryContinueOnCredentialRateLimit(
 	retryLogWg.Wait()
 
 	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	if parseCredentialFailureSignal(retryResult, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log)
+		refreshedEnv = o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
+		if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
+			logCredentialRateLimitBlocked(log, session, authErr)
+			if createBlockedMessage {
+				o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
+			}
+			return retryResult, authErr, true
+		}
+	}
 	return retryResult, retryErr, true
 }
 
-func (o *Orchestrator) blockedContinueAfterRateLimitExhaustion(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandboxCfg SandboxConfig, log zerolog.Logger) error {
-	refreshedEnv := o.resolveContinueCredentialEnv(ctx, session, sandboxCfg)
-	authErr := o.env.CheckAuth(session.AgentType, refreshedEnv)
-	if authErr == nil {
-		return nil
-	}
-	logCredentialRateLimitBlockedContinue(log, session, authErr)
-	o.createContinueAuthFailureMessage(ctx, session, threadID, authErr, log)
-	return authErr
-}
-
-func (o *Orchestrator) resolveContinueCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
+func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
 	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
@@ -6091,6 +6359,13 @@ func refreshAgentCredentialEnv(current, resolved map[string]string, agentType mo
 		out[k] = v
 	}
 	return out
+}
+
+// RefreshAgentCredentialEnv replaces only the agent credential keys in current
+// with a fresh AgentEnv.Resolve result, preserving execution-scoped values such
+// as HOME, GitHub auth, internal API tokens, branch metadata, and socket paths.
+func RefreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {
+	return refreshAgentCredentialEnv(current, resolved, agentType)
 }
 
 func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) {
@@ -6135,7 +6410,7 @@ func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *mo
 	}
 }
 
-func logCredentialRateLimitBlockedContinue(log zerolog.Logger, session *models.Session, authErr error) {
+func logCredentialRateLimitBlocked(log zerolog.Logger, session *models.Session, authErr error) {
 	authLog := log.Error().Err(authErr).
 		Str("session_id", session.ID.String()).
 		Str("agent_type", string(session.AgentType))
@@ -6148,7 +6423,7 @@ func logCredentialRateLimitBlockedContinue(log zerolog.Logger, session *models.S
 			authLog = authLog.Time("rate_limited_until", *structuredAuthErr.RateLimitedUntil)
 		}
 	}
-	authLog.Msg("continue_session fallback credentials unavailable after rate-limit signal")
+	authLog.Msg("fallback credentials unavailable after rate-limit signal")
 }
 
 func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, session *models.Session, threadID *uuid.UUID, authErr error, log zerolog.Logger) {
@@ -6176,11 +6451,11 @@ func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, ses
 // failures; this is the fast-path hint that prevents repeat picks before the
 // resolver cache refreshes.
 //
-// Provider mapping is intentionally limited to agent types whose API-key auth
-// flows go through AgentEnv.pickFromCodingProvider. Codex subscription auth
-// uses codexauth.Service's own selector; because that path records no
-// ProviderOpenAI pick, the shed call below remains a no-op for subscription
-// runs.
+// Provider mapping is intentionally limited to agent types whose runtime auth
+// flows go through AgentEnv credential selection. Unified Codex subscription
+// rows are recorded under the OpenAI request provider too, so subscription
+// usage-limit output sheds the picked subscription row and lets the retry pick
+// the next Codex/OpenAI credential.
 func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
 	if o.env == nil || result == nil {
 		return
@@ -6230,9 +6505,15 @@ func parseCredentialFailureSignal(result *AgentResult, now time.Time) Credential
 	}
 }
 
-// codingProviderForAgent maps an agent type to the unified provider name its
-// API-key auth uses. Subscription picks are intentionally not represented
-// here; they do not write the recentPicks tracker under these providers.
+// CredentialFailureSignalFromResult exposes the runtime credential-failure
+// parser to service packages that execute adapters outside the orchestrator
+// but still need to shed and retry the same unified coding credentials.
+func CredentialFailureSignalFromResult(result *AgentResult, now time.Time) CredentialFailureSignal {
+	return parseCredentialFailureSignal(result, now)
+}
+
+// codingProviderForAgent maps an agent type to the unified request provider
+// used for credential picking and shedding.
 func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 	switch agentType {
 	case models.AgentTypeClaudeCode:
@@ -6248,6 +6529,12 @@ func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 	default:
 		return ""
 	}
+}
+
+// CodingProviderForAgent exposes the provider mapping for PM/autopilot
+// execution paths that invoke adapters directly.
+func CodingProviderForAgent(agentType models.AgentType) models.ProviderName {
+	return codingProviderForAgent(agentType)
 }
 
 // isRateLimitedError matches the same surface as the failure classifier so

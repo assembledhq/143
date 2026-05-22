@@ -92,8 +92,8 @@ func TestPullRequestStore_GetByID_Success(t *testing.T) {
 	require.Equal(t, "https://github.com/org/repo/pull/42", pr.GitHubPRURL, "should return the correct GitHub PR URL")
 	require.Equal(t, "org/repo", pr.GitHubRepo, "should return the correct GitHub repo")
 	require.Equal(t, "Fix bug", pr.Title, "should return the correct title")
-	require.Equal(t, "open", pr.Status, "should return the correct status")
-	require.Equal(t, "pending", pr.ReviewStatus, "should return the correct review status")
+	require.Equal(t, models.PullRequestStatusOpen, pr.Status, "should return the correct status")
+	require.Equal(t, models.PullRequestReviewStatusPending, pr.ReviewStatus, "should return the correct review status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -139,7 +139,7 @@ func TestPullRequestStore_GetBySessionID_Success(t *testing.T) {
 	require.Equal(t, &sessionID, pr.SessionID, "should return the correct agent run ID")
 	require.Equal(t, orgID, pr.OrgID, "should return the correct org ID")
 	require.Equal(t, 42, pr.GitHubPRNumber, "should return the correct GitHub PR number")
-	require.Equal(t, "open", pr.Status, "should return the correct status")
+	require.Equal(t, models.PullRequestStatusOpen, pr.Status, "should return the correct status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -210,7 +210,7 @@ func TestPullRequestStore_ListByOrg_Success(t *testing.T) {
 	require.Equal(t, &sessionID, prs[0].SessionID, "first pull request should have the correct agent run ID")
 	require.Equal(t, orgID, prs[0].OrgID, "first pull request should have the correct org ID")
 	require.Equal(t, 42, prs[0].GitHubPRNumber, "first pull request should have the correct GitHub PR number")
-	require.Equal(t, "open", prs[0].Status, "first pull request should have the correct status")
+	require.Equal(t, models.PullRequestStatusOpen, prs[0].Status, "first pull request should have the correct status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -237,6 +237,6 @@ func TestPullRequestStore_ListByOrg_WithStatusFilter(t *testing.T) {
 	require.NoError(t, err, "should list pull requests filtered by status without error")
 	require.Len(t, prs, 1, "should return only the pull request matching the status filter")
 	require.Equal(t, id, prs[0].ID, "filtered pull request should have the correct ID")
-	require.Equal(t, "open", prs[0].Status, "filtered pull request should have the correct status")
+	require.Equal(t, models.PullRequestStatusOpen, prs[0].Status, "filtered pull request should have the correct status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

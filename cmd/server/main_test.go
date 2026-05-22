@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -169,6 +170,93 @@ func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
 	}
 }
 
+func TestValidateSessionExecutorStartupConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		wantErr bool
+	}{
+		{
+			name: "production worker requires executor image",
+			cfg: config.Config{
+				Env:  "production",
+				Mode: "worker",
+			},
+			wantErr: true,
+		},
+		{
+			name: "production all mode requires executor image",
+			cfg: config.Config{
+				Env:  "production",
+				Mode: "all",
+			},
+			wantErr: true,
+		},
+		{
+			name: "production api mode does not require executor image",
+			cfg: config.Config{
+				Env:  "production",
+				Mode: "api",
+			},
+		},
+		{
+			name: "local worker can fall back to inline execution",
+			cfg: config.Config{
+				Env:  "development",
+				Mode: "worker",
+			},
+		},
+		{
+			name: "production worker accepts configured executor image",
+			cfg: config.Config{
+				Env:                  "production",
+				Mode:                 "worker",
+				SessionExecutorImage: "143:test",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateSessionExecutorStartupConfig(&tt.cfg)
+
+			if tt.wantErr {
+				require.Error(t, err, "production worker-capable modes should fail fast without an executor image")
+				require.Contains(t, err.Error(), "SESSION_EXECUTOR_IMAGE", "error should name the missing production setting")
+				return
+			}
+			require.NoError(t, err, "startup config should allow this executor configuration")
+		})
+	}
+}
+
+func TestSessionExecutorGroupAdd(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		dockerGID string
+		expected  []string
+	}{
+		{name: "empty docker gid omits supplemental groups", dockerGID: "", expected: nil},
+		{name: "configured docker gid is passed through", dockerGID: "123", expected: []string{"123"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := sessionExecutorGroupAdd(tt.dockerGID)
+
+			require.Equal(t, tt.expected, got, "session executor group add should reflect the configured Docker socket group")
+		})
+	}
+}
+
 func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -203,6 +291,51 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
 	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
+}
+
+func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for Linear agent worker wiring regression test")
+
+	body := string(src)
+	depsAssign := strings.Index(body, "svc.LinearAgentDeps = &worker.LinearAgentEventHandlerDeps")
+	require.NotEqual(t, -1, depsAssign, "buildServices should still wire LinearAgentDeps")
+
+	beforeDeps := body[:depsAssign]
+	lastFeatureFlagGate := strings.LastIndex(beforeDeps, "if cfg.LinearAgentEnabled")
+	lastFuncStart := strings.LastIndex(beforeDeps, "func buildServices(")
+	require.Less(t, lastFeatureFlagGate, lastFuncStart, "LinearAgentDeps must be wired even when LINEAR_AGENT_ENABLED=false so queued jobs drain")
+}
+
+func TestMainProductionWorkersPreflightSandboxAuthBeforeConstructingServer(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup preflight regression test")
+
+	body := string(src)
+	preflight := strings.Index(body, "sandboxauth.ValidateSocketDirForStartup")
+	construct := strings.Index(body, "sandboxauth.NewServer")
+	require.NotEqual(t, -1, preflight, "worker startup should preflight the sandbox auth socket dir")
+	require.NotEqual(t, -1, construct, "worker startup should still construct the sandbox auth server")
+	require.Less(t, preflight, construct, "startup preflight must run before constructing the socket server so bad workers fail before claiming jobs")
+	require.Contains(t, body, `cfg.Env == "production"`, "the sandbox auth preflight should be production-scoped so local dev can opt into the legacy fallback path")
+}
+
+func TestMainValidatesSessionExecutorConfigBeforeConstructingRouter(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
+
+	body := string(src)
+	preflight := strings.Index(body, "validateSessionExecutorStartupConfig(cfg)")
+	construct := strings.Index(body, "api.NewRouter(")
+	require.NotEqual(t, -1, preflight, "startup should validate durable session executor config")
+	require.NotEqual(t, -1, construct, "startup should still construct the API router")
+	require.Less(t, preflight, construct, "production executor config should fail before expensive server/router wiring")
 }
 
 func TestMainPassesConfiguredNodeIDToWorkers(t *testing.T) {
@@ -275,21 +408,28 @@ func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
 		"worker jobs should keep the full configured drain timeout")
 	require.Contains(t, body, "shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)",
 		"HTTP shutdown should use the bounded timeout constant")
+	require.Contains(t, body, "waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)",
+		"worker shutdown should verify DB-owned jobs for the draining node before process exit")
+	require.Contains(t, body, "jobStore.CountRunningOwnedByNode(ctx, nodeID)",
+		"DB-owned drain verification should query the durable job owner state")
 
 	nodeDrain := strings.Index(body, "nodeManager.RequestDrain(nodeDrainCtx, time.Now())")
 	httpDrainSignal := strings.Index(body, "close(shutdownCh)")
 	httpDrainDelay := strings.Index(body, "time.Sleep(httpDrainPropagationDelay)")
 	workerDrain := strings.Index(body, "drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)")
 	activeJobLoop := strings.Index(body, "activeJobs := 0")
+	dbOwnedDrain := strings.Index(body, "waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)")
 	require.NotEqual(t, -1, nodeDrain, "shutdown should mark the node draining")
 	require.NotEqual(t, -1, httpDrainSignal, "shutdown should mark HTTP health as draining")
 	require.NotEqual(t, -1, httpDrainDelay, "shutdown should wait for proxy health propagation")
 	require.NotEqual(t, -1, workerDrain, "shutdown should create the worker drain context")
 	require.NotEqual(t, -1, activeJobLoop, "shutdown should wait for active jobs")
+	require.NotEqual(t, -1, dbOwnedDrain, "shutdown should verify DB-owned jobs after active jobs drain")
 	require.Less(t, nodeDrain, httpDrainSignal, "node drain DB marking should happen before HTTP health drain begins")
 	require.Less(t, httpDrainSignal, httpDrainDelay, "HTTP health should be marked draining before waiting for proxy propagation")
 	require.Less(t, httpDrainDelay, workerDrain, "proxy propagation should finish before the worker drain budget starts")
 	require.Less(t, workerDrain, activeJobLoop, "the worker drain budget should be reserved for the active-job wait")
+	require.Less(t, activeJobLoop, dbOwnedDrain, "DB-owned drain verification should run after in-process active jobs reach zero")
 }
 
 func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {

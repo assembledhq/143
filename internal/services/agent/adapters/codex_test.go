@@ -102,6 +102,52 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 	}
 }
 
+func TestCodexModelArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		env            map[string]string
+		effectiveModel string
+		expected       string
+	}{
+		{
+			name:     "adds priority service tier for gpt 5.5 fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT55Fast},
+			expected: ` -m 'gpt-5.5' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "adds priority service tier for gpt 5.4 fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT54Fast},
+			expected: ` -m 'gpt-5.4' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "adds explicit model for regular model",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT55},
+			expected: ` -m 'gpt-5.5'`,
+		},
+		{
+			name:     "does not add args when no env model is set",
+			env:      map[string]string{},
+			expected: "",
+		},
+		{
+			name:           "uses resolved effective model when env model is absent",
+			env:            map[string]string{},
+			effectiveModel: models.CodexModelGPT54Fast,
+			expected:       ` -m 'gpt-5.4' -c 'service_tier="priority"'`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codexModelArgs(tt.env, tt.effectiveModel), "codexModelArgs should translate selectable fast aliases into CLI config")
+		})
+	}
+}
+
 func TestParseCodexOutput_JSON(t *testing.T) {
 	t.Parallel()
 
@@ -437,11 +483,13 @@ func TestParseCodexStreamOutput(t *testing.T) {
 				require.Len(t, logs, 2, "should have tool_use + tool_result")
 				require.Equal(t, "tool_use", logs[0].Level)
 				require.Equal(t, "command_execution", logs[0].Metadata["tool"])
+				require.Equal(t, "item_1", logs[0].Metadata["item_id"])
 				inputMap, ok := logs[0].Metadata["input"].(map[string]interface{})
 				require.True(t, ok)
 				require.Contains(t, inputMap["command"], "ls -la /workspace")
 				require.Equal(t, "output", logs[1].Level)
 				require.Equal(t, "tool_result", logs[1].Metadata["type"])
+				require.Equal(t, "item_1", logs[1].Metadata["item_id"])
 			},
 		},
 		{

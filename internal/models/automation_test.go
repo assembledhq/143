@@ -13,7 +13,7 @@ func TestValidateAutomationScheduleType(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		input     string
+		input     AutomationScheduleType
 		expectErr bool
 	}{
 		{name: "interval is valid", input: AutomationScheduleInterval},
@@ -25,7 +25,7 @@ func TestValidateAutomationScheduleType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := ValidateAutomationScheduleType(tt.input)
+			err := ValidateAutomationScheduleType(string(tt.input))
 			if tt.expectErr {
 				require.Error(t, err)
 				return
@@ -148,7 +148,7 @@ func TestComputeNextRunAt(t *testing.T) {
 	from := time.Date(2026, 4, 17, 8, 0, 0, 0, time.UTC)
 
 	iv := 6
-	iu := "hours"
+	iu := ScheduleUnitHours
 	interval := Automation{
 		ScheduleType:  AutomationScheduleInterval,
 		IntervalValue: &iv,
@@ -208,7 +208,7 @@ func TestComputeNextRunAt(t *testing.T) {
 func TestValidateAutomationRunStatus(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{
+	valid := []AutomationRunStatus{
 		AutomationRunStatusPending,
 		AutomationRunStatusRunning,
 		AutomationRunStatusCompleted,
@@ -217,9 +217,9 @@ func TestValidateAutomationRunStatus(t *testing.T) {
 		AutomationRunStatusSkipped,
 	}
 	for _, s := range valid {
-		t.Run("valid_"+s, func(t *testing.T) {
+		t.Run("valid_"+string(s), func(t *testing.T) {
 			t.Parallel()
-			require.NoError(t, ValidateAutomationRunStatus(s))
+			require.NoError(t, ValidateAutomationRunStatus(string(s)))
 		})
 	}
 
@@ -268,12 +268,13 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	scope := "src/"
 	reasoning := ReasoningEffortXHigh
 	a := Automation{
-		AgentType:       &agent,
-		ModelOverride:   &model,
-		ReasoningEffort: &reasoning,
-		Scope:           &scope,
-		IdentityScope:   AutomationIdentityScopePersonal,
-		BaseBranch:      "main",
+		AgentType:        &agent,
+		ModelOverride:    &model,
+		ReasoningEffort:  &reasoning,
+		Scope:            &scope,
+		IdentityScope:    AutomationIdentityScopePersonal,
+		PrePRReviewLoops: 2,
+		BaseBranch:       "main",
 	}
 
 	raw, err := a.BuildConfigSnapshot()
@@ -287,6 +288,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	require.Equal(t, "xhigh", decoded["reasoning_effort"])
 	require.Equal(t, "src/", decoded["scope"])
 	require.Equal(t, string(AutomationIdentityScopePersonal), decoded["identity_scope"])
+	require.Equal(t, float64(2), decoded["pre_pr_review_loops"], "config snapshot should include the pre-PR review pass count")
 	require.Equal(t, "main", decoded["base_branch"])
 }
 
@@ -304,5 +306,6 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.Nil(t, decoded["reasoning_effort"])
 	require.Nil(t, decoded["scope"])
 	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"])
+	require.Equal(t, float64(0), decoded["pre_pr_review_loops"], "config snapshot should include disabled pre-PR review by default")
 	require.Equal(t, "develop", decoded["base_branch"])
 }

@@ -104,8 +104,8 @@ type mockSessionStore struct {
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
-	updateCalls      []string
+	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
+	updateCalls      []models.SessionStatus
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -119,7 +119,7 @@ func (m *mockSessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.
 	if m.claimIdleFn != nil {
 		return m.claimIdleFn(ctx, orgID, sessionID)
 	}
-	return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+	return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 }
 
 func (m *mockSessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -129,7 +129,7 @@ func (m *mockSessionStore) ClaimForResume(ctx context.Context, orgID, sessionID 
 	return models.Session{}, fmt.Errorf("no rows")
 }
 
-func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error {
 	m.updateCalls = append(m.updateCalls, status)
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, sessionID, status)
@@ -138,8 +138,9 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uu
 }
 
 type mockMessageStore struct {
-	createFn       func(ctx context.Context, msg *models.SessionMessage) error
-	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	createFn             func(ctx context.Context, msg *models.SessionMessage) error
+	listByThreadFn       func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	listWindowByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
 func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
@@ -154,6 +155,13 @@ func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uui
 		return m.listByThreadFn(ctx, orgID, threadID)
 	}
 	return nil, nil
+}
+
+func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+	if m.listWindowByThreadFn != nil {
+		return m.listWindowByThreadFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionMessageWindow{}, nil
 }
 
 type mockLogStore struct {
@@ -1128,6 +1136,39 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "success with continuation dedupe override",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				UserID:    &userID,
+				Message:   "internal follow-up",
+				ContinuationDedupeKeyOverride: func() *string {
+					key := "continue_session_review_loop:loop:pass:decision"
+					return &key
+				}(),
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 43
+					msg.CreatedAt = time.Now()
+					return nil
+				}
+				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, queue, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
+					require.Equal(t, "agent", queue, "thread messages should use the agent queue")
+					require.Equal(t, "continue_session", jobType, "thread messages should reuse the continue-session worker")
+					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
+					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should still be included for worker attribution")
+					require.NotNil(t, dedupeKey, "override enqueue should carry a dedupe key")
+					require.Equal(t, "continue_session_review_loop:loop:pass:decision", *dedupeKey, "internal follow-up should use the caller-provided dedupe key")
+					return uuid.New(), nil
+				}
+			},
+		},
+		{
 			name: "claims parent session before creating thread message",
 			input: SendMessageInput{
 				SessionID: sessionID,
@@ -1142,7 +1183,7 @@ func TestService_SendMessage(t *testing.T) {
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					claimedSession = true
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
 					require.True(t, claimedSession, "SendMessage should claim the parent session before creating the message")
@@ -1170,7 +1211,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
 					require.Equal(t, "hi", msg.Content, "queued sibling message should preserve content")
@@ -1388,7 +1429,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
 					return fmt.Errorf("db error")
@@ -1433,7 +1474,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
 					msg.ID = 42
@@ -1474,12 +1515,12 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("no rows in result set")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), CurrentTurn: 4}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, CurrentTurn: 4}, nil
 				}
 				resumed := false
 				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					resumed = true
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 4}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 4}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
 					require.True(t, resumed, "ClaimForResume should fire before message create when ClaimIdle returns no rows")
@@ -1512,7 +1553,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted}, nil
 				}
 				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{}, fmt.Errorf("no rows")
@@ -1550,7 +1591,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SandboxState: string(models.SandboxStateDestroyed)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SandboxState: models.SandboxStateDestroyed}, nil
 				}
 				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					t.Errorf("ClaimForResume must not be called when the sandbox is destroyed")
@@ -1630,17 +1671,17 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted}, nil
 				}
 				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
 					return fmt.Errorf("db error")
 				}
 				revertedToOriginal := false
-				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status string) error {
-					if status == string(models.SessionStatusCompleted) {
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.SessionStatus) error {
+					if status == models.SessionStatusCompleted {
 						revertedToOriginal = true
 					}
 					return nil
@@ -1671,12 +1712,12 @@ func TestService_SendMessage(t *testing.T) {
 					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
 					return fmt.Errorf("db error")
 				}
-				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ string) error {
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ models.SessionStatus) error {
 					t.Errorf("session UpdateStatus must not be called when sibling is mid-turn")
 					return nil
 				}
@@ -1764,10 +1805,10 @@ func TestService_SendMessage_AnswersThreadHumanInputRequest(t *testing.T) {
 		return models.Session{}, fmt.Errorf("no rows")
 	}
 	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-		return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusAwaitingInput), CurrentTurn: 5}, nil
+		return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusAwaitingInput, CurrentTurn: 5}, nil
 	}
 	deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-		return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 5}, nil
+		return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 5}, nil
 	}
 	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
 		require.Equal(t, "agent", opts.Queue, "thread human-input resume should use the agent queue")
@@ -1926,7 +1967,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		// GetByID is called once per resolution path to pick up CurrentTurn
 		// for the resolution pass; CurrentTurn=2 → resolved_by_pass=2.
 		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2}, nil
+			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 2}, nil
 		}
 	}
 
@@ -2049,10 +2090,10 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 			return models.Session{}, fmt.Errorf("no rows")
 		}
 		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusAwaitingInput), CurrentTurn: 2}, nil
+			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusAwaitingInput, CurrentTurn: 2}, nil
 		}
 		deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2}, nil
+			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 2}, nil
 		}
 		deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
 			return uuid.New(), nil
@@ -2071,7 +2112,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NotNil(t, result)
 		require.NotNil(t, result.AnsweredQuestion, "the answered question should come back so the handler can audit it")
 		require.Equal(t, questionID, result.AnsweredQuestion.ID)
-		require.Equal(t, "answered", result.AnsweredQuestion.Status)
+		require.Equal(t, models.SessionQuestionStatusAnswered, result.AnsweredQuestion.Status)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -2135,7 +2176,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NotNil(t, result, "queued awaiting_input answer should return a result")
 		require.NotNil(t, result.AnsweredQuestion, "queued awaiting_input answer should return the answered question for audit")
 		require.Equal(t, questionID, result.AnsweredQuestion.ID, "queued awaiting_input answer should report the answered question")
-		require.Equal(t, "answered", result.AnsweredQuestion.Status, "queued awaiting_input answer should mark the question answered")
+		require.Equal(t, models.SessionQuestionStatusAnswered, result.AnsweredQuestion.Status, "queued awaiting_input answer should mark the question answered")
 		require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 	})
 
@@ -2181,7 +2222,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 			return models.Session{}, fmt.Errorf("session already running")
 		}
 		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning)}, nil
+			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
 		}
 		deps.threadStore.updateStatusFn = func(_ context.Context, _, tid uuid.UUID, status models.ThreadStatus) error {
 			require.Equal(t, threadID, tid, "sibling-queued awaiting_input answer should release the claimed thread")
@@ -2210,7 +2251,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NotNil(t, result, "sibling-queued awaiting_input answer should return a result")
 		require.NotNil(t, result.AnsweredQuestion, "sibling-queued awaiting_input answer should return the answered question for audit")
 		require.Equal(t, questionID, result.AnsweredQuestion.ID, "sibling-queued awaiting_input answer should report the answered question")
-		require.Equal(t, "answered", result.AnsweredQuestion.Status, "sibling-queued awaiting_input answer should mark the question answered")
+		require.Equal(t, models.SessionQuestionStatusAnswered, result.AnsweredQuestion.Status, "sibling-queued awaiting_input answer should mark the question answered")
 		require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 	})
 
@@ -2427,6 +2468,89 @@ func TestService_GetMessages(t *testing.T) {
 			}
 			require.NoError(t, err, "should not return an error")
 			require.Len(t, messages, tt.expectLen, "should return expected number of messages")
+		})
+	}
+}
+
+func TestService_GetMessageWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setupDeps func(deps *testDeps)
+		expectErr error
+		expected  MessageWindowResult
+	}{
+		{
+			name: "success",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+					require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped by org")
+					require.Equal(t, threadID, gotThreadID, "thread lookup should use requested thread")
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted}, nil
+				}
+				deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+					require.Equal(t, orgID, gotOrgID, "message window should be scoped by org")
+					require.Equal(t, threadID, gotThreadID, "message window should use requested thread")
+					require.Equal(t, int64(44), opts.BeforeID, "message window should pass cursor options")
+					return db.SessionMessageWindow{
+						Messages:                 []models.SessionMessage{{ID: 43}},
+						NextOlderCursor:          "43",
+						HasOlder:                 true,
+						LatestAssistantMessageID: 43,
+						LiveEdgeMessageID:        43,
+					}, nil
+				}
+			},
+			expected: MessageWindowResult{
+				Window: db.SessionMessageWindow{
+					Messages:                 []models.SessionMessage{{ID: 43}},
+					NextOlderCursor:          "43",
+					HasOlder:                 true,
+					LatestAssistantMessageID: 43,
+					LiveEdgeMessageID:        43,
+				},
+				ThreadStatus: models.ThreadStatusCompleted,
+			},
+		},
+		{
+			name: "thread not found",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+		{
+			name: "session mismatch",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: uuid.New(), OrgID: orgID}, nil
+				}
+			},
+			expectErr: ErrThreadNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.setupDeps(deps)
+
+			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{BeforeID: 44, Limit: 10})
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
+				return
+			}
+			require.NoError(t, err, "message window should not return an error")
+			require.Equal(t, tt.expected, result, "message window should return expected data and thread status")
 		})
 	}
 }

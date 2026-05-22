@@ -44,6 +44,7 @@ func TestCheckpointKind_Validate(t *testing.T) {
 	t.Parallel()
 
 	require.NoError(t, CheckpointKindNone.Validate(), "empty checkpoint kind should be valid")
+	require.NoError(t, CheckpointKindBootstrap.Validate(), "bootstrap checkpoint kind should be valid")
 	require.NoError(t, CheckpointKindTurnComplete.Validate(), "turn-complete checkpoint kind should be valid")
 	require.NoError(t, CheckpointKindGracefulStop.Validate(), "graceful-stop checkpoint kind should be valid")
 	require.Error(t, CheckpointKind("bad").Validate(), "unknown checkpoint kind should be rejected")

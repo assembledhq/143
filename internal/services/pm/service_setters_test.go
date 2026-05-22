@@ -169,6 +169,6 @@ func (m *mockSkillsBuilder) BuildIntegrationSkills(_ context.Context, _ uuid.UUI
 
 type mockIntegrationStore struct{}
 
-func (m *mockIntegrationStore) ListByOrgAndProvider(_ context.Context, _ uuid.UUID, _ string) ([]models.Integration, error) {
+func (m *mockIntegrationStore) ListByOrgAndProvider(_ context.Context, _ uuid.UUID, _ models.IntegrationProvider) ([]models.Integration, error) {
 	return nil, nil
 }

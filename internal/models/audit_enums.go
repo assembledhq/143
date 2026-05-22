@@ -42,10 +42,12 @@ const (
 	AuditActionSessionReviewCommentUpdated AuditAction = "session.review_comment.updated"
 	AuditActionSessionReviewCommentDeleted AuditAction = "session.review_comment.deleted"
 	AuditActionSessionPRRequested          AuditAction = "session.pr_requested"
+	AuditActionSessionBranchRequested      AuditAction = "session.branch_requested"
 	AuditActionSessionPRPushRequested      AuditAction = "session.pr_push_requested"
 	AuditActionSessionRetried              AuditAction = "session.retried"
 	AuditActionSessionArchived             AuditAction = "session.archived"
 	AuditActionSessionUnarchived           AuditAction = "session.unarchived"
+	AuditActionSessionPreviewLifetimeSet   AuditAction = "session.preview_lifetime_set"
 
 	// Project actions
 	AuditActionProjectCreated        AuditAction = "project.created"
@@ -127,8 +129,8 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionHumanInputAnswered, AuditActionSessionHumanInputCancelled,
 		AuditActionSessionResumedLocally,
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
-		AuditActionSessionPRRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
-		AuditActionSessionArchived, AuditActionSessionUnarchived,
+		AuditActionSessionPRRequested, AuditActionSessionBranchRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
+		AuditActionSessionArchived, AuditActionSessionUnarchived, AuditActionSessionPreviewLifetimeSet,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
 		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectArchived,
 		AuditActionProjectUnarchived, AuditActionProjectRunTriggered,

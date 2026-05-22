@@ -2,6 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -24,13 +25,20 @@ import {
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { queryKeys } from "@/lib/query-keys";
-import { useDisconnectRepository } from "@/hooks/use-repository-connection";
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
-import type { GitHubRepositoryClaimCandidate } from "@/lib/types";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { GitHubRepositoryClaimCandidate, LinearTeamRepoMapping, Repository } from "@/lib/types";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
+const NO_DEFAULT_REPO_VALUE = "__none__";
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
 // `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
@@ -83,38 +91,39 @@ function GitHubRepositoryClaims({
   const actionable = repos.filter((repo) =>
     repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (repo.status === "owned_by_other_org" && repo.can_transfer)
   );
+  const connectedCount = repos.filter((repo) => repo.status === "owned_by_current_org").length;
   const claimError = claimMutation.error;
   const needsGitHubUserAuth = claimError instanceof ApiError && claimError.code === "GITHUB_USER_AUTH_REQUIRED";
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">GitHub repositories</CardTitle>
-          <CardDescription>
-            Choose which repositories this 143 organization owns from the connected GitHub installation.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading repositories...</p>
-          ) : error ? (
-            <p className="text-sm text-destructive">
-              {error instanceof Error ? error.message : "Failed to load GitHub repositories."}
+      <div className="mt-3">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading repositories...</p>
+        ) : error ? (
+          <p className="text-sm text-destructive">
+            {error instanceof Error ? error.message : "Failed to load GitHub repositories."}
+          </p>
+        ) : repos.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {repos.length} repositor{repos.length === 1 ? "y" : "ies"} · {connectedCount} connected · {actionable.length} available
             </p>
-          ) : repos.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
-          ) : (
-            <div className="space-y-2">
+            <div
+              data-testid="github-repository-grid"
+              className="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-2"
+            >
               {repos.map((repo) => {
                 const transfer = repo.status === "owned_by_other_org";
                 const canClaim = repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (transfer && repo.can_transfer);
                 const pending = claimMutation.isPending && claimMutation.variables?.githubId === repo.github_id;
                 return (
-                  <div key={repo.github_id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div key={repo.github_id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-border px-3 py-2">
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{repo.full_name}</div>
-                      <div className="mt-1 flex items-center gap-2">
+                      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
                         <Badge variant={repo.status === "owned_by_current_org" ? "secondary" : "outline"} className="text-xs">
                           {claimStatusLabel(repo)}
                         </Badge>
@@ -138,25 +147,25 @@ function GitHubRepositoryClaims({
                   </div>
                 );
               })}
-              {claimMutation.isError && (
-                <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                  <p className="text-sm text-destructive">
-                    {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
-                  </p>
-                  {needsGitHubUserAuth && (
-                    <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
-                      Connect GitHub account
-                    </Button>
-                  )}
-                </div>
-              )}
-              {actionable.length === 0 && (
-                <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>
-              )}
             </div>
-          )}
-        </CardContent>
-      </Card>
+            {claimMutation.isError && (
+              <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <p className="text-sm text-destructive">
+                  {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
+                </p>
+                {needsGitHubUserAuth && (
+                  <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
+                    Connect GitHub account
+                  </Button>
+                )}
+              </div>
+            )}
+            {actionable.length === 0 && (
+              <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>
+            )}
+          </div>
+        )}
+      </div>
       <AlertDialog open={!!transferRepo} onOpenChange={(open) => !open && setTransferRepo(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -270,6 +279,170 @@ function SlackChannelPicker() {
   );
 }
 
+function repoName(repositories: Repository[], repoID?: string): string {
+  return repositories.find((repo) => repo.id === repoID)?.full_name ?? repoID ?? "Unknown repository";
+}
+
+function LinearAgentRoutingSettings() {
+  const queryClient = useQueryClient();
+  const [teamID, setTeamID] = useState("");
+  const [projectID, setProjectID] = useState("");
+  const [mappingRepoID, setMappingRepoID] = useState("");
+
+  const { data: statusResp, isLoading: statusLoading } = useQuery({
+    queryKey: queryKeys.integrations.linearAgentStatus,
+    queryFn: () => api.integrations.getLinearAgentStatus(),
+  });
+  const { data: mappingsResp, isLoading: mappingsLoading } = useQuery({
+    queryKey: queryKeys.integrations.linearAgentMappings,
+    queryFn: () => api.integrations.listLinearAgentMappings(),
+  });
+  const { data: repositoriesResp } = useQuery({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+
+  const repositories = (repositoriesResp?.data ?? []).filter((repo) => repo.status === "active");
+  const status = statusResp?.data;
+  const mappings = mappingsResp?.data ?? [];
+
+  const updateSettings = useMutation({
+    mutationFn: (body: { default_repo_id: string | null }) => api.integrations.updateLinearAgentSettings(body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.integrations.linearAgentStatus, exact: true }),
+  });
+  const upsertMapping = useMutation({
+    mutationFn: (body: { linear_team_id: string; linear_project_id?: string; repository_id: string }) =>
+      api.integrations.upsertLinearAgentMapping(body),
+    onSuccess: () => {
+      setTeamID("");
+      setProjectID("");
+      setMappingRepoID("");
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.linearAgentMappings });
+    },
+  });
+  const deleteMapping = useMutation({
+    mutationFn: (id: string) => api.integrations.deleteLinearAgentMapping(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.integrations.linearAgentMappings }),
+  });
+
+  const defaultRepoValue = status?.default_repo_id ?? NO_DEFAULT_REPO_VALUE;
+  const canAddMapping = teamID.trim() !== "" && mappingRepoID !== "";
+
+  return (
+    <div className="mt-3 space-y-4 rounded-md border border-border px-3 py-3">
+      <div>
+        <div className="text-sm font-medium">Linear agent routing</div>
+      </div>
+      <div className="space-y-4">
+        {statusLoading ? (
+          <p className="text-sm text-muted-foreground">Loading Linear agent settings...</p>
+        ) : (
+          <div className="grid gap-2">
+            <Label htmlFor="linear-default-repo">Default repository</Label>
+            <Select
+              value={defaultRepoValue}
+              onValueChange={(value) =>
+                updateSettings.mutate({ default_repo_id: value === NO_DEFAULT_REPO_VALUE ? null : value })
+              }
+              disabled={repositories.length === 0 || updateSettings.isPending}
+            >
+              <SelectTrigger id="linear-default-repo" aria-label="Default repository">
+                <SelectValue placeholder="Choose a default repository" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DEFAULT_REPO_VALUE}>No default repository</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {repositories.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Connect a GitHub repository before routing Linear agent work.</p>
+            ) : null}
+            {!status?.agent_scopes_granted ? (
+              <p className="text-xs text-muted-foreground">Reconnect Linear to grant the agent assignment and mention scopes.</p>
+            ) : null}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Team overrides</div>
+          {mappingsLoading ? (
+            <p className="text-sm text-muted-foreground">Loading team mappings...</p>
+          ) : mappings.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No team-specific overrides yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {mappings.map((mapping: LinearTeamRepoMapping) => (
+                <div key={mapping.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{mapping.linear_team_id}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {mapping.linear_project_id ? `Project ${mapping.linear_project_id} -> ` : ""}{repoName(repositories, mapping.repository_id)}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    title="Remove mapping"
+                    disabled={deleteMapping.isPending}
+                    onClick={() => deleteMapping.mutate(mapping.id)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-2 border-t border-border pt-4">
+          <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1.3fr_auto]">
+            <Input
+              aria-label="Linear team ID"
+              placeholder="Linear team ID"
+              value={teamID}
+              onChange={(event) => setTeamID(event.target.value)}
+            />
+            <Input
+              aria-label="Linear project ID"
+              placeholder="Project ID (optional)"
+              value={projectID}
+              onChange={(event) => setProjectID(event.target.value)}
+            />
+            <Select value={mappingRepoID} onValueChange={setMappingRepoID} disabled={repositories.length === 0}>
+              <SelectTrigger aria-label="Override repository">
+                <SelectValue placeholder="Repository" />
+              </SelectTrigger>
+              <SelectContent>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              disabled={!canAddMapping || upsertMapping.isPending}
+              loading={upsertMapping.isPending}
+              onClick={() => upsertMapping.mutate({
+                linear_team_id: teamID.trim(),
+                linear_project_id: projectID.trim() || undefined,
+                repository_id: mappingRepoID,
+              })}
+            >
+              Add
+            </Button>
+          </div>
+          {updateSettings.isError || upsertMapping.isError || deleteMapping.isError ? (
+            <p className="text-xs text-destructive">Failed to update Linear agent routing.</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type TokenDialogField = {
   id: string;
   label: string;
@@ -346,12 +519,7 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
-  const { data: reposResp } = useQuery({
-    queryKey: ["repositories", { includeDisconnected: true }],
-    queryFn: () => api.repositories.list({ includeDisconnected: true }),
-  });
   const disconnectMutation = useDisconnectIntegration();
-  const disconnectRepoMutation = useDisconnectRepository();
 
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
   const [notionError, setNotionError] = useState<string | null>(null);
@@ -410,15 +578,6 @@ export default function IntegrationsPage() {
     (integration) => integration.provider === "circleci" && integration.status === "active"
   );
 
-  const githubRepos = (reposResp?.data ?? []).map((r) => ({
-    id: r.id,
-    full_name: r.full_name,
-    status: r.status,
-  }));
-  const pendingRepoID = disconnectRepoMutation.isPending
-    ? (disconnectRepoMutation.variables ?? null)
-    : null;
-
   return (
     <PageContainer size="default">
       <div className="space-y-6">
@@ -433,12 +592,17 @@ export default function IntegrationsPage() {
       )}
       <AllIntegrationCards
         githubConnected={githubConnected}
-        githubRepos={githubRepos}
-        onDisconnectRepo={(id) => disconnectRepoMutation.mutate(id)}
-        onReconnectRepo={undefined}
-        pendingRepoID={pendingRepoID}
+        githubExtra={
+          isAdmin && githubConnected ? (
+            <GitHubRepositoryClaims
+              installationId={githubIntegration?.github_installation_id}
+              enabled={githubConnected}
+            />
+          ) : undefined
+        }
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
+        linearExtra={linearIntegration && isAdmin ? <LinearAgentRoutingSettings /> : undefined}
         linearLoading={false}
         linearAuthError={linearAuthError}
         slackConnected={Boolean(slackIntegration)}
@@ -464,12 +628,6 @@ export default function IntegrationsPage() {
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
         readOnly={!isAdmin}
       />
-      {isAdmin && githubConnected && (
-        <GitHubRepositoryClaims
-          installationId={githubIntegration?.github_installation_id}
-          enabled={githubConnected}
-        />
-      )}
       {slackIntegration && isAdmin && <SlackChannelPicker />}
       </div>
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -218,6 +219,26 @@ type LinearConfig struct {
 	Scope         string    `json:"scope,omitempty"`
 	WorkspaceID   string    `json:"workspace_id,omitempty"`
 	WorkspaceName string    `json:"workspace_name,omitempty"`
+
+	// AppUserID is the id of the @143 agent user provisioned by Linear when
+	// the OAuth flow was completed with actor=app. Empty for legacy installs
+	// that completed before the agent flow shipped — the health probe flips
+	// the integration into a "needs re-authorize" state when this is empty
+	// after the cutover. Persisted because filtering inbound webhooks by
+	// AppUserID lets us distinguish events targeted at our agent from
+	// arbitrary issue activity.
+	AppUserID string `json:"app_user_id,omitempty"`
+	// AppUserName is the display-name handle Linear assigned the agent user
+	// (typically "143"). Cosmetic; surfaced in admin UIs so operators can
+	// confirm the install paired the right OAuth app.
+	AppUserName string `json:"app_user_name,omitempty"`
+	// AgentScopesGranted is true when the OAuth Scope string contains both
+	// app:assignable and app:mentionable. Cached at install time so the
+	// runtime hot path doesn't re-parse Scope on every webhook. The health
+	// probe re-derives this on each pass so a token rotated through a
+	// non-agent flow (e.g. legacy "connect Linear") flips this back to false
+	// and surfaces a re-authorize banner.
+	AgentScopesGranted bool `json:"agent_scopes_granted,omitempty"`
 }
 
 // IsExpired returns true if the access token has a known expiry that has
@@ -436,6 +457,42 @@ func (c LinearConfig) Validate() error {
 		return errors.New("access_token or webhook_secret is required")
 	}
 	return nil
+}
+
+// HasAgentScopes returns true when the OAuth Scope string contains the
+// scopes required by the Linear agent feature (app:assignable AND
+// app:mentionable). Used by the health probe to decide whether to surface
+// a "re-authorize Linear (admin required)" banner. Computed from Scope
+// rather than the cached AgentScopesGranted bit so a token rotated through
+// the legacy `read,write` flow demotes correctly even if the cache was
+// stale.
+func (c LinearConfig) HasAgentScopes() bool {
+	if c.Scope == "" {
+		return false
+	}
+	// Linear stores scopes as a comma-separated list (the same shape the
+	// OAuth params used). Splitting on both `,` and ` ` is defensive — the
+	// spec allows both and Linear has historically used commas.
+	scopes := splitScopeString(c.Scope)
+	wantA, wantM := false, false
+	for _, s := range scopes {
+		switch s {
+		case LinearScopeAppAssignable:
+			wantA = true
+		case LinearScopeAppMentionable:
+			wantM = true
+		}
+	}
+	return wantA && wantM
+}
+
+// splitScopeString splits an OAuth scope string on commas or spaces. Linear
+// uses commas, but the OAuth spec leaves the separator implementation-defined
+// and other providers use spaces; accepting both keeps parsing robust.
+func splitScopeString(scope string) []string {
+	return strings.FieldsFunc(scope, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
 }
 
 func (c SlackConfig) Validate() error {
@@ -721,74 +778,92 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 
 // --- DB models ---
 
+type CredentialStatus string
+
+const (
+	CredentialStatusActive      CredentialStatus = "active"
+	CredentialStatusDisabled    CredentialStatus = "disabled"
+	CredentialStatusPendingAuth CredentialStatus = "pending_auth"
+	CredentialStatusInvalid     CredentialStatus = "invalid"
+)
+
+func (s CredentialStatus) Validate() error {
+	switch s {
+	case CredentialStatusActive, CredentialStatusDisabled, CredentialStatusPendingAuth, CredentialStatusInvalid:
+		return nil
+	default:
+		return fmt.Errorf("invalid CredentialStatus: %q", s)
+	}
+}
+
 // OrgCredential is the DB row representation. Config is encrypted bytea.
 type OrgCredential struct {
-	ID             uuid.UUID    `db:"id"`
-	OrgID          uuid.UUID    `db:"org_id"`
-	Provider       ProviderName `db:"provider"`
-	Label          string       `db:"label"`
-	Config         []byte       `db:"config"`
-	Status         string       `db:"status"`
-	Priority       int          `db:"priority"`
-	LastVerifiedAt *time.Time   `db:"last_verified_at"`
-	LastUsedAt     *time.Time   `db:"last_used_at"`
-	CreatedBy      *uuid.UUID   `db:"created_by"`
-	CreatedAt      time.Time    `db:"created_at"`
-	UpdatedAt      time.Time    `db:"updated_at"`
+	ID             uuid.UUID        `db:"id"`
+	OrgID          uuid.UUID        `db:"org_id"`
+	Provider       ProviderName     `db:"provider"`
+	Label          string           `db:"label"`
+	Config         []byte           `db:"config"`
+	Status         CredentialStatus `db:"status"`
+	Priority       int              `db:"priority"`
+	LastVerifiedAt *time.Time       `db:"last_verified_at"`
+	LastUsedAt     *time.Time       `db:"last_used_at"`
+	CreatedBy      *uuid.UUID       `db:"created_by"`
+	CreatedAt      time.Time        `db:"created_at"`
+	UpdatedAt      time.Time        `db:"updated_at"`
 }
 
 // DecryptedCredential pairs DB metadata with the strongly-typed, decrypted config.
 type DecryptedCredential struct {
-	ID             uuid.UUID      `json:"id"`
-	OrgID          uuid.UUID      `json:"org_id"`
-	Provider       ProviderName   `json:"provider"`
-	Label          string         `json:"label,omitempty"`
-	Config         ProviderConfig `json:"-"`
-	Status         string         `json:"status"`
-	Priority       int            `json:"priority"`
-	LastVerifiedAt *time.Time     `json:"last_verified_at,omitempty"`
-	LastUsedAt     *time.Time     `json:"last_used_at,omitempty"`
-	CreatedBy      *uuid.UUID     `json:"created_by,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID             uuid.UUID        `json:"id"`
+	OrgID          uuid.UUID        `json:"org_id"`
+	Provider       ProviderName     `json:"provider"`
+	Label          string           `json:"label,omitempty"`
+	Config         ProviderConfig   `json:"-"`
+	Status         CredentialStatus `json:"status"`
+	Priority       int              `json:"priority"`
+	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
+	LastUsedAt     *time.Time       `json:"last_used_at,omitempty"`
+	CreatedBy      *uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
 // UserCredential is the DB row representation for per-user credentials.
 type UserCredential struct {
-	ID             uuid.UUID    `db:"id"`
-	UserID         uuid.UUID    `db:"user_id"`
-	OrgID          uuid.UUID    `db:"org_id"`
-	Provider       ProviderName `db:"provider"`
-	Config         []byte       `db:"config"`
-	IsTeamDefault  bool         `db:"is_team_default"`
-	Status         string       `db:"status"`
-	LastVerifiedAt *time.Time   `db:"last_verified_at"`
-	CreatedAt      time.Time    `db:"created_at"`
-	UpdatedAt      time.Time    `db:"updated_at"`
+	ID             uuid.UUID        `db:"id"`
+	UserID         uuid.UUID        `db:"user_id"`
+	OrgID          uuid.UUID        `db:"org_id"`
+	Provider       ProviderName     `db:"provider"`
+	Config         []byte           `db:"config"`
+	IsTeamDefault  bool             `db:"is_team_default"`
+	Status         CredentialStatus `db:"status"`
+	LastVerifiedAt *time.Time       `db:"last_verified_at"`
+	CreatedAt      time.Time        `db:"created_at"`
+	UpdatedAt      time.Time        `db:"updated_at"`
 }
 
 // DecryptedUserCredential pairs DB metadata with the strongly-typed, decrypted config.
 type DecryptedUserCredential struct {
-	ID             uuid.UUID      `json:"id"`
-	UserID         uuid.UUID      `json:"user_id"`
-	OrgID          uuid.UUID      `json:"org_id"`
-	Provider       ProviderName   `json:"provider"`
-	Config         ProviderConfig `json:"-"`
-	IsTeamDefault  bool           `json:"is_team_default"`
-	Status         string         `json:"status"`
-	LastVerifiedAt *time.Time     `json:"last_verified_at,omitempty"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID             uuid.UUID        `json:"id"`
+	UserID         uuid.UUID        `json:"user_id"`
+	OrgID          uuid.UUID        `json:"org_id"`
+	Provider       ProviderName     `json:"provider"`
+	Config         ProviderConfig   `json:"-"`
+	IsTeamDefault  bool             `json:"is_team_default"`
+	Status         CredentialStatus `json:"status"`
+	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
+	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
 // --- API response types ---
 
 // CredentialSummary is the API-safe representation. Never contains full keys.
 type CredentialSummary struct {
-	Provider       ProviderName `json:"provider"`
-	Configured     bool         `json:"configured"`
-	Status         string       `json:"status,omitempty"`
-	MaskedKey      string       `json:"masked_key,omitempty"`
-	LastVerifiedAt *time.Time   `json:"last_verified_at,omitempty"`
+	Provider       ProviderName     `json:"provider"`
+	Configured     bool             `json:"configured"`
+	Status         CredentialStatus `json:"status,omitempty"`
+	MaskedKey      string           `json:"masked_key,omitempty"`
+	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
 
 	// Provider-specific non-secret fields.
 	APIType     string `json:"api_type,omitempty"`
@@ -799,14 +874,14 @@ type CredentialSummary struct {
 
 // UserCredentialSummary is the API-safe representation of a user credential.
 type UserCredentialSummary struct {
-	Provider       ProviderName `json:"provider"`
-	Configured     bool         `json:"configured"`
-	IsTeamDefault  bool         `json:"is_team_default"`
-	MaskedKey      string       `json:"masked_key,omitempty"`
-	SetByUserID    *uuid.UUID   `json:"set_by_user_id,omitempty"`
-	SetByUserName  string       `json:"set_by_user_name,omitempty"`
-	Status         string       `json:"status,omitempty"`
-	LastVerifiedAt *time.Time   `json:"last_verified_at,omitempty"`
+	Provider       ProviderName     `json:"provider"`
+	Configured     bool             `json:"configured"`
+	IsTeamDefault  bool             `json:"is_team_default"`
+	MaskedKey      string           `json:"masked_key,omitempty"`
+	SetByUserID    *uuid.UUID       `json:"set_by_user_id,omitempty"`
+	SetByUserName  string           `json:"set_by_user_name,omitempty"`
+	Status         CredentialStatus `json:"status,omitempty"`
+	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
 }
 
 // ResolvedCredential describes which credential source would be used for a provider.
@@ -851,24 +926,24 @@ func (s CodingAuthStatus) Validate() error {
 }
 
 type CodingAuth struct {
-	ID               uuid.UUID        `json:"id"`
-	OrgID            uuid.UUID        `json:"org_id"`
-	Priority         int              `json:"priority"`
-	Agent            AgentType        `json:"agent"`
-	AuthType         CodingAuthType   `json:"auth_type"`
-	Label            string           `json:"label"`
-	Scope            string           `json:"scope"`
-	Provider         ProviderName     `json:"provider"`
-	Status           CodingAuthStatus `json:"status"`
-	IsDefault        bool             `json:"is_default"`
-	LastVerifiedAt   *time.Time       `json:"last_verified_at,omitempty"`
-	RateLimitedUntil *time.Time       `json:"rate_limited_until,omitempty"`
-	RateLimitMessage *string          `json:"rate_limit_message,omitempty"`
-	LastUsedAt       *time.Time       `json:"last_used_at,omitempty"`
-	UsageNote        string           `json:"usage_note,omitempty"`
-	CreatedBy        *uuid.UUID       `json:"created_by,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	ID               uuid.UUID             `json:"id"`
+	OrgID            uuid.UUID             `json:"org_id"`
+	Priority         int                   `json:"priority"`
+	Agent            AgentType             `json:"agent"`
+	AuthType         CodingAuthType        `json:"auth_type"`
+	Label            string                `json:"label"`
+	Scope            CodingCredentialScope `json:"scope"`
+	Provider         ProviderName          `json:"provider"`
+	Status           CodingAuthStatus      `json:"status"`
+	IsDefault        bool                  `json:"is_default"`
+	LastVerifiedAt   *time.Time            `json:"last_verified_at,omitempty"`
+	RateLimitedUntil *time.Time            `json:"rate_limited_until,omitempty"`
+	RateLimitMessage *string               `json:"rate_limit_message,omitempty"`
+	LastUsedAt       *time.Time            `json:"last_used_at,omitempty"`
+	UsageNote        string                `json:"usage_note,omitempty"`
+	CreatedBy        *uuid.UUID            `json:"created_by,omitempty"`
+	CreatedAt        time.Time             `json:"created_at"`
+	UpdatedAt        time.Time             `json:"updated_at"`
 }
 
 type CreateCodingAuthInput struct {

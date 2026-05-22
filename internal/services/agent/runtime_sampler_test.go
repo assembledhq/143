@@ -148,6 +148,10 @@ func TestRuntimeSampler_LogsAggregateHealthSample(t *testing.T) {
 	require.InDelta(t, 0.50, event["max_cpu_util"].(float64), 0.001, "runtime health log should include max CPU utilization")
 	require.InDelta(t, 0.75, event["mean_memory_util"].(float64), 0.001, "runtime health log should include mean memory utilization to distinguish single-container outliers from across-the-board pressure")
 	require.InDelta(t, 0.50, event["mean_cpu_util"].(float64), 0.001, "runtime health log should include mean CPU utilization")
+	require.InDelta(t, 0.25, event["min_memory_headroom"].(float64), 0.001, "runtime health log should include lowest remaining memory headroom")
+	require.InDelta(t, 0.50, event["min_cpu_headroom"].(float64), 0.001, "runtime health log should include lowest remaining CPU headroom")
+	require.InDelta(t, 0.25, event["mean_memory_headroom"].(float64), 0.001, "runtime health log should include mean remaining memory headroom")
+	require.InDelta(t, 0.50, event["mean_cpu_headroom"].(float64), 0.001, "runtime health log should include mean remaining CPU headroom")
 }
 
 func TestRuntimeSampler_LogsAggregateHealthSampleWhenIdle(t *testing.T) {
@@ -180,6 +184,10 @@ func TestRuntimeSampler_LogsAggregateHealthSampleWhenIdle(t *testing.T) {
 	require.Equal(t, float64(0), event["max_cpu_util"], "idle runtime health log should report zero CPU utilization")
 	require.Equal(t, float64(0), event["mean_memory_util"], "idle runtime health log should report zero mean memory utilization")
 	require.Equal(t, float64(0), event["mean_cpu_util"], "idle runtime health log should report zero mean CPU utilization")
+	require.Equal(t, float64(1), event["min_memory_headroom"], "idle runtime health log should report full memory headroom")
+	require.Equal(t, float64(1), event["min_cpu_headroom"], "idle runtime health log should report full CPU headroom")
+	require.Equal(t, float64(1), event["mean_memory_headroom"], "idle runtime health log should report full mean memory headroom")
+	require.Equal(t, float64(1), event["mean_cpu_headroom"], "idle runtime health log should report full mean CPU headroom")
 	require.Equal(t, int64(0), prov.called.Load(), "idle runtime sampler should not call stats provider")
 }
 
@@ -332,31 +340,6 @@ type wrappedErr struct {
 
 func (w *wrappedErr) Error() string { return w.prefix + ": " + w.err.Error() }
 func (w *wrappedErr) Unwrap() error { return w.err }
-
-// syncBuffer is a thread-safe bytes.Buffer wrapper for capturing zerolog output
-// when a writer goroutine and an Eventually reader goroutine touch the same buffer.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.String()
-}
-
-func (s *syncBuffer) Bytes() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]byte(nil), s.buf.Bytes()...)
-}
 
 func TestUsageTrackerSnapshot_IsCopy(t *testing.T) {
 	t.Parallel()

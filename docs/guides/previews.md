@@ -16,10 +16,18 @@ This guide covers how to add preview support to a repo. For the underlying archi
 2. Open a session against the 143 repo (or anything on `main`).
 3. Click **Start Preview**.
 
-**Demo credentials** (shown on the login page when `DEMO_MODE=true`):
+**Demo credentials** (the admin login is shown on the login page when `DEMO_MODE=true`):
 
-- Email: `dogfood@143.dev`
-- Password: `preview-dogfood`
+- Email: `preview-admin@143.dev`
+- Password: `preview`
+
+Additional seeded users use the same password:
+
+| Email | Role |
+|---|---|
+| `preview-member@143.dev` | `member` |
+| `preview-builder@143.dev` | `builder` |
+| `preview-viewer@143.dev` | `viewer` |
 
 The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed.sql`). If you override those env vars, regenerate the bcrypt hash in `seed.sql` in lockstep or the banner will point at credentials that don't log in.
 
@@ -36,6 +44,8 @@ The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was starte
 The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
 
 Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables the login-page credential banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
+
+The dogfood frontend runs as a production Next build inside the preview (`npm run build`, then the generated standalone server). The launch script stages `.next/static` and `public` into the standalone output before booting so generated CSS, JavaScript chunks, fonts, and public images are served by the production server. Avoid `next dev` here: its HMR stream is not useful for reviewers and can interact badly with the preview gateway's HTML instrumentation on App Router pages.
 
 **How the dogfood handles `SESSION_SECRET`:** The preview runs inside a 143 session sandbox, which has no access to sops-encrypted production secrets, so the secret is generated at boot from `/dev/urandom` and cached at `/tmp/143-preview/session_secret`. Server restarts within the same sandbox reuse the cached value, so a reviewer stays signed in. A full sandbox recycle generates a fresh secret — reviewers just re-sign-in with the public demo credentials.
 
@@ -271,6 +281,8 @@ Any service using a destination or `credentials.mode != "none"` makes the previe
 ```
 
 The frontend proxies `/api/*` to the server at `localhost:8080`. The server gets `DATABASE_URL` injected and uses a shell `command` to chain `migrate` then `server` — the ready probe only passes once `server` is listening, so ordering is enforced naturally.
+
+For frontend frameworks that bake public environment variables into the browser bundle, keep preview API calls same-origin unless you intentionally own cross-origin auth. In Next.js, unset `NEXT_PUBLIC_API_URL` (or set it to an empty string) and use a server-side rewrite such as `/api/* -> http://localhost:8080`; otherwise the preview page can read a preview-domain CSRF cookie while posting to a different API origin that does not receive that cookie.
 
 For production preview domains such as `<preview-id>.preview.143.dev`, the public wildcard DNS must resolve to the app node and the edge proxy must be able to obtain a wildcard certificate. In 143's production setup that means:
 

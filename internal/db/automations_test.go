@@ -18,7 +18,7 @@ func automationColumnSlice() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope",
+		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
@@ -30,7 +30,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.IconType.OrDefault(), a.IconValue,
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
-		a.IdentityScope.OrDefault(),
+		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
@@ -75,7 +75,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(24)...).
+		WithArgs(anyArgs(25)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -204,7 +204,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(26)...).
+		WithArgs(anyArgs(27)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))
@@ -314,7 +314,7 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	ids := []uuid.UUID{uuid.New()}
 
 	iv := 1
-	iu := "hours"
+	iu := models.ScheduleUnitHours
 	a1 := models.Automation{
 		ID: ids[0], OrgID: orgID, Name: "a1",
 		ScheduleType: "interval", IntervalValue: &iv, IntervalUnit: &iu, Timezone: "UTC",
@@ -598,13 +598,13 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 	type prRow struct {
 		number   int
 		url      string
-		status   string
-		ciStatus string
+		status   models.PullRequestStatus
+		ciStatus models.PullRequestCIStatus
 	}
 	type sessionRow struct {
 		id                  uuid.UUID
 		title               *string
-		status              string
+		status              models.SessionStatus
 		diffStats           []byte
 		failureExplanation  *string
 		failureCategory     *string
@@ -616,7 +616,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 
 	cases := []struct {
 		name             string
-		runStatus        string
+		runStatus        models.AutomationRunStatus
 		session          *sessionRow
 		assertEnrichment func(t *testing.T, got models.AutomationRun)
 	}{
@@ -626,14 +626,14 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			session: &sessionRow{
 				id:              sessionID,
 				title:           &title,
-				status:          string(models.SessionStatusCompleted),
+				status:          models.SessionStatusCompleted,
 				diffStats:       []byte(`{"added":128,"removed":23,"files_changed":4}`),
 				prCreationState: "succeeded",
 				pr: &prRow{
 					number:   1213,
 					url:      prURL,
-					status:   "open",
-					ciStatus: "success",
+					status:   models.PullRequestStatusOpen,
+					ciStatus: models.PullRequestCIStatusSuccess,
 				},
 			},
 			assertEnrichment: func(t *testing.T, got models.AutomationRun) {
@@ -641,13 +641,13 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 				require.NotNil(t, got.Session)
 				require.Equal(t, sessionID, got.Session.ID)
 				require.Equal(t, "Refactor diff viewer", *got.Session.Title)
-				require.Equal(t, string(models.SessionStatusCompleted), got.Session.Status)
+				require.Equal(t, models.SessionStatusCompleted, got.Session.Status)
 				require.JSONEq(t, `{"added":128,"removed":23,"files_changed":4}`, string(got.Session.DiffStats))
 				require.NotNil(t, got.Session.PR)
 				require.Equal(t, 1213, got.Session.PR.Number)
 				require.Equal(t, prURL, got.Session.PR.URL)
-				require.Equal(t, "open", got.Session.PR.Status)
-				require.Equal(t, "success", got.Session.PR.CIStatus)
+				require.Equal(t, models.PullRequestStatusOpen, got.Session.PR.Status)
+				require.Equal(t, models.PullRequestCIStatusSuccess, got.Session.PR.CIStatus)
 			},
 		},
 		{
@@ -656,7 +656,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			session: &sessionRow{
 				id:              sessionID,
 				title:           &title,
-				status:          string(models.SessionStatusCompleted),
+				status:          models.SessionStatusCompleted,
 				diffStats:       []byte(`{"added":12,"removed":3}`),
 				prCreationState: "idle",
 			},
@@ -673,7 +673,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			session: &sessionRow{
 				id:                  sessionID,
 				title:               nil,
-				status:              string(models.SessionStatusFailed),
+				status:              models.SessionStatusFailed,
 				failureExplanation:  &failureExplanation,
 				failureCategory:     &failureCategory,
 				failureNextSteps:    failureNextSteps,

@@ -227,11 +227,11 @@ func (s *ScopedCredentialStore) DisableByID(ctx context.Context, scope models.Sc
 
 // UpdateStatusByID flips the row's status. Used to mark a credential invalid
 // after a refresh fails authentication.
-func (s *ScopedCredentialStore) UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error {
+func (s *ScopedCredentialStore) UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error {
 	if scope.IsPersonal() {
 		return s.coding.UpdateStatus(ctx, scope, id, status)
 	}
-	return s.org.UpdateStatusByID(ctx, scope.OrgID, id, status)
+	return s.org.UpdateStatusByID(ctx, scope.OrgID, id, models.CredentialStatus(status))
 }
 
 // ExistsForProviderByID is used by Disconnect to verify an id belongs to the
@@ -446,7 +446,7 @@ func decryptedCredentialFromCoding(row *models.DecryptedCodingCredential) (*mode
 		Provider:       translateProviderFromUnified(row.Provider),
 		Label:          row.Label,
 		Config:         translateConfigFromUnifiedRead(row.Config),
-		Status:         row.Status,
+		Status:         models.CredentialStatus(row.Status),
 		Priority:       row.Priority,
 		LastVerifiedAt: row.LastVerifiedAt,
 		CreatedBy:      row.CreatedBy,

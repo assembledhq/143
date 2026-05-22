@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 const defaultExtensionQueueAgeThreshold = 2 * time.Minute
+const runtimeStopPersistenceTimeout = 2 * time.Second
 
 type runtimeConfig struct {
 	SoftBudget               time.Duration
@@ -94,7 +96,12 @@ type runtimeProgressTracker struct {
 	lastStrength     models.RuntimeProgressStrength
 	lastStrongAt     time.Time
 	lastPersistedAt  time.Time
-	activeToolAt     time.Time
+	activeTools      map[string]activeToolProgress
+}
+
+type activeToolProgress struct {
+	startedAt time.Time
+	summary   string
 }
 
 func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
@@ -106,7 +113,7 @@ func newRuntimeProgressTracker(now time.Time) *runtimeProgressTracker {
 	}
 }
 
-func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) {
+func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time, toolID string, toolSummary ...string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if observedAt.IsZero() {
@@ -120,11 +127,22 @@ func (t *runtimeProgressTracker) Record(progressType models.RuntimeProgressType,
 	}
 	switch progressType {
 	case models.RuntimeProgressTypeToolUse:
-		if t.activeToolAt.IsZero() {
-			t.activeToolAt = observedAt
+		if toolID != "" {
+			if t.activeTools == nil {
+				t.activeTools = make(map[string]activeToolProgress)
+			}
+			progress := activeToolProgress{startedAt: observedAt}
+			if len(toolSummary) > 0 {
+				progress.summary = toolSummary[0]
+			}
+			t.activeTools[toolID] = progress
 		}
 	case models.RuntimeProgressTypeToolResult, models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressTypeCheckpoint:
-		t.activeToolAt = time.Time{}
+		if toolID != "" && t.activeTools != nil {
+			delete(t.activeTools, toolID)
+		} else {
+			clear(t.activeTools)
+		}
 	}
 }
 
@@ -137,7 +155,51 @@ func (t *runtimeProgressTracker) Snapshot() (time.Time, time.Time, models.Runtim
 func (t *runtimeProgressTracker) ToolActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return !t.activeToolAt.IsZero()
+	return len(t.activeTools) > 0
+}
+
+func (t *runtimeProgressTracker) ActiveToolSummaries(limit int) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.activeTools) == 0 || limit <= 0 {
+		return nil
+	}
+	tools := make([]struct {
+		id       string
+		progress activeToolProgress
+	}, 0, len(t.activeTools))
+	for id, progress := range t.activeTools {
+		tools = append(tools, struct {
+			id       string
+			progress activeToolProgress
+		}{id: id, progress: progress})
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		if tools[i].progress.startedAt.Equal(tools[j].progress.startedAt) {
+			return tools[i].id < tools[j].id
+		}
+		return tools[i].progress.startedAt.Before(tools[j].progress.startedAt)
+	})
+	if len(tools) > limit {
+		tools = tools[:limit]
+	}
+	summaries := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		summary := tool.id
+		if tool.progress.summary != "" {
+			summary += ": " + truncateRuntimeToolSummary(tool.progress.summary)
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries
+}
+
+func truncateRuntimeToolSummary(summary string) string {
+	const maxRuntimeToolSummaryBytes = 170
+	if len(summary) <= maxRuntimeToolSummaryBytes {
+		return summary
+	}
+	return summary[:maxRuntimeToolSummaryBytes-3] + "..."
 }
 
 func (t *runtimeProgressTracker) ShouldPersist() bool {
@@ -153,30 +215,61 @@ func (t *runtimeProgressTracker) ShouldPersist() bool {
 	return false
 }
 
-func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, bool) {
+func runtimeProgressFromLog(entry LogEntry) (models.RuntimeProgressType, models.RuntimeProgressStrength, string, bool) {
 	switch entry.Level {
 	case "tool_use":
 		if isTerminalCommandExecution(entry.Metadata) {
-			return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, true
+			return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, commandExecutionItemIDFromMetadata(entry.Metadata), true
 		}
-		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, commandExecutionItemIDFromMetadata(entry.Metadata), true
 	case "question":
-		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, true
+		return models.RuntimeProgressTypeQuestionBlocked, models.RuntimeProgressStrengthStrong, "", true
 	case "output":
 		if entry.Metadata != nil {
 			if typ, ok := entry.Metadata["type"].(string); ok && typ == "tool_result" {
-				return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, true
+				return models.RuntimeProgressTypeToolResult, models.RuntimeProgressStrengthStrong, commandExecutionItemIDFromMetadata(entry.Metadata), true
 			}
 		}
-		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeAssistantOutput, models.RuntimeProgressStrengthWeak, "", true
 	case "debug":
-		if isCommandExecutionStart(entry.Message) {
-			return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, true
+		if itemID, ok := commandExecutionStartItemID(entry.Message); ok {
+			return models.RuntimeProgressTypeToolUse, models.RuntimeProgressStrengthWeak, itemID, true
 		}
-		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, true
+		return models.RuntimeProgressTypeAssistantReason, models.RuntimeProgressStrengthWeak, "", true
 	default:
-		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, false
+		return models.RuntimeProgressTypeNone, models.RuntimeProgressStrengthNone, "", false
 	}
+}
+
+func runtimeToolSummaryFromLog(entry LogEntry) string {
+	if entry.Level == "debug" {
+		if itemID, ok := commandExecutionStartItemID(entry.Message); ok && itemID != "" {
+			if command, ok := commandExecutionStartCommand(entry.Message); ok {
+				return command
+			}
+		}
+	}
+	if entry.Metadata == nil {
+		return ""
+	}
+	tool, _ := entry.Metadata["tool"].(string)
+	if tool != "command_execution" {
+		return ""
+	}
+	input, _ := entry.Metadata["input"].(map[string]any)
+	if input == nil {
+		return ""
+	}
+	command, _ := input["command"].(string)
+	return command
+}
+
+func commandExecutionItemIDFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	itemID, _ := metadata["item_id"].(string)
+	return itemID
 }
 
 func isTerminalCommandExecution(metadata map[string]any) bool {
@@ -196,20 +289,55 @@ func isTerminalCommandExecution(metadata map[string]any) bool {
 	}
 }
 
-func isCommandExecutionStart(message string) bool {
+func commandExecutionStartItemID(message string) (string, bool) {
 	if message == "" {
-		return false
+		return "", false
 	}
 	var event struct {
 		Type string `json:"type"`
 		Item struct {
+			ID   string `json:"id"`
 			Type string `json:"type"`
 		} `json:"item"`
 	}
 	if err := json.Unmarshal([]byte(message), &event); err != nil {
-		return false
+		return "", false
 	}
-	return event.Type == "item.started" && event.Item.Type == "command_execution"
+	if event.Type != "item.started" || event.Item.Type != "command_execution" {
+		return "", false
+	}
+	return event.Item.ID, true
+}
+
+func commandExecutionStartCommand(message string) (string, bool) {
+	if message == "" {
+		return "", false
+	}
+	var event struct {
+		Type string `json:"type"`
+		Item struct {
+			Type    string `json:"type"`
+			Command string `json:"command"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(message), &event); err != nil {
+		return "", false
+	}
+	if event.Type != "item.started" || event.Item.Type != "command_execution" || event.Item.Command == "" {
+		return "", false
+	}
+	return event.Item.Command, true
+}
+
+func (c *runtimeController) activeToolLogFields(event *zerolog.Event) *zerolog.Event {
+	if c.tracker == nil {
+		return event
+	}
+	summaries := c.tracker.ActiveToolSummaries(5)
+	if len(summaries) == 0 {
+		return event
+	}
+	return event.Int("active_tool_count", len(summaries)).Strs("active_tools", summaries)
 }
 
 type runtimeController struct {
@@ -295,6 +423,23 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 	if c.cancels != nil {
 		c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow)
 	}
+	runtimeReason := stopReasonToRuntime(reason)
+	if runtimeReason != models.RuntimeStopReasonNone {
+		stopAfter := time.Now().UTC().Add(c.cfg.GracefulShutdownWindow + c.cfg.CheckpointFinalizeWindow + defaultRuntimeStallAge)
+		persistCtx, cancel := context.WithTimeout(context.Background(), runtimeStopPersistenceTimeout)
+		defer cancel()
+		if err := c.sessions.MarkRuntimeStopRequested(persistCtx, c.orgID, c.sessionID, runtimeReason, stopAfter); err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str("session_id", c.sessionID.String()).
+				Str("stop_reason", string(runtimeReason)).
+				Msg("failed to persist runtime stop request")
+		}
+	}
+	event := c.logger.Info().
+		Str("session_id", c.sessionID.String()).
+		Str("stop_reason", string(runtimeReason))
+	c.activeToolLogFields(event).Msg("runtime stop requested")
 }
 
 func (c *runtimeController) tick(ctx context.Context, now time.Time) {
@@ -337,6 +482,12 @@ func (c *runtimeController) tick(ctx context.Context, now time.Time) {
 }
 
 func (c *runtimeController) shouldExtend(ctx context.Context, now, lastStrongAt time.Time) bool {
+	if lastStrongAt.IsZero() {
+		return false
+	}
+	if now.Sub(lastStrongAt) > c.cfg.ExtensionIncrement {
+		return false
+	}
 	if c.isDraining != nil && c.isDraining() {
 		return false
 	}
@@ -352,10 +503,7 @@ func (c *runtimeController) shouldExtend(ctx context.Context, now, lastStrongAt 
 			return false
 		}
 	}
-	if lastStrongAt.IsZero() {
-		return false
-	}
-	return now.Sub(lastStrongAt) <= c.cfg.ExtensionIncrement
+	return true
 }
 
 func (c *runtimeController) tryExtend(ctx context.Context, expectedSoftDeadline time.Time) bool {

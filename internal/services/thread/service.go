@@ -62,7 +62,7 @@ type SessionStore interface {
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 }
 
 // QuestionStore is the optional clarifying-question surface used by
@@ -115,6 +115,7 @@ type ThreadCanceller interface {
 type MessageStore interface {
 	Create(ctx context.Context, msg *models.SessionMessage) error
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
+	ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
 // LogStore defines the log DB operations needed by the thread service.
@@ -172,6 +173,11 @@ type SendMessageInput struct {
 	Commands                models.SessionInputCommands
 	PlanMode                bool
 	ResolveReviewCommentIDs []uuid.UUID
+	// ContinuationDedupeKeyOverride is for system-generated follow-up turns
+	// created while the current same-thread worker job is still marked running.
+	// User sends should leave it nil so rapid-fire messages keep normal thread
+	// dedupe behavior.
+	ContinuationDedupeKeyOverride *string
 }
 
 // SendMessageResult carries everything callers need to finish handling a
@@ -190,6 +196,11 @@ type SendMessageResult struct {
 	ResolvedComments   []models.SessionReviewComment
 	AnsweredQuestion   *models.SessionQuestion
 	AnsweredHumanInput *models.HumanInputRequest
+}
+
+type MessageWindowResult struct {
+	Window       db.SessionMessageWindow
+	ThreadStatus models.ThreadStatus
 }
 
 // Service handles thread business logic.
@@ -522,7 +533,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// Skipped on the queue-only path: the thread is already running, which
 	// already implies the session is running.
 	var claimedSession models.Session
-	revertStatus := ""
+	var revertStatus models.SessionStatus
 	if !queueOnly {
 		var claimErr error
 		claimedSession, revertStatus, claimErr = s.claimSessionForSend(ctx, input.OrgID, input.SessionID)
@@ -572,7 +583,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// clarifying question and the caller has the plumbing to answer it.
 	// Mirrors sessions.go's predicate: revertStatus == awaiting_input &&
 	// userID != nil && questionStore != nil.
-	answerPendingQuestion := revertStatus == string(models.SessionStatusAwaitingInput) && input.UserID != nil && s.questionStore != nil
+	answerPendingQuestion := revertStatus == models.SessionStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
 	answerPendingHumanInput := preClaimThreadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.humanInputStore != nil
 
 	var (
@@ -623,6 +634,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// this tab collapse, while sibling sends that arrive during another tab's
 	// turn are queued without enqueueing a second shared-sandbox job.
 	dedupeKey := db.ContinueSessionDedupeKey(thread.ID)
+	if input.ContinuationDedupeKeyOverride != nil && *input.ContinuationDedupeKeyOverride != "" {
+		dedupeKey = *input.ContinuationDedupeKeyOverride
+	}
 	payload := map[string]string{
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),
@@ -885,10 +899,10 @@ func threadStatusIsResumable(status models.ThreadStatus) bool {
 // row, the status to revert to on failure (empty when the session was
 // already running due to a sibling tab and no claim was taken), and a
 // terminal error when neither claim succeeds.
-func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, string, error) {
+func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, models.SessionStatus, error) {
 	claimed, claimErr := s.sessionStore.ClaimIdle(ctx, orgID, sessionID)
 	if claimErr == nil {
-		return claimed, string(models.SessionStatusIdle), nil
+		return claimed, models.SessionStatusIdle, nil
 	}
 
 	// ClaimIdle failed because the session is not 'idle'. Read the actual
@@ -902,13 +916,13 @@ func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid
 	if getErr != nil {
 		return models.Session{}, "", fmt.Errorf("inspect session for claim fallback: %w", getErr)
 	}
-	if existing.Status == string(models.SessionStatusRunning) {
+	if existing.Status == models.SessionStatusRunning {
 		s.logger.Debug().
 			Str("session_id", sessionID.String()).
 			Msg("session already running due to sibling thread; proceeding without re-claim")
 		return existing, "", nil
 	}
-	if existing.SandboxState == string(models.SandboxStateDestroyed) {
+	if existing.SandboxState == models.SandboxStateDestroyed {
 		return models.Session{}, "", ErrSessionSnapshotExpired
 	}
 
@@ -1036,12 +1050,12 @@ func (s *Service) createMessageInTx(
 //
 // Logs each revert error individually so partial reverts are debuggable, but
 // never returns — callers always have a primary error to surface.
-func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, revertStatus, reason string) {
+func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, revertStatus models.SessionStatus, reason string) {
 	if revertStatus != "" {
 		if revertErr := s.sessionStore.UpdateStatus(ctx, orgID, sessionID, revertStatus); revertErr != nil {
 			s.logger.Error().Err(revertErr).
 				Str("session_id", sessionID.String()).
-				Str("revert_status", revertStatus).
+				Str("revert_status", string(revertStatus)).
 				Str("reason", reason).
 				Msg("failed to revert session after thread send failure")
 		}
@@ -1107,6 +1121,25 @@ func (s *Service) GetMessages(ctx context.Context, orgID, sessionID, threadID uu
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
 	return messages, nil
+}
+
+// GetMessageWindow returns a bottom-first message window for a thread,
+// validating it belongs to the given session before querying messages.
+func (s *Service) GetMessageWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (MessageWindowResult, error) {
+	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return MessageWindowResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return MessageWindowResult{}, err
+	}
+
+	window, err := s.messageStore.ListWindowByThread(ctx, orgID, threadID, opts)
+	if err != nil {
+		return MessageWindowResult{}, fmt.Errorf("list message window: %w", err)
+	}
+	return MessageWindowResult{Window: window, ThreadStatus: thread.Status}, nil
 }
 
 // GetLogs returns logs for a thread, validating it belongs to the given session.
