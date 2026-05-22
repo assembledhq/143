@@ -37,6 +37,17 @@ function metadataString(metadata: SessionLog["metadata"] | null | undefined, key
   return typeof value === "string" ? value : undefined;
 }
 
+function isRecoverableCodexRouterDiagnostic(message: string): boolean {
+  return message.includes("codex_core::tools::router:") && (
+    message.includes("write_stdin failed: stdin is closed for this session") ||
+    message.includes("apply_patch verification failed: Failed to find expected lines")
+  );
+}
+
+function isHiddenLog(log: SessionLog): boolean {
+  return metadataString(log.metadata, "visibility") === "hidden" || isRecoverableCodexRouterDiagnostic(log.message);
+}
+
 function isToolResultLog(item: TaggedTimelineItem | undefined): item is Extract<TaggedTimelineItem, { source: "log" }> {
   return item?.source === "log" && item.data.metadata?.type === "tool_result";
 }
@@ -168,6 +179,12 @@ export function buildTimeline(
       } else {
         entries.push({ kind: "tool_group", toolUse: log });
       }
+      i++;
+      continue;
+    }
+
+    if (isHiddenLog(log)) {
+      entries.push({ kind: "log", data: log });
       i++;
       continue;
     }
