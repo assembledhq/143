@@ -7,10 +7,7 @@ import {
   Square,
   RotateCw,
   ExternalLink,
-  Smartphone,
-  Tablet,
   Monitor,
-  Maximize2,
   Loader2,
   AlertTriangle,
   CheckCircle2,
@@ -67,13 +64,6 @@ export interface PreviewPanelProps {
   previewOriginTemplate: string; // e.g. "http://{id}.preview.localhost:9090"
 }
 
-const WIDTH_PRESETS = [
-  { name: "Mobile", width: 375, icon: Smartphone },
-  { name: "Tablet", width: 768, icon: Tablet },
-  { name: "Desktop", width: 1280, icon: Monitor },
-  { name: "Full", width: 0, icon: Maximize2 },
-] as const;
-
 const PREVIEW_LIFETIME_OPTIONS = [
   { label: "Keep for 15 min", durationSeconds: 15 * 60 },
   { label: "Keep for 30 min", durationSeconds: 30 * 60 },
@@ -126,20 +116,6 @@ function statusColor(status: PreviewStatus): string {
       return "bg-muted text-muted-foreground border-border";
     default:
       return "bg-primary/15 text-primary border-primary/20";
-  }
-}
-
-function serviceStatusIcon(status: string) {
-  switch (status) {
-    case "ready":
-      return <CheckCircle2 className="size-3 text-emerald-500" />;
-    case "failed":
-      return <AlertTriangle className="size-3 text-destructive" />;
-    case "starting":
-    case "pending":
-      return <Loader2 className="size-3 animate-spin text-muted-foreground" />;
-    default:
-      return <Circle className="size-3 text-muted-foreground" />;
   }
 }
 
@@ -408,7 +384,6 @@ export function PreviewPanel({
   const queryClient = useQueryClient();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const startupPhaseRailRef = useRef<HTMLDivElement | null>(null);
-  const [selectedWidth, setSelectedWidth] = useState<number>(0); // 0 = full
   const [designMode, setDesignMode] = useState(false);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
@@ -799,6 +774,23 @@ export function PreviewPanel({
       {/* Controls bar */}
       {showTopControls && (
       <div className="flex items-center gap-2 flex-wrap">
+        {/* Open preview */}
+        {isReady && previewOrigin && (
+          <Button
+            size="sm"
+            asChild
+          >
+            <a
+              href={previewOrigin}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLink className="size-3.5" />
+              Open Preview
+            </a>
+          </Button>
+        )}
+
         {/* Start / Stop / Restart */}
         <div className="flex items-center gap-1">
           {isActive ? (
@@ -863,37 +855,6 @@ export function PreviewPanel({
 
         <div className="flex-1" />
 
-        {/* Width presets */}
-        {isReady && (
-          <TooltipProvider>
-            <div className="flex items-center gap-0.5 rounded-md border bg-muted/50 p-0.5">
-              {WIDTH_PRESETS.map((preset) => (
-                <Tooltip key={preset.name}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      onClick={() => setSelectedWidth(preset.width)}
-                      className={cn(
-                        "rounded p-1 transition-colors",
-                        selectedWidth === preset.width
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      )}
-                    >
-                      <preset.icon className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {preset.name}
-                    {preset.width > 0 ? ` (${preset.width}px)` : ""}
-                  </TooltipContent>
-                </Tooltip>
-              ))}
-            </div>
-          </TooltipProvider>
-        )}
-
         {/* Design mode toggle */}
         {isReady && (
           <TooltipProvider>
@@ -914,29 +875,6 @@ export function PreviewPanel({
           </TooltipProvider>
         )}
 
-        {/* Open in new tab */}
-        {isReady && previewOrigin && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  asChild
-                >
-                  <a
-                    href={previewOrigin}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <ExternalLink className="size-3.5" />
-                  </a>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Open in new tab</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
       </div>
       )}
 
@@ -974,23 +912,6 @@ export function PreviewPanel({
             <RefreshCw className="size-3.5" />
             Retry
           </Button>
-        </div>
-      )}
-
-      {/* Service status indicators */}
-      {services.length > 1 && isReady && (
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          {services.map((svc) => (
-            <div key={svc.service_name} className="flex items-center gap-1">
-              {serviceStatusIcon(svc.status)}
-              <span>{svc.service_name}</span>
-              {svc.error && (
-                <span className="text-destructive truncate max-w-[200px]">
-                  ({svc.error})
-                </span>
-              )}
-            </div>
-          ))}
         </div>
       )}
 
@@ -1206,14 +1127,7 @@ export function PreviewPanel({
       {isReady && iframeSrc && (
         <div className="relative rounded-lg border bg-muted/30 overflow-hidden">
           <div
-            className={cn(
-              "mx-auto transition-all duration-300",
-              selectedWidth > 0 ? "border-x border-dashed border-border" : ""
-            )}
-            style={{
-              maxWidth: selectedWidth > 0 ? `${selectedWidth}px` : "100%",
-              width: "100%",
-            }}
+            className="mx-auto w-full"
           >
             <div className="relative" style={{ paddingBottom: "62.5%" }}>
               {/* Sandbox threat model: allow-same-origin is required so the
