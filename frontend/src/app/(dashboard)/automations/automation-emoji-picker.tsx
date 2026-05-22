@@ -140,7 +140,7 @@ export function AutomationEmojiPicker({
             variant="outline"
             aria-label={triggerLabel}
             disabled={disabled}
-            className={cn("h-10 w-16 justify-center gap-1 px-2", className)}
+            className={cn("h-9 w-16 justify-center gap-1 px-2", className)}
           >
             <span className="text-lg leading-none" aria-hidden="true">{selected.emoji}</span>
             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
