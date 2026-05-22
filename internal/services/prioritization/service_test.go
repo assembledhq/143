@@ -406,7 +406,7 @@ func TestCheckAutoTrigger(t *testing.T) {
 				orgID,
 				&models.PriorityScore{Score: tt.score},
 				&models.ComplexityEstimate{Tier: tt.tier},
-				&models.Issue{ID: issueID, Severity: tt.issueSeverity},
+				&models.Issue{ID: issueID, Severity: models.IssueSeverity(tt.issueSeverity)},
 			)
 			require.NoError(t, err, "CheckAutoTrigger should not return an error for gate pass or skip paths")
 			require.Equal(t, tt.expectedCreateRun, len(runs.createdRuns) == 1, "CheckAutoTrigger should create a run only when all gates pass")
@@ -473,10 +473,10 @@ func TestScoringAndHelpers(t *testing.T) {
 		{
 			name: "severity mapping uses expected buckets",
 			validate: func(t *testing.T) {
-				require.Equal(t, 100.0, computeSeverity("critical"), "computeSeverity should map critical to max score")
-				require.Equal(t, 75.0, computeSeverity("HIGH"), "computeSeverity should be case-insensitive for high severity")
-				require.Equal(t, 50.0, computeSeverity("medium"), "computeSeverity should map medium to 50")
-				require.Equal(t, 25.0, computeSeverity("unknown"), "computeSeverity should default unknown values to low score")
+				require.Equal(t, 100.0, computeSeverity(models.IssueSeverity("critical")), "computeSeverity should map critical to max score")
+				require.Equal(t, 75.0, computeSeverity(models.IssueSeverity("HIGH")), "computeSeverity should be case-insensitive for high severity")
+				require.Equal(t, 50.0, computeSeverity(models.IssueSeverity("medium")), "computeSeverity should map medium to 50")
+				require.Equal(t, 25.0, computeSeverity(models.IssueSeverity("unknown")), "computeSeverity should default unknown values to low score")
 			},
 		},
 		{
@@ -501,8 +501,8 @@ func TestScoringAndHelpers(t *testing.T) {
 			validate: func(t *testing.T) {
 				require.Equal(t, 0.25, defaultOrValue(0, 0.25), "defaultOrValue should return default when value is zero")
 				require.Equal(t, 0.5, defaultOrValue(0.5, 0.25), "defaultOrValue should return value when non-zero")
-				require.True(t, isHighSeverity("High"), "isHighSeverity should match high severity case-insensitively")
-				require.False(t, isHighSeverity("medium"), "isHighSeverity should reject medium severity")
+				require.True(t, isHighSeverity(models.IssueSeverity("High")), "isHighSeverity should match high severity case-insensitively")
+				require.False(t, isHighSeverity(models.IssueSeverity("medium")), "isHighSeverity should reject medium severity")
 				require.Equal(t, 2, aggressivenessMaxTier(1), "aggressivenessMaxTier should map conservative to tier 2")
 				require.Equal(t, 3, aggressivenessMaxTier(0), "aggressivenessMaxTier should default unknown values to moderate")
 			},

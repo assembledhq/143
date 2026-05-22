@@ -74,11 +74,11 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 	return &models.Session{
 		OrgID:                orgID,
 		AgentType:            agentType,
-		Status:               string(models.SessionStatusPending),
+		Status:               models.SessionStatusPending,
 		Origin:               models.SessionOriginIssueTrigger,
 		Title:                &title,
 		PMApproach:           &approach,
-		AutonomyLevel:        string(models.DefaultSessionAutonomy),
+		AutonomyLevel:        models.DefaultSessionAutonomy,
 		TokenMode:            models.DefaultSessionTokenMode,
 		RepositoryID:         &repoID,
 		PrimaryIssueID:       &primaryIssueID,

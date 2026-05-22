@@ -32,7 +32,7 @@ var errUnauthenticated = errors.New("unauthenticated")
 // point (so the org-id lint rule sees middleware.OrgIDFromContext directly
 // in each handler body) and pass them in here.
 func resolveOAuthScope(orgID uuid.UUID, userID uuid.UUID, activeRole, scopeParam string) (models.Scope, error) {
-	switch scopeParam {
+	switch models.CodingCredentialScope(scopeParam) {
 	case models.CodingCredentialScopePersonal:
 		uid := userID
 		return models.Scope{OrgID: orgID, UserID: &uid}, nil

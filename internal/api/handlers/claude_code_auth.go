@@ -200,7 +200,7 @@ func (h *ClaudeCodeAuthHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := models.Scope{OrgID: orgID}
-	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))) == models.CodingCredentialScopePersonal {
+	if strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))) == string(models.CodingCredentialScopePersonal) {
 		uid := user.ID
 		scope = models.Scope{OrgID: orgID, UserID: &uid}
 	}

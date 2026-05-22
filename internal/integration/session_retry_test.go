@@ -27,7 +27,7 @@ func TestIntegration_RetrySession_ResetsAndReenqueues(t *testing.T) {
 	user := seedUser(t, pool, orgID)
 
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusFailed),
+		Status:      models.SessionStatusFailed,
 		CurrentTurn: 1,
 	})
 	// Stamp realistic failure metadata so the test verifies the reset
@@ -59,7 +59,7 @@ func TestIntegration_RetrySession_ResetsAndReenqueues(t *testing.T) {
 	// 1. Session reset to pending with failure metadata cleared.
 	updated, err := db.NewSessionStore(pool).GetByID(context.Background(), orgID, session.ID)
 	require.NoError(t, err)
-	require.Equal(t, "pending", updated.Status)
+	require.Equal(t, models.SessionStatusPending, updated.Status)
 	require.Nil(t, updated.FailureExplanation, "failure_explanation must be cleared on retry")
 	require.Nil(t, updated.FailureCategory, "failure_category must be cleared on retry")
 	require.False(t, updated.FailureRetryAdvised, "failure_retry_advised must be reset on retry")
@@ -102,7 +102,7 @@ func TestIntegration_RetrySession_RejectsNonFailedSession(t *testing.T) {
 	orgID := seedOrg(t, pool)
 	user := seedUser(t, pool, orgID)
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusRunning),
+		Status:      models.SessionStatusRunning,
 		CurrentTurn: 1,
 	})
 

@@ -25,7 +25,7 @@ const (
 
 // resolveTokenLimit returns the appropriate max token limit based on
 // the token mode and optional org-specific context limits.
-func resolveTokenLimit(mode string, limits *models.ContextLimits) int {
+func resolveTokenLimit(mode models.SessionTokenMode, limits *models.ContextLimits) int {
 	low := defaultLowTokenMax
 	high := defaultHighTokenMax
 	if limits != nil {
@@ -36,7 +36,7 @@ func resolveTokenLimit(mode string, limits *models.ContextLimits) int {
 			high = limits.AgentHighTokenMax
 		}
 	}
-	if mode == "high" {
+	if mode == models.SessionTokenModeHigh {
 		return high
 	}
 	return low

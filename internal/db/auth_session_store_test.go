@@ -562,7 +562,7 @@ func TestSessionStore_UpdateStatus(t *testing.T) {
 					),
 				)
 
-			err = store.UpdateStatus(context.Background(), orgID, runID, tt.status)
+			err = store.UpdateStatus(context.Background(), orgID, runID, models.SessionStatus(tt.status))
 			require.NoError(t, err, "UpdateStatus should not return an error")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})

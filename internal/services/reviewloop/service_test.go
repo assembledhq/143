@@ -25,7 +25,7 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	snapshotKey := "snapshots/review-loop-start.tar.zst"
 	store := &fakeReviewLoopStore{}
 	threads := &fakeThreadService{
-		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeClaudeCode, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted), SnapshotKey: &snapshotKey},
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeClaudeCode, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
 		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeClaudeCode, Label: "Claude Review"},
 		message: models.SessionMessage{ID: messageID, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
 	}
@@ -67,7 +67,7 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 		},
 	}
 	threads := &fakeThreadService{
-		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted), SnapshotKey: &snapshotKey},
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
 	}
 	svc := NewService(store, threads)
 
@@ -89,7 +89,7 @@ func TestService_StartRejectsMissingSnapshot(t *testing.T) {
 	sessionID := uuid.New()
 	store := &fakeReviewLoopStore{}
 	threads := &fakeThreadService{
-		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusCompleted), SandboxState: string(models.SandboxStateSnapshotted)},
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusCompleted, SandboxState: models.SandboxStateSnapshotted},
 	}
 	svc := NewService(store, threads)
 
@@ -115,7 +115,7 @@ func TestService_StartCreatesLoopAndFirstPassAtomically(t *testing.T) {
 		createLoopWithInitialPassErr: errors.New("insert pass failed"),
 	}
 	threads := &fakeThreadService{
-		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: string(models.SessionStatusIdle), SandboxState: string(models.SandboxStateSnapshotted), SnapshotKey: &snapshotKey},
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
 		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Label: "Codex Review"},
 		message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
 	}

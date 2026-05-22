@@ -19,7 +19,7 @@ import (
 // an interface here (rather than taking *db.AutomationRunStore) so hook tests
 // don't have to stand up a Postgres pool.
 type automationRunStore interface {
-	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error)
+	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error)
 }
 
 // AutomationHooks implements agent.AutomationRunUpdater by mapping a session's
@@ -43,13 +43,13 @@ func NewAutomationHooks(runs automationRunStore, logger zerolog.Logger) *Automat
 // "running" so that if both the orchestrator's success path and failRun fire
 // for the same session (or the reaper has already written a terminal status),
 // a second call here cannot overwrite an already-terminal row.
-func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
+func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	if run.AutomationRunID == nil {
 		return nil
 	}
 
-	var runStatus string
-	switch models.SessionStatus(status) {
+	var runStatus models.AutomationRunStatus
+	switch status {
 	case models.SessionStatusCompleted:
 		runStatus = models.AutomationRunStatusCompleted
 	case models.SessionStatusFailed, models.SessionStatusNeedsHumanGuidance:
@@ -76,7 +76,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 		// worker handler). No-op — the earlier writer's status stands.
 		h.logger.Debug().
 			Str("automation_run_id", run.AutomationRunID.String()).
-			Str("attempted_status", runStatus).
+			Str("attempted_status", string(runStatus)).
 			Msg("automation run already non-running; hook update skipped")
 	}
 	return nil
@@ -86,7 +86,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 // terminal fields. Prefers the orchestrator's result summary; falls back to
 // the error string on failure; finally to a generic status label so the row
 // never lands with an empty result_summary.
-func deriveSummary(run *models.Session, status string) *string {
+func deriveSummary(run *models.Session, status models.SessionStatus) *string {
 	if run.ResultSummary != nil && *run.ResultSummary != "" {
 		s := *run.ResultSummary
 		return &s

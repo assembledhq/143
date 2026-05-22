@@ -159,7 +159,7 @@ func (s testInternalIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (
 	return s.issue, nil
 }
 
-func (s testInternalIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s testInternalIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.IssueStatus) error {
 	return s.err
 }
 
@@ -361,7 +361,7 @@ func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T
 			creds: map[models.ProviderName]*models.DecryptedCredential{
 				models.ProviderOpenAI: {
 					OrgID:  orgID,
-					Status: models.CodingCredentialStatusActive,
+					Status: models.CredentialStatusActive,
 					Config: models.OpenAIConfig{APIKey: "sk-legacy-openai"},
 				},
 			},

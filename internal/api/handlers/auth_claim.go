@@ -47,7 +47,7 @@ func (h *AuthHandler) acceptValidatedInvitation(
 	ctx context.Context,
 	inv *models.Invitation,
 	userID uuid.UUID,
-	role string,
+	role models.Role,
 	opts acceptOptions,
 ) (string, *invitationError, error) {
 	if h.pool == nil {

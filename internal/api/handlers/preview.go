@@ -294,7 +294,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	// whose sandbox_state has since moved to 'snapshotted'/'destroyed' should
 	// fall through to hydrate/expired instead of attaching to a dead ID.
 	if session.ContainerID != nil && *session.ContainerID != "" &&
-		session.SandboxState == string(models.SandboxStateRunning) {
+		session.SandboxState == models.SandboxStateRunning {
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
@@ -332,7 +332,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	}
 
 	// No live container. Check whether we can hydrate one from a snapshot.
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		return acquireSandboxResult{
 			ErrCode: "SNAPSHOT_EXPIRED",
 			Err:     fmt.Errorf("this session's sandbox snapshot has expired; send a new message to rebuild it"),

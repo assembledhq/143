@@ -123,7 +123,7 @@ func TestUserStore_GetByID(t *testing.T) {
 			require.Equal(t, orgID, user.OrgID, "should return the correct org ID")
 			require.Equal(t, "test@example.com", user.Email, "should return the correct user email")
 			require.Equal(t, "Test User", user.Name, "should return the correct user name")
-			require.Equal(t, "member", user.Role, "should return the correct user role")
+			require.Equal(t, models.RoleMember, user.Role, "should return the correct user role")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -831,9 +831,9 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, users, 2)
 	require.Equal(t, "Alice", users[0].Name)
-	require.Equal(t, "admin", users[0].Role)
+	require.Equal(t, models.RoleAdmin, users[0].Role)
 	require.Equal(t, "Bob", users[1].Name)
-	require.Equal(t, "member", users[1].Role)
+	require.Equal(t, models.RoleMember, users[1].Role)
 	require.Equal(t, membershipTime2.UTC(), lastMembershipTime.UTC())
 	require.NoError(t, mock.ExpectationsWereMet())
 }

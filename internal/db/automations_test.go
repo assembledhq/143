@@ -314,7 +314,7 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	ids := []uuid.UUID{uuid.New()}
 
 	iv := 1
-	iu := "hours"
+	iu := models.ScheduleUnitHours
 	a1 := models.Automation{
 		ID: ids[0], OrgID: orgID, Name: "a1",
 		ScheduleType: "interval", IntervalValue: &iv, IntervalUnit: &iu, Timezone: "UTC",
@@ -598,13 +598,13 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 	type prRow struct {
 		number   int
 		url      string
-		status   string
-		ciStatus string
+		status   models.PullRequestStatus
+		ciStatus models.PullRequestCIStatus
 	}
 	type sessionRow struct {
 		id                  uuid.UUID
 		title               *string
-		status              string
+		status              models.SessionStatus
 		diffStats           []byte
 		failureExplanation  *string
 		failureCategory     *string
@@ -616,7 +616,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 
 	cases := []struct {
 		name             string
-		runStatus        string
+		runStatus        models.AutomationRunStatus
 		session          *sessionRow
 		assertEnrichment func(t *testing.T, got models.AutomationRun)
 	}{
@@ -626,14 +626,14 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			session: &sessionRow{
 				id:              sessionID,
 				title:           &title,
-				status:          string(models.SessionStatusCompleted),
+				status:          models.SessionStatusCompleted,
 				diffStats:       []byte(`{"added":128,"removed":23,"files_changed":4}`),
 				prCreationState: "succeeded",
 				pr: &prRow{
 					number:   1213,
 					url:      prURL,
-					status:   "open",
-					ciStatus: "success",
+					status:   models.PullRequestStatusOpen,
+					ciStatus: models.PullRequestCIStatusSuccess,
 				},
 			},
 			assertEnrichment: func(t *testing.T, got models.AutomationRun) {
@@ -641,13 +641,13 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 				require.NotNil(t, got.Session)
 				require.Equal(t, sessionID, got.Session.ID)
 				require.Equal(t, "Refactor diff viewer", *got.Session.Title)
-				require.Equal(t, string(models.SessionStatusCompleted), got.Session.Status)
+				require.Equal(t, models.SessionStatusCompleted, got.Session.Status)
 				require.JSONEq(t, `{"added":128,"removed":23,"files_changed":4}`, string(got.Session.DiffStats))
 				require.NotNil(t, got.Session.PR)
 				require.Equal(t, 1213, got.Session.PR.Number)
 				require.Equal(t, prURL, got.Session.PR.URL)
-				require.Equal(t, "open", got.Session.PR.Status)
-				require.Equal(t, "success", got.Session.PR.CIStatus)
+				require.Equal(t, models.PullRequestStatusOpen, got.Session.PR.Status)
+				require.Equal(t, models.PullRequestCIStatusSuccess, got.Session.PR.CIStatus)
 			},
 		},
 		{
@@ -656,7 +656,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			session: &sessionRow{
 				id:              sessionID,
 				title:           &title,
-				status:          string(models.SessionStatusCompleted),
+				status:          models.SessionStatusCompleted,
 				diffStats:       []byte(`{"added":12,"removed":3}`),
 				prCreationState: "idle",
 			},
@@ -673,7 +673,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			session: &sessionRow{
 				id:                  sessionID,
 				title:               nil,
-				status:              string(models.SessionStatusFailed),
+				status:              models.SessionStatusFailed,
 				failureExplanation:  &failureExplanation,
 				failureCategory:     &failureCategory,
 				failureNextSteps:    failureNextSteps,

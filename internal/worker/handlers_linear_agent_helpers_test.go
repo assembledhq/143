@@ -50,7 +50,7 @@ func TestBuildAgentSession(t *testing.T) {
 	session := buildAgentSession(orgID, repo, issue, fetched, models.AgentTypePi)
 	require.Equal(t, orgID, session.OrgID, "session inherits org from caller, not from the issue (defense against cross-org bugs)")
 	require.Equal(t, models.AgentTypePi, session.AgentType, "Linear-triggered sessions should honor the org default agent type resolved by the caller")
-	require.Equal(t, string(models.DefaultSessionAutonomy), session.AutonomyLevel,
+	require.Equal(t, models.DefaultSessionAutonomy, session.AutonomyLevel,
 		"Linear-triggered sessions should use the session-level autonomy default accepted by chk_sessions_autonomy_level")
 	require.Equal(t, models.DefaultSessionTokenMode, session.TokenMode,
 		"Linear-triggered sessions should use the same default token mode as manual and automation-created sessions")
@@ -150,7 +150,7 @@ func TestEnqueueRunAgentForLinearAgentUsesAgentQueue(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(orgID, "agent", "run_agent", pgxmock.AnyArg(), 5, &dedupe).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -174,7 +174,7 @@ func TestEnqueueRunAgentForLinearAgentSkipsTerminalSessions(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCompleted, 1, nil, nil)...))
 
 	err = enqueueRunAgentForLinearAgent(context.Background(), &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}, orgID, sessionID)
 	require.NoError(t, err, "terminal Linear agent reconciliation should be a no-op instead of enqueueing duplicate completed work")

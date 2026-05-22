@@ -23,9 +23,9 @@ func (h *IssueHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	limit := queryInt(r, "limit", 50)
 	filters := db.IssueFilters{
-		Status:   r.URL.Query().Get("status"),
+		Status:   models.IssueStatus(r.URL.Query().Get("status")),
 		Source:   models.IssueSource(r.URL.Query().Get("source")),
-		Severity: r.URL.Query().Get("severity"),
+		Severity: models.IssueSeverity(r.URL.Query().Get("severity")),
 		Sort:     r.URL.Query().Get("sort"),
 		Limit:    limit,
 		Cursor:   r.URL.Query().Get("cursor"),

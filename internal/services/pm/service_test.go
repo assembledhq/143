@@ -26,7 +26,7 @@ func (m *mockIssueStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters
 	return nil, nil
 }
 
-func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+func (m *mockIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error {
 	m.updated = append(m.updated, issueID)
 	return nil
 }
@@ -35,7 +35,7 @@ type mockSessionStore struct {
 	created          []*models.Session
 	running          int
 	lastResult       *models.SessionResult
-	lastResultStatus string
+	lastResultStatus models.SessionStatus
 }
 
 func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
@@ -55,7 +55,7 @@ func (m *mockSessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID,
 	return nil, nil
 }
 
-func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	m.lastResult = result
 	m.lastResultStatus = status
 	return nil
@@ -240,7 +240,7 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 
 	// Verify session was created, then marked failed with error via UpdateResult.
 	require.Len(t, sessions.created, 1, "PM session should be created")
-	require.Equal(t, "failed", sessions.lastResultStatus, "session should be marked failed")
+	require.Equal(t, models.SessionStatusFailed, sessions.lastResultStatus, "session should be marked failed")
 	require.NotNil(t, sessions.lastResult, "UpdateResult should have been called")
 	require.NotNil(t, sessions.lastResult.Error, "error message should be set on session")
 	require.Contains(t, *sessions.lastResult.Error, "gather context", "error should describe the failure stage")
@@ -248,7 +248,7 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 
 	// Verify an error-level session log was written.
 	require.Len(t, logStore.logs, 1, "should write one session log entry")
-	require.Equal(t, "error", logStore.logs[0].Level, "log should be error level")
+	require.Equal(t, models.SessionLogLevelError, logStore.logs[0].Level, "log should be error level")
 	require.Contains(t, logStore.logs[0].Message, "gather context", "log message should describe failure")
 }
 

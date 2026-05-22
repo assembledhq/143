@@ -114,9 +114,9 @@ func TestReconcileOrphanedContainers_PreservesNonTerminalAndRecoveringSessions(t
 	t.Parallel()
 
 	running := newOrphanSession("running-c1")
-	running.Status = string(models.SessionStatusRunning)
+	running.Status = models.SessionStatusRunning
 	recovering := newOrphanSession("recovering-c1")
-	recovering.Status = string(models.SessionStatusFailed)
+	recovering.Status = models.SessionStatusFailed
 	recovering.RecoveryState = models.RecoveryStateRecovering
 	store := &fakeOrphanStore{
 		batches: [][]models.Session{{running, recovering}},

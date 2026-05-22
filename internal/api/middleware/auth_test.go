@@ -231,7 +231,7 @@ func TestAuth_HeaderSelectsMembership(t *testing.T) {
 		u := UserFromContext(r.Context())
 		require.NotNil(t, u)
 		require.Equal(t, testUserID, u.ID)
-		require.Equal(t, "member", u.Role, "user.Role should reflect active membership role for compatibility")
+		require.Equal(t, models.RoleMember, u.Role, "user.Role should reflect active membership role for compatibility")
 		w.WriteHeader(http.StatusOK)
 	})
 

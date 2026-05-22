@@ -11,7 +11,7 @@ func TestIsValidRole(t *testing.T) {
 
 	tests := []struct {
 		name  string
-		role  string
+		role  Role
 		valid bool
 	}{
 		{name: "admin", role: RoleAdmin, valid: true},
@@ -26,12 +26,12 @@ func TestIsValidRole(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.valid, IsValidRole(tt.role))
+			require.Equal(t, tt.valid, IsValidRole(string(tt.role)))
 		})
 	}
 }
 
 func TestValidRoles_OrderedByPrivilege(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, []string{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}, ValidRoles)
+	require.Equal(t, []Role{RoleAdmin, RoleMember, RoleBuilder, RoleViewer}, ValidRoles)
 }

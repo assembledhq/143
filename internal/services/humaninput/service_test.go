@@ -26,9 +26,9 @@ func TestService_AnswerSyncsCompatibilityQuestionAndEnqueuesResume(t *testing.T)
 		session: models.Session{
 			ID:           sessionID,
 			OrgID:        orgID,
-			Status:       string(models.SessionStatusAwaitingInput),
+			Status:       models.SessionStatusAwaitingInput,
 			CurrentTurn:  4,
-			SandboxState: string(models.SandboxStateRunning),
+			SandboxState: models.SandboxStateRunning,
 			SnapshotKey:  &snapshotKey,
 		},
 		request: models.HumanInputRequest{
@@ -45,7 +45,7 @@ func TestService_AnswerSyncsCompatibilityQuestionAndEnqueuesResume(t *testing.T)
 		claimedSession: models.Session{
 			ID:          sessionID,
 			OrgID:       orgID,
-			Status:      string(models.SessionStatusRunning),
+			Status:      models.SessionStatusRunning,
 			CurrentTurn: 4,
 		},
 		jobID: jobID,
@@ -85,9 +85,9 @@ func TestService_CancelDeniesProviderAndEnqueuesResume(t *testing.T) {
 		session: models.Session{
 			ID:           sessionID,
 			OrgID:        orgID,
-			Status:       string(models.SessionStatusAwaitingInput),
+			Status:       models.SessionStatusAwaitingInput,
 			CurrentTurn:  2,
-			SandboxState: string(models.SandboxStateRunning),
+			SandboxState: models.SandboxStateRunning,
 			SnapshotKey:  &snapshotKey,
 		},
 		request: models.HumanInputRequest{
@@ -105,7 +105,7 @@ func TestService_CancelDeniesProviderAndEnqueuesResume(t *testing.T) {
 			},
 			CreatedAt: time.Now(),
 		},
-		claimedSession: models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2},
+		claimedSession: models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 2},
 		jobID:          uuid.New(),
 	}
 
@@ -146,9 +146,9 @@ func TestService_AnswerRejectsBeforeCheckpointReady(t *testing.T) {
 			session: models.Session{
 				ID:           sessionID,
 				OrgID:        orgID,
-				Status:       string(models.SessionStatusRunning),
+				Status:       models.SessionStatusRunning,
 				CurrentTurn:  2,
-				SandboxState: string(models.SandboxStateRunning),
+				SandboxState: models.SandboxStateRunning,
 				SnapshotKey:  &snapshotKey,
 			},
 		},
@@ -157,9 +157,9 @@ func TestService_AnswerRejectsBeforeCheckpointReady(t *testing.T) {
 			session: models.Session{
 				ID:           sessionID,
 				OrgID:        orgID,
-				Status:       string(models.SessionStatusAwaitingInput),
+				Status:       models.SessionStatusAwaitingInput,
 				CurrentTurn:  2,
-				SandboxState: string(models.SandboxStateRunning),
+				SandboxState: models.SandboxStateRunning,
 			},
 		},
 		{
@@ -167,9 +167,9 @@ func TestService_AnswerRejectsBeforeCheckpointReady(t *testing.T) {
 			session: models.Session{
 				ID:                 sessionID,
 				OrgID:              orgID,
-				Status:             string(models.SessionStatusAwaitingInput),
+				Status:             models.SessionStatusAwaitingInput,
 				CurrentTurn:        2,
-				SandboxState:       string(models.SandboxStateRunning),
+				SandboxState:       models.SandboxStateRunning,
 				SnapshotKey:        &snapshotKey,
 				PendingSnapshotKey: &pendingSnapshotKey,
 			},
@@ -196,7 +196,7 @@ func TestService_AnswerRejectsBeforeCheckpointReady(t *testing.T) {
 					},
 					CreatedAt: time.Now(),
 				},
-				claimedSession: models.Session{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 2},
+				claimedSession: models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 2},
 				jobID:          uuid.New(),
 			}
 

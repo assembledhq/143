@@ -55,7 +55,7 @@ func (m *mockProjectStore) UpdateProgress(_ context.Context, _, _ uuid.UUID) err
 	return nil
 }
 
-func (m *mockProjectStore) UpdateStatus(_ context.Context, _, id uuid.UUID, status string) error {
+func (m *mockProjectStore) UpdateStatus(_ context.Context, _, id uuid.UUID, status models.ProjectStatus) error {
 	p := m.projects[id]
 	p.Status = models.ProjectStatus(status)
 	m.projects[id] = p
@@ -66,7 +66,7 @@ type mockProjectTaskStore struct {
 	tasks         []*models.ProjectTask
 	created       []*models.ProjectTask
 	maxBatch      int
-	countByStatus map[string]int
+	countByStatus map[models.ProjectTaskStatus]int
 }
 
 func (m *mockProjectTaskStore) Create(_ context.Context, t *models.ProjectTask) error {
@@ -105,7 +105,7 @@ func (m *mockProjectTaskStore) Update(_ context.Context, t *models.ProjectTask) 
 	return nil
 }
 
-func (m *mockProjectTaskStore) CountByProjectAndStatus(_ context.Context, _, _ uuid.UUID, status string) (int, error) {
+func (m *mockProjectTaskStore) CountByProjectAndStatus(_ context.Context, _, _ uuid.UUID, status models.ProjectTaskStatus) (int, error) {
 	if m.countByStatus != nil {
 		return m.countByStatus[status], nil
 	}
@@ -214,13 +214,13 @@ func TestCanDispatchForProject_Sequential(t *testing.T) {
 	}
 
 	t.Run("no active tasks allows 1", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
-		pts.countByStatus = map[string]int{}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got)
 	})
 
 	t.Run("active tasks blocks dispatch", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
-		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{models.ProjectTaskStatusRunning: 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
 	})
@@ -239,19 +239,19 @@ func TestCanDispatchForProject_Parallel(t *testing.T) {
 	}
 
 	t.Run("no active tasks returns max", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
-		pts.countByStatus = map[string]int{}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 3, got)
 	})
 
 	t.Run("some active tasks returns remaining", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
-		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1, string(models.ProjectTaskStatusDelegated): 1}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{models.ProjectTaskStatusRunning: 1, models.ProjectTaskStatusDelegated: 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got)
 	})
 
 	t.Run("all slots used returns 0", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
-		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 3}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{models.ProjectTaskStatusRunning: 3}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
 	})
@@ -260,7 +260,7 @@ func TestCanDispatchForProject_Parallel(t *testing.T) {
 func TestCanDispatchForProject_ZeroMaxConcurrent(t *testing.T) {
 	t.Parallel()
 
-	pts := &mockProjectTaskStore{countByStatus: map[string]int{}}
+	pts := &mockProjectTaskStore{countByStatus: map[models.ProjectTaskStatus]int{}}
 	svc := newTestProjectService(nil, pts, nil)
 
 	project := &models.Project{
@@ -514,7 +514,7 @@ func TestDispatchProjectTasks_SkipsLowConfidenceUnlessAutoAll(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	svc := newTestProjectService(nil, pts, &mockProjectCycleStore{})
 
@@ -620,7 +620,7 @@ func TestCheckDependenciesStatus(t *testing.T) {
 func TestCanDispatchForProject_DependencyGraph(t *testing.T) {
 	t.Parallel()
 
-	pts := &mockProjectTaskStore{countByStatus: map[string]int{}}
+	pts := &mockProjectTaskStore{countByStatus: map[models.ProjectTaskStatus]int{}}
 	svc := newTestProjectService(nil, pts, nil)
 
 	project := &models.Project{
@@ -630,19 +630,19 @@ func TestCanDispatchForProject_DependencyGraph(t *testing.T) {
 	}
 
 	t.Run("no active tasks returns max concurrent", func(t *testing.T) { //nolint:paralleltest
-		pts.countByStatus = map[string]int{}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 3, got, "should allow max_concurrent when no active tasks")
 	})
 
 	t.Run("some active returns remaining", func(t *testing.T) { //nolint:paralleltest
-		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 2}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{models.ProjectTaskStatusRunning: 2}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 1, got, "should return remaining slots")
 	})
 
 	t.Run("all slots used returns 0", func(t *testing.T) { //nolint:paralleltest
-		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 3}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{models.ProjectTaskStatusRunning: 3}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got, "should return 0 when all slots are used")
 	})
@@ -682,7 +682,7 @@ func TestDispatchProjectTasks_DependencyGraph(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{depTask, readyTask, blockedTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	svc := newTestProjectService(nil, pts, &mockProjectCycleStore{})
 
@@ -738,7 +738,7 @@ func TestDispatchProjectTasks_DependencyGraph_BlockedPath(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{failedDep, blockedTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	svc := newTestProjectService(nil, pts, &mockProjectCycleStore{})
 

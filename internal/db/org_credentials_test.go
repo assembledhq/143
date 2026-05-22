@@ -854,7 +854,7 @@ func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	}
 	require.NotNil(t, anthropicSummary, "should have anthropic summary")
 	require.True(t, anthropicSummary.Configured, "anthropic should be configured")
-	require.Equal(t, "active", anthropicSummary.Status, "anthropic should be active")
+	require.Equal(t, models.CredentialStatusActive, anthropicSummary.Status, "anthropic should be active")
 	require.NotEmpty(t, anthropicSummary.MaskedKey, "anthropic should have masked key")
 	require.NotContains(t, anthropicSummary.MaskedKey, "sk-ant-api03-longkeyhere", "masked key should not contain full key")
 
@@ -1040,7 +1040,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 			require.NoError(t, err, "ClaimNextRoundRobin should not return an error")
 			require.NotNil(t, cred, "ClaimNextRoundRobin should return a credential")
 			require.Equal(t, models.ProviderOpenAIChatGPT, cred.Provider, "credential should have correct provider")
-			require.Equal(t, "active", cred.Status, "returned credential should be active")
+			require.Equal(t, models.CredentialStatusActive, cred.Status, "returned credential should be active")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

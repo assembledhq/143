@@ -174,7 +174,7 @@ func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	require.Len(t, logs, 2, "should return both log entries for the session")
 	require.Equal(t, int64(1), logs[0].ID, "first log entry should have the correct ID")
 	require.Equal(t, sessionID, logs[0].SessionID, "first log entry should have the correct session ID")
-	require.Equal(t, "info", logs[0].Level, "first log entry should have the correct level")
+	require.Equal(t, models.SessionLogLevelInfo, logs[0].Level, "first log entry should have the correct level")
 	require.Equal(t, "doing something", logs[0].Message, "first log entry should have the correct message")
 	require.Equal(t, int64(2), logs[1].ID, "second log entry should have the correct ID")
 	require.Equal(t, sessionID, logs[1].SessionID, "second log entry should have the correct session ID")
@@ -222,7 +222,7 @@ func TestSessionLogStore_ListByRunIDSince_Success(t *testing.T) {
 	require.Len(t, logs, 1, "should return only log entries after the specified ID")
 	require.Equal(t, int64(5), logs[0].ID, "returned log entry should have the correct ID")
 	require.Equal(t, sessionID, logs[0].SessionID, "returned log entry should have the correct session ID")
-	require.Equal(t, "info", logs[0].Level, "returned log entry should have the correct level")
+	require.Equal(t, models.SessionLogLevelInfo, logs[0].Level, "returned log entry should have the correct level")
 	require.Equal(t, "doing something", logs[0].Message, "returned log entry should have the correct message")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

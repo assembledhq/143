@@ -73,7 +73,7 @@ func (s *helperIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (model
 	return s.issue, nil
 }
 
-func (s *helperIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *helperIssueStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.IssueStatus) error {
 	return s.err
 }
 
@@ -208,10 +208,10 @@ func TestUnprocessedUserMessages_NoMessages(t *testing.T) {
 func TestDrainAcceptableStatus(t *testing.T) {
 	t.Parallel()
 
-	for _, status := range []string{"idle", "running", "awaiting_input", "needs_human_guidance", "completed", "failed", "cancelled", "pr_created"} {
+	for _, status := range []models.SessionStatus{models.SessionStatusIdle, models.SessionStatusRunning, models.SessionStatusAwaitingInput, models.SessionStatusNeedsHumanGuidance, models.SessionStatusCompleted, models.SessionStatusFailed, models.SessionStatusCancelled, models.SessionStatusPRCreated} {
 		require.True(t, drainAcceptableStatus(status), "status %q should accept a drain enqueue", status)
 	}
-	for _, status := range []string{"skipped", "pending", ""} {
+	for _, status := range []models.SessionStatus{models.SessionStatusSkipped, models.SessionStatusPending, ""} {
 		require.False(t, drainAcceptableStatus(status), "status %q should not accept a drain enqueue", status)
 	}
 }
@@ -347,7 +347,7 @@ func TestCreateIssueSnapshotForTurn(t *testing.T) {
 		repoID := uuid.New()
 		title := "Fix checkout timeout"
 		description := "Customers hit a timeout after payment authorization."
-		status := "open"
+		status := models.IssueStatusOpen
 		source := models.IssueSourceLinear
 		links := []models.SessionIssueLink{
 			{

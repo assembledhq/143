@@ -229,11 +229,11 @@ func (s *ProjectTaskStore) Delete(ctx context.Context, orgID, taskID uuid.UUID) 
 	return err
 }
 
-func (s *ProjectTaskStore) CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) (int, error) {
+func (s *ProjectTaskStore) CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status models.ProjectTaskStatus) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
 		`SELECT count(*) FROM project_tasks WHERE project_id = @project_id AND org_id = @org_id AND status = @status`,
-		pgx.NamedArgs{"project_id": projectID, "org_id": orgID, "status": status},
+		pgx.NamedArgs{"project_id": projectID, "org_id": orgID, "status": string(status)},
 	).Scan(&count)
 	return count, err
 }

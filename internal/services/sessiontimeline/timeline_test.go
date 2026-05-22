@@ -34,7 +34,7 @@ func makeLog(t *testing.T, overrides func(*models.SessionLog), createdAt string,
 		SessionID:  uuid.MustParse("11111111-1111-1111-1111-111111111111"),
 		OrgID:      uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 		TurnNumber: 1,
-		Level:      level,
+		Level:      models.SessionLogLevel(level),
 		Message:    message,
 		Timestamp:  mustTime(t, createdAt),
 	}

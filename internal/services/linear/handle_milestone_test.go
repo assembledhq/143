@@ -219,7 +219,7 @@ func (f *fakeLinearClient) FetchComment(context.Context, string) (*FetchedCommen
 // disabled-flag tests pin.
 type fakeIntegrationReader struct{}
 
-func (fakeIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+func (fakeIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	return models.Integration{Status: "active"}, nil
 }
 
