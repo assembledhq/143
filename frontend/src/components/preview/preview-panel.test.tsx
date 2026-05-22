@@ -384,7 +384,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Ready phase ---------- */
 
-  it('shows Ready badge and iframe with title "Preview" when phase is ready', async () => {
+  it('shows quiet running metadata and iframe with title "Preview" when phase is ready', async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "ready", id: "prev-1" }),
     );
@@ -392,8 +392,9 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
     });
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
 
     // Iframe should be rendered
     const iframe = screen.getByTitle("Preview");
@@ -418,7 +419,7 @@ describe("PreviewPanel component", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
     });
 
     expect(screen.getByTitle("Preview")).toHaveAttribute(
@@ -435,12 +436,14 @@ describe("PreviewPanel component", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Open Preview/i })).toBeInTheDocument();
     });
 
     const previewLink = screen.getByRole("link", { name: /Open Preview/i });
     expect(previewLink).toHaveAttribute("href", "http://prev-1.preview.test");
     expect(previewLink).toHaveAttribute("target", "_blank");
+    expect(screen.queryByRole("button", { name: /^Stop$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Restart$/ })).not.toBeInTheDocument();
 
     // The old viewport preset group (Mobile, Tablet, Desktop, Full) should not render.
     const presetContainer = container.querySelector(
@@ -469,7 +472,7 @@ describe("PreviewPanel component", () => {
       renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
       await waitFor(() => {
-        expect(screen.getByText("Ready")).toBeInTheDocument();
+        expect(screen.getByText("Running")).toBeInTheDocument();
       });
       expect(screen.getByTitle("Preview")).toBeInTheDocument();
       expect(screen.queryByTestId("console-badge")).not.toBeInTheDocument();
@@ -504,7 +507,7 @@ describe("PreviewPanel component", () => {
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
-    await user.click(await screen.findByRole("button", { name: "Preview lifetime" }));
+    await user.click(await screen.findByRole("button", { name: "Preview actions" }));
 
     expect(screen.getByText("Preview lifetime")).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Keep for 15 min" })).toBeInTheDocument();
@@ -524,7 +527,7 @@ describe("PreviewPanel component", () => {
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
-    await user.click(await screen.findByRole("button", { name: "Preview lifetime" }));
+    await user.click(await screen.findByRole("button", { name: "Preview actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Stop in 5 min" }));
 
     await waitFor(() => {
@@ -534,7 +537,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Partially ready phase ---------- */
 
-  it("shows Partially Ready badge and iframe in partially_ready state", async () => {
+  it("shows partially ready metadata and iframe in partially_ready state", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "partially_ready", id: "prev-1" }),
     );
@@ -542,7 +545,7 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Partially Ready")).toBeInTheDocument();
+      expect(screen.getByText("Partially ready")).toBeInTheDocument();
     });
 
     expect(screen.getByTitle("Preview")).toBeInTheDocument();
@@ -556,13 +559,12 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Partially Ready")).toBeInTheDocument();
+      expect(screen.getByText("Partially ready")).toBeInTheDocument();
     });
 
     expect(screen.queryByText("Preparing preview")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop preview" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Restart/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
   });
 
   /* ---------- Failed phase ---------- */
@@ -711,7 +713,7 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
     });
 
     expect(screen.queryByText("frontend")).not.toBeInTheDocument();
@@ -739,7 +741,7 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
     });
 
     // Service error indicators should not appear
@@ -748,17 +750,16 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Phase helpers via badge classes ---------- */
 
-  it("applies emerald color class for ready phase badge", async () => {
+  it("uses quiet metadata for the ready phase instead of a status badge", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
     });
 
-    const badge = screen.getByText("Ready").closest("[class]")!;
-    expect(badge.className).toContain("text-emerald-600");
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
   });
 
   it("applies destructive color class to failed diagnostics", async () => {
@@ -788,7 +789,7 @@ describe("PreviewPanel component", () => {
     expect(screen.getAllByText("Starting")).toHaveLength(1);
   });
 
-  it("applies amber color class for partially_ready phase badge", async () => {
+  it("uses quiet metadata for the partially_ready phase instead of a status badge", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "partially_ready" }),
     );
@@ -796,11 +797,10 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Partially Ready")).toBeInTheDocument();
+      expect(screen.getByText("Partially ready")).toBeInTheDocument();
     });
 
-    const badge = screen.getByText("Partially Ready").closest("[class]")!;
-    expect(badge.className).toContain("text-amber-600");
+    expect(screen.queryByText("Partially Ready")).not.toBeInTheDocument();
   });
 
   /* ---------- Start mutation ---------- */
@@ -948,17 +948,18 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Stop mutation ---------- */
 
-  it("calls stop mutation when Stop button is clicked", async () => {
+  it("calls stop mutation from the preview actions menu", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Stop")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Stop"));
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Stop preview" }));
 
     await waitFor(() => {
       expect(mockStop).toHaveBeenCalledWith("sess-1");
@@ -984,17 +985,18 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Restart mutation ---------- */
 
-  it("calls restart mutation when Restart button is clicked", async () => {
+  it("calls restart mutation from the preview actions menu", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Restart")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Restart"));
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Restart preview" }));
 
     await waitFor(() => {
       expect(mockRestart).toHaveBeenCalledWith("sess-1");
@@ -1237,10 +1239,11 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Stop")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Stop"));
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Stop preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to stop preview: timeout")).toBeInTheDocument();
@@ -1255,10 +1258,11 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Restart")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Restart"));
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Restart preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to restart preview: server error")).toBeInTheDocument();
@@ -1274,7 +1278,7 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
     });
 
     // The design mode button is the Palette icon button
