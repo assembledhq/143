@@ -1205,7 +1205,7 @@ function SessionComposer({
     : !canSendMessage
       ? unavailableMessage
       : undefined;
-  const cancelDisabledReason = cancelPending ? "Cancelling session..." : undefined;
+  const cancelDisabledReason = cancelPending ? "Stopping agent..." : undefined;
   const sendDisabledReason = hasInvalidCommands
     ? `${invalidCommandTokens.join(", ")} ${invalidCommandTokens.length === 1 ? "is" : "are"} not valid for this agent. Remove the chip${invalidCommandTokens.length === 1 ? "" : "s"} to continue.`
     : !hasContent
@@ -1881,6 +1881,8 @@ type ChatPanelProps = {
   sessionId: string;
   activeThread?: SessionThread;
   isActive: boolean;
+  isStopRequested: boolean;
+  stopOutcome: "checkpointed" | null;
   viewerScope: SessionScrollViewerScope | null;
   optimisticMessages: SessionMessage[];
   onDiffClick?: () => void;
@@ -1897,6 +1899,8 @@ function ChatPanel({
   sessionId,
   activeThread,
   isActive,
+  isStopRequested,
+  stopOutcome,
   viewerScope,
   optimisticMessages,
   onDiffClick,
@@ -2270,12 +2274,26 @@ function ChatPanel({
       if (!existing) {
         return { data: { ...updated, threads: [] } };
       }
+      const existingThreads = existing.data.threads ?? [];
+      const threads = updated.threads ?? (
+        updated.status === "cancelled"
+          ? existingThreads.map((thread) => (
+            workingStatusesSet.has(thread.status)
+              ? {
+                ...thread,
+                status: "cancelled" as const,
+                completed_at: updated.completed_at ?? thread.completed_at,
+              }
+              : thread
+          ))
+          : existingThreads
+      );
       return {
         ...existing,
         data: {
           ...existing.data,
           ...updated,
-          threads: updated.threads ?? existing.data.threads ?? [],
+          threads,
         },
       };
     });
@@ -2484,6 +2502,14 @@ function ChatPanel({
             <ChatTimeline
               entries={timelineEntries}
               isRunning={isRunning}
+              stoppingLabel={isStopRequested ? "Stopping agent..." : undefined}
+              stoppedLabel={
+                session.status === "cancelled" || activeThread?.status === "cancelled"
+                  ? "Session stopped"
+                  : stopOutcome === "checkpointed"
+                    ? "Stopped. You can send a follow-up when ready."
+                    : undefined
+              }
               diffStats={session.diff_stats}
               onDiffClick={onDiffClick}
               onApprovePlan={canSendMessage ? onApprovePlan : undefined}
@@ -2537,6 +2563,8 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
     previous.viewerScope?.userId === next.viewerScope?.userId &&
     previous.viewerScope?.orgId === next.viewerScope?.orgId &&
     previous.optimisticMessages === next.optimisticMessages &&
+    previous.isStopRequested === next.isStopRequested &&
+    previous.stopOutcome === next.stopOutcome &&
     previous.onDiffClick === next.onDiffClick &&
     previous.onApprovePlan === next.onApprovePlan &&
     previous.onAdjustPlan === next.onAdjustPlan &&
@@ -2818,12 +2846,44 @@ export function SessionDetailContent({ id }: { id: string }) {
   const queryClient = useQueryClient();
   const optimisticMessageIDRef = useRef(-1_000_000);
   const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
+  const [sessionStopRequest, setSessionStopRequest] = useState<{ sessionId: string; requestedAt: string } | null>(null);
+  const [sessionStopOutcome, setSessionStopOutcome] = useState<"checkpointed" | null>(null);
 
   useEffect(() => {
     setHasResolvedInitialThreadSelection(false);
     setActiveThreadId(null);
     setPendingThreadPreview(null);
+    setSessionStopRequest(null);
+    setSessionStopOutcome(null);
   }, [id]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+    if (session.status === "running") {
+      setSessionStopOutcome(null);
+    }
+    if (!sessionStopRequest || sessionStopRequest.sessionId !== id) {
+      return;
+    }
+
+    if (session.status === "cancelled" || activeThread?.status === "cancelled") {
+      setSessionStopRequest(null);
+      setSessionStopOutcome(null);
+      return;
+    }
+
+    const activeThreadSettled = !activeThread || !workingStatusesSet.has(activeThread.status);
+    if (session.status !== "running" && activeThreadSettled) {
+      setSessionStopRequest(null);
+      setSessionStopOutcome(
+        session.status === "idle" && (session.sandbox_state === "snapshotted" || !!session.snapshot_key)
+          ? "checkpointed"
+          : null,
+      );
+    }
+  }, [activeThread, id, session, sessionStopRequest]);
 
   useEffect(() => {
     if (!session) {
@@ -3549,6 +3609,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
   const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
+  const localStopRequested = sessionStopRequest?.sessionId === id && composerIsRunning;
+  const threadStopRequested = !!activeThread?.cancel_requested_at && workingStatusesSet.has(activeThread.status);
+  const isStopRequested = localStopRequested || threadStopRequested;
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
   const composerAgentType = activeThread?.agent_type ?? session?.agent_type ?? "codex";
   const activeThreadIsEditable = !!activeThread && activeThread.status === "idle" && activeThread.current_turn === 0;
@@ -3775,6 +3838,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     const isPlanRequest = opts.planMode ?? composerPlanMode;
     const formattedMessage = applyPlanModePrefix(userFacingMessage, isPlanRequest);
     const resolvedIDs = attachedReviewComments.map((comment) => comment.id);
+    setSessionStopOutcome(null);
     const optimisticID = optimisticMessageIDRef.current;
     optimisticMessageIDRef.current -= 1;
 
@@ -3847,8 +3911,16 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
+    onMutate: () => {
+      setSessionStopRequest({ sessionId: id, requestedAt: new Date().toISOString() });
+      setSessionStopOutcome(null);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+    onError: (error) => {
+      setSessionStopRequest(null);
+      toast.error(error instanceof ApiError ? error.message : "Failed to stop session");
     },
   });
   const cancelSession = cancelMutation.mutate;
@@ -4831,6 +4903,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 sessionId={id}
                 activeThread={activeThread ?? undefined}
                 isActive={isActive}
+                isStopRequested={isStopRequested}
+                stopOutcome={sessionStopOutcome}
                 viewerScope={viewerScope}
                 optimisticMessages={optimisticMessages}
                 onDiffClick={handleChatDiffClick}
@@ -4927,7 +5001,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isClaudeCode={composerIsClaudeCode}
               sendPending={sendMutation.isPending}
               sendError={sendMutation.error}
-              cancelPending={cancelMutation.isPending}
+              cancelPending={cancelMutation.isPending || isStopRequested}
               uploadError={composerUploadError}
               onCancelSession={handleCancelSession}
               onSend={handleComposerSend}
@@ -5032,7 +5106,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isClaudeCode={composerIsClaudeCode}
               sendPending={sendMutation.isPending}
               sendError={sendMutation.error}
-              cancelPending={cancelMutation.isPending}
+              cancelPending={cancelMutation.isPending || isStopRequested}
               uploadError={composerUploadError}
               onCancelSession={handleCancelSession}
               onSend={handleComposerSend}
