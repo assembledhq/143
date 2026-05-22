@@ -1358,6 +1358,76 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
+  it('clears stale running thread UI when a cancelled session status omits thread detail', async () => {
+    const sessionId = 'session-cancelled-thread-omitted';
+    const thread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Stop this run',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('done', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'cancelled',
+        sandbox_state: 'none',
+        completed_at: '2026-02-17T07:05:00Z',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    });
+    expect(screen.getByText('Session stopped')).toBeInTheDocument();
+  });
+
   it('archives a closed thread and switches focus to a remaining tab', async () => {
     const sessionId = 'session-archive-thread';
     let threads: SessionThread[] = [
@@ -5110,6 +5180,87 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(cancelSessionCalled).toBe(true);
     });
+  });
+
+  it('shows stop-requested transcript state immediately after cancelling a running session', async () => {
+    let cancelSessionCalled = false;
+
+    const runningSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'running',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/cancel', () => {
+        cancelSessionCalled = true;
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+    await screen.findByText('Agent is working...');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTitle('Cancel session'));
+
+    await waitFor(() => {
+      expect(cancelSessionCalled).toBe(true);
+    });
+    expect(screen.getByText('Stopping agent...')).toBeInTheDocument();
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    expect(screen.getByTitle('Cancel session')).toBeDisabled();
+  });
+
+  it('shows checkpointed stopped state when a cancelled run returns to idle', async () => {
+    const sessionId = 'session-stop-returns-idle';
+    const runningSession: Session = {
+      ...mockSessions[0],
+      id: sessionId,
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'running',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/cancel', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+    await screen.findByText('Agent is working...');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTitle('Cancel session'));
+    expect(await screen.findByText('Stopping agent...')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...runningSession,
+        status: 'idle',
+        sandbox_state: 'snapshotted',
+        snapshot_key: 'snapshots/session-stop-returns-idle.tar',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Stopping agent...')).not.toBeInTheDocument();
+    });
+    expect(screen.getByText('Stopped. You can send a follow-up when ready.')).toBeInTheDocument();
   });
 
   it('shows PM context when pm_plan_id is set', async () => {

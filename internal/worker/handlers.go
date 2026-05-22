@@ -1621,7 +1621,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("duplicate continue_session job lost sandbox-hold race; dead-lettering silently — winner retains the session row")
 				return &FatalError{Err: err}
 			}
-			if hasThread {
+			if hasThread && !errors.Is(err, agent.ErrSessionCancelled) {
 				// Detached context: this cleanup must land even when ctx was
 				// cancelled by worker drain mid-shutdown. Otherwise the
 				// thread is stuck in 'running' and the UI shows an orphaned

@@ -5492,6 +5492,46 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 		"thread-status reset UPDATE must land even though the handler ctx was cancelled (WithoutCancel detach)")
 }
 
+func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := "gemini-2.5-pro"
+	cancelErr := fmt.Errorf("%w: %w", agent.ErrSessionCancelled, context.Canceled)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(_ context.Context, _ *models.Session, _ *agent.ContinueSessionOptions) error {
+			return cancelErr
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.ErrorIs(t, err, agent.ErrSessionCancelled, "handler should preserve user-cancel classification")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not overwrite the orchestrator's cancelled thread status")
+}
+
 // TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn pins the
 // thread-side current_turn advancement to the thread's own counter, not the
 // session's. With multiple tabs in one sandbox, session.CurrentTurn is the

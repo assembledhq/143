@@ -51,6 +51,12 @@ var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
 // without resorting to error-string matching.
 var ErrSessionTimedOut = errors.New("session timed out")
 
+// ErrSessionCancelled is returned from RunAgent / ContinueSession when the
+// agent turn stopped because the user explicitly cancelled the session.
+// Callers use this to avoid generic failure cleanup that would overwrite
+// cancelled terminal state.
+var ErrSessionCancelled = errors.New("session cancelled")
+
 // ErrRecoveryAttemptsExhausted is returned from RecoverSession when repeated
 // worker-loss recovery attempts have already restarted a session without any
 // durable checkpoint. The worker treats this as terminal because another retry
@@ -2450,7 +2456,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
 			})
-			return fmt.Errorf("session cancelled: %w", ctx.Err())
+			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
@@ -3754,7 +3760,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
 			drainAfterRelease = true
-			return fmt.Errorf("session cancelled: %w", ctx.Err())
+			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
