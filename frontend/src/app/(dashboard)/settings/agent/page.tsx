@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, ShieldAlert, Trash2 } from "lucide-react";
+import { KeyRound, Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import { apiKeyHelp, ORG_PROVIDER_OPTIONS } from "@/lib/coding-auth-metadata";
@@ -12,6 +12,7 @@ import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_47 } fro
 import { queryKeys } from "@/lib/query-keys";
 import type { CodingAuth, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
+import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageContainer } from "@/components/page-container";
@@ -320,9 +321,12 @@ export default function AgentPage() {
             <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
             {rows.length === 0 ? (
               <Card>
-                <CardContent className="py-6 text-sm text-muted-foreground">
-                  No coding auths configured.
-                </CardContent>
+                <EmptyState
+                  variant="inline"
+                  icon={KeyRound}
+                  title="No org coding auths yet"
+                  description="Ask an admin to add org-level auths so coding-agent sessions have shared fallback credentials."
+                />
               </Card>
             ) : (
               <Card>
