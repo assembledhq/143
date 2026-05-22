@@ -598,10 +598,7 @@ type SessionDiffSnapshot struct {
 	CapturedAt     time.Time         `db:"captured_at" json:"captured_at"`
 }
 
-// PullRequest.Status values. Stored as a free-form string for historical
-// reasons (the webhook used to forward GitHub's raw state field). New code
-// should compare against these constants rather than literal strings so
-// renames stay grep-friendly.
+// PullRequestStatus represents the lifecycle state of a pull request.
 type PullRequestStatus string
 
 const (
