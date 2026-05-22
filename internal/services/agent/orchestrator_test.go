@@ -4804,13 +4804,13 @@ func TestContinueSession_ReusePathRejectsWrongStaticEgressNetwork(t *testing.T) 
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
+	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	containerID := "direct-egress-container"
 	session.ContainerID = &containerID
 	thisNode := "worker-static"
 	session.WorkerNodeID = &thisNode
-	session.SandboxState = string(models.SandboxStateRunning)
+	session.SandboxState = models.SandboxStateRunning
 
 	d := defaultDeps()
 	d.nodeID = thisNode

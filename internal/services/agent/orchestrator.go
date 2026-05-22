@@ -2919,7 +2919,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network failure")
 		}
 		return err
@@ -3123,7 +3123,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					Str("expected_network", sandboxCfg.NetworkName).
 					Str("static_egress_network", o.staticEgress.NetworkName).
 					Msg("recorded container_id uses a different sandbox network than the current org setting")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 					log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network mismatch")
 				}
 				o.registerSandboxFailureMessage(

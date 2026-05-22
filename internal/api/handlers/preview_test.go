@@ -2035,7 +2035,7 @@ func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetw
 		ID:           sessionID,
 		OrgID:        orgID,
 		ContainerID:  &containerID,
-		SandboxState: string(models.SandboxStateRunning),
+		SandboxState: models.SandboxStateRunning,
 	}, &models.PreviewConfig{})
 
 	require.Nil(t, result.Sandbox, "live container on the direct bridge should not be reused for static egress")
