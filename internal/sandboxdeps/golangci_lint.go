@@ -25,8 +25,8 @@ func (golangciLint) Install(ctx context.Context, exec Executor, version string) 
 		return fmt.Errorf("golangci-lint: invalid version pin %q", version)
 	}
 	// Install into ~/.local/bin because the sandbox user has no sudo;
-	// /usr/local/bin would be read-only at runtime. The Dockerfile already
-	// puts ~/.local/bin on PATH.
+	// /usr/local/bin would be read-only at runtime. The orchestrator prepends
+	// this directory to PATH in the runtime sandbox env.
 	cmd := fmt.Sprintf(
 		`set -eu
 tmp_dir="$(mktemp -d)"

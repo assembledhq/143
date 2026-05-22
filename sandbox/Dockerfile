@@ -120,5 +120,4 @@ COPY --from=go-builder /bin/143-tools /usr/local/bin/143-tools
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd --uid 1000 --create-home --user-group --shell /bin/bash sandbox
 USER sandbox
-
 WORKDIR /workspace
