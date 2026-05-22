@@ -1952,6 +1952,9 @@ func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	services := &Services{
 		PR: &stubPRService{
@@ -1969,6 +1972,49 @@ func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
 	require.ErrorAs(t, err, &fatalErr, "open_pr should dead-letter terminal PR creation failures instead of retrying them")
 	require.ErrorIs(t, fatalErr, ghservice.ErrSnapshotExpired, "open_pr should preserve the underlying terminal PR error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOpenPRHandler_RetryablePRErrorEnqueuesFailedMilestoneOnDeadLetter(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-retryable"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	retryableErr := errors.New("transient github push failure")
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, retryableErr
+			},
+		},
+	}
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(ctx, "open_pr", payload)
+
+	require.ErrorIs(t, err, retryableErr, "open_pr should return retryable PR errors to the worker")
+	jobctx.RunDeadLetterHooks(ctx, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should enqueue a failed Linear milestone after retry exhaustion")
 }
 
 func TestPullRequestHealthJobHandlers(t *testing.T) {
