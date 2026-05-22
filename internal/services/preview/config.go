@@ -156,9 +156,10 @@ func extractPreviewSection(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	_, hasPreview := probe["preview"]
+	_, hasDependencies := probe["dependencies"]
 	_, hasBootstrap := probe["bootstrap"]
 	_, hasValidation := probe["validation"]
-	if !hasPreview && !hasBootstrap && !hasValidation {
+	if !hasPreview && !hasDependencies && !hasBootstrap && !hasValidation {
 		return data, nil
 	}
 	if _, hasLegacyPreviewFields := probe["services"]; hasLegacyPreviewFields {

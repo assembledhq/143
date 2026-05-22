@@ -2745,6 +2745,11 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 		createdCfg = cfg
 		return &agent.Sandbox{ID: "resume-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
+	d.provider.Files["/home/sandbox/backend/.143/config.json"] = []byte(`{
+		"dependencies": {
+			"golangci-lint": "2.10.1"
+		}
+	}`)
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
 			Summary:         "continued",
@@ -2762,6 +2767,14 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	require.Equal(t, "noreply@143.dev", createdCfg.Env[sandboxauth.GitEmailEnvVar], "ContinueSession should set the git author email for the sandbox")
 	require.Contains(t, createdCfg.Env["PATH"], "/home/sandbox/.local/bin", "ContinueSession should prepend the gh wrapper directory to PATH")
 	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "ContinueSession should rerun git-bootstrap after cloning the fresh workspace")
+	require.Condition(t, func() bool {
+		for _, cmd := range d.provider.ExecCalls {
+			if strings.Contains(cmd, "github.com/golangci/golangci-lint/releases/download/v2.10.1") {
+				return true
+			}
+		}
+		return false
+	}, "ContinueSession should install repo-declared sandbox dependencies after cloning the fresh workspace")
 	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
 }
 
