@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
@@ -35,6 +36,6 @@ func TestInvitationStore_ListPendingByOrgWithInviter_ProjectsExpiredStatus(t *te
 
 	invitations, err := store.ListPendingByOrgWithInviter(context.Background(), orgID)
 	require.NoError(t, err, "ListPendingByOrgWithInviter should load pending invitation rows")
-	require.Equal(t, "expired", invitations[0].Status, "expired pending invitations should be projected with expired status")
+	require.Equal(t, models.InvitationStatusExpired, invitations[0].Status, "expired pending invitations should be projected with expired status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

@@ -109,7 +109,7 @@ func ReconcileOrphanedContainers(ctx context.Context, store OrphanedContainerLis
 				totalSkipped++
 				logger.Info().
 					Str("session_id", s.ID.String()).
-					Str("status", s.Status).
+					Str("status", string(s.Status)).
 					Str("recovery_state", string(s.RecoveryState)).
 					Msg("reconciler: preserving container for active or recovering session")
 				continue
@@ -198,7 +198,7 @@ func ReconcileOrphanedContainers(ctx context.Context, store OrphanedContainerLis
 }
 
 func startupContainerDestroyProtected(s models.Session) bool {
-	if s.Status == string(models.SessionStatusRunning) {
+	if s.Status == models.SessionStatusRunning {
 		return true
 	}
 	switch s.RecoveryState {

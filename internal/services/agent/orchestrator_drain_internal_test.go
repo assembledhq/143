@@ -47,10 +47,10 @@ func (s *drainStubSessions) GetByID(context.Context, uuid.UUID, uuid.UUID) (mode
 
 // All other SessionStore methods are no-op zero-returning stubs; the drain
 // path never calls them.
-func (s *drainStubSessions) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *drainStubSessions) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus) error {
 	return nil
 }
-func (s *drainStubSessions) UpdateResult(context.Context, uuid.UUID, uuid.UUID, string, *models.SessionResult) error {
+func (s *drainStubSessions) UpdateResult(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus, *models.SessionResult) error {
 	return nil
 }
 func (s *drainStubSessions) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
@@ -86,7 +86,7 @@ func (s *drainStubSessions) PublishCheckpoint(context.Context, uuid.UUID, uuid.U
 func (s *drainStubSessions) UpdateRecoveryState(context.Context, uuid.UUID, uuid.UUID, models.RecoveryState, *time.Time, *time.Time, bool) error {
 	return nil
 }
-func (s *drainStubSessions) UpdateSandboxState(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *drainStubSessions) UpdateSandboxState(context.Context, uuid.UUID, uuid.UUID, models.SandboxState) error {
 	return nil
 }
 func (s *drainStubSessions) UpdateWorkingBranch(context.Context, uuid.UUID, uuid.UUID, string) error {
@@ -371,7 +371,7 @@ func TestDrainQueuedMessages_LinearPromptedRunningSessionContract(t *testing.T) 
 	}
 
 	messages := &drainStubMessages{messages: []models.SessionMessage{linearAppended}}
-	sessions := &drainStubSessions{session: models.Session{Status: string(models.SessionStatusIdle)}}
+	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle}}
 	jobs := &drainStubJobs{}
 	o := newDrainOrchestrator(messages, sessions, jobs, nil)
 

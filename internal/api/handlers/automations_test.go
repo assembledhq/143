@@ -39,7 +39,7 @@ func (s *stubRepoLookup) GetByID(_ context.Context, _, repoID uuid.UUID) (models
 	if status == "" {
 		status = models.RepositoryStatusActive
 	}
-	return models.Repository{ID: repoID, Status: string(status)}, nil
+	return models.Repository{ID: repoID, Status: status}, nil
 }
 
 func automationTestColumns() []string {
@@ -819,7 +819,7 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	a := models.Automation{
 		ID: id, OrgID: orgID, Name: "a", Goal: "g",
 		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
@@ -872,7 +872,7 @@ func TestAutomationHandler_Update_RejectsPrePRReviewForUnsupportedAgent(t *testi
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	agentType := "gemini_cli"
 	a := models.Automation{
 		ID: id, OrgID: orgID, Name: "a", Goal: "g",
@@ -910,7 +910,7 @@ func TestAutomationHandler_Update_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	a := models.Automation{
 		ID: id, OrgID: orgID, Name: "a", Goal: "g",
 		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
@@ -949,7 +949,7 @@ func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testin
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	agentType := string(models.AgentTypeClaudeCode)
 	model := "claude-sonnet-4-6"
 	a := models.Automation{
@@ -999,7 +999,7 @@ func TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt(t *testing.T) 
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	runAt := "09:00"
 	// Seed a UTC interval row whose stored next_run_at is 09:00 UTC. After the
 	// PATCH flips timezone to America/New_York the recompute must shift
@@ -1061,7 +1061,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 		id := uuid.New()
 		now := time.Now()
 		iv := 1
-		unit := "days"
+		unit := models.ScheduleUnitDays
 		a := models.Automation{
 			ID: id, OrgID: orgID, Name: "a", Goal: "g",
 			ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
@@ -1166,7 +1166,7 @@ func TestAutomationHandler_Update_RejectsDisconnectedRepo(t *testing.T) {
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	a := models.Automation{
 		ID: id, OrgID: orgID, Name: "a", Goal: "g",
 		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
@@ -1326,7 +1326,7 @@ func TestAutomationHandler_Resume_OK(t *testing.T) {
 	id := uuid.New()
 	now := time.Now()
 	iv := 1
-	unit := "days"
+	unit := models.ScheduleUnitDays
 	a := models.Automation{
 		ID: id, OrgID: orgID, Enabled: false,
 		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
@@ -1742,7 +1742,7 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
-	sessionStatus := string(models.SessionStatusCompleted)
+	sessionStatus := models.SessionStatusCompleted
 	retryAdvised := false
 	prCreationState := "succeeded"
 	prNumber := 1213

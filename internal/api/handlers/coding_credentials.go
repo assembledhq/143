@@ -34,7 +34,7 @@ type codingCredentialStore interface {
 	ListResolvableMulti(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error)
 	Create(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error)
 	Rename(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error
-	UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error
 	Disable(ctx context.Context, scope models.Scope, id uuid.UUID) error
 	Move(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
 	Reorder(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
@@ -73,15 +73,9 @@ func (h *CodingCredentialHandler) resolveScopeFromQuery(r *http.Request, orgID u
 	}
 	scopeParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
 	if scopeParam == "" {
-		scopeParam = models.CodingCredentialScopePersonal
+		scopeParam = string(models.CodingCredentialScopePersonal)
 	}
-	switch scopeParam {
-	case models.CodingCredentialScopeOrg:
-		if requireAdmin && middleware.ActiveRoleFromContext(r.Context()) != "admin" {
-			return models.Scope{}, "", fmt.Errorf("admin role required for scope=org mutations")
-		}
-		return models.Scope{OrgID: orgID}, scopeParam, nil
-	case "resolved":
+	if scopeParam == "resolved" {
 		// "resolved" returns the caller's effective ordered list (personal
 		// then org). UserID must be set so ListResolvable walks the personal
 		// half — without it, the response degrades to org-only and the
@@ -89,6 +83,13 @@ func (h *CodingCredentialHandler) resolveScopeFromQuery(r *http.Request, orgID u
 		// rows.
 		uid := user.ID
 		return models.Scope{OrgID: orgID, UserID: &uid}, scopeParam, nil
+	}
+	switch models.CodingCredentialScope(scopeParam) {
+	case models.CodingCredentialScopeOrg:
+		if requireAdmin && middleware.ActiveRoleFromContext(r.Context()) != "admin" {
+			return models.Scope{}, "", fmt.Errorf("admin role required for scope=org mutations")
+		}
+		return models.Scope{OrgID: orgID}, scopeParam, nil
 	case models.CodingCredentialScopePersonal:
 		uid := user.ID
 		return models.Scope{OrgID: orgID, UserID: &uid}, scopeParam, nil
@@ -105,7 +106,7 @@ func (h *CodingCredentialHandler) resolveScope(r *http.Request, orgID uuid.UUID,
 	if user == nil {
 		return models.Scope{}, fmt.Errorf("unauthenticated")
 	}
-	switch scopeParam {
+	switch models.CodingCredentialScope(scopeParam) {
 	case models.CodingCredentialScopeOrg:
 		if requireAdmin && middleware.ActiveRoleFromContext(r.Context()) != "admin" {
 			return models.Scope{}, fmt.Errorf("admin role required")
@@ -240,7 +241,7 @@ func (h *CodingCredentialHandler) Create(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
 		return
 	}
-	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	scope, err := h.resolveScope(r, orgID, string(input.Scope), true)
 	if err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
@@ -318,7 +319,7 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
 		return
 	}
-	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	scope, err := h.resolveScope(r, orgID, string(input.Scope), true)
 	if err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
@@ -369,7 +370,7 @@ func (h *CodingCredentialHandler) Delete(w http.ResponseWriter, r *http.Request)
 	}
 	scopeParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
 	if scopeParam == "" {
-		scopeParam = models.CodingCredentialScopePersonal
+		scopeParam = string(models.CodingCredentialScopePersonal)
 	}
 	scope, err := h.resolveScope(r, orgID, scopeParam, true)
 	if err != nil {
@@ -404,7 +405,7 @@ func (h *CodingCredentialHandler) Move(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
 		return
 	}
-	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	scope, err := h.resolveScope(r, orgID, string(input.Scope), true)
 	if err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
@@ -432,7 +433,7 @@ func (h *CodingCredentialHandler) Reorder(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
 		return
 	}
-	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	scope, err := h.resolveScope(r, orgID, string(input.Scope), true)
 	if err != nil {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
@@ -492,7 +493,7 @@ func markDefaults(rows []models.CodingCredentialSummary) {
 	defaulted := map[string]bool{}
 	for i := range rows {
 		row := &rows[i]
-		key := row.Scope + "|" + string(row.Agent)
+		key := string(row.Scope) + "|" + string(row.Agent)
 		if defaulted[key] {
 			continue
 		}
@@ -512,7 +513,7 @@ func isRunnableCodingStatus(s models.CodingAuthStatus) bool {
 // from a client. active and pending_auth are intentionally excluded — those
 // states are set by provider-specific verification/OAuth flows. Generic PATCH
 // can only remove a row from the runnable set or mark it invalid.
-func isAllowedHandlerStatus(s string) bool {
+func isAllowedHandlerStatus(s models.CodingCredentialRowStatus) bool {
 	switch s {
 	case models.CodingCredentialStatusDisabled,
 		models.CodingCredentialStatusInvalid:

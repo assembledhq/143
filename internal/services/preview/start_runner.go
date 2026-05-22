@@ -240,7 +240,7 @@ func (r *StartRunner) resolveSandboxWorkDir(ctx context.Context, session *models
 func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := r.resolveSandboxWorkDir(ctx, session)
 	if session.ContainerID != nil && *session.ContainerID != "" &&
-		session.SandboxState == string(models.SandboxStateRunning) {
+		session.SandboxState == models.SandboxStateRunning {
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
@@ -261,7 +261,7 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 		}
 	}
 
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		return acquireSandboxResult{ErrCode: "SNAPSHOT_EXPIRED", Err: fmt.Errorf("this session's sandbox snapshot has expired; send a new message to rebuild it")}
 	}
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" {

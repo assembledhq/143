@@ -63,7 +63,7 @@ func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger 
 		}
 
 		result := &models.SessionResult{Error: &errMsg}
-		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, models.SessionStatusFailed, result); err != nil {
 			logger.Error().
 				Err(err).
 				Str("session_id", session.ID.String()).
@@ -115,7 +115,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 		}
 		failedSession := session
 		failureCategory := agent.FailureCategorySandboxCapacity
-		failedSession.Status = string(models.SessionStatusFailed)
+		failedSession.Status = models.SessionStatusFailed
 		failedSession.Error = &errMsg
 		failedSession.FailureExplanation = &explanation
 		failedSession.FailureCategory = &failureCategory
@@ -130,7 +130,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 		}
 
 		result := &models.SessionResult{Error: &errMsg}
-		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, string(models.SessionStatusFailed), result); err != nil {
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, models.SessionStatusFailed, result); err != nil {
 			logger.Error().
 				Err(err).
 				Str("session_id", session.ID.String()).
@@ -161,7 +161,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 			}
 		}
 		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
-			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, models.SessionStatusFailed); err != nil {
 				logger.Warn().
 					Err(err).
 					Str("session_id", failedSession.ID.String()).
@@ -170,7 +170,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 			}
 		}
 		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
-			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, string(models.SessionStatusFailed)); err != nil {
+			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, models.SessionStatusFailed); err != nil {
 				logger.Warn().
 					Err(err).
 					Str("session_id", failedSession.ID.String()).
@@ -652,7 +652,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("fetch automation run: %w", err)
 		}
 		if run.Status != models.AutomationRunStatusPending {
-			log.Info().Str("status", run.Status).Msg("skipping automation_run: row no longer pending")
+			log.Info().Str("status", string(run.Status)).Msg("skipping automation_run: row no longer pending")
 			return nil
 		}
 
@@ -781,7 +781,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			OrgID:             orgID,
 			AgentType:         agentType,
 			Status:            "pending",
-			AutonomyLevel:     string(models.DefaultSessionAutonomy),
+			AutonomyLevel:     models.DefaultSessionAutonomy,
 			TokenMode:         "low",
 			ModelOverride:     automation.ModelOverride,
 			ReasoningEffort:   automation.ReasoningEffort,
@@ -897,7 +897,7 @@ func newSyncSentryHandler(stores *Stores, logger zerolog.Logger) JobHandler {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
 
-		integrations, err := stores.Integrations.ListByOrgAndProvider(ctx, orgID, "sentry")
+		integrations, err := stores.Integrations.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderSentry)
 		if err != nil {
 			return fmt.Errorf("list sentry integrations: %w", err)
 		}
@@ -1003,7 +1003,7 @@ func newSyncSlackHandler(stores *Stores, services *Services, logger zerolog.Logg
 			return fmt.Errorf("parse org ID: %w", err)
 		}
 
-		integrations, err := stores.Integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderSlack))
+		integrations, err := stores.Integrations.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderSlack)
 		if err != nil {
 			return fmt.Errorf("list slack integrations: %w", err)
 		}
@@ -1210,7 +1210,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			// Don't start blind. Surface to the user via the recoverable
 			// failure path so they can retry.
 			errMsg := "Linear context could not be loaded. Retry the session to fetch it again."
-			_ = stores.Sessions.UpdateResult(ctx, orgID, runID, "failed", &models.SessionResult{Error: &errMsg})
+			_ = stores.Sessions.UpdateResult(ctx, orgID, runID, models.SessionStatusFailed, &models.SessionResult{Error: &errMsg})
 			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
 		}
 
@@ -1305,7 +1305,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 						Dur("age", time.Since(run.CreatedAt)).
 						Msg("concurrency limit: session pending too long, failing")
 					errMsg := "Session could not start: all agent slots are in use. Please try again when capacity is available."
-					failErr := stores.Sessions.UpdateResult(ctx, orgID, runID, "failed", &models.SessionResult{
+					failErr := stores.Sessions.UpdateResult(ctx, orgID, runID, models.SessionStatusFailed, &models.SessionResult{
 						Error: &errMsg,
 					})
 					if failErr != nil {
@@ -3190,7 +3190,7 @@ func (w *bootstrapLogWriter) log(ctx context.Context, level, message string) {
 	entry := &models.SessionLog{
 		SessionID:  w.sessionID,
 		OrgID:      w.orgID,
-		Level:      level,
+		Level:      models.SessionLogLevel(level),
 		Message:    message,
 		TurnNumber: 0,
 	}
@@ -3233,9 +3233,9 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 		session := &models.Session{
 			OrgID:         orgID,
 			AgentType:     models.AgentTypeClaudeCode,
-			Status:        "running",
-			AutonomyLevel: string(models.SessionAutonomyFull),
-			TokenMode:     "low",
+			Status:        models.SessionStatusRunning,
+			AutonomyLevel: models.SessionAutonomyFull,
+			TokenMode:     models.SessionTokenModeLow,
 			Title:         &title,
 			RepositoryID:  &repoID,
 		}
@@ -3265,7 +3265,7 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 			errMsg := scanErr.Error()
 			logWriter.log(ctx, "error", fmt.Sprintf("Bootstrap scan failed: %s", errMsg))
 			if session.ID != uuid.Nil {
-				_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, "failed")
+				_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusFailed)
 			}
 			if updateErr := stores.EvalBootstraps.UpdateResult(ctx, orgID, bootstrapRunID,
 				models.EvalBootstrapStatusFailed, nil, &errMsg); updateErr != nil {
@@ -3284,7 +3284,7 @@ func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerol
 
 		logWriter.log(ctx, "info", fmt.Sprintf("Bootstrap scan completed successfully. Found %d candidates.", len(candidates)))
 		if session.ID != uuid.Nil {
-			_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, "completed")
+			_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusCompleted)
 		}
 
 		logger.Info().

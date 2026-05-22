@@ -449,7 +449,7 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// With only three statuses (draft, active, completed), "completed" is the sole
 	// terminal state. Deleting a project marks it completed (which also sets
 	// completed_at).
-	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCompleted)); err != nil {
+	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, models.ProjectStatusCompleted); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to mark project as done", err)
 		return
 	}
@@ -595,7 +595,7 @@ func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(target)); err != nil {
+	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, target); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status", err)
 		return
 	}

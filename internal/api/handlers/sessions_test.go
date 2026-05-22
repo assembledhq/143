@@ -2983,7 +2983,7 @@ func TestSessionHandler_StreamLogsViaRedis_FallsBackWhenRedisUnavailable(t *test
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	rec := httptest.NewRecorder()
 	sw := sse.NewWriter(rec)
@@ -3008,7 +3008,7 @@ func TestSessionHandler_StreamLogsViaRedis_ContextCanceledAfterSetup(t *testing.
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3052,7 +3052,7 @@ func TestSessionHandler_StreamLogsViaRedis_ShutdownSignalAfterSetup(t *testing.T
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3082,7 +3082,7 @@ func TestSessionHandler_StreamLogsViaRedis_ReplayAndStatusWriteFailures(t *testi
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 11, SessionID: runID, OrgID: orgID, Level: "info", Message: "hello", Timestamp: time.Now()}), "test should seed Redis replay logs")
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
@@ -3122,7 +3122,7 @@ func TestSessionHandler_StreamLogsViaRedis_SubscriptionClosureWritesRetryEvent(t
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3168,7 +3168,7 @@ func TestSessionHandler_StreamLogsViaPolling_ReplaysAndFinishes(t *testing.T) {
 	runID := uuid.New()
 	issueID := uuid.New()
 	now := time.Now()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3240,7 +3240,7 @@ func TestSessionHandler_StreamLogsViaPolling_InvalidLastEventIDFallsBackAndWrite
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 	now := time.Now()
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
@@ -3268,7 +3268,7 @@ func TestSessionHandler_StreamLogsViaPolling_InitialLoadFailureReturns(t *testin
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), int64(2)).
@@ -3294,7 +3294,7 @@ func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) 
 	orgID := uuid.New()
 	runID := uuid.New()
 	issueID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3377,7 +3377,7 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 		orgID := uuid.New()
 		runID := uuid.New()
 		issueID := uuid.New()
-		run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+		run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 		mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3404,7 +3404,7 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 		orgID := uuid.New()
 		runID := uuid.New()
 		issueID := uuid.New()
-		run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+		run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 		mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3446,7 +3446,7 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 				runID := uuid.New()
 				issueID := uuid.New()
 				now := time.Now()
-				run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
+				run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
 
 				mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -6357,7 +6357,7 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 			rctx.URLParams.Add("id", sessionID.String())
 			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 			ctx = middleware.WithOrgID(ctx, orgID)
-			ctx = middleware.WithActiveRole(ctx, models.RoleBuilder)
+			ctx = middleware.WithActiveRole(ctx, string(models.RoleBuilder))
 			req = req.WithContext(ctx)
 			w := httptest.NewRecorder()
 
@@ -7798,7 +7798,7 @@ func TestSessionHandler_PushChangesToPR_BuilderRequiresCleanReviewLoopForCurrent
 			rctx.URLParams.Add("id", sessionID.String())
 			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 			ctx = middleware.WithOrgID(ctx, orgID)
-			ctx = middleware.WithActiveRole(ctx, models.RoleBuilder)
+			ctx = middleware.WithActiveRole(ctx, string(models.RoleBuilder))
 			req = req.WithContext(ctx)
 			w := httptest.NewRecorder()
 

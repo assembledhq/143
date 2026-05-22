@@ -143,7 +143,7 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	require.Equal(t, prID, result[sessionID].ID)
-	require.Equal(t, "success", result[sessionID].CIStatus)
+	require.Equal(t, models.PullRequestCIStatusSuccess, result[sessionID].CIStatus)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

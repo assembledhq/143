@@ -63,7 +63,7 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 	}
 	return WorkerNode{
 		ID:      node.ID,
-		Mode:    node.Mode,
+		Mode:    string(node.Mode),
 		BaseURL: baseURL,
 	}, nil
 }
@@ -81,13 +81,13 @@ func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
 	}
 	return WorkerNode{
 		ID:      node.ID,
-		Mode:    node.Mode,
+		Mode:    string(node.Mode),
 		BaseURL: baseURL,
 	}, nil
 }
 
-func isResolvableNodeStatus(status string) bool {
-	return status == "active" || status == "draining"
+func isResolvableNodeStatus(status models.NodeStatus) bool {
+	return status == models.NodeStatusActive || status == models.NodeStatusDraining
 }
 
 // ResolveNode returns a routable worker by ID. Existing previews and live
@@ -119,7 +119,7 @@ func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, s
 	}
 
 	if session.ContainerID != nil && *session.ContainerID != "" &&
-		session.SandboxState == string(models.SandboxStateRunning) {
+		session.SandboxState == models.SandboxStateRunning {
 		if session.WorkerNodeID == nil || *session.WorkerNodeID == "" {
 			return WorkerNode{}, ErrLegacySessionWorkerOwnership
 		}

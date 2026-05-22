@@ -85,7 +85,7 @@ type AgentInput struct {
 	Commands           []models.SessionInputCommand
 	ReasoningEffort    models.ReasoningEffort
 	OrgSettings        json.RawMessage
-	TokenMode          string // "low" or "high"
+	TokenMode          models.SessionTokenMode
 	ComplexityEstimate *ComplexityEstimate
 	ContextDocs        []string // content of CLAUDE.md, AGENTS.md, etc.
 	RevisionContext    *RevisionContext

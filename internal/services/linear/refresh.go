@@ -284,7 +284,7 @@ func (s *Service) loadLinearCredential(ctx context.Context, orgID uuid.UUID) (mo
 	if s == nil || s.integrations == nil {
 		return models.Integration{}, models.LinearConfig{}, fmt.Errorf("lookup linear integration: %w", ErrIntegrationNotFound)
 	}
-	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, "linear")
+	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, models.IntegrationProviderLinear)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return models.Integration{}, models.LinearConfig{}, fmt.Errorf("lookup linear integration: %w", ErrIntegrationNotFound)

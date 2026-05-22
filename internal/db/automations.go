@@ -416,9 +416,9 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	}
 	type affectedRow struct {
 		id             uuid.UUID
-		scheduleType   string
+		scheduleType   models.AutomationScheduleType
 		intervalValue  *int
-		intervalUnit   *string
+		intervalUnit   *models.ScheduleUnit
 		intervalRunAt  *string
 		cronExpression *string
 		timezone       string
@@ -796,7 +796,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		// skipped, in-flight before the worker creates the session).
 		sessionID                  *uuid.UUID
 		sessionTitle               *string
-		sessionStatus              *string
+		sessionStatus              *models.SessionStatus
 		sessionDiffStats           []byte
 		sessionFailureExplanation  *string
 		sessionFailureCategory     *string
@@ -808,8 +808,8 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		// the inner LATERAL is also a LEFT JOIN.
 		prNumber   *int
 		prURL      *string
-		prStatus   *string
-		prCIStatus *string
+		prStatus   *models.PullRequestStatus
+		prCIStatus *models.PullRequestCIStatus
 	)
 
 	err := row.Scan(
@@ -873,7 +873,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 
 // UpdateStatus updates a run's status. Scoped by org_id so a leaked run UUID
 // from another tenant cannot be mutated.
-func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string, completedAt *time.Time, resultSummary *string) error {
+func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) error {
 	query := `UPDATE automation_runs SET status = @status, completed_at = @completed_at, result_summary = @result_summary, updated_at = now()
 		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -897,7 +897,7 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 // for both without risk, and a later terminal transition that accidentally
 // drops one of them still won't clobber a value written by an earlier writer.
 // Pass non-nil values for terminal transitions.
-func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
+func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
 	query := `UPDATE automation_runs
 		SET status = @to_status,
 			completed_at = COALESCE(@completed_at, completed_at),

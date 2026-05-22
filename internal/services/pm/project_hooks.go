@@ -13,7 +13,7 @@ import (
 // ProjectTaskUpdater is called by the orchestrator when an agent run
 // completes, to update the associated project task's status.
 type ProjectTaskUpdater interface {
-	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
+	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
 // ProjectHooks implements ProjectTaskUpdater by updating project task
@@ -32,7 +32,7 @@ func NewProjectHooks(projectTasks projectTaskStore, projects projectStore, logge
 	}
 }
 
-func (h *ProjectHooks) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
+func (h *ProjectHooks) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	if run.ProjectTaskID == nil {
 		return nil
 	}
@@ -44,14 +44,14 @@ func (h *ProjectHooks) OnSessionComplete(ctx context.Context, run *models.Sessio
 
 	now := time.Now()
 	switch status {
-	case "completed":
+	case models.SessionStatusCompleted:
 		task.Status = models.ProjectTaskStatusCompleted
 		task.CompletedAt = &now
-	case "failed":
+	case models.SessionStatusFailed:
 		task.Status = models.ProjectTaskStatusFailed
 		outcomeNote := "Agent run failed"
 		task.OutcomeNotes = &outcomeNote
-	case "needs_human_guidance":
+	case models.SessionStatusNeedsHumanGuidance:
 		task.Status = models.ProjectTaskStatusFailed
 		outcomeNote := "Agent run needs human guidance"
 		task.OutcomeNotes = &outcomeNote

@@ -44,11 +44,11 @@ type runtimeTestSessionStore struct {
 	lastGrantExtensionSeconds  int
 }
 
-func (s *runtimeTestSessionStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *runtimeTestSessionStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus) error {
 	return nil
 }
 
-func (s *runtimeTestSessionStore) UpdateResult(context.Context, uuid.UUID, uuid.UUID, string, *models.SessionResult) error {
+func (s *runtimeTestSessionStore) UpdateResult(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus, *models.SessionResult) error {
 	return nil
 }
 
@@ -126,7 +126,7 @@ func (s *runtimeTestSessionStore) UpdateRecoveryState(context.Context, uuid.UUID
 	return nil
 }
 
-func (s *runtimeTestSessionStore) UpdateSandboxState(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *runtimeTestSessionStore) UpdateSandboxState(context.Context, uuid.UUID, uuid.UUID, models.SandboxState) error {
 	return nil
 }
 

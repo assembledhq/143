@@ -179,7 +179,7 @@ func TestIssueStore_GetByID(t *testing.T) {
 			require.NoError(t, err, "GetByID should not return an error")
 			require.Equal(t, issueID, issue.ID, "should return the correct issue ID")
 			require.Equal(t, "Found Issue", issue.Title, "should return the correct issue title")
-			require.Equal(t, "medium", issue.Severity, "should return the correct issue severity")
+			require.Equal(t, models.IssueSeverityMedium, issue.Severity, "should return the correct issue severity")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

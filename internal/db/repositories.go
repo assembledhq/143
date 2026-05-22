@@ -273,7 +273,7 @@ func (s *RepositoryStore) ClaimFromGitHub(ctx context.Context, repo *models.Repo
 		}
 		return fmt.Errorf("claim github repository: %w", err)
 	}
-	repo.Status = string(models.RepositoryStatusActive)
+	repo.Status = models.RepositoryStatusActive
 	return nil
 }
 

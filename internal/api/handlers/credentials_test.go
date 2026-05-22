@@ -22,7 +22,7 @@ type mockCredentialStore struct {
 	upsertFn       func(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 	listFn         func(ctx context.Context, orgID uuid.UUID) ([]models.CredentialSummary, error)
 	disableFn      func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
-	updateStatusFn func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error
+	updateStatusFn func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status models.CredentialStatus) error
 }
 
 func (m *mockCredentialStore) Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error {
@@ -46,7 +46,7 @@ func (m *mockCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, prov
 	return nil
 }
 
-func (m *mockCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error {
+func (m *mockCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status models.CredentialStatus) error {
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, provider, status)
 	}

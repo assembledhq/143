@@ -151,11 +151,11 @@ func handleLinearAgentPrompted(ctx context.Context, deps LinearAgentEventHandler
 	// we fall back to ClaimForResume which lifts terminal sessions back
 	// to running. The user's intent is "respond to my new message",
 	// regardless of whether the prior run technically finished.
-	revertStatus := string(models.SessionStatusIdle)
+	revertStatus := models.SessionStatusIdle
 	session, err := deps.Stores.Sessions.ClaimIdle(ctx, orgID, sessionID)
 	if err != nil {
 		appendState, stateErr := deps.Stores.Sessions.GetMessageAppendState(ctx, orgID, sessionID)
-		if stateErr == nil && appendState.Status == string(models.SessionStatusRunning) {
+		if stateErr == nil && appendState.Status == models.SessionStatusRunning {
 			err := appendPromptedMessageToRunningSession(ctx, deps, orgID, row.ID, appendState, payload, commentBody, logger)
 			if errors.Is(err, errPromptedMessageAlreadyProcessed) {
 				return nil
@@ -385,7 +385,7 @@ func appendPromptedMessageToRunningSession(
 	if err != nil {
 		return fmt.Errorf("lock running session append state: %w", err)
 	}
-	if lockedState.Status != string(models.SessionStatusRunning) {
+	if lockedState.Status != models.SessionStatusRunning {
 		return &RetryableError{
 			Err:        fmt.Errorf("linear_agent_event: prompted append raced with session status %q", lockedState.Status),
 			RetryAfter: &promptedAppendRaceBackoff,

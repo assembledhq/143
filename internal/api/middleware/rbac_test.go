@@ -95,7 +95,7 @@ func TestRequireRole(t *testing.T) {
 			req := httptest.NewRequest(tt.requestMethod, "/", nil)
 			if tt.user != nil {
 				ctx := WithUser(req.Context(), tt.user)
-				ctx = WithActiveRole(ctx, tt.user.Role)
+				ctx = WithActiveRole(ctx, string(tt.user.Role))
 				req = req.WithContext(ctx)
 			}
 			w := httptest.NewRecorder()

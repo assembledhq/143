@@ -77,9 +77,9 @@ type StaleSessionLister interface {
 	ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error)
 	ListRuntimeControlStalledSessions(ctx context.Context, deadlineBefore, stopRequestedBefore time.Time) ([]models.Session, error)
 	ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error)
-	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
-	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
+	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error
 }
 
 // StuckThreadLister is the subset of the session-thread store used by the
@@ -265,7 +265,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Error().Err(err).Msg("reaper: failed to list stale pending sessions")
 	} else {
 		for _, s := range stalePending {
-			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed)); err != nil {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, models.SessionStatusFailed); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark stale pending session as failed")
 				continue
 			}
@@ -297,7 +297,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Error().Err(err).Msg("reaper: failed to list runtime-control stalled sessions")
 	} else {
 		for _, s := range runtimeStalled {
-			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed)); err != nil {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, models.SessionStatusFailed); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark runtime-control stalled session as failed")
 				continue
 			}
@@ -375,7 +375,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Error().Err(err).Msg("reaper: failed to list stale running sessions")
 	} else {
 		for _, s := range staleRunning {
-			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed)); err != nil {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, models.SessionStatusFailed); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark stale running session as failed")
 				continue
 			}
@@ -452,7 +452,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		r.logger.Error().Err(err).Msg("reaper: failed to list stale idle sessions")
 	} else {
 		for _, s := range staleSessions {
-			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, string(models.SessionStatusCompleted)); err != nil {
+			if err := r.sessions.UpdateStatus(ctx, s.OrgID, s.ID, models.SessionStatusCompleted); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark session completed")
 				continue
 			}
@@ -510,14 +510,14 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			}
 		}
 
-		if err := r.sessions.UpdateSandboxState(ctx, s.OrgID, s.ID, string(models.SandboxStateDestroyed)); err != nil {
+		if err := r.sessions.UpdateSandboxState(ctx, s.OrgID, s.ID, models.SandboxStateDestroyed); err != nil {
 			r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update sandbox state")
 			continue
 		}
 
 		r.logger.Info().
 			Str("session_id", s.ID.String()).
-			Str("status", s.Status).
+			Str("status", string(s.Status)).
 			Msg("reaper: cleaned up expired snapshot")
 	}
 
