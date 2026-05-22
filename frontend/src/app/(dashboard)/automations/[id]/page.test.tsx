@@ -548,7 +548,7 @@ describe("AutomationDetailPage", () => {
 
     const identityRow = screen.getByTestId("automation-settings-identity-row");
     expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
-    expect(screen.getByRole("button", { name: "Automation emoji" })).toHaveClass("w-16");
+    expect(screen.getByRole("button", { name: "Automation emoji" })).toHaveClass("h-9", "w-16");
     expect(screen.getByLabelText("Name")).toHaveValue("Weekly audit");
   });
 
