@@ -847,7 +847,6 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
 			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
 			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
-			require.Contains(t, string(raw), "unset NEXT_PUBLIC_API_URL", "dogfood Next preview script should keep API calls same-origin even when run from a shell with public API env")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
 			return

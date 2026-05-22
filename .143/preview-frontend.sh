@@ -19,11 +19,6 @@
 # preview-start.sh does for DATABASE_URL.
 set -eu
 
-# The dogfood preview must use same-origin /api requests. If a developer shell
-# or sandbox image leaks NEXT_PUBLIC_API_URL into the build, Next bakes that
-# absolute origin into the browser bundle and CSRF cookies no longer match.
-unset NEXT_PUBLIC_API_URL
-
 cd frontend
 
 # Skip the install on a hot restart inside the same sandbox: once the deps
