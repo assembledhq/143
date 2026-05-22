@@ -816,9 +816,12 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s: %v", candidate, err)
 			}
-			if _, err := ParseConfig(raw); err != nil {
-				t.Fatalf("committed .143/config.json failed to parse: %v", err)
-			}
+			cfg, err := ParseConfig(raw)
+			require.NoError(t, err, "committed .143/config.json should parse")
+			frontend, ok := cfg.Services["frontend"]
+			require.True(t, ok, "dogfood preview config should define the frontend service")
+			require.Contains(t, frontend.Env, "NEXT_PUBLIC_API_URL", "dogfood preview should explicitly neutralize public API origin inherited from the surrounding environment")
+			require.Equal(t, "", frontend.Env["NEXT_PUBLIC_API_URL"], "dogfood preview must force same-origin API calls so preview CSRF cookies match the request origin")
 			return
 		}
 		parent := filepath.Dir(dir)
