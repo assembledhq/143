@@ -199,6 +199,13 @@ describe("thread message windows", () => {
       [message(1, 1), message(2, 3)],
     ).map((item) => item.id)).toEqual([10, 30]);
   });
+
+  it("keeps logs when a legacy thread has no persisted messages", () => {
+    expect(filterThreadLogsForLoadedMessages(
+      [log(10, 1), log(20, 1)],
+      [],
+    ).map((item) => item.id)).toEqual([10, 20]);
+  });
 });
 
 describe("trackInFlightAgentUpdate", () => {
