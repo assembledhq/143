@@ -1899,17 +1899,17 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 			}
-			// "no changes to push" is a terminal-but-non-failure outcome:
-			// the session ran to completion but produced nothing worth
-			// shipping. Tell the Linear linker so the attachment subtitle
-			// stops saying "Running" forever and the audit log records the
-			// terminal state. Other PR creation errors are not fired as
-			// `failed` here because failRun in the orchestrator is the
-			// canonical entry point for those.
+			// PR creation failures happen after the agent run has already
+			// completed, so failRun will not fire for them. Tell the Linear
+			// linker about terminal outcomes here so agent-triggered sessions
+			// do not stay in-progress forever after a dead-lettered open_pr.
 			if errors.Is(createErr, ghservice.ErrNoChanges) {
 				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
 			}
 			if shouldDeadLetterPRError(createErr) {
+				if !errors.Is(createErr, ghservice.ErrNoChanges) {
+					linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "failed", 0)
+				}
 				return &FatalError{Err: createErr}
 			}
 			return createErr

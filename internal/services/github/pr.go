@@ -1367,6 +1367,7 @@ trap cleanup EXIT
 cd %[2]s
 git config user.name %[3]s
 git config user.email %[4]s
+git checkout -B %[7]s
 git add -A
 if ! git diff --cached --quiet; then
     git commit -F %[1]s
