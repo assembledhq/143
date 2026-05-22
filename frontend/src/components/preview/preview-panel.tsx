@@ -17,6 +17,7 @@ import {
   RefreshCw,
   X,
   ChevronDown,
+  MoreHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -324,57 +325,85 @@ function formatPreviewRemaining(expiresAt: string): string {
   return minutes > 0 ? `${hours} hr ${minutes} min left` : `${hours} hr left`;
 }
 
-interface PreviewLifetimeMenuProps {
-  expiresAt: string;
+interface PreviewActionsMenuProps {
+  expiresAt?: string;
   disabled: boolean;
+  onStop: () => void;
+  onRestart: () => void;
   onSetLifetime: (durationSeconds: number) => void;
-  onStopNow: () => void;
 }
 
-function PreviewLifetimeMenu({
+function PreviewActionsMenu({
   expiresAt,
   disabled,
+  onStop,
+  onRestart,
   onSetLifetime,
-  onStopNow,
-}: PreviewLifetimeMenuProps) {
+}: PreviewActionsMenuProps) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          size="icon-xs"
+          size="icon-sm"
           variant="outline"
-          aria-label="Preview lifetime"
-          title="Preview lifetime"
+          aria-label="Preview actions"
+          title="Preview actions"
           disabled={disabled}
         >
-          <Clock className="size-3.5" />
+          <MoreHorizontal className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel className="space-y-0.5">
-          <span className="block">Preview lifetime</span>
-          <span className="block text-xs font-normal text-muted-foreground">
-            Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
-          </span>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {PREVIEW_LIFETIME_OPTIONS.map((option) => (
-          <DropdownMenuItem
-            key={option.durationSeconds}
-            onSelect={() => onSetLifetime(option.durationSeconds)}
-          >
-            {option.label}
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onStopNow}>
-          <Square className="size-3.5" />
-          Stop now
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>Preview actions</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={onRestart}>
+          <RotateCw className="size-3.5" />
+          Restart preview
         </DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onSelect={onStop}>
+          <Square className="size-3.5" />
+          Stop preview
+        </DropdownMenuItem>
+        {expiresAt && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="space-y-0.5">
+              <span className="flex items-center gap-1.5">
+                <Clock className="size-3.5" />
+                Preview lifetime
+              </span>
+              <span className="block text-xs font-normal text-muted-foreground">
+                Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
+              </span>
+            </DropdownMenuLabel>
+            {PREVIEW_LIFETIME_OPTIONS.map((option) => (
+              <DropdownMenuItem
+                key={option.durationSeconds}
+                onSelect={() => onSetLifetime(option.durationSeconds)}
+              >
+                {option.label}
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function previewStatusMetadata(status?: PreviewStatus): string | undefined {
+  switch (status) {
+    case "ready":
+      return "Running";
+    case "partially_ready":
+      return "Partially ready";
+    case "unhealthy":
+      return "Unhealthy";
+    case "failed":
+      return undefined;
+    default:
+      return status ? STATUS_LABELS[status] : undefined;
+  }
 }
 
 export function PreviewPanel({
@@ -724,7 +753,9 @@ export function PreviewPanel({
     [showStartupProgress, status, services, infrastructure],
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
-  const showTopControls = status !== "starting";
+  const showTopControls =
+    status !== "starting" && status !== "stopped" && status !== "expired";
+  const statusMetadata = previewStatusMetadata(status);
   const visibleStartupPhases = STARTUP_PHASES.filter(
     (phase) => phase !== "Provisioning" || infrastructure.length > 0,
   );
@@ -771,111 +802,87 @@ export function PreviewPanel({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Controls bar */}
+      {/* Command header */}
       {showTopControls && (
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* Open preview */}
-        {isReady && previewOrigin && (
-          <Button
-            size="sm"
-            asChild
-          >
-            <a
-              href={previewOrigin}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <ExternalLink className="size-3.5" />
-              Open Preview
-            </a>
-          </Button>
-        )}
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 space-y-1">
+              <div className="text-sm font-medium text-foreground">Preview</div>
+              <div className="flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                {statusMetadata && <span>{statusMetadata}</span>}
+                {isReady && (
+                  <ErrorBoundary fallback={null}>
+                    <ConsoleBadge sessionId={sessionId} />
+                  </ErrorBoundary>
+                )}
+              </div>
+            </div>
 
-        {/* Start / Stop / Restart */}
-        <div className="flex items-center gap-1">
-          {isActive ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => stopMutation.mutate()}
-                disabled={isMutating}
-                loading={stopMutation.isPending}
-              >
-                <Square className="size-3.5" />
-                Stop
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => restartMutation.mutate()}
-                disabled={isMutating}
-                loading={restartMutation.isPending}
-              >
-                <RotateCw className="size-3.5" />
-                Restart
-              </Button>
-            </>
-          ) : null}
-        </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {isReady && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size="icon-sm"
+                        variant={designMode ? "default" : "outline"}
+                        onClick={() => setDesignMode(!designMode)}
+                      >
+                        <Palette className="size-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {designMode ? "Exit Design Mode" : "Design Mode"}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
 
-        {/* Status badge */}
-        {status && status !== "failed" && status !== "stopped" && status !== "expired" && (
-          <Badge variant="secondary" className={cn(statusColor(status))}>
-            {status === "ready" && <CheckCircle2 className="size-3" />}
-            {status === "unhealthy" && <AlertTriangle className="size-3" />}
-            {STATUS_LABELS[status]}
-          </Badge>
-        )}
+              {isActive && (
+                <PreviewActionsMenu
+                  expiresAt={isReady ? instance?.expires_at : undefined}
+                  disabled={isMutating}
+                  onStop={() => stopMutation.mutate()}
+                  onRestart={() => restartMutation.mutate()}
+                  onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
+                />
+              )}
 
-        {/* Console errors badge */}
-        {isReady && (
-          <ErrorBoundary fallback={null}>
-            <ConsoleBadge sessionId={sessionId} />
-          </ErrorBoundary>
-        )}
-
-        {isReady && instance?.expires_at && (
-          <PreviewLifetimeMenu
-            expiresAt={instance.expires_at}
-            disabled={isMutating}
-            onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
-            onStopNow={() => stopMutation.mutate()}
-          />
-        )}
-
-        {/* TTL Warning */}
-        {instance?.expires_at && isReady && (
-          <TTLWarning
-            expiresAt={instance.expires_at}
-            sessionId={sessionId}
-            recycleScheduledAt={instance.recycle_scheduled_at}
-          />
-        )}
-
-        <div className="flex-1" />
-
-        {/* Design mode toggle */}
-        {isReady && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon-sm"
-                  variant={designMode ? "default" : "outline"}
-                  onClick={() => setDesignMode(!designMode)}
-                >
-                  <Palette className="size-3.5" />
+              {isReady && previewOrigin && (
+                <Button size="sm" asChild>
+                  <a
+                    href={previewOrigin}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    Open Preview
+                  </a>
                 </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {designMode ? "Exit Design Mode" : "Design Mode"}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
+              )}
 
-      </div>
+              {status === "failed" && (
+                <Button
+                  size="sm"
+                  onClick={() => restartMutation.mutate()}
+                  disabled={isMutating}
+                  loading={restartMutation.isPending}
+                >
+                  {!restartMutation.isPending && <RotateCw className="size-3.5" />}
+                  Restart Preview
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {instance?.expires_at && isReady && (
+            <TTLWarning
+              expiresAt={instance.expires_at}
+              sessionId={sessionId}
+              recycleScheduledAt={instance.recycle_scheduled_at}
+            />
+          )}
+        </div>
       )}
 
       {/* Mutation error banner */}
