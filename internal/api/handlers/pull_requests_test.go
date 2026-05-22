@@ -194,7 +194,7 @@ func TestPullRequestHandler_StartRepair(t *testing.T) {
 			require.Equal(t, models.PullRequestRepairActionTypeFixTests, action, "StartRepair should use the endpoint's repair action type")
 			return &models.PullRequestRepairResponse{
 				SessionID:        sessionID,
-				Mode:             "revision",
+				Mode:             "reconstructed",
 				HealthVersion:    4,
 				RepairActionType: action,
 			}, nil

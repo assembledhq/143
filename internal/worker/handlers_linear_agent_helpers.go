@@ -78,6 +78,8 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 		Origin:               models.SessionOriginIssueTrigger,
 		Title:                &title,
 		PMApproach:           &approach,
+		AutonomyLevel:        models.DefaultSessionAutonomy,
+		TokenMode:            models.DefaultSessionTokenMode,
 		RepositoryID:         &repoID,
 		PrimaryIssueID:       &primaryIssueID,
 		LinearIdentifierHint: &identifier,

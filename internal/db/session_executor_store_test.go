@@ -47,6 +47,28 @@ func TestSessionExecutorStore_CreateStarting(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionExecutorStore_ClearPreHandoffReservation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+
+	mock.ExpectExec("UPDATE session_executors se").
+		WithArgs(orgID, sessionID, jobID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	cleared, err := store.ClearPreHandoffReservation(context.Background(), orgID, sessionID, jobID)
+	require.NoError(t, err, "ClearPreHandoffReservation should clear worker-owned pre-handoff executor rows")
+	require.Equal(t, int64(1), cleared, "ClearPreHandoffReservation should report cleared executor rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_HandoffToSessionExecutorWithLease(t *testing.T) {
 	t.Parallel()
 

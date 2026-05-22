@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -618,6 +619,18 @@ func (s *Service) SessionURL(sessionID uuid.UUID) string {
 		return fmt.Sprintf("/sessions/%s", sessionID.String())
 	}
 	return fmt.Sprintf("%s/sessions/%s", strings.TrimRight(s.appBaseURL, "/"), sessionID.String())
+}
+
+// AgentSessionDebugURL builds the operator debug URL for a Linear
+// AgentSession bridge row. This is used before a 143 session exists, so it
+// intentionally targets the Linear agent debug endpoint rather than
+// /sessions/<id>.
+func (s *Service) AgentSessionDebugURL(linearAgentSessionID string) string {
+	path := fmt.Sprintf("/api/v1/integrations/linear/agent/sessions/%s", url.PathEscape(linearAgentSessionID))
+	if s == nil || s.appBaseURL == "" {
+		return path
+	}
+	return strings.TrimRight(s.appBaseURL, "/") + path
 }
 
 // Enabled returns true when the org has an active Linear integration. The

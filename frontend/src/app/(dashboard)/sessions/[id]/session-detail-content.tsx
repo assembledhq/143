@@ -4931,6 +4931,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
+                          className="text-xs"
                           onClick={createBranch}
                           disabled={branchActionDisabled}
                           title={branchActionTitle}

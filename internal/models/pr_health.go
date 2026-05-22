@@ -206,6 +206,23 @@ type PullRequestRepairResponse struct {
 	RepairActionType PullRequestRepairActionType `json:"repair_action_type"`
 }
 
+type PullRequestRepairWorkspaceMode string
+
+const (
+	PullRequestRepairWorkspaceModeSnapshotContinuation PullRequestRepairWorkspaceMode = "snapshot_continuation"
+	PullRequestRepairWorkspaceModePRHeadReconstruction PullRequestRepairWorkspaceMode = "pr_head_reconstruction"
+)
+
+func (m PullRequestRepairWorkspaceMode) Validate() error {
+	switch m {
+	case PullRequestRepairWorkspaceModeSnapshotContinuation,
+		PullRequestRepairWorkspaceModePRHeadReconstruction:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestRepairWorkspaceMode: %q", m)
+	}
+}
+
 type PullRequestMergeMethod string
 
 const (
@@ -222,16 +239,17 @@ type PullRequestMergeResponse struct {
 }
 
 type PullRequestRepairRun struct {
-	ID                 uuid.UUID                   `db:"id" json:"id"`
-	OrgID              uuid.UUID                   `db:"org_id" json:"org_id"`
-	PullRequestID      uuid.UUID                   `db:"pull_request_id" json:"pull_request_id"`
-	SessionID          uuid.UUID                   `db:"session_id" json:"session_id"`
-	ActionType         PullRequestRepairActionType `db:"action_type" json:"action_type"`
-	HealthVersion      int64                       `db:"health_version" json:"health_version"`
-	Active             bool                        `db:"active" json:"active"`
-	ObsoletedByVersion *int64                      `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`
-	CreatedAt          time.Time                   `db:"created_at" json:"created_at"`
-	UpdatedAt          time.Time                   `db:"updated_at" json:"updated_at"`
+	ID                 uuid.UUID                      `db:"id" json:"id"`
+	OrgID              uuid.UUID                      `db:"org_id" json:"org_id"`
+	PullRequestID      uuid.UUID                      `db:"pull_request_id" json:"pull_request_id"`
+	SessionID          uuid.UUID                      `db:"session_id" json:"session_id"`
+	ActionType         PullRequestRepairActionType    `db:"action_type" json:"action_type"`
+	HealthVersion      int64                          `db:"health_version" json:"health_version"`
+	WorkspaceMode      PullRequestRepairWorkspaceMode `db:"workspace_mode" json:"workspace_mode"`
+	Active             bool                           `db:"active" json:"active"`
+	ObsoletedByVersion *int64                         `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`
+	CreatedAt          time.Time                      `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time                      `db:"updated_at" json:"updated_at"`
 }
 
 type PullRequestUpdatedEvent struct {

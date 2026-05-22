@@ -1597,14 +1597,14 @@ func TestAgentEnvInjectClaudeCodeAuthWithEnvSetsPermissionModeFromModelAndVersio
 		expected string
 	}{
 		{
-			name:     "supported sonnet model enables auto",
+			name:     "supported sonnet model uses bypass",
 			model:    models.ClaudeCodeModelSonnet46,
-			expected: ClaudeCodePermissionModeAuto,
+			expected: ClaudeCodePermissionModeBypassPermissions,
 		},
 		{
-			name:     "unsupported haiku model keeps accept edits",
+			name:     "unsupported haiku model still uses bypass",
 			model:    models.ClaudeCodeModelHaiku45,
-			expected: ClaudeCodePermissionModeAcceptEdits,
+			expected: ClaudeCodePermissionModeBypassPermissions,
 		},
 	}
 

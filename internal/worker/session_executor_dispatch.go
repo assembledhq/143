@@ -52,6 +52,7 @@ type ExecutorLauncher interface {
 }
 
 type sessionExecutorLifecycleStore interface {
+	ClearPreHandoffReservation(ctx context.Context, orgID, sessionID, jobID uuid.UUID) (int64, error)
 	CreateStarting(ctx context.Context, orgID uuid.UUID, params models.CreateSessionExecutorParams) (uuid.UUID, error)
 	MarkTerminalWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, status models.SessionExecutorStatus, exitCode *int, lastError string) (bool, error)
 }
@@ -89,6 +90,10 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 	lockToken, ok := jobctx.LockTokenFromContext(ctx)
 	if !ok || lockToken == uuid.Nil {
 		return uuid.Nil, fmt.Errorf("lock token missing from context")
+	}
+
+	if _, err := d.Executors.ClearPreHandoffReservation(ctx, session.OrgID, session.ID, jobID); err != nil {
+		return uuid.Nil, err
 	}
 
 	executorID, err := d.Executors.CreateStarting(ctx, session.OrgID, models.CreateSessionExecutorParams{

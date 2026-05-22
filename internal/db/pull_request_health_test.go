@@ -26,7 +26,7 @@ var prHealthSnapshotColumns = []string{
 
 var prRepairRunColumns = []string{
 	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version",
-	"active", "obsoleted_by_version", "created_at", "updated_at",
+	"workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at",
 }
 
 func TestPullRequestStore_HealthQueries(t *testing.T) {
@@ -257,7 +257,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 			"health_version":  int64(5),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).AddRow(
-			runID, orgID, prID, sessionID, models.PullRequestRepairActionTypeFixTests, int64(5), true, nil, now, now,
+			runID, orgID, prID, sessionID, models.PullRequestRepairActionTypeFixTests, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
 		))
 
 	run, err := store.GetActiveRepairRun(context.Background(), orgID, prID, models.PullRequestRepairActionTypeFixTests, 5)
@@ -271,6 +271,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 			"session_id":           sessionID,
 			"action_type":          models.PullRequestRepairActionTypeResolveConflicts,
 			"health_version":       int64(6),
+			"workspace_mode":       models.PullRequestRepairWorkspaceModePRHeadReconstruction,
 			"active":               true,
 			"obsoleted_by_version": (*int64)(nil),
 		}).
@@ -282,6 +283,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 		SessionID:     sessionID,
 		ActionType:    models.PullRequestRepairActionTypeResolveConflicts,
 		HealthVersion: 6,
+		WorkspaceMode: models.PullRequestRepairWorkspaceModePRHeadReconstruction,
 		Active:        true,
 	}
 	err = store.CreateRepairRun(context.Background(), createRun)
@@ -318,8 +320,8 @@ func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
 			"health_version":  int64(9),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).
-			AddRow(uuid.New(), orgID, prID, sessionA, models.PullRequestRepairActionTypeFixTests, int64(9), true, nil, now, now).
-			AddRow(uuid.New(), orgID, prID, sessionB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), true, nil, now, now))
+			AddRow(uuid.New(), orgID, prID, sessionA, models.PullRequestRepairActionTypeFixTests, int64(9), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
+			AddRow(uuid.New(), orgID, prID, sessionB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
 
 	runs, err := store.ListActiveRepairRuns(context.Background(), orgID, prID, 9)
 	require.NoError(t, err, "ListActiveRepairRuns should return active repair runs for the current health version")

@@ -4947,6 +4947,117 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestContinueSessionHandler_PassesPRRepairCommandOptions(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	repairRunID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass command-aware options to the orchestrator")
+			require.NotNil(t, opts.PRRepair, "continue_session should decode PR repair command metadata")
+			require.Equal(t, prID, opts.PRRepair.PullRequestID, "continue_session should preserve the pull request id")
+			require.Equal(t, repairRunID, opts.PRRepair.RepairRunID, "continue_session should preserve the repair run id")
+			require.Equal(t, 42, opts.PRRepair.PullRequestNumber, "continue_session should preserve the GitHub PR number")
+			require.Equal(t, models.PullRequestRepairActionTypeFixTests, opts.PRRepair.CommandType, "continue_session should decode the repair command type")
+			require.Equal(t, int64(12), opts.PRRepair.HealthVersion, "continue_session should preserve the health version")
+			require.Equal(t, "head-sha", opts.PRRepair.HeadSHA, "continue_session should preserve the expected head SHA")
+			require.Equal(t, models.PullRequestRepairWorkspaceModePRHeadReconstruction, opts.PRRepair.WorkspaceMode, "continue_session should decode the workspace mode")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":          sessionID.String(),
+		"org_id":              orgID.String(),
+		"pull_request_id":     prID.String(),
+		"repair_run_id":       repairRunID.String(),
+		"command_type":        "fix_tests",
+		"health_version":      12,
+		"head_sha":            "head-sha",
+		"workspace_mode":      "pr_head_reconstruction",
+		"pull_request_number": 42,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.NoError(t, err, "continue_session should accept PR repair command metadata")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_StalePRHeadSyncsAndStops(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	var syncedPRID uuid.UUID
+	prSvc := &stubPRService{
+		syncPullRequestStateFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) error {
+			require.Equal(t, orgID, gotOrgID, "stale PR head handling should sync within the job org")
+			syncedPRID = gotPRID
+			return nil
+		},
+	}
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return agent.ErrStalePullRequestHead
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch, PR: prSvc}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":          sessionID.String(),
+		"org_id":              orgID.String(),
+		"pull_request_id":     prID.String(),
+		"command_type":        "resolve_conflicts",
+		"health_version":      12,
+		"head_sha":            "head-sha",
+		"workspace_mode":      "pr_head_reconstruction",
+		"pull_request_number": 42,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.ErrorIs(t, err, agent.ErrStalePullRequestHead, "continue_session should preserve the stale head sentinel")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "stale PR head should stop the obsolete job instead of retrying the wrong checkout")
+	require.Equal(t, prID, syncedPRID, "stale PR head handling should request a fresh PR health sync")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestContinueSessionHandler_DispatchesSessionExecutorWhenDispatcherConfigured(t *testing.T) {
 	t.Parallel()
 

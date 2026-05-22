@@ -340,6 +340,10 @@ func (m SessionTokenMode) Validate() error {
 	}
 }
 
+// DefaultSessionTokenMode is the token mode applied when a session is created
+// without an explicit token-mode override.
+const DefaultSessionTokenMode = SessionTokenModeLow
+
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string
 
