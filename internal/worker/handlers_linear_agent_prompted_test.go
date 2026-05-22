@@ -236,7 +236,7 @@ func TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure(t *testin
 		deps,
 		orgID,
 		uuid.New(),
-		db.SessionMessageAppendState{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 7},
+		db.SessionMessageAppendState{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 7},
 		linearAgentEventPayload{LinearAgentSessionID: "as_committed_fail"},
 		"please retry",
 		zerolog.Nop(),

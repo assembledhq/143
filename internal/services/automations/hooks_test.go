@@ -47,7 +47,7 @@ func TestAutomationHooks_OnSessionComplete_NoAutomationRunID_NoOp(t *testing.T) 
 	h := NewAutomationHooks(store, zerolog.Nop())
 
 	session := &models.Session{OrgID: uuid.New()}
-	err := h.OnSessionComplete(context.Background(), session, "completed")
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusCompleted)
 	require.NoError(t, err)
 	require.Empty(t, store.calls, "no update should fire when session has no automation_run_id")
 }
@@ -67,7 +67,7 @@ func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 		ResultSummary:   &summary,
 	}
 
-	err := h.OnSessionComplete(context.Background(), session, "completed")
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusCompleted)
 	require.NoError(t, err)
 	require.Len(t, store.calls, 1)
 	call := store.calls[0]
@@ -95,7 +95,7 @@ func TestAutomationHooks_OnSessionComplete_FailedPrefersErrorWhenNoSummary(t *te
 		Error:           &errMsg,
 	}
 
-	err := h.OnSessionComplete(context.Background(), session, "failed")
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusFailed)
 	require.NoError(t, err)
 	require.Len(t, store.calls, 1)
 	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
@@ -120,7 +120,7 @@ func TestAutomationHooks_OnSessionComplete_NeedsHumanGuidanceMapsToFailed(t *tes
 		AutomationRunID: &runID,
 	}
 
-	err := h.OnSessionComplete(context.Background(), session, "needs_human_guidance")
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusNeedsHumanGuidance)
 	require.NoError(t, err)
 	require.Len(t, store.calls, 1)
 	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
@@ -141,7 +141,12 @@ func TestAutomationHooks_OnSessionComplete_IgnoresNonTerminal(t *testing.T) {
 		AutomationRunID: &runID,
 	}
 
-	for _, status := range []string{"running", "awaiting_input", "cancelled", "pending"} {
+	for _, status := range []models.SessionStatus{
+		models.SessionStatusRunning,
+		models.SessionStatusAwaitingInput,
+		models.SessionStatusCancelled,
+		models.SessionStatusPending,
+	} {
 		err := h.OnSessionComplete(context.Background(), session, status)
 		require.NoError(t, err, "status %q should no-op", status)
 	}
@@ -165,7 +170,7 @@ func TestAutomationHooks_OnSessionComplete_AlreadyTerminalIsSafeNoOp(t *testing.
 		AutomationRunID: &runID,
 	}
 
-	err := h.OnSessionComplete(context.Background(), session, "failed")
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusFailed)
 	require.NoError(t, err, "a lost-race transition must not surface as an error")
 	require.Len(t, store.calls, 1, "the hook still attempts the conditional transition")
 	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
@@ -180,7 +185,7 @@ func TestAutomationHooks_OnSessionComplete_TransitionErrorWraps(t *testing.T) {
 
 	runID := uuid.New()
 	session := &models.Session{OrgID: uuid.New(), AutomationRunID: &runID}
-	err := h.OnSessionComplete(context.Background(), session, "completed")
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusCompleted)
 	require.Error(t, err)
 	require.ErrorIs(t, err, sentinel, "store errors must propagate so the worker can retry/log")
 }

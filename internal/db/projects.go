@@ -346,16 +346,16 @@ func (s *ProjectStore) UpdateProgress(ctx context.Context, orgID, projectID uuid
 	return err
 }
 
-func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) error {
+func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status models.ProjectStatus) error {
 	query := `UPDATE projects SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	if status == "completed" {
+	if status == models.ProjectStatusCompleted {
 		query = `UPDATE projects SET status = @status, completed_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     projectID,
 		"org_id": orgID,
-		"status": status,
+		"status": string(status),
 	})
 	return err
 }

@@ -43,13 +43,13 @@ func NewAutomationHooks(runs automationRunStore, logger zerolog.Logger) *Automat
 // "running" so that if both the orchestrator's success path and failRun fire
 // for the same session (or the reaper has already written a terminal status),
 // a second call here cannot overwrite an already-terminal row.
-func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
+func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	if run.AutomationRunID == nil {
 		return nil
 	}
 
 	var runStatus models.AutomationRunStatus
-	switch models.SessionStatus(status) {
+	switch status {
 	case models.SessionStatusCompleted:
 		runStatus = models.AutomationRunStatusCompleted
 	case models.SessionStatusFailed, models.SessionStatusNeedsHumanGuidance:
@@ -86,7 +86,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 // terminal fields. Prefers the orchestrator's result summary; falls back to
 // the error string on failure; finally to a generic status label so the row
 // never lands with an empty result_summary.
-func deriveSummary(run *models.Session, status string) *string {
+func deriveSummary(run *models.Session, status models.SessionStatus) *string {
 	if run.ResultSummary != nil && *run.ResultSummary != "" {
 		s := *run.ResultSummary
 		return &s

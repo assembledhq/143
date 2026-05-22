@@ -116,7 +116,7 @@ func (h *OrganizationsHandler) createOrgWithAdmin(ctx context.Context, name stri
 	// Plain Insert (not GrantAtLeast): the org was just created inside this
 	// tx, so a pre-existing membership would indicate a bug. Loud failure is
 	// better than GrantAtLeast's silent no-op.
-	if err := db.NewOrganizationMembershipStore(tx).Insert(ctx, userID, org.ID, string(models.RoleAdmin)); err != nil {
+	if err := db.NewOrganizationMembershipStore(tx).Insert(ctx, userID, org.ID, models.RoleAdmin); err != nil {
 		return nil, fmt.Errorf("grant admin membership: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

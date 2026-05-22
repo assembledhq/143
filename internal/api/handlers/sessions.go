@@ -2694,7 +2694,7 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusCompleted)); err != nil {
+	if err := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, models.SessionStatusCompleted); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to end session", err)
 		return
 	}
@@ -3183,7 +3183,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			// fast path that surfaces the failure to the user immediately;
 			// the reaper is the eventual-consistency safety net.
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
+			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, models.SessionStatusFailed, &models.SessionResult{Error: &errMsg}); err != nil {
 				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; SessionReaper Phase 0 will reap the stuck-pending row within max_pending_age")
 			}
 			cancel()

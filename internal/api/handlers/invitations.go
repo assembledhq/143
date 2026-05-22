@@ -103,7 +103,7 @@ func (h *AuthHandler) AcceptInvitationByID(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	effectiveRole, acceptErr, err := h.acceptValidatedInvitation(r.Context(), &inv, user.ID, string(inv.Role), acceptOptions{updateLastOrgID: false})
+	effectiveRole, acceptErr, err := h.acceptValidatedInvitation(r.Context(), &inv, user.ID, inv.Role, acceptOptions{updateLastOrgID: false})
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", user.ID.String()).Msg("failed to accept invitation by id")
 		h.emitInvitationClaimFailed(r, user.ID, &inv, "INTERNAL_ERROR", "internal error during invitation accept")

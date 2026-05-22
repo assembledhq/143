@@ -35,7 +35,7 @@ type mockSessionStore struct {
 	created          []*models.Session
 	running          int
 	lastResult       *models.SessionResult
-	lastResultStatus string
+	lastResultStatus models.SessionStatus
 }
 
 func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
@@ -55,7 +55,7 @@ func (m *mockSessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID,
 	return nil, nil
 }
 
-func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	m.lastResult = result
 	m.lastResultStatus = status
 	return nil
@@ -240,7 +240,7 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 
 	// Verify session was created, then marked failed with error via UpdateResult.
 	require.Len(t, sessions.created, 1, "PM session should be created")
-	require.Equal(t, "failed", sessions.lastResultStatus, "session should be marked failed")
+	require.Equal(t, models.SessionStatusFailed, sessions.lastResultStatus, "session should be marked failed")
 	require.NotNil(t, sessions.lastResult, "UpdateResult should have been called")
 	require.NotNil(t, sessions.lastResult.Error, "error message should be set on session")
 	require.Contains(t, *sessions.lastResult.Error, "gather context", "error should describe the failure stage")

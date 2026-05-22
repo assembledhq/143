@@ -39,8 +39,8 @@ var workerIssueColumns = []string{
 
 type workerLinearIntegrationReader struct{}
 
-func (workerLinearIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
-	return models.Integration{ID: uuid.New(), Provider: "linear", Status: "active"}, nil
+func (workerLinearIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
+	return models.Integration{ID: uuid.New(), Provider: models.IntegrationProviderLinear, Status: models.IntegrationStatusActive}, nil
 }
 
 // workerLinearMissingIntegrationReader simulates the org-disconnected-Linear
@@ -49,7 +49,7 @@ func (workerLinearIntegrationReader) GetByOrgAndProvider(context.Context, uuid.U
 // to dead-letter on.
 type workerLinearMissingIntegrationReader struct{}
 
-func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	return models.Integration{}, pgx.ErrNoRows
 }
 
@@ -65,14 +65,14 @@ func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.Provi
 // status flip.
 type workerLinearIntegrationRecorder struct {
 	row             models.Integration
-	statusCfgWrites []string
+	statusCfgWrites []models.IntegrationStatus
 }
 
-func (r *workerLinearIntegrationRecorder) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+func (r *workerLinearIntegrationRecorder) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	return r.row, nil
 }
 
-func (r *workerLinearIntegrationRecorder) UpdateStatus(_ context.Context, _, _ uuid.UUID, status string) error {
+func (r *workerLinearIntegrationRecorder) UpdateStatus(_ context.Context, _, _ uuid.UUID, status models.IntegrationStatus) error {
 	r.statusCfgWrites = append(r.statusCfgWrites, status)
 	return nil
 }
@@ -81,7 +81,7 @@ func (r *workerLinearIntegrationRecorder) UpdateConfig(_ context.Context, _, _ u
 	return nil
 }
 
-func (r *workerLinearIntegrationRecorder) UpdateStatusAndConfig(_ context.Context, _, _ uuid.UUID, status string, _ json.RawMessage) error {
+func (r *workerLinearIntegrationRecorder) UpdateStatusAndConfig(_ context.Context, _, _ uuid.UUID, status models.IntegrationStatus, _ json.RawMessage) error {
 	r.statusCfgWrites = append(r.statusCfgWrites, status)
 	return nil
 }
@@ -505,11 +505,11 @@ type sessionCompleteRecorder struct {
 
 type sessionCompleteCall struct {
 	sessionID uuid.UUID
-	status    string
+	status    models.SessionStatus
 	errText   string
 }
 
-func (r *sessionCompleteRecorder) OnSessionComplete(_ context.Context, run *models.Session, status string) error {
+func (r *sessionCompleteRecorder) OnSessionComplete(_ context.Context, run *models.Session, status models.SessionStatus) error {
 	call := sessionCompleteCall{sessionID: run.ID, status: status}
 	if run.Error != nil {
 		call.errText = *run.Error
@@ -886,7 +886,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		var fatal *FatalError
 		require.ErrorAs(t, err, &fatal, "unauthorized must dead-letter, not retry to exhaustion")
 		require.ErrorIs(t, err, linearservice.ErrUnauthorized, "fatal wrapper should preserve the unauthorized sentinel")
-		require.Equal(t, []string{string(models.IntegrationStatusError)}, recorder.statusCfgWrites, "handler must mark the integration errored before dead-lettering so the UI shows Reconnect")
+		require.Equal(t, []models.IntegrationStatus{models.IntegrationStatusError}, recorder.statusCfgWrites, "handler must mark the integration errored before dead-lettering so the UI shows Reconnect")
 		require.NoError(t, mock.ExpectationsWereMet(), "fatal-on-unauthorized must not write to sessions before the dead-letter hook")
 	})
 
@@ -1096,7 +1096,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		var fatal *FatalError
 		require.ErrorAs(t, err, &fatal, "unauthorized must dead-letter the cron job, not retry for 8 minutes")
 		require.ErrorIs(t, err, linearservice.ErrUnauthorized, "fatal wrapper should preserve the unauthorized sentinel")
-		require.Equal(t, []string{string(models.IntegrationStatusError)}, recorder.statusCfgWrites, "handler must mark the integration errored so the UI shows Reconnect")
+		require.Equal(t, []models.IntegrationStatus{models.IntegrationStatusError}, recorder.statusCfgWrites, "handler must mark the integration errored so the UI shows Reconnect")
 	})
 
 	t.Run("linear_milestone skips sessions without primary link", func(t *testing.T) {
@@ -5246,7 +5246,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	jobctx.RunDeadLetterHooks(handlerCtx, err)
 	expectedCompletionCalls := []sessionCompleteCall{{
 		sessionID: sessionID,
-		status:    string(models.SessionStatusFailed),
+		status:    models.SessionStatusFailed,
 		errText:   "Session stopped because sandbox capacity stayed full until the retry window expired.",
 	}}
 	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")

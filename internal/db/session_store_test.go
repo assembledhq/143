@@ -945,7 +945,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 			),
 		)
 
-	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -975,7 +975,7 @@ func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
 			),
 		)
 
-	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{
 		ModelUsed: &modelUsed,
 	})
 	require.NoError(t, err, "UpdateResult should persist model_used when provided")
@@ -1002,7 +1002,7 @@ func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
-	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should succeed for terminal transitions")
+	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should succeed for terminal transitions")
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), 10).
@@ -1029,7 +1029,7 @@ func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)
 
-	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "running")
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusRunning)
 	require.Error(t, err, "UpdateStatus should surface query failures")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -1049,7 +1049,7 @@ func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
-	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "completed")
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted)
 	require.Error(t, err, "UpdateStatus should surface row collection failures")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -1073,7 +1073,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(context.DeadlineExceeded)
 
-		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", &models.SessionResult{})
+		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted, &models.SessionResult{})
 		require.Error(t, err, "UpdateResult should surface query failures")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
@@ -1105,7 +1105,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),
 			)
 
-		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should tolerate best-effort Redis publish failures")
+		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should tolerate best-effort Redis publish failures")
 
 		mock.ExpectQuery("UPDATE sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1115,7 +1115,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
-		err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{})
+		err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{})
 		require.Error(t, err, "UpdateResult should surface row collection failures")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})

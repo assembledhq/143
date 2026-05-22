@@ -76,7 +76,7 @@ func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid
 	return m.recent, nil
 }
 
-func (m *gatherSessionStoreMock) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (m *gatherSessionStoreMock) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	return nil
 }
 

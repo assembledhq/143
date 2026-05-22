@@ -1298,7 +1298,7 @@ func (h *AuthHandler) acceptInvitationAndUpsertUser(
 		return nil, "", nil, fmt.Errorf("upsert invited oauth user: %w", err)
 	}
 
-	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, string(user.Role))
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
 	}
@@ -1372,7 +1372,7 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 		return nil, "", nil, fmt.Errorf("create invited user: %w", err)
 	}
 
-	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, string(role))
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, role)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
 	}

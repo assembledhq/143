@@ -492,7 +492,7 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 		return
 	}
 
-	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, string(provider))
+	activeIntegrations, err := h.integrationStore.ListByOrgAndProvider(r.Context(), orgID, provider)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to look up integration", err)
 		return
@@ -503,7 +503,7 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 	}
 
 	for _, integration := range activeIntegrations {
-		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, string(models.IntegrationStatusInactive)); err != nil {
+		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, models.IntegrationStatusInactive); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect integration", err)
 			return
 		}
@@ -1090,7 +1090,7 @@ func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderGitHub)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_INTEGRATIONS_FAILED", "failed to list integrations", err)
 		return
@@ -1479,7 +1479,7 @@ func (h *IntegrationHandler) githubInstallationLink(ctx context.Context, orgID u
 		}
 	}
 
-	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	integrations, err := h.integrationStore.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderGitHub)
 	if err != nil || len(integrations) == 0 {
 		return models.GitHubInstallationOrgLink{}, false
 	}
@@ -1970,7 +1970,7 @@ func (h *IntegrationHandler) ensureIntegration(ctx context.Context, orgID uuid.U
 	// reconnect after a 401-flip reuse the original row instead of leaving
 	// a stale errored row plus a fresh duplicate. Active-first ORDER BY in
 	// SQL keeps the existing "prefer active" precedence.
-	reusableIntegrations, err := h.integrationStore.ListReusableForReconnect(ctx, orgID, string(provider))
+	reusableIntegrations, err := h.integrationStore.ListReusableForReconnect(ctx, orgID, provider)
 	if err != nil {
 		return models.Integration{}, false, err
 	}
@@ -2041,7 +2041,7 @@ func (h *IntegrationHandler) convergeReusableRow(ctx context.Context, orgID uuid
 	statusErrored := integration.Status == models.IntegrationStatusError
 	switch {
 	case configChanged && statusErrored:
-		if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedConfig); err != nil {
+		if err := h.integrationStore.UpdateStatusAndConfig(ctx, orgID, integration.ID, models.IntegrationStatusActive, clearedConfig); err != nil {
 			return integration, fmt.Errorf("converge integration %s: update status and config: %w", integration.ID, err)
 		}
 		integration.Config = clearedConfig
@@ -2052,7 +2052,7 @@ func (h *IntegrationHandler) convergeReusableRow(ctx context.Context, orgID uuid
 		}
 		integration.Config = clearedConfig
 	case statusErrored:
-		if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err != nil {
+		if err := h.integrationStore.UpdateStatus(ctx, orgID, integration.ID, models.IntegrationStatusActive); err != nil {
 			return integration, fmt.Errorf("converge integration %s: update status: %w", integration.ID, err)
 		}
 		integration.Status = models.IntegrationStatusActive

@@ -41,7 +41,7 @@ type reaperMockSessionLister struct {
 type statusUpdate struct {
 	orgID     uuid.UUID
 	sessionID uuid.UUID
-	status    string
+	status    models.SessionStatus
 }
 
 type failureUpdate struct {
@@ -61,7 +61,7 @@ type terminalizeUpdate struct {
 type sandboxUpdate struct {
 	orgID     uuid.UUID
 	sessionID uuid.UUID
-	state     string
+	state     models.SandboxState
 }
 
 func (m *reaperMockSessionLister) ListStaleIdleSessions(_ context.Context, _ time.Time) ([]models.Session, error) {
@@ -86,7 +86,7 @@ func (m *reaperMockSessionLister) ListExpiredSnapshots(_ context.Context, _ time
 	return m.expiredSnapshots, m.listExpiredErr
 }
 
-func (m *reaperMockSessionLister) UpdateStatus(_ context.Context, orgID, sessionID uuid.UUID, status string) error {
+func (m *reaperMockSessionLister) UpdateStatus(_ context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error {
 	m.updatedStatuses = append(m.updatedStatuses, statusUpdate{orgID: orgID, sessionID: sessionID, status: status})
 	return m.updateStatusErr
 }
@@ -96,7 +96,7 @@ func (m *reaperMockSessionLister) UpdateFailure(_ context.Context, orgID, sessio
 	return m.updateFailureErr
 }
 
-func (m *reaperMockSessionLister) UpdateSandboxState(_ context.Context, orgID, sessionID uuid.UUID, state string) error {
+func (m *reaperMockSessionLister) UpdateSandboxState(_ context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
 	m.updatedSandboxes = append(m.updatedSandboxes, sandboxUpdate{orgID: orgID, sessionID: sessionID, state: state})
 	return m.updateSandboxErr
 }
@@ -183,9 +183,9 @@ func TestReapPhase0_FailsStalePendingSessions(t *testing.T) {
 
 	// Phase 0 should mark both sessions as failed without bumping MRU result fields.
 	require.Len(t, mock.updatedStatuses, 2, "Phase 0 should mark both pending sessions failed via status-only updates")
-	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[0].status, "first stale pending session should be marked failed")
+	require.Equal(t, models.SessionStatusFailed, mock.updatedStatuses[0].status, "first stale pending session should be marked failed")
 	require.Equal(t, sessionID1, mock.updatedStatuses[0].sessionID, "first stale pending session should be updated")
-	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[1].status, "second stale pending session should be marked failed")
+	require.Equal(t, models.SessionStatusFailed, mock.updatedStatuses[1].status, "second stale pending session should be marked failed")
 	require.Equal(t, sessionID2, mock.updatedStatuses[1].sessionID, "second stale pending session should be updated")
 
 	// Phase 0 should also set failure details.
@@ -215,9 +215,9 @@ func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
 
 	// Phase 0.5 should fail both running sessions via status-only updates.
 	require.Len(t, mock.updatedStatuses, 2, "Phase 0.5 should mark both running sessions failed via status-only updates")
-	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[0].status, "first stale running session should be marked failed")
+	require.Equal(t, models.SessionStatusFailed, mock.updatedStatuses[0].status, "first stale running session should be marked failed")
 	require.Equal(t, sessionID1, mock.updatedStatuses[0].sessionID, "first stale running session should be updated")
-	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[1].status, "second stale running session should be marked failed")
+	require.Equal(t, models.SessionStatusFailed, mock.updatedStatuses[1].status, "second stale running session should be marked failed")
 	require.Equal(t, sessionID2, mock.updatedStatuses[1].sessionID, "second stale running session should be updated")
 
 	// Phase 0.5 should also set failure details with the stuck_running category.
@@ -247,7 +247,7 @@ func TestReapPhase0_4_FailsRuntimeControlStalledSessions(t *testing.T) {
 	after := time.Now()
 
 	require.Len(t, mock.updatedStatuses, 1, "runtime-control stalled session should be marked failed")
-	require.Equal(t, string(models.SessionStatusFailed), mock.updatedStatuses[0].status, "runtime-control stalled session should fail")
+	require.Equal(t, models.SessionStatusFailed, mock.updatedStatuses[0].status, "runtime-control stalled session should fail")
 	require.Equal(t, sessionID, mock.updatedStatuses[0].sessionID, "runtime-control stalled session should be updated")
 	require.Len(t, mock.updatedFailures, 1, "runtime-control stalled session should get failure details")
 	require.Equal(t, FailureCategoryRuntimeControlStalled, mock.updatedFailures[0].category, "failure should be attributable to runtime control")
@@ -375,7 +375,7 @@ func TestReapPhase0_5_ContinuesOnListError(t *testing.T) {
 
 	// Phase 0.5 list failed, but Phase 1 should still run.
 	require.Len(t, mock.updatedStatuses, 1)
-	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
+	assert.Equal(t, models.SessionStatusCompleted, mock.updatedStatuses[0].status)
 }
 
 func TestReapPhase0Error_StillRunsPhase1(t *testing.T) {
@@ -397,7 +397,7 @@ func TestReapPhase0Error_StillRunsPhase1(t *testing.T) {
 
 	// Phase 0 failed, but phase 1 should still run.
 	require.Len(t, mock.updatedStatuses, 1)
-	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
+	assert.Equal(t, models.SessionStatusCompleted, mock.updatedStatuses[0].status)
 }
 
 func TestReapPhase1_TransitionsIdleSessionsToCompleted(t *testing.T) {
@@ -422,9 +422,9 @@ func TestReapPhase1_TransitionsIdleSessionsToCompleted(t *testing.T) {
 
 	// Phase 1 should update status to completed for both sessions.
 	require.Len(t, mock.updatedStatuses, 2)
-	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
+	assert.Equal(t, models.SessionStatusCompleted, mock.updatedStatuses[0].status)
 	assert.Equal(t, sessionID1, mock.updatedStatuses[0].sessionID)
-	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[1].status)
+	assert.Equal(t, models.SessionStatusCompleted, mock.updatedStatuses[1].status)
 	assert.Equal(t, sessionID2, mock.updatedStatuses[1].sessionID)
 
 	// Phase 1 should NOT delete any snapshots.
@@ -462,8 +462,8 @@ func TestReapPhase2_DeletesExpiredSnapshots(t *testing.T) {
 
 	// Phase 2 should update sandbox state to destroyed.
 	require.Len(t, mock.updatedSandboxes, 2)
-	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[0].state)
-	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[1].state)
+	assert.Equal(t, models.SandboxStateDestroyed, mock.updatedSandboxes[0].state)
+	assert.Equal(t, models.SandboxStateDestroyed, mock.updatedSandboxes[1].state)
 
 	// Phase 2 should NOT update status (sessions are already completed).
 	assert.Empty(t, mock.updatedStatuses, "phase 2 should not update session status")
@@ -489,7 +489,7 @@ func TestReapPhase2_SkipsSessionsWithNilSnapshotKey(t *testing.T) {
 	assert.Empty(t, snapStore.deletedKeys)
 	// But sandbox state should still be updated.
 	require.Len(t, mock.updatedSandboxes, 1)
-	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[0].state)
+	assert.Equal(t, models.SandboxStateDestroyed, mock.updatedSandboxes[0].state)
 }
 
 func TestReapPhase2_SkipsSessionsWithEmptySnapshotKey(t *testing.T) {
@@ -511,7 +511,7 @@ func TestReapPhase2_SkipsSessionsWithEmptySnapshotKey(t *testing.T) {
 
 	assert.Empty(t, snapStore.deletedKeys)
 	require.Len(t, mock.updatedSandboxes, 1)
-	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[0].state)
+	assert.Equal(t, models.SandboxStateDestroyed, mock.updatedSandboxes[0].state)
 }
 
 func TestReapBothPhases(t *testing.T) {
@@ -538,14 +538,14 @@ func TestReapBothPhases(t *testing.T) {
 	// Phase 1: idle session transitioned to completed.
 	require.Len(t, mock.updatedStatuses, 1)
 	assert.Equal(t, idleSessionID, mock.updatedStatuses[0].sessionID)
-	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
+	assert.Equal(t, models.SessionStatusCompleted, mock.updatedStatuses[0].status)
 
 	// Phase 2: expired snapshot deleted and sandbox state updated.
 	require.Len(t, snapStore.deletedKeys, 1)
 	assert.Equal(t, "expired-snap", snapStore.deletedKeys[0])
 	require.Len(t, mock.updatedSandboxes, 1)
 	assert.Equal(t, expiredSessionID, mock.updatedSandboxes[0].sessionID)
-	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[0].state)
+	assert.Equal(t, models.SandboxStateDestroyed, mock.updatedSandboxes[0].state)
 }
 
 func TestReapPhase1Error_StillRunsPhase2(t *testing.T) {
@@ -591,7 +591,7 @@ func TestReapPhase2Error_ListExpiredSnapshots(t *testing.T) {
 
 	// Phase 1 should still work.
 	require.Len(t, mock.updatedStatuses, 1)
-	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
+	assert.Equal(t, models.SessionStatusCompleted, mock.updatedStatuses[0].status)
 
 	// Phase 2 had an error listing, so no snapshots deleted.
 	assert.Empty(t, snapStore.deletedKeys)
@@ -842,7 +842,7 @@ func TestReapPhase2_StopsActivePreviewBeforeDeletingSnapshot(t *testing.T) {
 	require.Len(t, snapStore.deletedKeys, 1)
 	assert.Equal(t, snapshotKey, snapStore.deletedKeys[0])
 	require.Len(t, mock.updatedSandboxes, 1)
-	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[0].state)
+	assert.Equal(t, models.SandboxStateDestroyed, mock.updatedSandboxes[0].state)
 }
 
 func TestReapPhase2_ProceedsWhenPreviewStopperErrors(t *testing.T) {

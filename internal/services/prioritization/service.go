@@ -138,7 +138,7 @@ func (s *Service) ComputeScore(ctx context.Context, orgID, issueID uuid.UUID) (*
 
 	// Compute sub-scores.
 	customerImpact := computeCustomerImpact(issue.AffectedCustomerCount, issue.OccurrenceCount)
-	severity := computeSeverity(string(issue.Severity))
+	severity := computeSeverity(issue.Severity)
 	recency := computeRecency(issue.LastSeenAt)
 	revenueRisk := 0.0 // placeholder
 
@@ -286,7 +286,7 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 
 	// Gate 2: auto_simple mode — only trigger for high severity + high score.
 	if settings.AutonomyLevel == string(models.AutonomyLevelAutoSimple) {
-		if !isHighSeverity(string(issue.Severity)) || score.Score < 60 {
+		if !isHighSeverity(issue.Severity) || score.Score < 60 {
 			s.logger.Debug().
 				Str("org_id", orgID.String()).
 				Str("severity", string(issue.Severity)).
@@ -366,9 +366,9 @@ func computeCustomerImpact(customers, occurrences int) float64 {
 	return math.Min(score, 100)
 }
 
-// computeSeverity maps severity string to a numeric score.
-func computeSeverity(severity string) float64 {
-	switch strings.ToLower(severity) {
+// computeSeverity maps severity to a numeric score.
+func computeSeverity(severity models.IssueSeverity) float64 {
+	switch strings.ToLower(string(severity)) {
 	case "critical":
 		return 100
 	case "high":
@@ -510,8 +510,8 @@ func defaultOrValue(val, def float64) float64 {
 }
 
 // isHighSeverity returns true for critical or high severity.
-func isHighSeverity(severity string) bool {
-	s := strings.ToLower(severity)
+func isHighSeverity(severity models.IssueSeverity) bool {
+	s := strings.ToLower(string(severity))
 	return s == "critical" || s == "high"
 }
 

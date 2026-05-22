@@ -202,7 +202,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 
 // gatherSlackContext reads recent thread summaries from the Slack integration config.
 func (s *Service) gatherSlackContext(ctx context.Context, orgID uuid.UUID) ([]SlackThreadContext, []slackThreadData, error) {
-	integrations, err := s.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderSlack))
+	integrations, err := s.integrations.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderSlack)
 	if err != nil || len(integrations) == 0 {
 		return nil, nil, err
 	}

@@ -690,12 +690,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		s.linearMilestones(ctx, run.OrgID, run.ID, "pr_opened", prNumber)
 	}
 
-	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
+	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusPRCreated); err != nil {
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
 
 	if issue != nil && run.PrimaryIssueID != nil {
-		if err := s.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
+		if err := s.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, models.IssueStatusInProgress); err != nil {
 			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status")
 		}
 	}
@@ -1541,7 +1541,7 @@ func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models
 			snapshotKey = run.SnapshotKey
 			if s.issues != nil {
 				if run.PrimaryIssueID != nil {
-					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, "fixed"); err != nil {
+					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, models.IssueStatusFixed); err != nil {
 						s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status to fixed")
 					}
 				}

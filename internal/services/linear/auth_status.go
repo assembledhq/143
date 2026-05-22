@@ -40,7 +40,7 @@ func (s *Service) MarkIntegrationUnauthorized(ctx context.Context, orgID uuid.UU
 	if s == nil || s.integrationsWriter == nil || s.integrations == nil {
 		return
 	}
-	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderLinear))
+	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, models.IntegrationProviderLinear)
 	if err != nil {
 		s.logger.Debug().Err(err).
 			Str("org_id", orgID.String()).
@@ -63,7 +63,7 @@ func (s *Service) MarkIntegrationUnauthorized(ctx context.Context, orgID uuid.UU
 			Msg("MarkIntegrationUnauthorized: marshal config failed; status flip skipped")
 		return
 	}
-	if err := s.integrationsWriter.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusError), raw); err != nil {
+	if err := s.integrationsWriter.UpdateStatusAndConfig(ctx, orgID, integration.ID, models.IntegrationStatusError, raw); err != nil {
 		s.logger.Warn().Err(err).
 			Str("org_id", orgID.String()).
 			Str("integration_id", integration.ID.String()).
@@ -89,7 +89,7 @@ func (s *Service) ClearIntegrationUnauthorized(ctx context.Context, orgID uuid.U
 	if s == nil || s.integrationsWriter == nil || s.integrations == nil {
 		return
 	}
-	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderLinear))
+	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, models.IntegrationProviderLinear)
 	if err != nil {
 		return
 	}
@@ -118,7 +118,7 @@ func (s *Service) ClearIntegrationUnauthorized(ctx context.Context, orgID uuid.U
 
 	switch {
 	case clearedRaw != nil && statusErrored:
-		if err := s.integrationsWriter.UpdateStatusAndConfig(ctx, orgID, integration.ID, string(models.IntegrationStatusActive), clearedRaw); err != nil {
+		if err := s.integrationsWriter.UpdateStatusAndConfig(ctx, orgID, integration.ID, models.IntegrationStatusActive, clearedRaw); err != nil {
 			s.logger.Warn().Err(err).
 				Str("org_id", orgID.String()).
 				Str("integration_id", integration.ID.String()).
@@ -134,7 +134,7 @@ func (s *Service) ClearIntegrationUnauthorized(ctx context.Context, orgID uuid.U
 			return
 		}
 	case statusErrored:
-		if err := s.integrationsWriter.UpdateStatus(ctx, orgID, integration.ID, string(models.IntegrationStatusActive)); err != nil {
+		if err := s.integrationsWriter.UpdateStatus(ctx, orgID, integration.ID, models.IntegrationStatusActive); err != nil {
 			s.logger.Warn().Err(err).
 				Str("org_id", orgID.String()).
 				Str("integration_id", integration.ID.String()).

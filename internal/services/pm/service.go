@@ -43,7 +43,7 @@ type issueStore interface {
 type sessionStore interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	Create(ctx context.Context, run *models.Session) error
-	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
+	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error
 	UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.SessionFilters) ([]models.Session, error)
 	ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error)
@@ -82,7 +82,7 @@ type projectStore interface {
 	GetByID(ctx context.Context, orgID, projectID uuid.UUID) (models.Project, error)
 	Update(ctx context.Context, p *models.Project) error
 	UpdateProgress(ctx context.Context, orgID, projectID uuid.UUID) error
-	UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status models.ProjectStatus) error
 }
 
 type projectTaskStore interface {
@@ -90,7 +90,7 @@ type projectTaskStore interface {
 	GetByID(ctx context.Context, orgID, taskID uuid.UUID) (models.ProjectTask, error)
 	ListByProject(ctx context.Context, orgID, projectID uuid.UUID, filters db.ProjectTaskFilters) ([]models.ProjectTask, error)
 	Update(ctx context.Context, t *models.ProjectTask) error
-	CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) (int, error)
+	CountByProjectAndStatus(ctx context.Context, orgID, projectID uuid.UUID, status models.ProjectTaskStatus) (int, error)
 	GetMaxBatchNumber(ctx context.Context, orgID, projectID uuid.UUID) (int, error)
 }
 
@@ -114,7 +114,7 @@ type pmDocumentStore interface {
 }
 
 type integrationStore interface {
-	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error)
+	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error)
 }
 
 type credentialStore interface {
@@ -541,7 +541,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 			result := &models.SessionResult{
 				Error: strPtr(errMsg),
 			}
-			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "failed", result); err != nil {
+			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, models.SessionStatusFailed, result); err != nil {
 				s.logger.Error().Err(err).Msg("failed to mark PM session as failed")
 			}
 			if s.sessionLogs != nil {
@@ -798,7 +798,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		sessionResult := &models.SessionResult{
 			TokenUsage: plan.TokenUsage,
 		}
-		if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "completed", sessionResult); err != nil {
+		if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, models.SessionStatusCompleted, sessionResult); err != nil {
 			s.logger.Error().Err(err).Msg("failed to mark PM session as completed")
 		}
 	}

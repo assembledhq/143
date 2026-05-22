@@ -218,7 +218,7 @@ func (m *errProjectTaskStore) ListByProject(_ context.Context, _, _ uuid.UUID, _
 	return nil, m.err
 }
 func (m *errProjectTaskStore) Update(_ context.Context, _ *models.ProjectTask) error { return m.err }
-func (m *errProjectTaskStore) CountByProjectAndStatus(_ context.Context, _, _ uuid.UUID, _ string) (int, error) {
+func (m *errProjectTaskStore) CountByProjectAndStatus(_ context.Context, _, _ uuid.UUID, _ models.ProjectTaskStatus) (int, error) {
 	return 0, m.err
 }
 func (m *errProjectTaskStore) GetMaxBatchNumber(_ context.Context, _, _ uuid.UUID) (int, error) {
@@ -732,7 +732,7 @@ func TestGatherContext_WithProjectSummaries(t *testing.T) {
 func TestCanDispatchForProject_DependencyGraphMode(t *testing.T) {
 	t.Parallel()
 
-	pts := &mockProjectTaskStore{countByStatus: map[string]int{}}
+	pts := &mockProjectTaskStore{countByStatus: map[models.ProjectTaskStatus]int{}}
 	svc := newTestProjectService(nil, pts, nil)
 
 	project := &models.Project{
@@ -746,7 +746,7 @@ func TestCanDispatchForProject_DependencyGraphMode(t *testing.T) {
 	})
 
 	t.Run("active tasks blocks dispatch", func(t *testing.T) { //nolint:paralleltest // subtests share mutable mock state
-		pts.countByStatus = map[string]int{string(models.ProjectTaskStatusRunning): 1}
+		pts.countByStatus = map[models.ProjectTaskStatus]int{models.ProjectTaskStatusRunning: 1}
 		got := svc.canDispatchForProject(context.Background(), uuid.New(), project)
 		require.Equal(t, 0, got)
 	})
@@ -791,7 +791,7 @@ func TestDispatchProjectTasks_UsesProjectAgentType(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	sessions := &mockSessionStore{}
 	svc := &Service{
@@ -836,7 +836,7 @@ func TestDispatchProjectTasks_FallbackAgentType(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	sessions := &mockSessionStore{}
 	svc := &Service{
@@ -876,7 +876,7 @@ func TestDispatchProjectTasks_RespectsSlotLimit(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         tasks,
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	svc := &Service{
 		sessions:     &mockSessionStore{},
@@ -1149,7 +1149,7 @@ func TestDispatchProjectTasks_TaskWithApproachAndReasoning(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	sessions := &mockSessionStore{}
 	svc := &Service{
@@ -1199,7 +1199,7 @@ func TestDispatchProjectTasks_ModelOverride(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	sessions := &mockSessionStore{}
 	svc := &Service{
@@ -1382,7 +1382,7 @@ func TestDispatchProjectTasks_SessionCreateError(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	svc := &Service{
 		sessions:     &errSessionCreateStore{createErr: fmt.Errorf("session create fail")},
@@ -1419,7 +1419,7 @@ func TestDispatchProjectTasks_EnqueueError(t *testing.T) {
 
 	pts := &mockProjectTaskStore{
 		tasks:         []*models.ProjectTask{pendingTask},
-		countByStatus: map[string]int{},
+		countByStatus: map[models.ProjectTaskStatus]int{},
 	}
 	svc := &Service{
 		sessions:     &mockSessionStore{},
@@ -1677,8 +1677,8 @@ type errDelegatedCountStore struct {
 	delegatedErr bool
 }
 
-func (m *errDelegatedCountStore) CountByProjectAndStatus(_ context.Context, _, _ uuid.UUID, status string) (int, error) {
-	if m.delegatedErr && status == string(models.ProjectTaskStatusDelegated) {
+func (m *errDelegatedCountStore) CountByProjectAndStatus(_ context.Context, _, _ uuid.UUID, status models.ProjectTaskStatus) (int, error) {
+	if m.delegatedErr && status == models.ProjectTaskStatusDelegated {
 		return 0, fmt.Errorf("delegated count error")
 	}
 	if m.countByStatus != nil {
@@ -1693,7 +1693,7 @@ func TestCanDispatchForProject_DelegatedCountError(t *testing.T) {
 	pts := &errDelegatedCountStore{
 		delegatedErr: true,
 		mockProjectTaskStore: mockProjectTaskStore{
-			countByStatus: map[string]int{},
+			countByStatus: map[models.ProjectTaskStatus]int{},
 		},
 	}
 	svc := &Service{
@@ -1716,9 +1716,9 @@ func TestCanDispatchForProject_ParallelOverCapacity(t *testing.T) {
 	t.Parallel()
 
 	pts := &mockProjectTaskStore{
-		countByStatus: map[string]int{
-			string(models.ProjectTaskStatusRunning):   5,
-			string(models.ProjectTaskStatusDelegated): 5,
+		countByStatus: map[models.ProjectTaskStatus]int{
+			models.ProjectTaskStatusRunning:   5,
+			models.ProjectTaskStatusDelegated: 5,
 		},
 	}
 	svc := newTestProjectService(nil, pts, nil)
@@ -1753,7 +1753,7 @@ func TestDispatchProjectTasks_ListPendingError(t *testing.T) {
 	pts := &errListProjectTaskStore{
 		listErr: true,
 		mockProjectTaskStore: mockProjectTaskStore{
-			countByStatus: map[string]int{},
+			countByStatus: map[models.ProjectTaskStatus]int{},
 		},
 	}
 	svc := &Service{

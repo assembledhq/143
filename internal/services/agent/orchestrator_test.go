@@ -397,7 +397,7 @@ type recoveryStateUpdate struct {
 }
 
 type resultUpdate struct {
-	status string
+	status models.SessionStatus
 	result *models.SessionResult
 }
 
@@ -413,18 +413,18 @@ type turnUpdate struct {
 	snapshotKey    string
 }
 
-func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusUpdates = append(m.statusUpdates, string(status))
 	return nil
 }
 
-func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.eventHook != nil {
-		m.eventHook("session_result:" + status)
+		m.eventHook("session_result:" + string(status))
 	}
 	m.resultUpdates = append(m.resultUpdates, resultUpdate{status: status, result: result})
 	return nil
@@ -556,7 +556,7 @@ func (m *mockSessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessi
 	return nil
 }
 
-func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
+func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
 	return nil
 }
 
@@ -1087,10 +1087,10 @@ type mockProjectTaskUpdater struct {
 	statuses []string
 }
 
-func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
+func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.statuses = append(m.statuses, status)
+	m.statuses = append(m.statuses, string(status))
 	return nil
 }
 
@@ -1522,7 +1522,7 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	// Result should be "completed" with high confidence.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 	require.NotNil(t, results[0].result.ConfidenceScore)
 	require.InDelta(t, 0.9, *results[0].result.ConfidenceScore, 0.01)
 
@@ -2052,7 +2052,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should follow the normal run result path")
-	require.Equal(t, "completed", results[0].status, "restart should complete the run from scratch")
+	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete the run from scratch")
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
@@ -2080,7 +2080,7 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "exhausted recovery should mark the session failed")
-	require.Equal(t, "failed", results[0].status, "exhausted recovery should be terminal")
+	require.Equal(t, models.SessionStatusFailed, results[0].status, "exhausted recovery should be terminal")
 
 	failures := d.sessions.getFailureUpdates()
 	require.Len(t, failures, 1, "exhausted recovery should record structured failure metadata")
@@ -2137,7 +2137,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should still complete the run")
-	require.Equal(t, "completed", results[0].status, "restart should complete successfully under a single-slot concurrency limit")
+	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete successfully under a single-slot concurrency limit")
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
 }
 
@@ -2303,7 +2303,7 @@ func TestRunAgent_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	require.Equal(t, 0, d.sessions.finalizeCalls)
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive winner — must NOT clear container_id (would kill the active turn)")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "loser must not mark the session failed — winner owns the row")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "loser must not mark the session failed — winner owns the row")
 	}
 }
 
@@ -2343,7 +2343,7 @@ func TestRunAgent_AcquireHoldLosesRaceClearsStaleOrphan(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must still destroy the losing sandbox")
 	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusPending), "stale-orphan path must revert the session to pending so the retry re-enters the fresh run path")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "stale-orphan path must not mark the session failed")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "stale-orphan path must not mark the session failed")
 	}
 }
 
@@ -3562,7 +3562,7 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	// The first result update is from failRun, setting status to "failed".
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 		}
 	}
@@ -3669,7 +3669,7 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	// Result should be "needs_human_guidance".
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "needs_human_guidance", results[0].status)
+	require.Equal(t, models.SessionStatusNeedsHumanGuidance, results[0].status)
 
 	// No open_pr job should be enqueued.
 	for _, jt := range d.jobs.getEnqueued() {
@@ -3701,7 +3701,7 @@ func TestRunAgent_MediumConfidence(t *testing.T) {
 	// Medium confidence (0.65 >= default aggressive auto_proceed 0.4) proceeds as completed.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
 	// open_pr job should be enqueued.
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
@@ -3756,7 +3756,7 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 		}
 	}
@@ -5094,7 +5094,7 @@ func TestRunAgent_UnknownAgentType(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 		}
 	}
@@ -5125,7 +5125,7 @@ func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
 	// Score == 0.4 should proceed (>= aggressive auto_proceed threshold).
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
@@ -5581,7 +5581,7 @@ func TestRunAgent_CodexNoCredentialsFails(t *testing.T) {
 	defer d.sessions.mu.Unlock()
 	require.NotEmpty(t, d.sessions.resultUpdates, "run should have a result update")
 	lastResult := d.sessions.resultUpdates[len(d.sessions.resultUpdates)-1]
-	require.Equal(t, "failed", lastResult.status, "run should be marked as failed")
+	require.Equal(t, models.SessionStatusFailed, lastResult.status, "run should be marked as failed")
 }
 
 func TestRunAgent_CodexSandboxHasHomeEnv(t *testing.T) {
@@ -5637,7 +5637,7 @@ func TestRunAgent_IssueWithoutRepository(t *testing.T) {
 	// Should complete without cloning.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
-	require.Equal(t, "completed", results[0].status)
+	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 }
 
 func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
@@ -6610,7 +6610,7 @@ func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive winner — must not clear container_id")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "ContinueSession loser must not mark the session failed — winner owns the row")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "ContinueSession loser must not mark the session failed — winner owns the row")
 	}
 	for _, status := range d.sessions.statusUpdates {
 		require.NotEqual(t, string(models.SessionStatusIdle), status, "loser must not flip the session back to idle — winner is mid-turn")
@@ -6724,7 +6724,7 @@ func TestContinueSession_AcquireHoldLosesRaceToPreviewRetries(t *testing.T) {
 	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusIdle), "preview race should revert session status so retry re-enters cleanly")
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive preview container must not be cleared")
 	for _, ru := range d.sessions.resultUpdates {
-		require.NotEqual(t, "failed", ru.status, "preview race should not mark the session failed")
+		require.NotEqual(t, models.SessionStatusFailed, ru.status, "preview race should not mark the session failed")
 	}
 }
 
@@ -7346,7 +7346,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			countFailedResult := func() int {
 				var n int
 				for _, r := range d.sessions.getResultUpdates() {
-					if r.status == "failed" {
+					if r.status == models.SessionStatusFailed {
 						n++
 					}
 				}
@@ -7454,7 +7454,7 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 	// poll rather than burning attempts.
 	failedResults := 0
 	for _, r := range d.sessions.getResultUpdates() {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			failedResults++
 		}
 	}
@@ -7554,7 +7554,7 @@ func TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *testing.T) 
 			countFailedResult := func() int {
 				var n int
 				for _, r := range d.sessions.getResultUpdates() {
-					if r.status == "failed" {
+					if r.status == models.SessionStatusFailed {
 						n++
 					}
 				}
@@ -8176,7 +8176,7 @@ func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	foundFailed := false
 	for _, r := range results {
-		if r.status == "failed" {
+		if r.status == models.SessionStatusFailed {
 			foundFailed = true
 			require.NotNil(t, r.result)
 			require.NotNil(t, r.result.Error)
@@ -8594,7 +8594,7 @@ func TestRunAgent_DoesNotMarkAwaitingInputWhenHumanInputCheckpointFails(t *testi
 	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "RunAgent should not expose an answerable request without a durable checkpoint")
 	results := d.sessions.getResultUpdates()
 	require.NotEmpty(t, results, "RunAgent should persist a terminal result when checkpoint persistence fails")
-	require.Equal(t, string(models.SessionStatusFailed), results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
+	require.Equal(t, models.SessionStatusFailed, results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
 	require.Contains(t, d.sessionThreads.statuses(), models.ThreadStatusFailed, "RunAgent should fail the active thread when the human-input pause cannot be made answerable")
 }
 
@@ -8664,7 +8664,7 @@ func TestRunAgent_DoesNotMarkAwaitingInputWhenHumanInputCheckpointMetadataFails(
 			require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusAwaitingInput), "RunAgent should not expose an answerable request when metadata persistence fails")
 			results := d.sessions.getResultUpdates()
 			require.NotEmpty(t, results, "RunAgent should persist a terminal result when metadata persistence fails")
-			require.Equal(t, string(models.SessionStatusFailed), results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
+			require.Equal(t, models.SessionStatusFailed, results[len(results)-1].status, "RunAgent should leave the session in a non-answerable failed state")
 			require.Contains(t, d.sessionThreads.statuses(), models.ThreadStatusFailed, "RunAgent should fail the active thread when metadata persistence fails")
 		})
 	}
@@ -8828,7 +8828,7 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 
 	// No failed-status update should have been recorded.
 	for _, r := range d.sessions.getResultUpdates() {
-		require.NotEqual(t, "failed", r.status, "cancelled-with-expired-ctx should not mark session failed")
+		require.NotEqual(t, models.SessionStatusFailed, r.status, "cancelled-with-expired-ctx should not mark session failed")
 	}
 	// No analyze_failure job should have been enqueued.
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")

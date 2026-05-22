@@ -113,12 +113,12 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 
 	tests := []struct {
 		name string
-		role string
+		role models.Role
 	}{
-		{"admin role", "admin"},
-		{"member role", "member"},
-		{"builder role", "builder"},
-		{"viewer role", "viewer"},
+		{"admin role", models.RoleAdmin},
+		{"member role", models.RoleMember},
+		{"builder role", models.RoleBuilder},
+		{"viewer role", models.RoleViewer},
 	}
 
 	for _, tt := range tests {
@@ -137,7 +137,7 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 
 			effective, err := store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), tt.role)
 			require.NoError(t, err)
-			require.Equal(t, tt.role, effective)
+			require.Equal(t, string(tt.role), effective)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

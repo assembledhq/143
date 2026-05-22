@@ -102,7 +102,7 @@ type mockSessionStoreForThread struct {
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 }
 
 func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -126,7 +126,7 @@ func (m *mockSessionStoreForThread) ClaimForResume(ctx context.Context, orgID, s
 	return models.Session{}, fmt.Errorf("no rows")
 }
 
-func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error {
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, sessionID, status)
 	}

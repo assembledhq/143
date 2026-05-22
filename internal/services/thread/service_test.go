@@ -104,8 +104,8 @@ type mockSessionStore struct {
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
-	updateCalls      []string
+	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
+	updateCalls      []models.SessionStatus
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -129,7 +129,7 @@ func (m *mockSessionStore) ClaimForResume(ctx context.Context, orgID, sessionID 
 	return models.Session{}, fmt.Errorf("no rows")
 }
 
-func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error {
+func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error {
 	m.updateCalls = append(m.updateCalls, status)
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, orgID, sessionID, status)
@@ -1680,8 +1680,8 @@ func TestService_SendMessage(t *testing.T) {
 					return fmt.Errorf("db error")
 				}
 				revertedToOriginal := false
-				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status string) error {
-					if status == string(models.SessionStatusCompleted) {
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.SessionStatus) error {
+					if status == models.SessionStatusCompleted {
 						revertedToOriginal = true
 					}
 					return nil
@@ -1717,7 +1717,7 @@ func TestService_SendMessage(t *testing.T) {
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
 					return fmt.Errorf("db error")
 				}
-				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ string) error {
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ models.SessionStatus) error {
 					t.Errorf("session UpdateStatus must not be called when sibling is mid-turn")
 					return nil
 				}

@@ -45,7 +45,7 @@ func (s *IntegrationStore) Create(ctx context.Context, integration *models.Integ
 	return row.Scan(&integration.ID, &integration.CreatedAt)
 }
 
-func (s *IntegrationStore) GetByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) (models.Integration, error) {
+func (s *IntegrationStore) GetByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) (models.Integration, error) {
 	query := `
 		SELECT id, org_id, provider, config, status, last_synced_at, created_at
 		FROM integrations
@@ -57,7 +57,7 @@ func (s *IntegrationStore) GetByOrgAndProvider(ctx context.Context, orgID uuid.U
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
-		"provider": provider,
+		"provider": string(provider),
 	})
 	if err != nil {
 		return models.Integration{}, fmt.Errorf("query integration: %w", err)
@@ -80,7 +80,7 @@ func (s *IntegrationStore) GetByID(ctx context.Context, id uuid.UUID) (models.In
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
 }
 
-func (s *IntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error) {
+func (s *IntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error) {
 	query := `
 		SELECT id, org_id, provider, config, status, last_synced_at, created_at
 		FROM integrations
@@ -88,7 +88,7 @@ func (s *IntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
-		"provider": provider,
+		"provider": string(provider),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query integrations by org and provider: %w", err)
@@ -101,7 +101,7 @@ func (s *IntegrationStore) ListByOrgAndProvider(ctx context.Context, orgID uuid.
 // flipped to error after a 401, so a reconnect converges back onto the
 // same row instead of creating a duplicate. Single round trip with the
 // ORDER BY pinned in SQL — callers can take the first row.
-func (s *IntegrationStore) ListReusableForReconnect(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error) {
+func (s *IntegrationStore) ListReusableForReconnect(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error) {
 	query := `
 		SELECT id, org_id, provider, config, status, last_synced_at, created_at
 		FROM integrations
@@ -112,7 +112,7 @@ func (s *IntegrationStore) ListReusableForReconnect(ctx context.Context, orgID u
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
-		"provider": provider,
+		"provider": string(provider),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query reusable integrations by org and provider: %w", err)
@@ -145,12 +145,12 @@ func (s *IntegrationStore) UpdateLastSyncedAt(ctx context.Context, orgID, id uui
 	return err
 }
 
-func (s *IntegrationStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error {
+func (s *IntegrationStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status models.IntegrationStatus) error {
 	query := `UPDATE integrations SET status = @status WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     id,
 		"org_id": orgID,
-		"status": status,
+		"status": string(status),
 	})
 	return err
 }
@@ -168,12 +168,12 @@ func (s *IntegrationStore) UpdateConfig(ctx context.Context, orgID, integrationI
 // UpdateStatusAndConfig flips status and rewrites config in a single SQL
 // statement so the auth-error mark / clear paths can't observe a partial
 // state where one field updated and the other didn't.
-func (s *IntegrationStore) UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status string, config json.RawMessage) error {
+func (s *IntegrationStore) UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status models.IntegrationStatus, config json.RawMessage) error {
 	query := `UPDATE integrations SET status = @status, config = @config WHERE org_id = @org_id AND id = @id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     integrationID,
 		"org_id": orgID,
-		"status": status,
+		"status": string(status),
 		"config": config,
 	})
 	return err
