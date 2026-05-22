@@ -61,7 +61,7 @@ func seedUser(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID) models.User {
 // resulting row a plausible target for the handlers under test (manual
 // session, idle, ready to receive a follow-up).
 type sessionOpts struct {
-	Status       string
+	Status       models.SessionStatus
 	CurrentTurn  int
 	Origin       models.SessionOrigin
 	Interaction  models.SessionInteractionMode
@@ -98,7 +98,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, opts session
 		AgentType:        opts.AgentType,
 		Status:           opts.Status,
 		AutonomyLevel:    models.DefaultSessionAutonomy,
-		TokenMode:        "low",
+		TokenMode:        models.SessionTokenModeLow,
 		Origin:           opts.Origin,
 		InteractionMode:  opts.Interaction,
 		ValidationPolicy: opts.Validation,
