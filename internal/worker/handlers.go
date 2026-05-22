@@ -1912,6 +1912,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				}
 				return &FatalError{Err: createErr}
 			}
+			registerOpenPRDeadLetterMilestone(ctx, stores, logger, orgID, runID)
 			return createErr
 		}
 
@@ -1920,6 +1921,17 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 		return nil
 	}
+}
+
+func registerOpenPRDeadLetterMilestone(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	if stores == nil || stores.Jobs == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+		linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, orgID, sessionID, "failed", 0)
+	})
 }
 
 // create_branch pushes a completed session snapshot to GitHub without opening
