@@ -8,6 +8,7 @@
         "port": 3000,
         "env": {
           "API_PROXY_TARGET": "http://localhost:8080",
+          "NEXT_PUBLIC_API_URL": "",
           "NODE_OPTIONS": "--max-old-space-size=1280"
         },
         "ready": {

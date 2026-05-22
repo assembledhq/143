@@ -282,6 +282,8 @@ Any service using a destination or `credentials.mode != "none"` makes the previe
 
 The frontend proxies `/api/*` to the server at `localhost:8080`. The server gets `DATABASE_URL` injected and uses a shell `command` to chain `migrate` then `server` — the ready probe only passes once `server` is listening, so ordering is enforced naturally.
 
+For frontend frameworks that bake public environment variables into the browser bundle, keep preview API calls same-origin unless you intentionally own cross-origin auth. In Next.js, unset `NEXT_PUBLIC_API_URL` (or set it to an empty string) and use a server-side rewrite such as `/api/* -> http://localhost:8080`; otherwise the preview page can read a preview-domain CSRF cookie while posting to a different API origin that does not receive that cookie.
+
 For production preview domains such as `<preview-id>.preview.143.dev`, the public wildcard DNS must resolve to the app node and the edge proxy must be able to obtain a wildcard certificate. In 143's production setup that means:
 
 1. `*.preview.<your-domain>` points at the app node that runs Caddy.
