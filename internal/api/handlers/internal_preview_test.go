@@ -636,7 +636,7 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 		}
 		require.Equal(t, "/assets/app.js", req.URL.Path, "internal proxy should trim the worker proxy prefix before dialing the preview backend")
 		require.Empty(t, req.Header.Get("Authorization"), "internal proxy should strip authorization headers before dialing the preview backend")
-		require.Empty(t, req.Header.Get("Cookie"), "internal proxy should strip cookies before dialing the preview backend")
+		require.Equal(t, "csrf_token=csrf-token; session_token=session-token", req.Header.Get("Cookie"), "internal proxy should preserve preview-app cookies for in-sandbox auth and CSRF")
 		_, _ = io.WriteString(serverConn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok")
 	}()
 
@@ -661,7 +661,7 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
 		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
 	}))
-	req.Header.Set("Cookie", "session=secret")
+	req.Header.Set("Cookie", "__Host-preview_session=preview-secret; csrf_token=csrf-token; session_token=session-token")
 	rr := httptest.NewRecorder()
 
 	handler.Proxy(rr, req)
