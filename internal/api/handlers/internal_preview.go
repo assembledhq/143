@@ -446,7 +446,7 @@ func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.
 			req.RequestURI = ""
 			req.Host = "preview-target"
 			req.Header.Del("Authorization")
-			req.Header.Del("Cookie")
+			stripPreviewAccessCookies(req)
 		},
 		Transport: &internalPreviewTransport{
 			manager:   h.manager,
@@ -554,8 +554,18 @@ func cloneWebSocketRequestForInternalProxy(req *http.Request, previewID uuid.UUI
 	}
 	cloned.RequestURI = ""
 	cloned.Header.Del("Authorization")
-	cloned.Header.Del("Cookie")
+	stripPreviewAccessCookies(cloned)
 	return cloned
+}
+
+func stripPreviewAccessCookies(req *http.Request) {
+	cookies := req.Cookies()
+	req.Header.Del("Cookie")
+	for _, c := range cookies {
+		if c.Name != "__Host-preview_session" && c.Name != "preview_session" {
+			req.AddCookie(c)
+		}
+	}
 }
 
 func trimInternalPreviewProxyPath(path string, previewID uuid.UUID) string {
