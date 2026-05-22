@@ -1,4 +1,7 @@
 {
+  "dependencies": {
+    "golangci-lint": "2.10.1"
+  },
   "preview": {
     "name": "manado",
     "primary": "frontend",
