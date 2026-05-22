@@ -3732,6 +3732,11 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// WorkDir is cd'd into.
 	require.Contains(t, script, "cd '/home/user/repo'")
 
+	// Hydrated snapshots may have been captured while the repo was on a stale
+	// branch. The PR push path must normalize the current branch before the
+	// pre-push guard runs.
+	require.Contains(t, script, "git checkout -B '143/abc123/fix-typo'")
+
 	// Commit message is read from file (not argv).
 	require.Contains(t, script, "git commit -F '/home/user/.143-pr-commit-msg'")
 
@@ -3766,9 +3771,10 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"https://github.com/o/r.git",
 	)
 	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
-	// The branch is interpolated three times now (ls-remote, lease ref, push
-	// ref); each must round-trip through shellQuote so the embedded quote
-	// can't break out and corrupt the script.
+	// The branch is interpolated four times now (checkout, ls-remote, lease
+	// ref, push ref); each must round-trip through shellQuote so the embedded
+	// quote can't break out and corrupt the script.
+	require.Contains(t, script, `git checkout -B '143/abc/it'\''s-fine'`)
 	require.Contains(t, script, `git ls-remote 'https://github.com/o/r.git' refs/heads/'143/abc/it'\''s-fine'`)
 	require.Contains(t, script, `--force-with-lease=refs/heads/'143/abc/it'\''s-fine':"${remote_sha}"`)
 }
