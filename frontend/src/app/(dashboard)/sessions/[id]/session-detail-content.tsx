@@ -1848,7 +1848,7 @@ export function filterThreadLogsForLoadedMessages(
   logs: SessionLog[],
   messages: SessionMessage[],
 ): SessionLog[] {
-  if (messages.length === 0) return [];
+  if (messages.length === 0) return logs;
   const loadedTurns = new Set(messages.map((message) => message.turn_number));
   return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
