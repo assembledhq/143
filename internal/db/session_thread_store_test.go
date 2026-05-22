@@ -677,13 +677,12 @@ func TestSessionThreadStore_ClaimForResumeInSession(t *testing.T) {
 	row[11] = &now
 	row[17] = &now
 
-	// Pin the resume claim's distinguishing properties: it should clear
-	// completed_at (so the row reflects the new in-flight turn rather than
-	// the previous terminal state), preserve started_at (the original
-	// thread start time stays meaningful), and only fire when status is in
-	// the resumable set. The 5 named args mirror ClaimIdleForSession;
-	// claimable_statuses carries models.ResumableThreadStatuses.
-	mock.ExpectQuery(`(?s)WITH locked_threads AS.*WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*UPDATE session_threads\s+SET status = 'running',\s+completed_at = NULL,\s+last_activity_at = now\(\),\s+cancel_requested_at = NULL.*archived_at IS NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
+	// Pin the resume claim's distinguishing properties: it should refresh
+	// started_at for the new turn so the stuck-running reaper measures this
+	// execution, clear completed_at so the row reflects the new in-flight turn,
+	// and only fire when status is in the resumable set. The 5 named args mirror
+	// ClaimIdleForSession; claimable_statuses carries models.ResumableThreadStatuses.
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*UPDATE session_threads\s+SET status = 'running',\s+started_at = now\(\),\s+completed_at = NULL,\s+last_activity_at = now\(\),\s+cancel_requested_at = NULL.*archived_at IS NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
 		WithArgs(anyArgs(5)...).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 
