@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { GripVertical, MoveUp, MoveDown, Pencil } from "lucide-react";
+import { GripVertical, KeyRound, MoveUp, MoveDown, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/empty-state";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import { cn } from "@/lib/utils";
@@ -75,6 +76,19 @@ export function CodingAuthStack({
 }) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<{ id: string; position: DropPosition } | null>(null);
+
+  if (rows.length === 0) {
+    return (
+      <div className="overflow-hidden rounded-2xl border border-border bg-card">
+        <EmptyState
+          variant="inline"
+          icon={KeyRound}
+          title="No org coding auths yet"
+          description="Add an org-level auth so coding-agent sessions have shared fallback credentials."
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card">
