@@ -28,7 +28,7 @@ func automationAuditSnapshot(a *models.Automation) map[string]any {
 			snap["interval_value"] = *a.IntervalValue
 		}
 		if a.IntervalUnit != nil {
-			snap["interval_unit"] = *a.IntervalUnit
+			snap["interval_unit"] = string(*a.IntervalUnit)
 		}
 		if a.IntervalRunAt != nil {
 			snap["interval_run_at"] = *a.IntervalRunAt
@@ -74,7 +74,7 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("identity_scope", old.IdentityScope.OrDefault(), new_.IdentityScope.OrDefault())
 	track("schedule_type", old.ScheduleType, new_.ScheduleType)
 	track("interval_value", optInt(old.IntervalValue), optInt(new_.IntervalValue))
-	track("interval_unit", optString(old.IntervalUnit), optString(new_.IntervalUnit))
+	track("interval_unit", optScheduleUnit(old.IntervalUnit), optScheduleUnit(new_.IntervalUnit))
 	track("interval_run_at", optString(old.IntervalRunAt), optString(new_.IntervalRunAt))
 	track("cron_expression", optString(old.CronExpression), optString(new_.CronExpression))
 	track("timezone", old.Timezone, new_.Timezone)
@@ -109,6 +109,13 @@ func optString(p *string) any {
 		return nil
 	}
 	return *p
+}
+
+func optScheduleUnit(p *models.ScheduleUnit) any {
+	if p == nil {
+		return nil
+	}
+	return string(*p)
 }
 
 func optInt(p *int) any {

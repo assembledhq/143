@@ -236,7 +236,7 @@ func (s *Service) lockValidPendingRequest(ctx context.Context, tx Tx, orgID, ses
 		}
 		return models.Session{}, models.HumanInputRequest{}, err
 	}
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		return models.Session{}, models.HumanInputRequest{}, ErrSnapshotExpired
 	}
 	request, err := tx.GetRequestForUpdate(ctx, orgID, sessionID, requestID)

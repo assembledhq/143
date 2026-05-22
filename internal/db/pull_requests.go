@@ -19,7 +19,7 @@ func NewPullRequestStore(db DBTX) *PullRequestStore {
 }
 
 type PullRequestFilters struct {
-	Status string
+	Status models.PullRequestStatus
 	Limit  int
 	Cursor string
 }
@@ -32,7 +32,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 
 	authoredBy := pr.AuthoredBy
 	if authoredBy == "" {
-		authoredBy = "app"
+		authoredBy = models.GitIdentitySourceApp
 	}
 	args := pgx.NamedArgs{
 		"session_id":       pr.SessionID,
@@ -90,7 +90,7 @@ func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID 
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
 }
 
-func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error {
+func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status models.PullRequestStatus) error {
 	query := `UPDATE pull_requests SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id`
 	if status == models.PullRequestStatusMerged {
 		query = `UPDATE pull_requests SET status = @status, merged_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`
@@ -197,7 +197,7 @@ func (s *PullRequestStore) GetByOrgRepoAndNumber(ctx context.Context, orgID uuid
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
 }
 
-func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uuid.UUID, reviewStatus string) error {
+func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uuid.UUID, reviewStatus models.PullRequestReviewStatus) error {
 	query := `UPDATE pull_requests SET review_status = @review_status, updated_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":            id,
@@ -274,7 +274,7 @@ func (s *PullRequestStore) BatchGetBySessionIDs(ctx context.Context, orgID uuid.
 }
 
 // UpdateCIStatus updates the CI status of a pull request.
-func (s *PullRequestStore) UpdateCIStatus(ctx context.Context, orgID, id uuid.UUID, ciStatus string) error {
+func (s *PullRequestStore) UpdateCIStatus(ctx context.Context, orgID, id uuid.UUID, ciStatus models.PullRequestCIStatus) error {
 	query := `UPDATE pull_requests SET ci_status = @ci_status, updated_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":        id,

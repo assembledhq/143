@@ -125,7 +125,7 @@ func (m *mockCredStore) withDefaultStatus(cred *models.DecryptedCredential) *mod
 		return cred
 	}
 	copy := *cred
-	copy.Status = models.CodingCredentialStatusActive
+	copy.Status = models.CredentialStatusActive
 	return &copy
 }
 

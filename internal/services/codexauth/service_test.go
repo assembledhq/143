@@ -101,13 +101,13 @@ func (m *mockCredentialStore) Get(_ context.Context, scope models.Scope, provide
 	return nil, ErrCredentialNotFound
 }
 
-func (m *mockCredentialStore) UpdateStatus(_ context.Context, scope models.Scope, provider models.ProviderName, status string) error {
+func (m *mockCredentialStore) UpdateStatus(_ context.Context, scope models.Scope, provider models.ProviderName, status models.CredentialStatus) error {
 	for _, cred := range m.creds {
 		if cred.OrgID == scope.OrgID && cred.Provider == provider {
-			cred.Status = status
+			cred.Status = models.CredentialStatus(status)
 		}
 	}
-	m.status[m.key(scope.OrgID, provider)] = status
+	m.status[m.key(scope.OrgID, provider)] = string(status)
 	return nil
 }
 
@@ -162,10 +162,10 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, scope models.
 		// active and invalid rows reject with a typed error so callers can render
 		// a status-specific message.
 		if existing.Status != "pending_auth" && existing.Status != "disabled" {
-			return nil, &db.ErrCredentialLabelTaken{Label: label, ExistingStatus: existing.Status}
+			return nil, &db.ErrCredentialLabelTaken{Label: label, ExistingStatus: string(existing.Status)}
 		}
 		existing.Config = cfg
-		existing.Status = "pending_auth"
+		existing.Status = models.CredentialStatusPendingAuth
 		return &existing.ID, nil
 	}
 	id := uuid.New()
@@ -246,12 +246,12 @@ func (m *mockCredentialStore) DisableByID(_ context.Context, scope models.Scope,
 	return nil
 }
 
-func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, scope models.Scope, id uuid.UUID, status string) error {
+func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error {
 	for _, cred := range m.creds {
 		if cred.ID == id && cred.OrgID == scope.OrgID {
-			cred.Status = status
+			cred.Status = models.CredentialStatus(status)
 			k := m.key(cred.OrgID, cred.Provider)
-			m.status[k] = status
+			m.status[k] = string(status)
 			return nil
 		}
 	}
@@ -893,7 +893,7 @@ func (s *failingCredentialStore) ClaimNextRoundRobin(_ context.Context, _ models
 func (s *failingCredentialStore) DisableByID(_ context.Context, _ models.Scope, _ uuid.UUID) error {
 	return fmt.Errorf("db connection refused")
 }
-func (s *failingCredentialStore) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ string) error {
+func (s *failingCredentialStore) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ models.CodingCredentialRowStatus) error {
 	return fmt.Errorf("db connection refused")
 }
 func (s *failingCredentialStore) UpsertByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ models.ProviderConfig) error {
@@ -1239,7 +1239,7 @@ func TestGetValidToken_InactiveStatus(t *testing.T) {
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
 	})
 	// Mark as inactive.
-	store.UpdateStatus(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, "invalid")
+	store.UpdateStatus(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, models.CredentialStatusInvalid)
 
 	cfg, err := svc.GetValidToken(context.Background(), orgID)
 	if err != nil {
@@ -1757,7 +1757,7 @@ func (s *alwaysSameCredStore) ClaimNextRoundRobin(_ context.Context, _ models.Sc
 	return s.fixed, nil
 }
 
-func (s *alwaysSameCredStore) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ string) error {
+func (s *alwaysSameCredStore) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ models.CodingCredentialRowStatus) error {
 	return nil // Simulate a silent status-update failure (no row actually marked invalid).
 }
 

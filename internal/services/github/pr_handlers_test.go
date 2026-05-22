@@ -779,7 +779,7 @@ func TestPRServiceMaybeAutoArchiveSessionOnPRCloseHandlesSnapshotFailures(t *tes
 			name: "logs when snapshot cleanup fails",
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				snapshotKey := "snap-key"
-				row := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				row := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
 				setPRHealthSessionRowValue(row, "snapshot_key", &snapshotKey)
 
 				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
@@ -862,7 +862,7 @@ func TestPRServiceRunMergedPullRequestFollowUpsHandlesWarningPaths(t *testing.T)
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				issueID := uuid.New()
 				snapshotKey := "snap-key"
-				sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
 				setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
 				setPRHealthSessionRowValue(sessionRow, "agent_type", "claude-code")
 				setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")

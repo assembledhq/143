@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 func TestNewHealthHandler(t *testing.T) {
@@ -147,7 +149,7 @@ func TestIsTerminalStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.status, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, isTerminalStatus(tt.status), "isTerminalStatus(%q) should return %v", tt.status, tt.expected)
+			require.Equal(t, tt.expected, isTerminalStatus(models.SessionStatus(tt.status)), "isTerminalStatus(%q) should return %v", tt.status, tt.expected)
 		})
 	}
 }

@@ -15,7 +15,7 @@ func TestScopeLabel(t *testing.T) {
 	cases := []struct {
 		name  string
 		scope Scope
-		want  string
+		want  CodingCredentialScope
 	}{
 		{"org", Scope{OrgID: uuid.New()}, CodingCredentialScopeOrg},
 		{"personal", Scope{OrgID: uuid.New(), UserID: &user}, CodingCredentialScopePersonal},

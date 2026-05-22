@@ -89,7 +89,7 @@ type createPathIntegrationReader struct {
 	err         error
 }
 
-func (r createPathIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, string) (models.Integration, error) {
+func (r createPathIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	if r.err != nil {
 		return models.Integration{}, r.err
 	}

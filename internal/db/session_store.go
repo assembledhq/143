@@ -448,10 +448,10 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 // full sessionSelectColumns payload because running-session fast paths only
 // need status and turn numbering.
 type SessionMessageAppendState struct {
-	ID          uuid.UUID `db:"id"`
-	OrgID       uuid.UUID `db:"org_id"`
-	Status      string    `db:"status"`
-	CurrentTurn int       `db:"current_turn"`
+	ID          uuid.UUID            `db:"id"`
+	OrgID       uuid.UUID            `db:"org_id"`
+	Status      models.SessionStatus `db:"status"`
+	CurrentTurn int                  `db:"current_turn"`
 }
 
 // GetMessageAppendState returns the current status and turn number for a
@@ -1070,20 +1070,20 @@ func (s *SessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID
 	return err
 }
 
-func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
+func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error {
 	query := `UPDATE sessions SET status = @status, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	if status == "running" {
+	if status == models.SessionStatusRunning {
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
 		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	} else if status == "completed" || status == "failed" || status == "cancelled" {
+	} else if status == models.SessionStatusCompleted || status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	rows, err := s.db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":     runID,
 		"org_id": orgID,
-		"status": status,
+		"status": string(status),
 	})
 	if err != nil {
 		return err
@@ -1118,7 +1118,7 @@ func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID 
 // agent finished processing a user turn). Do NOT call this from reaper /
 // sweeper code paths — use a status-only update instead, otherwise dormant
 // sessions will resurface at the top of the MRU-ordered list.
-func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
 	if !shouldPersistDiffSnapshot(result) {
 		return s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
@@ -1139,7 +1139,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	return tx.Commit(ctx)
 }
 
-func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status string, result *models.SessionResult, diffStats json.RawMessage) error {
+func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult, diffStats json.RawMessage) error {
 
 	// COALESCE on diff / diff_stats / diff_collected_at preserves the
 	// previously persisted authoritative diff when the current turn did not
@@ -1172,7 +1172,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":                   runID,
 		"org_id":               orgID,
-		"status":               status,
+		"status":               string(status),
 		"confidence_score":     result.ConfidenceScore,
 		"confidence_reasoning": result.ConfidenceReasoning,
 		"risk_factors":         result.RiskFactors,
@@ -1780,12 +1780,12 @@ func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessi
 // MRU timestamp there would resurface dormant sessions at the top of the list.
 // Caller-driven activity (turn results, status transitions) bumps last_activity_at
 // through its own update path.
-func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
+func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
 	query := `UPDATE sessions SET sandbox_state = @sandbox_state WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":            sessionID,
 		"org_id":        orgID,
-		"sandbox_state": state,
+		"sandbox_state": string(state),
 	})
 	return err
 }

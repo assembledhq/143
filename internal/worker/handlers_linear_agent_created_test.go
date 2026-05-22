@@ -59,7 +59,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 		session := &models.Session{
 			OrgID:          orgID,
 			AgentType:      models.AgentTypeCodex,
-			Status:         string(models.SessionStatusPending),
+			Status:         models.SessionStatusPending,
 			PrimaryIssueID: &issueID,
 		}
 
@@ -110,7 +110,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 		session := &models.Session{
 			OrgID:          orgID,
 			AgentType:      models.AgentTypeCodex,
-			Status:         string(models.SessionStatusPending),
+			Status:         models.SessionStatusPending,
 			PrimaryIssueID: &issueID,
 		}
 		attachErr := errors.New("attach failed")
@@ -176,13 +176,13 @@ func TestReconcileLinearAgentCreatedNoPrimaryIssueOnlyReenqueuesRunAgent(t *test
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusPending, 0, nil, nil)...))
 
 	// enqueueRunAgentForLinearAgent re-fetches the session before enqueueing.
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusPending, 0, nil, nil)...))
 
 	// run_agent enqueue is idempotent (ON CONFLICT DO NOTHING dedupes on
 	// (queue, dedupe_key)); this row simulates the happy-path insert.
@@ -337,7 +337,7 @@ func TestReconcileLinearAgentCreatedRejectsZeroValueSession(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(uuid.Nil, uuid.Nil, orgID, string(models.SessionStatusPending), 0, nil, nil)...))
+			AddRow(workerSessionRow(uuid.Nil, uuid.Nil, orgID, models.SessionStatusPending, 0, nil, nil)...))
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{

@@ -46,7 +46,7 @@ type teamUserStore interface {
 // removal session cleanup decision).
 type teamMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
-	UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole string) (string, error)
+	UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole models.Role) (string, error)
 	RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (prevRole string, revokedInvitations int, err error)
 	CountForUser(ctx context.Context, userID uuid.UUID) (int, error)
 }
@@ -72,7 +72,7 @@ type teamOrgStore interface {
 
 // teamIntegrationStore looks up GitHub App installations for the org.
 type teamIntegrationStore interface {
-	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) ([]models.Integration, error)
+	ListByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) ([]models.Integration, error)
 }
 
 // teamGitHubService issues installation tokens for GitHub App installations.
@@ -217,7 +217,8 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !models.IsValidRole(body.Role) {
+	newRole := models.Role(body.Role)
+	if err := newRole.Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, builder, member, or viewer")
 		return
 	}
@@ -230,7 +231,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	// UpdateRoleGuarded is atomic: it locks the org's admin rows for the
 	// duration of the tx so two concurrent demotions can't both pass the
 	// "more than one admin" check and leave the org with zero admins.
-	prevRole, err := h.memberships.UpdateRoleGuarded(r.Context(), memberID, orgID, body.Role)
+	prevRole, err := h.memberships.UpdateRoleGuarded(r.Context(), memberID, orgID, newRole)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
@@ -258,11 +259,11 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("member_id", memberIDStr).Msg("team: role updated but display lookup failed; returning minimal payload")
-		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: body.Role}})
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: models.Role(body.Role)}})
 		return
 	}
 
-	member.Role = body.Role
+	member.Role = models.Role(body.Role)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: member})
 }
 
@@ -407,7 +408,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Role == "" {
-		body.Role = models.RoleMember
+		body.Role = string(models.RoleMember)
 	}
 	if !models.IsValidRole(body.Role) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, builder, member, or viewer")
@@ -455,7 +456,7 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	inv := &models.Invitation{
 		OrgID:            orgID,
 		AcceptanceMethod: body.AcceptanceMethod,
-		Role:             body.Role,
+		Role:             models.Role(body.Role),
 		InvitedBy:        currentUser.ID,
 		Token:            token,
 		ExpiresAt:        time.Now().Add(7 * 24 * time.Hour),
@@ -778,7 +779,7 @@ func (h *TeamHandler) getGitHubInstallationID(ctx context.Context, orgID uuid.UU
 	if h.integrations == nil {
 		return h.fallbackGitHubInstallationID(ctx, orgID)
 	}
-	integrations, err := h.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
+	integrations, err := h.integrations.ListByOrgAndProvider(ctx, orgID, models.IntegrationProviderGitHub)
 	if err != nil {
 		return 0, err
 	}

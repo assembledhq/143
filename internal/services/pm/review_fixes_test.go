@@ -216,7 +216,7 @@ func TestAnalyze_CodexRequiresInjectedAuth(t *testing.T) {
 	require.Equal(t, models.AgentTypeCodex, authErr.AgentType, "AuthError should identify the Codex agent")
 	require.Contains(t, authErr.Detail, "ChatGPT", "AuthError should tell the user how to fix Codex auth")
 	require.Equal(t, 1, sandbox.destroyCalls, "Analyze should destroy the sandbox on Codex auth failure")
-	require.Equal(t, "failed", sessions.lastResultStatus, "Analyze should mark the PM session failed on Codex auth failure")
+	require.Equal(t, models.SessionStatusFailed, sessions.lastResultStatus, "Analyze should mark the PM session failed on Codex auth failure")
 }
 
 func TestAnalyze_PiUsesDedicatedCredentialBeforeSandboxCreate(t *testing.T) {

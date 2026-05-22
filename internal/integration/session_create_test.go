@@ -49,7 +49,7 @@ func TestIntegration_CreateManual_EnqueuesRunAgentJob(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	createdID := resp.Data.ID
 	require.NotEqual(t, "", createdID.String())
-	require.Equal(t, "pending", resp.Data.Status, "newly-created manual session must be pending so the worker picks it up")
+	require.Equal(t, models.SessionStatusPending, resp.Data.Status, "newly-created manual session must be pending so the worker picks it up")
 	require.Equal(t, models.SessionOriginManual, resp.Data.Origin)
 	require.Equal(t, models.SessionInteractionModeInteractive, resp.Data.InteractionMode)
 	require.NotNil(t, resp.Data.TriggeredByUserID)
@@ -58,7 +58,7 @@ func TestIntegration_CreateManual_EnqueuesRunAgentJob(t *testing.T) {
 	// 1. Session row exists in DB and matches the response.
 	stored, err := db.NewSessionStore(pool).GetByID(context.Background(), orgID, createdID)
 	require.NoError(t, err)
-	require.Equal(t, "pending", stored.Status)
+	require.Equal(t, models.SessionStatusPending, stored.Status)
 	require.Equal(t, models.SessionOriginManual, stored.Origin)
 
 	// 2. Initial turn-0 user message persisted (so attachments / commands

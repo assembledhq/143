@@ -19,9 +19,9 @@ func NewIssueStore(db DBTX) *IssueStore {
 }
 
 type IssueFilters struct {
-	Status   string
+	Status   models.IssueStatus
 	Source   models.IssueSource
-	Severity string
+	Severity models.IssueSeverity
 	Sort     string
 	Limit    int
 	Cursor   string // issue ID for cursor-based pagination
@@ -223,7 +223,7 @@ func (s *IssueStore) Upsert(ctx context.Context, issue *models.Issue) error {
 	return row.Scan(&issue.ID, &issue.CreatedAt, &issue.UpdatedAt)
 }
 
-func (s *IssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+func (s *IssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error {
 	query := `UPDATE issues SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     issueID,

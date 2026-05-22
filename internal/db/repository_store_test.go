@@ -138,7 +138,7 @@ func TestRepositoryStore_GetByID(t *testing.T) {
 			require.NoError(t, err, "GetByID should not return an error")
 			require.Equal(t, repoID, repo.ID, "should return the correct repository ID")
 			require.Equal(t, "org/repo", repo.FullName, "should return the correct repository full name")
-			require.Equal(t, "active", repo.Status, "should return the correct repository status")
+			require.Equal(t, models.RepositoryStatusActive, repo.Status, "should return the correct repository status")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -167,7 +167,7 @@ func TestRepositoryStore_SetStatus(t *testing.T) {
 
 	repo, err := store.SetStatus(context.Background(), orgID, repoID, models.RepositoryStatusDisconnected)
 	require.NoError(t, err, "SetStatus should not error on happy path")
-	require.Equal(t, "disconnected", repo.Status, "should return the refreshed row with new status")
+	require.Equal(t, models.RepositoryStatusDisconnected, repo.Status, "should return the refreshed row with new status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -327,7 +327,7 @@ func TestRepositoryStore_GetByFullName(t *testing.T) {
 			require.Equal(t, repoID, repo.ID, "should return the correct repository ID")
 			require.Equal(t, orgID, repo.OrgID, "should return the correct org ID")
 			require.Equal(t, "org/repo", repo.FullName, "should return the correct repository full name")
-			require.Equal(t, "active", repo.Status, "should return the correct repository status")
+			require.Equal(t, models.RepositoryStatusActive, repo.Status, "should return the correct repository status")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -338,13 +338,13 @@ func TestRepositoryStore_GetByFullNameAnyStatus(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		status    string
+		status    models.RepositoryStatus
 		queryErr  error
 		expectErr bool
 	}{
 		{
 			name:   "returns disconnected repository when found",
-			status: "disconnected",
+			status: models.RepositoryStatusDisconnected,
 		},
 		{
 			name:      "returns error when query fails",
@@ -595,7 +595,7 @@ func TestRepositoryStore_ClaimFromGitHub_ReactivatesDisconnectedRepo(t *testing.
 	err = store.ClaimFromGitHub(context.Background(), repo)
 	require.NoError(t, err, "ClaimFromGitHub should activate the repository for the org")
 	require.Equal(t, repoID, repo.ID, "ClaimFromGitHub should scan the repository id")
-	require.Equal(t, string(models.RepositoryStatusActive), repo.Status, "ClaimFromGitHub should mark the repo active")
+	require.Equal(t, models.RepositoryStatusActive, repo.Status, "ClaimFromGitHub should mark the repo active")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

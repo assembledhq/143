@@ -30,7 +30,7 @@ func TestIntegration_EndSession_EnqueuesOpenPRJob(t *testing.T) {
 	user := seedUser(t, pool, orgID)
 
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusIdle),
+		Status:      models.SessionStatusIdle,
 		CurrentTurn: 2,
 		Validation:  models.SessionValidationPolicyOnSessionEnd,
 	})
@@ -48,7 +48,7 @@ func TestIntegration_EndSession_EnqueuesOpenPRJob(t *testing.T) {
 	// 1. Session transitioned to completed; pr_creation_state queued.
 	updated, err := db.NewSessionStore(pool).GetByID(context.Background(), orgID, session.ID)
 	require.NoError(t, err)
-	require.Equal(t, "completed", updated.Status)
+	require.Equal(t, models.SessionStatusCompleted, updated.Status)
 	require.Equal(t, models.PRCreationStateQueued, updated.PRCreationState,
 		"end-session must mark PR creation as queued so the UI shows the right state immediately")
 
@@ -87,7 +87,7 @@ func TestIntegration_EndSession_RejectsNonIdleSession(t *testing.T) {
 	orgID := seedOrg(t, pool)
 	user := seedUser(t, pool, orgID)
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusRunning),
+		Status:      models.SessionStatusRunning,
 		CurrentTurn: 1,
 	})
 
@@ -104,7 +104,7 @@ func TestIntegration_EndSession_RejectsNonIdleSession(t *testing.T) {
 
 	stored, err := db.NewSessionStore(pool).GetByID(context.Background(), orgID, session.ID)
 	require.NoError(t, err)
-	require.Equal(t, "running", stored.Status, "rejected end-session must not mutate status")
+	require.Equal(t, models.SessionStatusRunning, stored.Status, "rejected end-session must not mutate status")
 
 	jobs := listJobs(t, pool, orgID)
 	require.Empty(t, jobs)

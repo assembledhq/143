@@ -217,7 +217,7 @@ func TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure(t *testin
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 7))
+			AddRow(sessionID, orgID, models.SessionStatusRunning, 7))
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 8, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(99), now))
@@ -236,7 +236,7 @@ func TestAppendPromptedMessageToRunningSessionRollsBackOnCommitFailure(t *testin
 		deps,
 		orgID,
 		uuid.New(),
-		db.SessionMessageAppendState{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), CurrentTurn: 7},
+		db.SessionMessageAppendState{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 7},
 		linearAgentEventPayload{LinearAgentSessionID: "as_committed_fail"},
 		"please retry",
 		zerolog.Nop(),
@@ -327,12 +327,12 @@ func TestPromptedRunningSessionAppendsUnderSessionLockWithoutContinuationJob(t *
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
+			AddRow(sessionID, orgID, models.SessionStatusRunning, 3))
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
+			AddRow(sessionID, orgID, models.SessionStatusRunning, 3))
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 4, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
@@ -390,12 +390,12 @@ func TestPromptedRunningSessionAppendsWhenRevisionPromptsDisabled(t *testing.T) 
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 5))
+			AddRow(sessionID, orgID, models.SessionStatusRunning, 5))
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 5))
+			AddRow(sessionID, orgID, models.SessionStatusRunning, 5))
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 6, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(43), now))
@@ -456,12 +456,12 @@ func TestPromptedRunningSessionRetriesWhenTurnCompletesBeforeAppend(t *testing.T
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusRunning), 3))
+			AddRow(sessionID, orgID, models.SessionStatusRunning, 3))
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn\s+FROM sessions.*FOR UPDATE`).
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusIdle), 4))
+			AddRow(sessionID, orgID, models.SessionStatusIdle, 4))
 	mock.ExpectRollback()
 
 	deps := LinearAgentEventHandlerDeps{
@@ -518,7 +518,7 @@ func TestPromptedTerminalSessionRespectsDisabledRevisionPrompts(t *testing.T) {
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusCompleted), 9))
+			AddRow(sessionID, orgID, models.SessionStatusCompleted, 9))
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{
@@ -574,7 +574,7 @@ func TestPromptedIdleSessionRollsBackMessageWhenContinueEnqueueFails(t *testing.
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
 		WithArgs(sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusRunning), 7, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 7, nil, nil)...))
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 8, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -589,7 +589,7 @@ func TestPromptedIdleSessionRollsBackMessageWhenContinueEnqueueFails(t *testing.
 	mock.ExpectQuery("UPDATE sessions SET status = @status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 7, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 7, nil, nil)...))
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{
@@ -645,11 +645,11 @@ func TestPromptedResumedTerminalSessionRestoresOriginalStatusWhenContinueEnqueue
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
-			AddRow(sessionID, orgID, string(models.SessionStatusCompleted), 7))
+			AddRow(sessionID, orgID, models.SessionStatusCompleted, 7))
 	mock.ExpectQuery("(?s)UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusRunning), 7, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 7, nil, nil)...))
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), 8, models.MessageRoleUser, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -664,7 +664,7 @@ func TestPromptedResumedTerminalSessionRestoresOriginalStatusWhenContinueEnqueue
 	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
-			AddRow(workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusCompleted), 7, nil, nil)...))
+			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCompleted, 7, nil, nil)...))
 
 	deps := LinearAgentEventHandlerDeps{
 		Stores: &Stores{

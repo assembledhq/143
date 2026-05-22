@@ -19,7 +19,7 @@ type credentialStore interface {
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
 	ListSummaries(ctx context.Context, orgID uuid.UUID) ([]models.CredentialSummary, error)
 	Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
-	UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error
+	UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status models.CredentialStatus) error
 }
 
 // orgSettingsMutator is the slice of OrganizationStore needed to self-heal an

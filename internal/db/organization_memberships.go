@@ -109,8 +109,8 @@ func (s *OrganizationMembershipStore) Get(ctx context.Context, userID, orgID uui
 // legitimately be a pre-existing membership, so ON CONFLICT DO NOTHING (or
 // GrantAtLeast's silent no-op) would mask a real bug. Invitation acceptance
 // and role-upgrade paths should use GrantAtLeast instead.
-func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID uuid.UUID, role string) error {
-	if !models.IsValidRole(role) {
+func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID uuid.UUID, role models.Role) error {
+	if err := role.Validate(); err != nil {
 		return fmt.Errorf("invalid role %q", role)
 	}
 	_, err := s.db.Exec(ctx,
@@ -119,7 +119,7 @@ func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID 
 		pgx.NamedArgs{
 			"user_id": userID,
 			"org_id":  orgID,
-			"role":    role,
+			"role":    string(role),
 		})
 	return err
 }
@@ -142,8 +142,8 @@ func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID 
 // Use UpdateRole / UpdateRoleGuarded for explicit role changes (including
 // demotions) — those paths enforce the last-admin invariant, GrantAtLeast
 // does not because it can never demote.
-func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
-	if !models.IsValidRole(role) {
+func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role models.Role) (string, error) {
+	if err := role.Validate(); err != nil {
 		return "", fmt.Errorf("invalid role %q", role)
 	}
 	query := `
@@ -161,7 +161,7 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"user_id": userID,
 		"org_id":  orgID,
-		"role":    role,
+		"role":    string(role),
 	}).Scan(&effective)
 	if err != nil {
 		return "", err
@@ -175,8 +175,8 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 // enforce_last_admin trigger rejects the update; that is translated to
 // ErrLastAdmin so callers get the same sentinel they'd see from
 // UpdateRoleGuarded.
-func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role string) error {
-	if !models.IsValidRole(role) {
+func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role models.Role) error {
+	if err := role.Validate(); err != nil {
 		return fmt.Errorf("invalid role %q", role)
 	}
 	query := `
@@ -186,7 +186,7 @@ func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, or
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"user_id": userID,
 		"org_id":  orgID,
-		"role":    role,
+		"role":    string(role),
 	})
 	if err != nil {
 		return mapLastAdminViolation(err)
@@ -363,8 +363,8 @@ func (s *OrganizationMembershipStore) lockAdminCount(ctx context.Context, tx pgx
 // Returns the previous role on success. Returns ErrLastAdmin if the change
 // would demote the only remaining admin, or pgx.ErrNoRows if the membership
 // does not exist.
-func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole string) (string, error) {
-	if !models.IsValidRole(newRole) {
+func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole models.Role) (string, error) {
+	if err := newRole.Validate(); err != nil {
 		return "", fmt.Errorf("invalid role %q", newRole)
 	}
 	if s.pool == nil {
@@ -395,16 +395,16 @@ func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, use
 		return "", fmt.Errorf("read membership: %w", err)
 	}
 
-	if prevRole == "admin" && newRole != "admin" && adminCount <= 1 {
+	if prevRole == string(models.RoleAdmin) && newRole != models.RoleAdmin && adminCount <= 1 {
 		return prevRole, ErrLastAdmin
 	}
 
-	if prevRole != newRole {
+	if prevRole != string(newRole) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE organization_memberships
 			SET role = @role
 			WHERE user_id = @user_id AND org_id = @org_id`,
-			pgx.NamedArgs{"user_id": userID, "org_id": orgID, "role": newRole}); err != nil {
+			pgx.NamedArgs{"user_id": userID, "org_id": orgID, "role": string(newRole)}); err != nil {
 			return "", fmt.Errorf("update role: %w", err)
 		}
 	}

@@ -123,7 +123,7 @@ func TestIntegrationStore_GetByOrgAndProvider(t *testing.T) {
 			now := time.Now()
 			tt.setupMock(mock, orgID, integrationID, now)
 
-			integration, err := store.GetByOrgAndProvider(context.Background(), orgID, "github")
+			integration, err := store.GetByOrgAndProvider(context.Background(), orgID, models.IntegrationProviderGitHub)
 			if tt.expectErr {
 				require.Error(t, err, "GetByOrgAndProvider should return an error when integration is not found")
 				return
@@ -243,7 +243,7 @@ func TestIntegrationStore_ListReusableForReconnect(t *testing.T) {
 				AddRow(integrationID, orgID, "linear", json.RawMessage(`{}`), "error", nil, now),
 		)
 
-	integrations, err := store.ListReusableForReconnect(context.Background(), orgID, "linear")
+	integrations, err := store.ListReusableForReconnect(context.Background(), orgID, models.IntegrationProviderLinear)
 	require.NoError(t, err, "ListReusableForReconnect should not return an error")
 	require.Equal(t, []models.Integration{
 		{
