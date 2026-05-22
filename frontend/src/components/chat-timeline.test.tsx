@@ -118,8 +118,20 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("Agent is working...")).toBeInTheDocument();
   });
 
+  it("shows stopping indicator instead of working indicator after stop is requested", () => {
+    render(<ChatTimeline entries={[]} isRunning={true} stoppingLabel="Stopping agent..." />);
+    expect(screen.getByText("Stopping agent...")).toBeInTheDocument();
+    expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
+  });
+
   it("does not show working indicator when not running", () => {
     render(<ChatTimeline entries={[]} isRunning={false} />);
+    expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
+  });
+
+  it("shows stopped indicator when the session has stopped", () => {
+    render(<ChatTimeline entries={[]} isRunning={false} stoppedLabel="Session stopped" />);
+    expect(screen.getByText("Session stopped")).toBeInTheDocument();
     expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
   });
 

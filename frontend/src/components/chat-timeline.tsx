@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useCallback } from "react";
-import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine, FolderTree } from "lucide-react";
+import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine, FolderTree, Loader2, Square } from "lucide-react";
 import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -523,6 +523,8 @@ const CodeDiffSummary = memo(function CodeDiffSummary({
 interface ChatTimelineProps {
   entries: TimelineEntry[];
   isRunning: boolean;
+  stoppingLabel?: string;
+  stoppedLabel?: string;
   diffStats?: { added: number; removed: number; files_changed: number } | null;
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
@@ -539,7 +541,7 @@ interface ChatTimelineProps {
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -699,7 +701,18 @@ function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprov
 
   flushHidden();
 
-  if (isRunning) {
+  if (isRunning && stoppingLabel) {
+    rendered.push(
+      <div key="stopping" className="flex justify-start">
+        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+          <span className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+            {stoppingLabel}
+          </span>
+        </div>
+      </div>
+    );
+  } else if (isRunning) {
     rendered.push(
       <div key="working" className="flex justify-start">
         <div className="bg-muted rounded-lg px-3 py-2 text-sm">
@@ -709,6 +722,17 @@ function ChatTimelineImpl({ entries, isRunning, diffStats, onDiffClick, onApprov
               <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
             </span>
             Agent is working...
+          </span>
+        </div>
+      </div>
+    );
+  } else if (stoppedLabel) {
+    rendered.push(
+      <div key="stopped" className="flex justify-start">
+        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+          <span className="flex items-center gap-2 text-muted-foreground">
+            <Square className="h-2.5 w-2.5 fill-current" aria-hidden />
+            {stoppedLabel}
           </span>
         </div>
       </div>
@@ -748,6 +772,8 @@ export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
   return (
     prev.entries === next.entries &&
     prev.isRunning === next.isRunning &&
+    prev.stoppingLabel === next.stoppingLabel &&
+    prev.stoppedLabel === next.stoppedLabel &&
     prev.onDiffClick === next.onDiffClick &&
     prev.onApprovePlan === next.onApprovePlan &&
     prev.onAdjustPlan === next.onAdjustPlan &&
