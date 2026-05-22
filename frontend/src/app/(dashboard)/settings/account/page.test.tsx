@@ -148,11 +148,22 @@ describe("Account settings page", () => {
 
     renderWithProviders(<AccountPage />);
 
-    // Personal stack should show the empty-state copy.
-    expect(await screen.findByText(/No personal auth configured/)).toBeInTheDocument();
+    // Personal stack should show a clear empty state with its local action.
+    expect(await screen.findByText("No personal auths yet")).toBeInTheDocument();
+    expect(screen.getByText(/Add a personal auth to use your own subscription/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Add auth" })).toHaveLength(2);
     // Org fallback should still render with both the label and the masked key.
     expect((await screen.findAllByText("Org Claude key")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("sk-ant...team")).length).toBeGreaterThan(0);
+  });
+
+  it("renders an org fallback empty state when no org auths exist", async () => {
+    server.use(...emptyCodingCredentialsHandlers());
+
+    renderWithProviders(<AccountPage />);
+
+    expect(await screen.findByText("No org fallback yet")).toBeInTheDocument();
+    expect(screen.getByText(/Ask an admin to add an org-level fallback/)).toBeInTheDocument();
   });
 
   it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
@@ -161,7 +172,7 @@ describe("Account settings page", () => {
 
     renderWithProviders(<AccountPage />);
 
-    await user.click(screen.getByRole("button", { name: "Add auth" }));
+    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
 
     expect(await screen.findByText("Codex")).toBeInTheDocument();
     expect(screen.getAllByText("Claude Code").length).toBeGreaterThan(0);
@@ -206,7 +217,7 @@ describe("Account settings page", () => {
 
     renderWithProviders(<AccountPage />);
 
-    await user.click(screen.getByRole("button", { name: "Add auth" }));
+    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
     await user.click(await screen.findByLabelText("Claude Code"));
     await user.click(screen.getByRole("radio", { name: /API key/i }));
     await user.type(screen.getByLabelText("Label"), "Personal Claude backup");
