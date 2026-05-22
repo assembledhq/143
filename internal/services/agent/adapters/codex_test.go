@@ -1342,6 +1342,22 @@ func TestFilterCodexStderrLines(t *testing.T) {
 			expect: "",
 		},
 		{
+			name: "removes benign apply patch verification diagnostic block",
+			input: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx:\n" +
+				"    const formattedMessage = composerPlanMode && activeThread?.agent_type === \"claude_code\"\n" +
+				"      ? `${PLAN_MODE_PREFIX}${trimmedMessage}`\n" +
+				"      : trimmedMessage;\n" +
+				"    const optimisticID = optimisticMessageIDRef.current--;",
+			expect: "",
+		},
+		{
+			name: "removes apply patch verification diagnostic block while preserving real stderr",
+			input: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx:\n" +
+				"    const formattedMessage = composerPlanMode && activeThread?.agent_type === \"claude_code\"\n" +
+				"real error line",
+			expect: "real error line",
+		},
+		{
 			name:   "removes benign stdin diagnostic while preserving real stderr",
 			input:  "Reading additional input from stdin...\nreal error line",
 			expect: "real error line",
@@ -1393,6 +1409,32 @@ func TestEmitCodexStderrLogs_FlagsBenignDiagnosticsHidden(t *testing.T) {
 	require.Equal(t, "benign_runtime_diagnostic", logs[0].Metadata["diagnostic_class"], "hidden diagnostic should carry a reusable diagnostic class")
 	require.Equal(t, "codex", logs[0].Metadata["diagnostic_source"], "hidden diagnostic should identify its source")
 	require.Equal(t, "closed_stdin", logs[0].Metadata["diagnostic_kind"], "hidden diagnostic should identify the matched kind")
+}
+
+func TestEmitCodexStderrLogs_FlagsApplyPatchVerificationDiagnosticHidden(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx:\n" +
+		"    const formattedMessage = composerPlanMode && activeThread?.agent_type === \"claude_code\"\n" +
+		"      ? `${PLAN_MODE_PREFIX}${trimmedMessage}`\n" +
+		"      : trimmedMessage;\n" +
+		"    const optimisticID = optimisticMessageIDRef.current--;"
+
+	filtered := emitCodexStderrLogs([]byte(input), logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, filtered, "apply_patch context mismatch diagnostic should not be returned as visible stderr")
+	require.Len(t, logs, 1, "apply_patch diagnostic should be retained as one hidden log")
+	require.Equal(t, "debug", logs[0].Level, "hidden diagnostic should be emitted below user-visible error severity")
+	require.Equal(t, input, logs[0].Message, "hidden diagnostic should preserve the full multiline message")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "hidden diagnostic should be marked hidden from the user")
+	require.Equal(t, "apply_patch_verification_failed", logs[0].Metadata["diagnostic_kind"], "hidden diagnostic should identify the matched kind")
 }
 
 func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {
