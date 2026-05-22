@@ -223,6 +223,30 @@ export const api = {
     resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
   },
+  previews: {
+    list: (params?: { repository_id?: string; branch?: string; status?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.branch) searchParams.set('branch', params.branch);
+      if (params?.status) searchParams.set('status', params.status);
+      const query = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews${query ? `?${query}` : ''}`);
+    },
+    create: (body: import('./types').BranchPreviewCreateRequest) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>('/api/v1/previews', body),
+    get: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
+    getPullRequest: (owner: string, repo: string, number: string | number) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}`),
+    restart: (id: string, body?: { start_latest?: boolean }) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
+    startLatest: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/start-latest`),
+    stop: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/stop`),
+    bootstrap: (id: string) =>
+      post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
+  },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
       const searchParams = new URLSearchParams({ repository_id: repositoryId, q: query });

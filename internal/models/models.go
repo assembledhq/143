@@ -825,12 +825,13 @@ type LatestJobError struct {
 
 // Job type constants for async work queue items.
 const (
-	JobTypePMAnalyze        = "pm_analyze"
-	JobTypePMBootstrap      = "pm_bootstrap"
-	JobTypePMContextRefresh = "pm_context_refresh"
-	JobTypeProjectCycle     = "project_cycle"
-	JobTypeAutomationRun    = "automation_run"
-	JobTypeStartPreview     = "start_preview"
+	JobTypePMAnalyze          = "pm_analyze"
+	JobTypePMBootstrap        = "pm_bootstrap"
+	JobTypePMContextRefresh   = "pm_context_refresh"
+	JobTypeProjectCycle       = "project_cycle"
+	JobTypeAutomationRun      = "automation_run"
+	JobTypeStartPreview       = "start_preview"
+	JobTypeStartBranchPreview = "start_branch_preview"
 )
 
 // Job represents an async work queue item.

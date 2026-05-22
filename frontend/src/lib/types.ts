@@ -92,6 +92,44 @@ export interface Repository {
   updated_at: string;
 }
 
+export interface BranchPreviewCreateRequest {
+  repository_id: string;
+  branch: string;
+  commit_sha?: string;
+  preview_config_name?: string | null;
+  source?: {
+    type: "api" | "manual" | "session" | "pull_request" | "automation";
+    external_id?: string;
+    url?: string;
+  };
+  ttl_seconds?: number;
+}
+
+export interface BranchPreviewResponse {
+  target_id: string;
+  preview_id?: string;
+  repository_id?: string;
+  repository_full_name?: string;
+  branch?: string;
+  commit_sha?: string;
+  preview_config_name?: string;
+  source_type?: "api" | "manual" | "session" | "pull_request" | "automation";
+  source_url?: string;
+  status: string;
+  error?: string;
+  current_phase?: string;
+  new_commits_available?: boolean;
+  latest_commit_sha?: string;
+  github_branch_url?: string;
+  pull_request_url?: string;
+  stable_url: string;
+  preview_url?: string;
+  expires_at?: string;
+  services?: import('./preview-types').PreviewService[];
+  infrastructure?: import('./preview-types').PreviewInfrastructure[];
+  logs?: import('./preview-types').PreviewLog[];
+}
+
 export interface Integration {
   id: string;
   org_id: string;

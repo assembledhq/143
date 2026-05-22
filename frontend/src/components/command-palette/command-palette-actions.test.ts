@@ -27,6 +27,12 @@ describe("command-palette-actions", () => {
     expect(actions.find((a) => a.id === "settings-agents")).toBeDefined();
   });
 
+  it("includes create preview for build-capable roles", () => {
+    const actions = getFilteredActions("builder");
+    expect(actions.find((a) => a.id === "action-create-preview")?.href).toBe("/previews/new");
+    expect(getFilteredActions("viewer").find((a) => a.id === "action-create-preview")).toBeUndefined();
+  });
+
   it("all static actions have unique ids", () => {
     const ids = staticActions.map((a) => a.id);
     expect(new Set(ids).size).toBe(ids.length);

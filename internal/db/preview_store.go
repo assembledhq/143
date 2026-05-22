@@ -51,10 +51,17 @@ const terminalStatusFilter = `('stopped', 'expired', 'failed')`
 
 // --- Column lists ---
 
-const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
+const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-0000-000000000000'::uuid) AS session_id, preview_target_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
+
+const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
+	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
+	created_by_user_id, created_at`
+
+const previewLinkColumns = `id, org_id, preview_target_id, link_type, slug,
+	repository_id, pr_number, created_at, updated_at`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -78,9 +85,296 @@ const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id
 	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
 	base_snapshot_key, status, created_at, updated_at`
 
+const branchPreviewSummaryColumns = `target.id AS target_id, active.id AS preview_id,
+	target.repository_id, repo.full_name AS repository_full_name, target.branch, target.commit_sha, target.preview_config_name,
+	target.source_type, target.source_id, target.source_url,
+	COALESCE(active.status, 'target_created') AS status,
+	target.created_at, active.expires_at`
+
 // =============================================================================
 // Preview Instance CRUD
 // =============================================================================
+
+// CreatePreviewTarget inserts a branch preview target.
+func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.PreviewTarget) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_targets (
+			org_id, repository_id, branch, commit_sha, preview_config_name,
+			resolved_config_digest, source_type, source_id, source_url, created_by_user_id
+		) VALUES (
+			@org_id, @repository_id, @branch, @commit_sha, @preview_config_name,
+			@resolved_config_digest, @source_type, @source_id, @source_url, @created_by_user_id
+		)
+		ON CONFLICT (org_id, repository_id, branch, commit_sha, preview_config_name)
+		DO UPDATE SET
+			source_type = EXCLUDED.source_type,
+			source_id = EXCLUDED.source_id,
+			source_url = EXCLUDED.source_url
+		RETURNING %s`, previewTargetColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":                 target.OrgID,
+		"repository_id":          target.RepositoryID,
+		"branch":                 target.Branch,
+		"commit_sha":             target.CommitSHA,
+		"preview_config_name":    target.PreviewConfigName,
+		"resolved_config_digest": target.ResolvedConfigDigest,
+		"source_type":            target.SourceType,
+		"source_id":              target.SourceID,
+		"source_url":             target.SourceURL,
+		"created_by_user_id":     target.CreatedByUserID,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
+	if err != nil {
+		return fmt.Errorf("scan preview target: %w", err)
+	}
+	*target = row
+	return nil
+}
+
+// GetPreviewTarget returns a preview target by ID, scoped to org.
+func (s *PreviewStore) GetPreviewTarget(ctx context.Context, orgID, id uuid.UUID) (*models.PreviewTarget, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_targets WHERE id = @id AND org_id = @org_id`, previewTargetColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query preview target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
+	if err != nil {
+		return nil, fmt.Errorf("get preview target: %w", err)
+	}
+	return &row, nil
+}
+
+// GetPreviewTargetByIdempotencyKey returns the target associated with a
+// caller-provided idempotency key.
+func (s *PreviewStore) GetPreviewTargetByIdempotencyKey(ctx context.Context, orgID uuid.UUID, key string) (*models.PreviewTarget, error) {
+	query := fmt.Sprintf(`SELECT %s
+		FROM preview_targets target
+		JOIN preview_idempotency_keys idem ON idem.preview_target_id = target.id
+		WHERE idem.org_id = @org_id AND idem.idempotency_key = @key`, previewTargetColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "key": key})
+	if err != nil {
+		return nil, fmt.Errorf("query preview target idempotency key: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
+	if err != nil {
+		return nil, fmt.Errorf("get preview target by idempotency key: %w", err)
+	}
+	return &row, nil
+}
+
+// GetPreviewTargetBySource returns the newest target for caller source
+// metadata. This gives API/automation callers a natural idempotency key even
+// when they cannot preserve an HTTP Idempotency-Key across retries.
+func (s *PreviewStore) GetPreviewTargetBySource(ctx context.Context, orgID uuid.UUID, sourceType models.PreviewSourceType, sourceID string) (*models.PreviewTarget, error) {
+	query := fmt.Sprintf(`SELECT %s
+		FROM preview_targets
+		WHERE org_id = @org_id AND source_type = @source_type AND source_id = @source_id
+		ORDER BY created_at DESC
+		LIMIT 1`, previewTargetColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "source_type": sourceType, "source_id": sourceID})
+	if err != nil {
+		return nil, fmt.Errorf("query preview target by source: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
+	if err != nil {
+		return nil, fmt.Errorf("get preview target by source: %w", err)
+	}
+	return &row, nil
+}
+
+// UpsertPreviewIdempotencyKey records a stable caller key for a target.
+func (s *PreviewStore) UpsertPreviewIdempotencyKey(ctx context.Context, orgID uuid.UUID, key string, targetID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO preview_idempotency_keys (org_id, idempotency_key, preview_target_id)
+		VALUES (@org_id, @key, @target_id)
+		ON CONFLICT (org_id, idempotency_key) DO UPDATE SET preview_target_id = EXCLUDED.preview_target_id`,
+		pgx.NamedArgs{"org_id": orgID, "key": key, "target_id": targetID})
+	if err != nil {
+		return fmt.Errorf("upsert preview idempotency key: %w", err)
+	}
+	return nil
+}
+
+// UpdatePreviewTargetConfigDigest stores the digest of the resolved committed
+// config once the worker has checked out the branch and parsed .143/config.json.
+func (s *PreviewStore) UpdatePreviewTargetConfigDigest(ctx context.Context, orgID, targetID uuid.UUID, digest string) error {
+	tag, err := s.db.Exec(ctx, `UPDATE preview_targets
+		SET resolved_config_digest = @digest
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID, "digest": digest})
+	if err != nil {
+		return fmt.Errorf("update preview target config digest: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview target not found")
+	}
+	return nil
+}
+
+// ListBranchPreviewSummaries returns recent preview targets with their latest
+// active runtime when one exists.
+func (s *PreviewStore) ListBranchPreviewSummaries(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, branch, status string, limit int) ([]models.BranchPreviewSummary, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	query := fmt.Sprintf(`SELECT %s
+		FROM preview_targets target
+		JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
+		LEFT JOIN LATERAL (
+			SELECT id, status, expires_at
+			FROM preview_instances
+			WHERE org_id = target.org_id
+			  AND preview_target_id = target.id
+			ORDER BY created_at DESC
+			LIMIT 1
+		) active ON TRUE
+		WHERE target.org_id = @org_id
+		  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
+		  AND (@branch = '' OR target.branch = @branch)
+		  AND (@status = '' OR COALESCE(active.status, 'target_created') = @status)
+		ORDER BY target.created_at DESC
+		LIMIT @limit`, branchPreviewSummaryColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": repositoryID,
+		"branch":        branch,
+		"status":        status,
+		"limit":         limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list branch preview summaries: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
+}
+
+// GetLatestPreviewTargetForBranch returns the newest target for a repository
+// branch/config tuple, regardless of commit. It is used by durable PR links to
+// find stale existing previews before deciding whether to start the latest head.
+func (s *PreviewStore) GetLatestPreviewTargetForBranch(ctx context.Context, orgID, repositoryID uuid.UUID, branch, previewConfigName string) (*models.PreviewTarget, error) {
+	query := fmt.Sprintf(`SELECT %s
+		FROM preview_targets
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND branch = @branch
+		  AND preview_config_name = @preview_config_name
+		ORDER BY created_at DESC
+		LIMIT 1`, previewTargetColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":              orgID,
+		"repository_id":       repositoryID,
+		"branch":              branch,
+		"preview_config_name": previewConfigName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query latest preview target for branch: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
+	if err != nil {
+		return nil, fmt.Errorf("get latest preview target for branch: %w", err)
+	}
+	return &row, nil
+}
+
+// GetActivePreviewForTarget returns the currently active runtime for a branch
+// target, if one exists.
+func (s *PreviewStore) GetActivePreviewForTarget(ctx context.Context, orgID, targetID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE org_id = @org_id AND preview_target_id = @preview_target_id
+		AND status IN %s
+		ORDER BY created_at DESC
+		LIMIT 1`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":            orgID,
+		"preview_target_id": targetID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview for target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get active preview for target: %w", err)
+	}
+	return &row, nil
+}
+
+// AttachPreviewTarget links an existing runtime attempt to a branch preview
+// target. It is used when a live session sandbox already exactly matches the
+// requested branch target and can be reused instead of starting a cold clone.
+func (s *PreviewStore) AttachPreviewTarget(ctx context.Context, orgID, previewID, targetID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`UPDATE preview_instances
+		SET preview_target_id = @target_id, updated_at = now()
+		WHERE id = @preview_id AND org_id = @org_id
+		RETURNING %s`, previewInstanceColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"preview_id": previewID,
+		"target_id":  targetID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("attach preview target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan attached preview target: %w", err)
+	}
+	return &row, nil
+}
+
+// UpsertPreviewLink creates or updates a stable preview link for a target.
+func (s *PreviewStore) UpsertPreviewLink(ctx context.Context, link *models.PreviewLink) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_links (
+			org_id, preview_target_id, link_type, slug, repository_id, pr_number
+		) VALUES (
+			@org_id, @preview_target_id, @link_type, @slug, @repository_id, @pr_number
+		)
+		ON CONFLICT (org_id, link_type, slug)
+		DO UPDATE SET
+			preview_target_id = EXCLUDED.preview_target_id,
+			repository_id = EXCLUDED.repository_id,
+			pr_number = EXCLUDED.pr_number,
+			updated_at = now()
+		RETURNING %s`, previewLinkColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":            link.OrgID,
+		"preview_target_id": link.PreviewTargetID,
+		"link_type":         link.LinkType,
+		"slug":              link.Slug,
+		"repository_id":     link.RepositoryID,
+		"pr_number":         link.PRNumber,
+	})
+	if err != nil {
+		return fmt.Errorf("upsert preview link: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewLink])
+	if err != nil {
+		return fmt.Errorf("scan preview link: %w", err)
+	}
+	*link = row
+	return nil
+}
+
+// GetPreviewLinkBySlug returns a stable preview link by link namespace and
+// slug, scoped to org.
+func (s *PreviewStore) GetPreviewLinkBySlug(ctx context.Context, orgID uuid.UUID, linkType models.PreviewLinkType, slug string) (*models.PreviewLink, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_links
+		WHERE org_id = @org_id AND link_type = @link_type AND slug = @slug`, previewLinkColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "link_type": linkType, "slug": slug})
+	if err != nil {
+		return nil, fmt.Errorf("query preview link: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewLink])
+	if err != nil {
+		return nil, fmt.Errorf("get preview link: %w", err)
+	}
+	return &row, nil
+}
 
 // CreatePreviewInstance inserts a new preview instance.
 func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.PreviewInstance) error {
@@ -124,6 +418,59 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
 	if err != nil {
 		return fmt.Errorf("scan preview instance: %w", err)
+	}
+	*p = row
+	return nil
+}
+
+// CreateBranchPreviewInstance inserts a preview runtime reservation owned by a
+// preview target instead of a session. Branch preview sandboxes are standalone,
+// so session_id is persisted as NULL and preview_holding_container remains
+// false; teardown destroys the recycle sandbox directly.
+func (s *PreviewStore) CreateBranchPreviewInstance(ctx context.Context, p *models.PreviewInstance) error {
+	if p.PreviewTargetID == nil || *p.PreviewTargetID == uuid.Nil {
+		return fmt.Errorf("preview target id is required")
+	}
+	query := fmt.Sprintf(`
+		INSERT INTO preview_instances (
+			session_id, preview_target_id, org_id, user_id, profile_name, name, status, provider,
+			worker_node_id, preview_handle, primary_service, port,
+			config_digest, base_commit_sha, expires_at,
+			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox
+		) VALUES (
+			NULL, @preview_target_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
+			@worker_node_id, @preview_handle, @primary_service, @port,
+			@config_digest, @base_commit_sha, @expires_at,
+			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox
+		) RETURNING %s`, previewInstanceColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"preview_target_id": p.PreviewTargetID,
+		"org_id":            p.OrgID,
+		"user_id":           p.UserID,
+		"profile_name":      p.ProfileName,
+		"name":              p.Name,
+		"status":            p.Status,
+		"provider":          p.Provider,
+		"worker_node_id":    p.WorkerNodeID,
+		"preview_handle":    p.PreviewHandle,
+		"primary_service":   p.PrimaryService,
+		"port":              p.Port,
+		"config_digest":     p.ConfigDigest,
+		"base_commit_sha":   p.BaseCommitSHA,
+		"expires_at":        p.ExpiresAt,
+		"last_path":         p.LastPath,
+		"memory_limit_mb":   p.MemoryLimitMB,
+		"cpu_limit_millis":  p.CPULimitMillis,
+		"recycle_config":    p.RecycleConfig,
+		"recycle_sandbox":   p.RecycleSandbox,
+	})
+	if err != nil {
+		return fmt.Errorf("insert branch preview instance: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return fmt.Errorf("scan branch preview instance: %w", err)
 	}
 	*p = row
 	return nil
@@ -722,6 +1069,24 @@ func (s *PreviewStore) CountActivePreviewsByOrg(ctx context.Context, orgID uuid.
 	return count, nil
 }
 
+// CountActiveStandalonePreviewsByOrg counts target-owned branch previews for
+// standalone quota enforcement. Session-owned previews are intentionally
+// excluded so API/manual usage cannot starve active agent sessions.
+func (s *PreviewStore) CountActiveStandalonePreviewsByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE org_id = @org_id
+		 AND preview_target_id IS NOT NULL
+		 AND session_id IS NULL
+		 AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"org_id": orgID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active standalone previews by org: %w", err)
+	}
+	return count, nil
+}
+
 // CountActivePreviewsByUser counts active previews for per-user cap enforcement.
 func (s *PreviewStore) CountActivePreviewsByUser(ctx context.Context, orgID, userID uuid.UUID) (int, error) {
 	var count int
@@ -737,6 +1102,24 @@ func (s *PreviewStore) CountActivePreviewsByUser(ctx context.Context, orgID, use
 	return count, nil
 }
 
+// CountActiveStandalonePreviewsByUser counts target-owned branch previews for
+// per-user standalone quota enforcement.
+func (s *PreviewStore) CountActiveStandalonePreviewsByUser(ctx context.Context, orgID, userID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances
+		 WHERE org_id = @org_id AND user_id = @user_id
+		 AND preview_target_id IS NOT NULL
+		 AND session_id IS NULL
+		 AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"org_id": orgID, "user_id": userID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active standalone previews by user: %w", err)
+	}
+	return count, nil
+}
+
 // CountActivePreviewsByWorker counts active previews on a worker node.
 // lint:allow-no-orgid reason="cross-org worker capacity stats for scheduling"
 func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error) {
@@ -748,6 +1131,25 @@ func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNo
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active previews by worker: %w", err)
+	}
+	return count, nil
+}
+
+// CountActiveStandalonePreviewsByWorker counts target-owned branch previews on
+// a worker. The scheduler still considers total worker load, but this metric is
+// useful for observability and independent branch-preview caps.
+// lint:allow-no-orgid reason="cross-org worker capacity stats for scheduling"
+func (s *PreviewStore) CountActiveStandalonePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE worker_node_id = @worker
+		 AND preview_target_id IS NOT NULL
+		 AND session_id IS NULL
+		 AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"worker": workerNodeID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active standalone previews by worker: %w", err)
 	}
 	return count, nil
 }

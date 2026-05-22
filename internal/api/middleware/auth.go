@@ -22,9 +22,10 @@ type resolvedIdentityRecorder interface {
 }
 
 const (
-	userContextKey       contextKey = "user"
-	orgIDContextKey      contextKey = "org_id"
-	activeRoleContextKey contextKey = "active_role"
+	userContextKey            contextKey = "user"
+	orgIDContextKey           contextKey = "org_id"
+	activeRoleContextKey      contextKey = "active_role"
+	previewAPITokenContextKey contextKey = "preview_api_token"
 
 	// SessionCookieName is the cookie holding the opaque session token.
 	SessionCookieName = "session_token"
@@ -88,6 +89,11 @@ func ActiveRoleFromContext(ctx context.Context) string {
 	return role
 }
 
+func PreviewAPITokenFromContext(ctx context.Context) *models.PreviewAPIToken {
+	token, _ := ctx.Value(previewAPITokenContextKey).(*models.PreviewAPIToken)
+	return token
+}
+
 func WithUser(ctx context.Context, u *models.User) context.Context {
 	return context.WithValue(ctx, userContextKey, u)
 }
@@ -101,13 +107,18 @@ func WithActiveRole(ctx context.Context, role string) context.Context {
 	return context.WithValue(ctx, activeRoleContextKey, role)
 }
 
+func WithPreviewAPIToken(ctx context.Context, token *models.PreviewAPIToken) context.Context {
+	return context.WithValue(ctx, previewAPITokenContextKey, token)
+}
+
 // AuthStores bundles the store dependencies the Auth middleware needs. Using
 // a struct rather than a long positional signature keeps router wiring (and
 // the test harness) readable as we add the membership and org stores.
 type AuthStores struct {
-	Sessions    *db.AuthSessionStore
-	Users       *db.UserStore
-	Memberships *db.OrganizationMembershipStore
+	Sessions         *db.AuthSessionStore
+	Users            *db.UserStore
+	Memberships      *db.OrganizationMembershipStore
+	PreviewAPITokens *db.PreviewAPITokenStore
 }
 
 // Auth reads the session cookie (or Bearer token), loads the user identity,
@@ -152,6 +163,11 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		// terminal — logs the user out. Surface transient errors as 503 so
 		// the useAuth retry path handles them.
 		if errors.Is(err, pgx.ErrNoRows) {
+			if !cookieBased && stores.PreviewAPITokens != nil {
+				if handlePreviewAPIToken(w, r, next, stores, logger, token) {
+					return
+				}
+			}
 			if cookieBased {
 				clearSessionCookie(w, r)
 			}
@@ -244,6 +260,30 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		recorder.SetResolvedIdentity(activeOrgID, user.ID)
 	}
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func handlePreviewAPIToken(w http.ResponseWriter, r *http.Request, next http.Handler, stores AuthStores, logger zerolog.Logger, rawToken string) bool {
+	apiToken, err := stores.PreviewAPITokens.GetByToken(r.Context(), rawToken)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Msg("auth: preview api token lookup failed")
+			writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "preview api token lookup failed")
+			return true
+		}
+		return false
+	}
+	user, err := stores.Users.GetByIDGlobal(r.Context(), apiToken.CreatedByUserID)
+	if err != nil {
+		logger.Warn().Err(err).Str("user_id", apiToken.CreatedByUserID.String()).Msg("auth: preview api token user lookup failed")
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "preview api token user not found")
+		return true
+	}
+	ctx := WithUser(r.Context(), &user)
+	ctx = WithOrgID(ctx, apiToken.OrgID)
+	ctx = WithActiveRole(ctx, "preview_api_token")
+	ctx = WithPreviewAPIToken(ctx, &apiToken)
+	next.ServeHTTP(w, r.WithContext(ctx))
+	return true
 }
 
 // membershipResolution is the outcome of resolveActiveMembership. orgID/role

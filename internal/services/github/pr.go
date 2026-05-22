@@ -625,6 +625,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
+	if previewLink := s.prPreviewURL(owner, repoName, prNumber); previewLink != "" && !strings.Contains(body, previewLink) {
+		body = strings.TrimSpace(body) + fmt.Sprintf("\n\nPreview: %s", previewLink)
+		if bodyErr := s.updatePullRequestBody(ctx, token, owner, repoName, prNumber, body); bodyErr != nil {
+			s.logger.Warn().Err(bodyErr).Int("pr_number", prNumber).Msg("failed to append preview link to PR body")
+		}
+	}
 
 	labels := buildLabels(issue)
 	if len(labels) > 0 {
@@ -2062,6 +2068,68 @@ func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string)
 	return all, nil
 }
 
+// ResolveBranchHead returns the current commit SHA for a branch.
+func (s *PRService) ResolveBranchHead(ctx context.Context, token, owner, repo, branch string) (string, error) {
+	commitSHA, err := s.getRef(ctx, token, owner, repo, "heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("get branch ref: %w", err)
+	}
+	if commitSHA == "" {
+		return "", fmt.Errorf("branch head sha missing")
+	}
+	return commitSHA, nil
+}
+
+// CommitExists verifies that a commit SHA is readable in the repository.
+func (s *PRService) CommitExists(ctx context.Context, token, owner, repo, sha string) error {
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s", owner, repo, url.PathEscape(sha))
+	if _, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil); err != nil {
+		return fmt.Errorf("get commit: %w", err)
+	}
+	return nil
+}
+
+// PullRequestHead is the small PR shape branch previews need to resolve a
+// durable PR URL into the current head branch and commit.
+type PullRequestHead struct {
+	Number  int
+	HTMLURL string
+	State   string
+	Branch  string
+	SHA     string
+}
+
+// GetPullRequestHead returns the current head branch/SHA for a pull request.
+func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo string, number int) (PullRequestHead, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return PullRequestHead{}, fmt.Errorf("get pull request: %w", err)
+	}
+	var details struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+		State   string `json:"state"`
+		Head    struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(body, &details); err != nil {
+		return PullRequestHead{}, fmt.Errorf("decode pull request head: %w", err)
+	}
+	if details.Head.Ref == "" || details.Head.SHA == "" {
+		return PullRequestHead{}, fmt.Errorf("pull request head missing branch or sha")
+	}
+	return PullRequestHead{
+		Number:  details.Number,
+		HTMLURL: details.HTMLURL,
+		State:   details.State,
+		Branch:  details.Head.Ref,
+		SHA:     details.Head.SHA,
+	}, nil
+}
+
 func (s *PRService) ListRepositoryTree(ctx context.Context, token, owner, repo, branch string) ([]models.RepositoryTreeEntry, error) {
 	commitSHA, err := s.getRef(ctx, token, owner, repo, "heads/"+branch)
 	if err != nil {
@@ -2145,6 +2213,22 @@ func (s *PRService) updatePullRequestTitle(ctx context.Context, token, owner, re
 		"title": title,
 	})
 	return err
+}
+
+func (s *PRService) updatePullRequestBody(ctx context.Context, token, owner, repo string, number int, body string) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
+	_, err := s.doGitHubRequest(ctx, token, http.MethodPatch, path, map[string]any{
+		"body": body,
+	})
+	return err
+}
+
+func (s *PRService) prPreviewURL(owner, repo string, number int) string {
+	baseURL := strings.TrimRight(s.appBaseURL, "/")
+	if baseURL == "" {
+		baseURL = defaultAppBaseURL
+	}
+	return fmt.Sprintf("%s/previews/github/%s/%s/pull/%d", baseURL, owner, repo, number)
 }
 
 func (s *PRService) createPullRequest(ctx context.Context, token, owner, repo, title, body, head, base string, opts ...prCreateOption) (int, string, error) {

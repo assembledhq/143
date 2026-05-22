@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
@@ -95,9 +96,32 @@ func (r *rawPreviewConfig) hasBothFormats() bool {
 // ParseConfig parses the nested preview section from .143/config.json and
 // normalizes single-service configs to the multi-service format.
 func ParseConfig(data []byte) (*models.PreviewConfig, error) {
+	return ParseNamedConfig(data, "")
+}
+
+// ParseNamedConfig parses a specific named preview config from .143/config.json.
+// Repos may either use the legacy single preview object or a multi-config map:
+//
+//	{
+//	  "preview": {
+//	    "default": "web",
+//	    "configs": {
+//	      "web": {"primary": "web", "services": {...}},
+//	      "docs": {"primary": "docs", "services": {...}}
+//	    }
+//	  }
+//	}
+//
+// An omitted name auto-selects the only config or the declared default.
+func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 	previewData, err := extractPreviewSection(data)
 	if err != nil {
 		return nil, err
+	}
+	if selected, ok, err := selectNamedPreviewSection(previewData, name); err != nil {
+		return nil, err
+	} else if ok {
+		previewData = selected
 	}
 
 	var raw rawPreviewConfig
@@ -148,6 +172,44 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func selectNamedPreviewSection(previewData []byte, name string) ([]byte, bool, error) {
+	var probe struct {
+		Default string                     `json:"default"`
+		Configs map[string]json.RawMessage `json:"configs"`
+	}
+	if err := json.Unmarshal(previewData, &probe); err != nil {
+		return nil, false, nil
+	}
+	if len(probe.Configs) == 0 {
+		return nil, false, nil
+	}
+	names := sortedPreviewConfigNames(probe.Configs)
+	selectedName := strings.TrimSpace(name)
+	if selectedName == "" {
+		selectedName = strings.TrimSpace(probe.Default)
+	}
+	if selectedName == "" && len(names) == 1 {
+		selectedName = names[0]
+	}
+	if selectedName == "" {
+		return nil, false, fmt.Errorf("preview_config_name is required; available configs: %s", strings.Join(names, ", "))
+	}
+	selected, ok := probe.Configs[selectedName]
+	if !ok {
+		return nil, false, fmt.Errorf("preview config %q not found; available configs: %s", selectedName, strings.Join(names, ", "))
+	}
+	return selected, true, nil
+}
+
+func sortedPreviewConfigNames(configs map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func extractPreviewSection(data []byte) ([]byte, error) {

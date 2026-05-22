@@ -462,7 +462,7 @@ func previewTestContextWithIDs(r *http.Request, orgID, userID uuid.UUID, session
 }
 
 var previewInstanceTestCols = []string{
-	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
+	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
@@ -499,7 +499,7 @@ var handlerNodeTestCols = []string{
 // separate UPDATE). Columns must match previewInstanceTestCols.
 func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
 	return []any{
-		previewID, sessionID, orgID, userID, "bootstrap", "default", "starting",
+		previewID, sessionID, nil, orgID, userID, "bootstrap", "default", "starting",
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, json.RawMessage("{}"), json.RawMessage("{}"), "", now, now, nil, nil,
@@ -614,7 +614,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 	}
 
 	return []any{
-		previewID, sessionID, orgID, userID, "bootstrap", "my-preview", "ready",
+		previewID, sessionID, nil, orgID, userID, "bootstrap", "my-preview", "ready",
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, recycleConfig, recycleSandbox, "", now, now, now, nil,
@@ -2154,8 +2154,8 @@ func TestPreviewHandler_GetPreview_ReturnsLatestStoppedPreviewWhenNoActivePrevie
 	now := time.Now()
 	stoppedAt := now.Add(10 * time.Minute)
 	stoppedRow := newActivePreviewRow(previewID, sessionID, orgID, userID, now)
-	stoppedRow[6] = "stopped"
-	stoppedRow[16] = &stoppedAt
+	stoppedRow[7] = "stopped"
+	stoppedRow[17] = &stoppedAt
 
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2435,8 +2435,8 @@ func TestPreviewHandler_GetLogs_UsesLatestFailedPreviewWhenNoActivePreview(t *te
 	previewID := uuid.New()
 	now := time.Now()
 	failedRow := newActivePreviewRow(previewID, sessionID, orgID, userID, now)
-	failedRow[6] = "failed"
-	failedRow[22] = "preview service failed"
+	failedRow[7] = "failed"
+	failedRow[23] = "preview service failed"
 
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

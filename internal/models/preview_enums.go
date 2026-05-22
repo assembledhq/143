@@ -50,6 +50,47 @@ func (s PreviewStatus) IsTerminal() bool {
 	}
 }
 
+// PreviewSourceType records who or what requested a branch preview target.
+type PreviewSourceType string
+
+const (
+	PreviewSourceTypeSession     PreviewSourceType = "session"
+	PreviewSourceTypePullRequest PreviewSourceType = "pull_request"
+	PreviewSourceTypeAPI         PreviewSourceType = "api"
+	PreviewSourceTypeManual      PreviewSourceType = "manual"
+	PreviewSourceTypeAutomation  PreviewSourceType = "automation"
+)
+
+func (s PreviewSourceType) Validate() error {
+	switch s {
+	case PreviewSourceTypeSession,
+		PreviewSourceTypePullRequest,
+		PreviewSourceTypeAPI,
+		PreviewSourceTypeManual,
+		PreviewSourceTypeAutomation:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewSourceType: %q", s)
+	}
+}
+
+// PreviewLinkType identifies the stable link namespace a preview link occupies.
+type PreviewLinkType string
+
+const (
+	PreviewLinkTypeTarget      PreviewLinkType = "target"
+	PreviewLinkTypePullRequest PreviewLinkType = "pull_request"
+)
+
+func (t PreviewLinkType) Validate() error {
+	switch t {
+	case PreviewLinkTypeTarget, PreviewLinkTypePullRequest:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewLinkType: %q", t)
+	}
+}
+
 // PreviewServiceRole identifies a service as primary or support.
 type PreviewServiceRole string
 

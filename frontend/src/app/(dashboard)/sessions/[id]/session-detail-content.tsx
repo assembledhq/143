@@ -3572,6 +3572,38 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const branchPreviewMutation = useMutation({
+    mutationFn: () => {
+      if (!session?.repository_id) {
+        throw new Error("Session has no repository");
+      }
+      const branch = session.target_branch || session.working_branch;
+      if (!branch) {
+        throw new Error("Session has no branch");
+      }
+      return api.previews.create({
+        repository_id: session.repository_id,
+        branch,
+        source: {
+          type: "session",
+          external_id: session.id,
+          url: `/sessions/${session.id}`,
+        },
+      });
+    },
+    onSuccess: (response) => {
+      const url = response.data.stable_url;
+      if (url.startsWith("http")) {
+        window.location.href = url;
+      } else {
+        router.push(url);
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Preview could not be started");
+    },
+  });
+
   const startReviewLoopMutation = useMutation({
     mutationFn: () =>
       api.sessions.startReviewLoop(id, {
@@ -4744,6 +4776,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const branchActionTitle = localBranchActionError?.message ||
     (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
   const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
+  const canStartBranchPreview = Boolean(session.repository_id && (session.target_branch || session.working_branch));
 
   // Push-changes button derived state. Mirrors the PR creation block above
   // but operates on session.pr_push_state and the backend-derived
@@ -4948,6 +4981,23 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                 </DisabledTooltip>
               </>
+            ) : null}
+            {canStartBranchPreview ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                disabled={branchPreviewMutation.isPending}
+                title="Open branch preview"
+                onClick={() => branchPreviewMutation.mutate()}
+              >
+                {branchPreviewMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <ExternalLink className="h-3 w-3" />
+                )}
+                Preview
+              </Button>
             ) : null}
             <Button
               variant="ghost"

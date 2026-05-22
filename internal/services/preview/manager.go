@@ -173,13 +173,15 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 // StartPreviewInput contains everything needed to start a new preview.
 type StartPreviewInput struct {
-	SessionID     uuid.UUID
-	OrgID         uuid.UUID
-	UserID        uuid.UUID // for per-user concurrency cap
-	Sandbox       *agent.Sandbox
-	Config        *models.PreviewConfig
-	BaseCommitSHA string
-	ProfileName   string
+	SessionID       uuid.UUID
+	PreviewTargetID uuid.UUID
+	OrgID           uuid.UUID
+	UserID          uuid.UUID // for per-user concurrency cap
+	Sandbox         *agent.Sandbox
+	Config          *models.PreviewConfig
+	BaseCommitSHA   string
+	ProfileName     string
+	ExpiresAt       time.Time
 }
 
 // =============================================================================
@@ -236,6 +238,78 @@ func (m *Manager) ReservePreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, in
 	return m.reservePreview(ctx, m.store.WithTx(tx), input, workerNodeID, false)
 }
 
+// ReserveBranchPreviewForWorkerInTx reserves a standalone branch preview row
+// for a selected worker. Unlike session previews it does not acquire a session
+// sandbox hold; the branch runner creates and owns a dedicated sandbox.
+func (m *Manager) ReserveBranchPreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, input StartPreviewInput, workerNodeID string) (*models.PreviewInstance, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("transaction is required")
+	}
+	return m.reserveBranchPreview(ctx, m.store.WithTx(tx), input, workerNodeID)
+}
+
+func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID string) (*models.PreviewInstance, error) {
+	if store == nil {
+		return nil, fmt.Errorf("preview store is not configured")
+	}
+	if input.PreviewTargetID == uuid.Nil {
+		return nil, fmt.Errorf("preview target id is required")
+	}
+	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
+	}
+	existing, err := store.GetActivePreviewForTarget(ctx, input.OrgID, input.PreviewTargetID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check existing target preview: %w", err)
+	} else if err == nil && existing != nil {
+		return nil, fmt.Errorf("target already has an active preview (id=%s)", existing.ID)
+	}
+	if err := m.checkStandaloneConcurrencyCapsWithStore(ctx, store, input.OrgID, input.UserID, workerNodeID); err != nil {
+		return nil, err
+	}
+
+	limits := ResolveResourceLimits(input.Config)
+	configDigest := computeConfigDigest(input.Config)
+	profileName := input.ProfileName
+	if profileName == "" {
+		profileName = string(models.PreviewProfileBootstrap)
+	}
+	targetID := input.PreviewTargetID
+	instance := &models.PreviewInstance{
+		PreviewTargetID: &targetID,
+		OrgID:           input.OrgID,
+		UserID:          input.UserID,
+		ProfileName:     profileName,
+		Name:            input.Config.Name,
+		Status:          models.PreviewStatusStarting,
+		Provider:        ProviderDocker,
+		WorkerNodeID:    workerNodeID,
+		PrimaryService:  input.Config.Primary,
+		ConfigDigest:    configDigest,
+		BaseCommitSHA:   input.BaseCommitSHA,
+		ExpiresAt:       resolvePreviewExpiresAt(input.ExpiresAt),
+		LastPath:        "/",
+		MemoryLimitMB:   limits.MemoryMB,
+		CPULimitMillis:  limits.CPUMillis,
+	}
+	if err := store.CreateBranchPreviewInstance(ctx, instance); err != nil {
+		return nil, fmt.Errorf("create branch preview instance: %w", err)
+	}
+	m.logger.Info().
+		Str("preview_id", instance.ID.String()).
+		Str("preview_target_id", targetID.String()).
+		Str("name", input.Config.Name).
+		Msg("branch preview reserved")
+	return instance, nil
+}
+
+func resolvePreviewExpiresAt(requested time.Time) time.Time {
+	if requested.IsZero() {
+		return time.Now().Add(DefaultHardTTL)
+	}
+	return requested
+}
+
 func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID string, requireProvider bool) (*models.PreviewInstance, error) {
 	if requireProvider && m.provider == nil {
 		return nil, fmt.Errorf("preview provider is not configured")
@@ -276,7 +350,7 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		PrimaryService: input.Config.Primary,
 		ConfigDigest:   configDigest,
 		BaseCommitSHA:  input.BaseCommitSHA,
-		ExpiresAt:      time.Now().Add(DefaultHardTTL),
+		ExpiresAt:      resolvePreviewExpiresAt(input.ExpiresAt),
 		LastPath:       "/",
 		MemoryLimitMB:  limits.MemoryMB,
 		CPULimitMillis: limits.CPUMillis,
@@ -530,6 +604,19 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 		m.logger.Warn().Err(err).
 			Str("preview_id", instance.ID.String()).
 			Msg("abort reservation: failed to mark preview failed")
+	}
+
+	if instance.SessionID == uuid.Nil {
+		if hydratedContainerID != "" && m.sandboxProvider != nil {
+			sb := &agent.Sandbox{ID: hydratedContainerID, Provider: ProviderDocker}
+			if err := m.sandboxProvider.Destroy(ctx, sb); err != nil {
+				m.logger.Error().Err(err).
+					Str("preview_id", instance.ID.String()).
+					Str("container_id", hydratedContainerID).
+					Msg("abort branch reservation: destroy failed; container orphaned on host")
+			}
+		}
+		return
 	}
 
 	// Release the preview hold; learn sibling (turn) state.
@@ -799,6 +886,25 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	// it running; otherwise destroy it here. This is the inverse of the
 	// orchestrator's ReleaseTurnHold in the common case where the user stops
 	// a preview on an idle session.
+	if instance.SessionID == uuid.Nil {
+		if m.sandboxProvider != nil && len(instance.RecycleSandbox) > 2 {
+			var sb agent.Sandbox
+			if err := json.Unmarshal(instance.RecycleSandbox, &sb); err != nil {
+				m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to parse branch preview sandbox for destroy")
+			} else if sb.ID != "" {
+				destroyCtx, destroyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer destroyCancel()
+				if destroyErr := m.sandboxProvider.Destroy(destroyCtx, &sb); destroyErr != nil {
+					m.logger.Error().Err(destroyErr).
+						Str("preview_id", previewID.String()).
+						Str("container_id", sb.ID).
+						Msg("failed to destroy branch preview sandbox")
+				}
+			}
+		}
+		return nil
+	}
+
 	destroyNow, _, containerID, releaseErr := m.store.ReleasePreviewHold(ctx, orgID, previewID)
 	if releaseErr != nil {
 		// If the hold release fails we don't have clean signal about sibling
@@ -1301,6 +1407,33 @@ func (m *Manager) checkConcurrencyCapsWithStore(ctx context.Context, store *db.P
 	return nil
 }
 
+func (m *Manager) checkStandaloneConcurrencyCapsWithStore(ctx context.Context, store *db.PreviewStore, orgID, userID uuid.UUID, workerNodeID string) error {
+	userCount, err := store.CountActiveStandalonePreviewsByUser(ctx, orgID, userID)
+	if err != nil {
+		return fmt.Errorf("count standalone user previews: %w", err)
+	}
+	if userCount >= m.maxPerUser {
+		return fmt.Errorf("%w: you already have %d active branch previews (limit %d) — stop one before starting another", ErrPreviewCapacity, userCount, m.maxPerUser)
+	}
+
+	orgCount, err := store.CountActiveStandalonePreviewsByOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("count standalone org previews: %w", err)
+	}
+	if orgCount >= m.maxPerOrg {
+		return fmt.Errorf("%w: your team has %d active branch previews (limit %d) — ask a teammate to stop one", ErrPreviewCapacity, orgCount, m.maxPerOrg)
+	}
+
+	workerCount, err := store.CountActivePreviewsByWorker(ctx, workerNodeID)
+	if err != nil {
+		return fmt.Errorf("count worker previews: %w", err)
+	}
+	if workerCount >= m.maxPerWorker {
+		return fmt.Errorf("%w: all preview slots are in use (%d/%d) — try again in a few minutes", ErrPreviewCapacity, workerCount, m.maxPerWorker)
+	}
+	return nil
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -1360,14 +1493,22 @@ func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, erro
 	}
 
 	return StartPreviewInput{
-		SessionID:     instance.SessionID,
-		OrgID:         instance.OrgID,
-		UserID:        instance.UserID,
-		Sandbox:       &sandbox,
-		Config:        &cfg,
-		BaseCommitSHA: instance.BaseCommitSHA,
-		ProfileName:   instance.ProfileName,
+		SessionID:       instance.SessionID,
+		PreviewTargetID: previewTargetIDValue(instance.PreviewTargetID),
+		OrgID:           instance.OrgID,
+		UserID:          instance.UserID,
+		Sandbox:         &sandbox,
+		Config:          &cfg,
+		BaseCommitSHA:   instance.BaseCommitSHA,
+		ProfileName:     instance.ProfileName,
 	}, nil
+}
+
+func previewTargetIDValue(id *uuid.UUID) uuid.UUID {
+	if id == nil {
+		return uuid.Nil
+	}
+	return *id
 }
 
 func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
@@ -1390,6 +1531,9 @@ func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.Preview
 }
 
 func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
+	if instance.SessionID == uuid.Nil {
+		return StartPreviewInput{}, fmt.Errorf("branch preview has no legacy session recycle input")
+	}
 	if m.sessionStore == nil {
 		return StartPreviewInput{}, fmt.Errorf("session store is not configured")
 	}
