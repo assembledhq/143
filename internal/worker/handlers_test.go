@@ -5510,7 +5510,7 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
-				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
 	mock.ExpectQuery("SELECT .* FROM session_threads").
