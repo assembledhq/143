@@ -187,6 +187,18 @@ func TestParseConfig_RepoConfigWithoutPreviewSection(t *testing.T) {
 	require.Contains(t, err.Error(), "missing preview section", "ParseConfig should explain that .143/config.json requires a preview section for preview parsing")
 }
 
+func TestParseConfig_RepoConfigWithOnlyDependenciesWithoutPreviewSection(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseConfig([]byte(`{
+		"dependencies": {
+			"golangci-lint": "2.10.1"
+		}
+	}`))
+	require.Error(t, err, "ParseConfig should reject .143/config.json dependency-only files that omit the preview section")
+	require.Contains(t, err.Error(), "missing preview section", "ParseConfig should recognize dependencies as repo config and explain that preview is missing")
+}
+
 func TestParseConfig_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
