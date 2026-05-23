@@ -285,46 +285,48 @@ export function AgentTabStrip({
                     <div key={thread.id} className="group relative flex shrink-0 items-center">
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <TabsTrigger
-                            value={thread.id}
-                            disabled={isNonInteractive}
-                            className={cn(
-                              "h-7 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
-                              showArchiveButton && "pr-8",
-                              tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
-                              isNonInteractive && "cursor-default opacity-60",
-                            )}
-                          >
-                            {showUnreadDot ? (
-                              <span
-                                className={cn(
-                                  "h-2 w-2 shrink-0 rounded-full bg-primary",
-                                  thread.status === "running" && !isCancelling && "animate-pulse",
-                                )}
-                                aria-hidden
-                              />
-                            ) : (
-                              <span className="h-2 w-2 shrink-0" aria-hidden />
-                            )}
-                            <span className="truncate">{thread.label}</span>
-                            {isCancelling && (
-                              <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
-                            )}
-                            {queued > 0 && (
-                              <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
-                                {queued}
-                              </Badge>
-                            )}
-                            {needsAttention && (
-                              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
-                            )}
-                            {overlap.length > 0 && (
-                              <AlertTriangle
-                                className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
-                                aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
-                              />
-                            )}
-                          </TabsTrigger>
+                          <span className="inline-flex">
+                            <TabsTrigger
+                              value={thread.id}
+                              disabled={isNonInteractive}
+                              className={cn(
+                                "h-7 max-w-[15rem] gap-1.5 rounded-md px-2 text-xs data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none",
+                                showArchiveButton && "pr-8",
+                                tabs.length === 1 && "data-[state=active]:bg-transparent data-[state=active]:shadow-none",
+                                isNonInteractive && "cursor-default opacity-60",
+                              )}
+                            >
+                              {showUnreadDot ? (
+                                <span
+                                  className={cn(
+                                    "h-2 w-2 shrink-0 rounded-full bg-primary",
+                                    thread.status === "running" && !isCancelling && "animate-pulse",
+                                  )}
+                                  aria-hidden
+                                />
+                              ) : (
+                                <span className="h-2 w-2 shrink-0" aria-hidden />
+                              )}
+                              <span className="truncate">{thread.label}</span>
+                              {isCancelling && (
+                                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-label="Cancelling" />
+                              )}
+                              {queued > 0 && (
+                                <Badge variant="secondary" className="h-4 px-1 text-xs leading-none">
+                                  {queued}
+                                </Badge>
+                              )}
+                              {needsAttention && (
+                                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
+                              )}
+                              {overlap.length > 0 && (
+                                <AlertTriangle
+                                  className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                                  aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
+                                />
+                              )}
+                            </TabsTrigger>
+                          </span>
                         </TooltipTrigger>
                         <TooltipContent side="bottom" className="max-w-sm text-xs">
                           <div className="space-y-1">
