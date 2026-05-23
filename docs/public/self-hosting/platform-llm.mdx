@@ -1,0 +1,38 @@
+---
+title: Platform LLM
+description: Configure the LLM 143 uses for platform reasoning, classification, and analysis.
+section: Self-hosting
+order: 32
+status: beta
+audience: operator
+tags:
+  - llm
+  - self-hosting
+  - configuration
+llm_summary: Configure the platform LLM used by 143 for classification, summaries, failure analysis, and product reasoning separate from coding-agent auth.
+---
+
+# Platform LLM
+
+143 uses a platform LLM for product reasoning tasks such as prioritization, summaries, failure explanation, and classification. This is separate from coding-agent credentials used to run code-editing sessions.
+
+## Configuration model
+
+Self-hosted deployments should define:
+
+- Provider.
+- Model.
+- API key or credential reference.
+- Rate limits appropriate for expected usage.
+- Fallback behavior when the provider is unavailable.
+
+## Operational guidance
+
+- Keep platform LLM credentials separate from coding-agent credentials.
+- Monitor provider errors and latency.
+- Start with conservative limits and raise them after observing real workload.
+- Document which models are approved for production use.
+
+<AgentNote>
+When debugging behavior, distinguish platform LLM decisions from coding-agent execution. They use different credentials and serve different parts of the workflow.
+</AgentNote>

@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postinstall": "fumadocs-mdx",
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
@@ -18,9 +19,13 @@
     "@sentry/nextjs": "^10.45.0",
     "@tanstack/react-query": "^5.90.21",
     "@tanstack/react-table": "^8.21.3",
+    "@types/mdx": "^2.0.13",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "fumadocs-core": "^16.9.0",
+    "fumadocs-mdx": "^15.0.7",
+    "fumadocs-ui": "^16.9.0",
     "geist": "^1.7.0",
     "lucide-react": "^0.574.0",
     "next": "16.2.6",
@@ -34,7 +39,8 @@
     "remark-gfm": "^4.0.1",
     "shiki": "^4.0.2",
     "sonner": "^2.0.7",
-    "tailwind-merge": "^3.4.1"
+    "tailwind-merge": "^3.4.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

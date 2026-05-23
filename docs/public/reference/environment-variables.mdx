@@ -1,0 +1,44 @@
+---
+title: Environment variables
+description: Important environment variables for self-hosted 143 deployments.
+section: Reference
+order: 53
+status: beta
+audience: operator
+tags:
+  - environment
+  - self-hosting
+  - reference
+llm_summary: Reference for key self-hosted 143 environment variables covering API, workers, previews, GitHub, and sandbox capacity.
+---
+
+# Environment variables
+
+This page lists common deployment settings. Exact names may vary by deployment template, but the categories should stay consistent.
+
+## Application
+
+<ConfigField name="APP_ORIGIN" type="url" description="Public origin for the 143 app." />
+<ConfigField name="SESSION_SECRET" type="secret" description="Secret used for session signing." />
+<ConfigField name="DATABASE_URL" type="secret" description="Postgres connection string." />
+<ConfigField name="REDIS_URL" type="secret" description="Redis connection string." />
+
+## GitHub
+
+<ConfigField name="GITHUB_APP_ID" type="string" description="GitHub App ID." />
+<ConfigField name="GITHUB_CLIENT_ID" type="string" description="GitHub OAuth client ID." />
+<ConfigField name="GITHUB_CLIENT_SECRET" type="secret" description="GitHub OAuth client secret." />
+<ConfigField name="GITHUB_WEBHOOK_SECRET" type="secret" description="Secret used to verify GitHub webhooks." />
+<ConfigField name="GITHUB_PRIVATE_KEY" type="secret" description="Private key for the GitHub App." />
+
+## Workers
+
+<ConfigField name="WORKER_PROCESS_COUNT" type="integer" description="Worker loops per host." />
+<ConfigField name="WORKER_MAX_ACTIVE_SANDBOXES" type="integer" description="Maximum live sandboxes on a worker host." />
+<ConfigField name="SANDBOX_CPU_LIMIT" type="string" description="Sandbox CPU limit." />
+<ConfigField name="SANDBOX_MEMORY_LIMIT_MB" type="integer" description="Sandbox memory limit." />
+<ConfigField name="SANDBOX_DISK_LIMIT_GB" type="integer" description="Sandbox disk limit." />
+
+<Callout type="warning" title="Secret handling">
+Production secrets should live in the deployment's encrypted secret system. Do not commit plaintext `.env` files.
+</Callout>

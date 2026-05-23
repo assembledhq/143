@@ -1,0 +1,10 @@
+{
+  "title": "143.dev docs",
+  "pages": [
+    "index",
+    "getting-started",
+    "guides",
+    "self-hosting",
+    "reference"
+  ]
+}

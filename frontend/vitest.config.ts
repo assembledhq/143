@@ -9,6 +9,7 @@ const nodeTestFiles = [
   'src/lib/automation-templates.test.ts',
   'src/lib/coding-agent-reasoning.test.ts',
   'src/lib/diff-parser.test.ts',
+  'src/lib/docs/public-docs.test.ts',
   'src/lib/errors.test.ts',
   'src/lib/format-review-message.test.ts',
   'src/lib/integrations.test.ts',

@@ -1,0 +1,43 @@
+---
+title: Worker capacity tuning
+description: Size worker concurrency and sandbox resources for self-hosted deployments.
+section: Self-hosting
+order: 34
+status: beta
+audience: operator
+tags:
+  - workers
+  - capacity
+  - sandboxes
+llm_summary: Tune worker process count, active sandbox limits, CPU, memory, and disk controls for self-hosted 143 worker hosts.
+---
+
+# Worker capacity tuning
+
+Workers run coding-agent jobs and sandboxed previews. Capacity settings should match host size, repository workload, and expected session concurrency.
+
+## Key controls
+
+<ConfigField name="WORKER_PROCESS_COUNT" type="integer" description="Number of in-process worker loops that can claim jobs." />
+<ConfigField name="WORKER_MAX_ACTIVE_SANDBOXES" type="integer" description="Maximum live sandboxes on the host. Use explicit values for mixed fleets." />
+<ConfigField name="SANDBOX_CPU_LIMIT" type="string" description="CPU limit applied to sandbox containers." />
+<ConfigField name="SANDBOX_MEMORY_LIMIT_MB" type="integer" description="Memory limit in megabytes for each sandbox." />
+<ConfigField name="SANDBOX_DISK_LIMIT_GB" type="integer" description="Disk cap for each sandbox workspace." />
+
+## Tuning approach
+
+<Steps>
+  <Step>Start with one worker process and one active sandbox per small host.</Step>
+  <Step>Measure CPU, memory, disk, and preview startup latency.</Step>
+  <Step>Raise process count only when workers spend time idle while capacity remains available.</Step>
+  <Step>Set explicit active sandbox caps on larger or heterogeneous worker hosts.</Step>
+</Steps>
+
+## Warning signs
+
+- Preview startup frequently times out.
+- Docker disk usage grows without cleanup.
+- Jobs sit claimed but make no progress.
+- Host memory pressure causes sandbox crashes.
+
+Scale horizontally when isolation and predictability matter more than squeezing one large host.
