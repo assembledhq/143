@@ -1,11 +1,21 @@
-import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
+import { createMDX } from "fumadocs-mdx/next";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const apiTarget = process.env.API_PROXY_TARGET || "http://localhost:8080";
+const frontendRoot = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(frontendRoot, "..");
 
-const nextConfig: NextConfig = {
+/**
+ * @type {import("next").NextConfig}
+ */
+const nextConfig = {
   output: process.env.NODE_ENV === "production" ? "standalone" : undefined,
   allowedDevOrigins: ["*.ngrok.dev", "localhost", "127.0.0.1"],
+  turbopack: {
+    root: repoRoot,
+  },
   env: {
     NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:
       process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -15,15 +25,21 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
-        source: '/api/:path*',
+        source: "/docs/:path*.md",
+        destination: "/api/docs/raw/:path*",
+      },
+      {
+        source: "/api/:path*",
         destination: `${apiTarget}/api/:path*`,
       },
     ];
   },
 };
 
-export default withSentryConfig(nextConfig, {
-  // Suppress Sentry CLI logs during build
+const withMDX = createMDX();
+
+export default withSentryConfig(withMDX(nextConfig), {
+  // Suppress Sentry CLI logs during build.
   silent: true,
 
   // Upload source maps for readable stack traces.

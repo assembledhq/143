@@ -1,0 +1,36 @@
+---
+title: Self-hosting
+description: Run 143 on your own infrastructure with GitHub, Postgres, Redis, workers, and coding-agent credentials.
+section: Self-hosting
+order: 30
+status: beta
+audience: operator
+tags:
+  - self-hosting
+  - deployment
+llm_summary: Self-host 143 by preparing GitHub App credentials, platform LLM settings, database and worker infrastructure, and deployment checks.
+---
+
+# Self-hosting
+
+Self-hosting gives your team control over deployment, secrets, worker capacity, and network policy. The core production shape is an API/frontend app, Postgres, Redis, and one or more worker hosts that run sandboxed coding-agent sessions.
+
+## Start here
+
+<Cards>
+  <Card title="GitHub App setup" href="/docs/self-hosting/github-app-setup" description="Create the GitHub App used for repo access and PR creation." />
+  <Card title="Platform LLM" href="/docs/self-hosting/platform-llm" description="Configure the LLM used for platform reasoning and classification." />
+  <Card title="Deployment checklist" href="/docs/self-hosting/production-deployment-checklist" description="Verify production readiness before real agent work." />
+  <Card title="Worker capacity" href="/docs/self-hosting/worker-capacity-tuning" description="Size worker process and sandbox concurrency." />
+</Cards>
+
+## Operating responsibilities
+
+Self-hosted operators own:
+
+- Secrets and encrypted environment management.
+- GitHub App credentials and callback URLs.
+- Database backups and migrations.
+- Worker host capacity and sandbox runtime health.
+- Log retention and production debugging access.
+- Provider credentials for platform LLM and coding-agent execution.

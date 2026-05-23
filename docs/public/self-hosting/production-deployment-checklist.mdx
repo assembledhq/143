@@ -1,0 +1,55 @@
+---
+title: Production deployment checklist
+description: Verify a self-hosted deployment before allowing real coding-agent work.
+section: Self-hosting
+order: 33
+status: beta
+audience: operator
+tags:
+  - deployment
+  - production
+  - checklist
+llm_summary: Use this checklist before running real agent work on a self-hosted 143 deployment.
+---
+
+# Production deployment checklist
+
+Use this checklist before routing real repositories or user work through a self-hosted deployment.
+
+## Core services
+
+- API and frontend are reachable over HTTPS.
+- Postgres migrations have run successfully.
+- Redis is reachable by API and worker processes.
+- Workers can claim jobs and report health.
+- Logs are shipped to the configured log backend.
+
+## GitHub
+
+- GitHub App credentials are present.
+- Webhook secret matches GitHub.
+- Webhook delivery succeeds.
+- Test repository import succeeds.
+- A test PR can be opened from a session.
+
+## Workers and sandboxes
+
+- Sandbox runtime health check passes.
+- Worker concurrency is configured for host size.
+- Disk limits and cleanup are enabled.
+- Preview routing works for a simple app.
+- Worker logs include enough context for debugging.
+
+## Rollback
+
+Have a rollback plan for:
+
+- API/frontend release.
+- Worker release.
+- Database migration.
+- Secret rotation.
+- Provider outage.
+
+<Callout type="info" title="Start small">
+Before enabling broad automation, run a manual session in a low-risk repo and inspect the full path from clone to PR.
+</Callout>

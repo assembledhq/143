@@ -1,6 +1,7 @@
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RootProvider } from "fumadocs-ui/provider/next";
 import { NuqsAdapter } from "nuqs/adapters/next/app";
 import { useState, useEffect } from "react";
 import { ErrorBoundary } from "@/components/error-boundary";
@@ -59,13 +60,15 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      <NuqsAdapter>
-        <QueryClientProvider client={queryClient}>
-          <ErrorBoundary>
-            {children}
-          </ErrorBoundary>
-        </QueryClientProvider>
-      </NuqsAdapter>
+      <RootProvider theme={{ enabled: false }} search={{ options: { api: "/api/search" } }}>
+        <NuqsAdapter>
+          <QueryClientProvider client={queryClient}>
+            <ErrorBoundary>
+              {children}
+            </ErrorBoundary>
+          </QueryClientProvider>
+        </NuqsAdapter>
+      </RootProvider>
     </ThemeProvider>
   );
 }

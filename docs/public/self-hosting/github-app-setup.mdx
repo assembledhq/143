@@ -1,0 +1,46 @@
+---
+title: GitHub App setup
+description: Create and configure the GitHub App required for a self-hosted 143 deployment.
+section: Self-hosting
+order: 31
+status: beta
+audience: operator
+tags:
+  - github
+  - self-hosting
+  - setup
+llm_summary: Configure a GitHub App for self-hosted 143 so the platform can access repos, receive webhooks, and create PRs.
+---
+
+# GitHub App setup
+
+Self-hosted 143 uses a GitHub App for repository access. The app grants scoped installation access and emits webhooks for repo, issue, PR, and review events.
+
+## Create the app
+
+<Steps>
+  <Step>Create a new GitHub App under the GitHub organization or account that will own the integration.</Step>
+  <Step>Set the homepage URL to your 143 deployment URL.</Step>
+  <Step>Set callback URLs to the OAuth callback route exposed by your deployment.</Step>
+  <Step>Generate a private key and store it in your encrypted deployment secrets.</Step>
+  <Step>Install the app on the repositories 143 should access.</Step>
+</Steps>
+
+## Required values
+
+You will need:
+
+- App ID.
+- Client ID.
+- Client secret.
+- Webhook secret.
+- Private key.
+- Installation ID after install.
+
+## Webhooks
+
+Webhook delivery must reach your public API origin. Use a stable HTTPS URL and verify that the webhook secret in GitHub matches the deployment secret.
+
+<Callout type="warning" title="Secrets">
+Do not commit the GitHub App private key, client secret, or webhook secret. Store them through the deployment's encrypted secret flow.
+</Callout>

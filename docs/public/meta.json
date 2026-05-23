@@ -1,0 +1,14 @@
+{
+  "title": "143.dev docs",
+  "pages": [
+    "index",
+    "---Get started---",
+    "getting-started",
+    "---Guides---",
+    "guides",
+    "---Self-hosting---",
+    "self-hosting",
+    "---Reference---",
+    "reference"
+  ]
+}

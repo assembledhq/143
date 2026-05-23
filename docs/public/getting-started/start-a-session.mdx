@@ -1,0 +1,62 @@
+---
+title: Start a session
+description: Start a manual coding-agent session with the right repo, branch, prompt, and context.
+section: Get started
+order: 3
+status: beta
+audience: engineer
+tags:
+  - sessions
+  - agents
+  - prompts
+llm_summary: Start a 143 coding-agent session by choosing a repo, branch, agent, and prompt, then continue with follow-up messages.
+---
+
+# Start a session
+
+A session is the core unit of work in 143. It owns the sandbox, transcript, branch, diff, validation results, preview, and eventual PR.
+
+## Before you start
+
+Have a clear task:
+
+- What should change?
+- Which repo and branch should the agent work from?
+- What files, screenshots, issues, or product context matter?
+- How will you know the result is correct?
+
+## Start the run
+
+<Steps>
+  <Step>Select the repository and base branch.</Step>
+  <Step>Choose the coding agent and any model/reasoning controls available to your org.</Step>
+  <Step>Write the prompt as a concrete task with expected behavior and constraints.</Step>
+  <Step>Attach screenshots or files when visual context matters.</Step>
+  <Step>Send the session and watch the transcript for progress or questions.</Step>
+</Steps>
+
+## Prompt shape
+
+Good prompts include outcome, constraints, and verification:
+
+```text
+Fix the mobile overflow in the session detail header.
+
+Constraints:
+- Keep the existing desktop layout.
+- Use existing shadcn components and theme tokens.
+- Add or update tests for the mobile behavior.
+
+Verification:
+- npm run typecheck
+- npm run lint
+- npm run build
+```
+
+## Follow-ups
+
+Sessions are interactive. After a turn completes or pauses, send follow-up instructions instead of starting over. Follow-ups reuse the session context and can continue from the same sandbox when a checkpoint is available.
+
+<AgentNote>
+When automating against sessions, treat the session as the durable work object. Issues provide context, but the session owns execution state.
+</AgentNote>

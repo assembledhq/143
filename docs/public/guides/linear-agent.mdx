@@ -1,0 +1,51 @@
+---
+title: Linear agent
+description: Assign or mention `@143` in Linear to start a 143 coding session from an issue.
+section: Guides
+order: 13
+status: beta
+audience: engineer
+tags:
+  - linear
+  - integrations
+  - agents
+llm_summary: Configure and use the Linear agent so assigning or mentioning `@143` starts a 143 session and posts progress back to Linear.
+---
+
+# Linear agent
+
+The Linear agent lets teams start 143 work from Linear. Assign an issue to `@143` or mention `@143` in a comment, and 143 creates a coding session, posts progress, and links the resulting PR.
+
+## Setup
+
+<Steps>
+  <Step>Connect Linear from 143 settings.</Step>
+  <Step>Authorize the Linear scopes needed for the `@143` agent user.</Step>
+  <Step>Map Linear teams or projects to GitHub repositories.</Step>
+  <Step>Enable the agent for the teams that should be allowed to start work.</Step>
+</Steps>
+
+## Start work from Linear
+
+You can trigger work in two ways:
+
+- Assign the issue to `@143`.
+- Mention `@143` in the issue description or a comment.
+
+143 reads the issue title, description, recent comments, attachments, team, and project context. It does not automatically read private 143 sessions or unrelated internal docs.
+
+## Repo mapping priority
+
+1. A `repo:owner/name` label on the issue.
+2. Exact team and project mapping.
+3. Team default mapping.
+4. Organization default repo.
+5. Otherwise, 143 posts a clear configuration response and does not start work.
+
+## Follow-ups
+
+When a session already exists for an issue, mention `@143` again with follow-up instructions. 143 continues the existing session instead of starting a separate branch by default.
+
+<Callout type="info" title="Visibility">
+If the session was started from Linear, Linear remains the collaboration surface for progress updates and final PR links.
+</Callout>
