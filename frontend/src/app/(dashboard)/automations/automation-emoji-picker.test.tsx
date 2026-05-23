@@ -1,6 +1,6 @@
 import { fireEvent, renderWithProviders, screen } from "@/test/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { AutomationEmojiPicker } from "./automation-emoji-picker";
+import { AutomationEmojiPicker } from "@/components/automation-emoji-picker";
 
 describe("AutomationEmojiPicker", () => {
   const getEmojiOption = (container: HTMLElement, name: string) => {
