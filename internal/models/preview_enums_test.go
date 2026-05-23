@@ -172,6 +172,7 @@ func TestPreviewLogStep_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{PreviewLogStepBuild, false},
+		{PreviewLogStepInstall, false},
 		{PreviewLogStepInit, false},
 		{PreviewLogStepStart, false},
 		{PreviewLogStepProxy, false},

@@ -496,6 +496,7 @@ describe("NewAutomationPage", () => {
     await user.type(screen.getByLabelText("Name"), "Personal sweep");
     await user.clear(screen.getByLabelText("Goal"));
     await user.type(screen.getByLabelText("Goal"), "Use my own credentials");
+    await user.click(screen.getByText("Advanced options"));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
     await user.click(await screen.findByText("Personal"));
     await user.click(screen.getByRole("button", { name: "Create automation" }));
@@ -557,7 +558,6 @@ describe("NewAutomationPage", () => {
       expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Advanced options"));
     await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
     await user.click(await screen.findByText("Extra High"));
     await user.click(screen.getByRole("button", { name: "Create automation" }));

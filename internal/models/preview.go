@@ -225,11 +225,23 @@ type PreviewConfig struct {
 	Version        string                          `json:"version"`
 	Name           string                          `json:"name"`
 	Primary        string                          `json:"primary"`
+	Install        *PreviewInstallConfig           `json:"install,omitempty"`
 	Services       map[string]ServiceConfig        `json:"services"`
 	Infrastructure map[string]InfrastructureConfig `json:"infrastructure,omitempty"`
 	Credentials    CredentialConfig                `json:"credentials"`
 	Network        NetworkConfig                   `json:"network"`
 	Progressive    bool                            `json:"progressive,omitempty"`
+}
+
+// PreviewInstallConfig defines an optional platform-managed install phase that
+// runs before preview services start.
+type PreviewInstallConfig struct {
+	Command        []string `json:"command"`
+	Cwd            string   `json:"cwd,omitempty"`
+	Lockfiles      []string `json:"lockfiles,omitempty"`
+	CleanPaths     []string `json:"clean_paths,omitempty"`
+	VerifyPaths    []string `json:"verify_paths,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 }
 
 // ServiceConfig defines a single service within a preview.

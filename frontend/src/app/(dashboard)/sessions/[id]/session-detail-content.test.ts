@@ -114,6 +114,7 @@ describe("hasCleanReviewLoopForSnapshot", () => {
     source: "manual",
     agent_type: "codex",
     max_passes: 2,
+    fix_mode: "minimal",
     completed_passes: 1,
     review_required: false,
     started_at: "2026-01-01T00:00:00.000Z",

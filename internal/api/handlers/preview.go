@@ -108,6 +108,14 @@ func (e *previewHTTPError) Error() string {
 	return e.message
 }
 
+func previewCapacityMessage(err error) string {
+	var capacityErr *preview.CapacityError
+	if errors.As(err, &capacityErr) {
+		return capacityErr.UserMessage()
+	}
+	return preview.PreviewCapacityMessage
+}
+
 func newPreviewHTTPError(status int, code, message string, err error) *previewHTTPError {
 	return &previewHTTPError{status: status, code: code, message: message, err: err}
 }
@@ -187,14 +195,10 @@ func (h *PreviewHandler) requireManager(w http.ResponseWriter, r *http.Request) 
 // Returns:
 //   - (cfg, nil)   when a valid committed config is found and parsed.
 //   - (nil, nil)   for "no config to use" cases where the caller should fall
-//     back to built-in defaults: no fileReader wired, the file is absent, or
-//     its contents fail to parse (a malformed committed config is a user
-//     authoring problem, not an infrastructure failure; surfacing it as a 500
-//     would make the preview worse, not better, than the default).
+//     back to the no-config path: no fileReader wired or the file is absent.
 //   - (nil, err)   for genuine infrastructure failures (docker exec failed,
-//     context cancelled, sandbox gone) — the caller should surface these
-//     instead of silently swapping in Node.js defaults for what may well be
-//     a Go/Python/etc. project.
+//     context cancelled, sandbox gone) or invalid committed config. The caller
+//     should surface these instead of reporting that the file is absent.
 func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, error) {
 	if h.fileReader == nil {
 		return nil, nil
@@ -221,8 +225,8 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 			Err(err).
 			Str("session_id", sessionID.String()).
 			Str("path", repoconfig.ConfigPath).
-			Msg("committed preview config failed to parse; falling back to defaults")
-		return nil, nil
+			Msg("committed preview config failed to parse")
+		return nil, fmt.Errorf("%w: parse %s: %w", preview.ErrInvalidConfig, repoconfig.ConfigPath, err)
 	}
 	h.logger.Info().
 		Str("session_id", sessionID.String()).
@@ -574,7 +578,10 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, previewCapacityMessage(err), err)
+		}
+		if errors.Is(err, preview.ErrInvalidConfig) {
+			return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_CONFIG_INVALID", preview.InvalidConfigMessage(err), err)
 		}
 		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
@@ -640,7 +647,10 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, previewCapacityMessage(err), err)
+		}
+		if errors.Is(err, preview.ErrInvalidConfig) {
+			return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_CONFIG_INVALID", preview.InvalidConfigMessage(err), err)
 		}
 		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
@@ -698,6 +708,11 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 		// Returning a clear PREVIEW_NO_CONFIG error is strictly more useful.
 		cfg, err := h.readWorkspacePreviewConfig(ctx, sb, sessionID)
 		if err != nil {
+			if errors.Is(err, preview.ErrInvalidConfig) {
+				msg := preview.InvalidConfigMessage(err)
+				h.manager.AbortReservation(ctx, reservation, hydratedID, msg)
+				return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_CONFIG_INVALID", msg, err)
+			}
 			h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
 			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_CONFIG_READ_FAILED", "failed to read preview config from workspace", err)
 		}

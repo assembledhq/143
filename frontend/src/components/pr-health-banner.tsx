@@ -7,8 +7,10 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { SyncTimeText } from "@/components/sync-time-text";
+import { deriveMergeActionState } from "@/lib/session-pr-action-state";
 
 // PRBannerAction names every action the banner can launch. The pending value
 // is shared across buttons so they can disable each other while one is in
@@ -71,8 +73,12 @@ export function PRHealthBanner({
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
   const canShowResolveConflictsButton = health.can_resolve_conflicts && !activeRepairState.suppressResolveConflicts;
   const canShowFixTestsButton = health.can_fix_tests && !activeRepairState.suppressFixTests;
-  const canShowMergeButton =
-    !activeRepairState.suppressMerge && health.can_merge && checksAllowMerge(health.checks_confirmed, orderedChecks);
+  const mergeAction = deriveMergeActionState({
+    health: { ...health, checks: orderedChecks },
+    hasActiveRepair: activeRepairState.suppressMerge,
+    pendingAction,
+  });
+  const canShowMergeButton = mergeAction.visible;
   const hasActionableButton =
     !!activeRepairState.label ||
     canShowResolveConflictsButton ||
@@ -191,88 +197,104 @@ export function PRHealthBanner({
                   </div>
                 )}
                 <div className="flex flex-wrap gap-2">
+                  {canShowMergeButton && (
+                    <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
+                      <Button
+                        size="sm"
+                        variant="default"
+                        disabled={mergeAction.disabled}
+                        title={mergeAction.disabledReason ?? "Merge PR (p m)"}
+                        onClick={onMerge}
+                      >
+                        {mergeAction.spinning ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <GitMerge className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        {mergeAction.label}
+                      </Button>
+                    </DisabledTooltip>
+                  )}
                   {canShowResolveConflictsButton && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={pendingAction !== null}
-                      title="Resolve conflicts (p r)"
-                      onClick={onResolveConflicts}
-                    >
-                      {pendingAction === "resolve_conflicts" ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Wrench className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
-                    </Button>
+                    <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={pendingAction !== null}
+                        title={pendingAction !== null ? "Wait for the current PR action to finish" : "Resolve conflicts (p r)"}
+                        onClick={onResolveConflicts}
+                      >
+                        {pendingAction === "resolve_conflicts" ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
+                      </Button>
+                    </DisabledTooltip>
                   )}
                   {canShowFixTestsButton && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={pendingAction !== null}
-                      title="Fix tests (p t)"
-                      onClick={onFixTests}
-                    >
-                      {pendingAction === "fix_tests" ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Wrench className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
-                    </Button>
-                  )}
-                  {canShowMergeButton && (
-                    <Button
-                      size="sm"
-                      variant="default"
-                      disabled={pendingAction !== null}
-                      title="Merge PR (p m)"
-                      onClick={onMerge}
-                    >
-                      {pendingAction === "merge" ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <GitMerge className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      {pendingAction === "merge" ? "Merging…" : "Merge"}
-                    </Button>
+                    <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={pendingAction !== null}
+                        title={pendingAction !== null ? "Wait for the current PR action to finish" : "Fix tests (p t)"}
+                        onClick={onFixTests}
+                      >
+                        {pendingAction === "fix_tests" ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
+                      </Button>
+                    </DisabledTooltip>
                   )}
                   {reviewAction && (
-                    <Button
-                      size="sm"
-                      variant="outline"
+                    <DisabledTooltip
                       disabled={reviewAction.disabled || pendingAction !== null}
-                      title={reviewAction.title}
-                      onClick={reviewAction.onClick}
+                      content={pendingAction !== null ? "Wait for the current PR action to finish" : reviewAction.title}
                     >
-                      {reviewAction.spinning ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      Review
-                    </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={reviewAction.disabled || pendingAction !== null}
+                        title={pendingAction !== null ? "Wait for the current PR action to finish" : reviewAction.title}
+                        onClick={reviewAction.onClick}
+                      >
+                        {reviewAction.spinning ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        Review
+                      </Button>
+                    </DisabledTooltip>
                   )}
                   {pushChanges && (
-                    <Button
-                      size="sm"
-                      variant="outline"
+                    <DisabledTooltip
                       disabled={pushChanges.disabled || pendingAction !== null}
-                      title={pushChanges.title ?? "Push changes (p p)"}
-                      aria-keyshortcuts="p p"
-                      onClick={pushChanges.onClick}
+                      content={pendingAction !== null ? "Wait for the current PR action to finish" : pushChanges.title}
                     >
-                      {pushChanges.spinning ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      ) : pushChanges.showError ? (
-                        <AlertTriangle className="mr-1.5 h-3.5 w-3.5" />
-                      ) : (
-                        <Upload className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      {pushChanges.label}
-                    </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={pushChanges.disabled || pendingAction !== null}
+                        title={pendingAction !== null ? "Wait for the current PR action to finish" : pushChanges.title ?? "Push changes (p p)"}
+                        aria-keyshortcuts="p p"
+                        onClick={pushChanges.onClick}
+                      >
+                        {pushChanges.spinning ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : pushChanges.showError ? (
+                          <AlertTriangle className="mr-1.5 h-3.5 w-3.5" />
+                        ) : (
+                          <Upload className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        {pushChanges.label}
+                      </Button>
+                    </DisabledTooltip>
                   )}
                 </div>
                 {canShowResolveConflictsButton && canShowFixTestsButton && (
@@ -344,23 +366,12 @@ function normalizeCheckStatus(status?: string): PullRequestCheckStatus {
   }
 }
 
-function checksAllowMerge(
-  checksConfirmed: boolean,
-  checks: Array<{ status: PullRequestCheckStatus }>,
-) {
-  return checks.length === 0
-    ? checksConfirmed
-    : checks.every((check) => check.status === "passed");
-}
-
 // prHealthAllowsMerge mirrors the merge gating the banner uses internally so
 // callers outside the banner (keyboard shortcuts, command palette) can decide
 // whether to expose the merge action without re-deriving the rule.
 export function prHealthAllowsMerge(health: PullRequestHealthResponse | undefined): boolean {
-  if (!health?.can_merge) {
-    return false;
-  }
-  return checksAllowMerge(health.checks_confirmed, health.checks ?? []);
+  if (!health?.can_merge || !health.checks_confirmed) return false;
+  return (health.checks ?? []).every((c) => c.status === "passed");
 }
 
 function checkStatusLabel(status: PullRequestCheckStatus) {

@@ -2352,7 +2352,7 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
 			loopID, orgID, sessionID, &automationRunID, &threadID,
 			models.ReviewLoopStatusRunning, models.ReviewLoopSourceAutomation, models.AgentTypeCodex,
-			1, 0, true, nil, nil, nil, nil, nil, nil, now, nil,
+			1, models.ReviewLoopFixModeMinimal, 0, true, nil, nil, nil, nil, nil, nil, now, nil,
 		))
 
 	run := models.Session{
@@ -2907,7 +2907,7 @@ func automationRowColumns() []string {
 func workerReviewLoopColumns() []string {
 	return []string{
 		"id", "org_id", "session_id", "automation_run_id", "thread_id",
-		"status", "source", "agent_type", "max_passes", "completed_passes", "review_required",
+		"status", "source", "agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 		"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
 		"latest_summary", "started_by_user_id", "started_at", "completed_at",
 	}

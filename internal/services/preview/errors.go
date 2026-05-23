@@ -1,6 +1,9 @@
 package preview
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+)
 
 // Provider-side failure sentinels. The HTTP handler classifies preview-launch
 // errors via errors.Is so the frontend gets a specific code and message
@@ -31,9 +34,58 @@ var (
 	// returned a non-zero exit code or could not be read from the workspace.
 	ErrInitScriptFailed = errors.New("preview init script failed")
 
+	// ErrInstallFailed means a preview.install command returned non-zero,
+	// timed out, or could not prepare its lockfile-based cache state.
+	ErrInstallFailed = errors.New("preview install failed")
+
 	// ErrServiceNotReady means an application service was launched but its
 	// readiness probe never passed within the configured timeout. The user's
 	// preview command likely crashed at boot or never bound to its declared
 	// port.
 	ErrServiceNotReady = errors.New("preview service readiness probe failed")
 )
+
+type CapacityScope string
+
+const (
+	CapacityScopeUser   CapacityScope = "user"
+	CapacityScopeOrg    CapacityScope = "org"
+	CapacityScopeWorker CapacityScope = "worker"
+)
+
+type CapacityError struct {
+	Scope  CapacityScope
+	Active int
+	Limit  int
+}
+
+func (e *CapacityError) Error() string {
+	return e.UserMessage()
+}
+
+func (e *CapacityError) Unwrap() error {
+	return ErrPreviewCapacity
+}
+
+func (e *CapacityError) UserMessage() string {
+	if e == nil {
+		return PreviewCapacityMessage
+	}
+	switch e.Scope {
+	case CapacityScopeUser:
+		return "You have reached your per-user preview limit: " + pluralizePreviewCount(e.Active) + " out of " + strconv.Itoa(e.Limit) + " allowed. Stop one of your previews or ask an admin to raise the per-user preview limit in General settings."
+	case CapacityScopeOrg:
+		return "Your organization has reached its active preview limit. Stop another active preview or try again shortly."
+	case CapacityScopeWorker:
+		return "This preview worker is at capacity. Try again shortly."
+	default:
+		return PreviewCapacityMessage
+	}
+}
+
+func pluralizePreviewCount(count int) string {
+	if count == 1 {
+		return "1 active preview"
+	}
+	return strconv.Itoa(count) + " active previews"
+}

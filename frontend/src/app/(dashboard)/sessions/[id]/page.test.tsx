@@ -6,7 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { api } from '@/lib/api';
-import type { Issue, PullRequest, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse, ThreadMessageWindowResponse } from '@/lib/types';
+import type { Issue, PullRequest, ReviewLoopFixMode, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse, ThreadMessageWindowResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -161,6 +161,14 @@ describe('SessionDetailPage', () => {
     expect(elements.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('updates the browser tab title with the session title', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await waitFor(() => {
+      expect(document.title).toBe('143 | Fixed TypeError by adding null check');
+    });
+  });
+
   it('shows agent type label', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -188,13 +196,43 @@ describe('SessionDetailPage', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  it('shows a disabled review action in the Overview readiness area when no PR or session snapshot is available', async () => {
+  it('hides the Overview review readiness action when there are no changes to review', async () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await screen.findByText('Could not reproduce the error in test environment');
+    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Review and fix with a selected agent before creating a PR.')).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
+  });
+
+  it('shows a disabled review action in the Overview readiness area when changes exist but no snapshot is available', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            snapshot_key: undefined,
+            sandbox_state: 'none',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findByRole('button', { name: 'Review' })).toBeDisabled();
     expect(screen.getByText('Review and fix with a selected agent before creating a PR.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
 
   it('moves the review action into PR health after a PR exists when a snapshot is available', async () => {
@@ -236,6 +274,8 @@ describe('SessionDetailPage', () => {
             status: 'completed',
             snapshot_key: 'snapshot-manual-review',
             sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
           },
         } satisfies SingleResponse<Session>);
       }),
@@ -257,9 +297,9 @@ describe('SessionDetailPage', () => {
     expect(dialog.querySelector('.lucide-clipboard-list')).not.toBeInTheDocument();
   });
 
-  it('starts a manual review loop with the selected pass count', async () => {
+  it('starts a manual review loop with the selected pass count and default minimal fix mode', async () => {
     const user = userEvent.setup();
-    let postedMaxPasses = 0;
+    let postedBody: { max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -269,6 +309,8 @@ describe('SessionDetailPage', () => {
             status: 'completed',
             snapshot_key: 'snapshot-manual-review',
             sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
           },
         } satisfies SingleResponse<Session>);
       }),
@@ -279,8 +321,8 @@ describe('SessionDetailPage', () => {
         } satisfies ListResponse<SessionReviewLoop>);
       }),
       http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
-        const body = await request.json() as { max_passes: number };
-        postedMaxPasses = body.max_passes;
+        const body = await request.json() as { max_passes: number; fix_mode?: ReviewLoopFixMode };
+        postedBody = body;
         return HttpResponse.json({
           data: {
             id: 'review-loop-selected-passes',
@@ -290,6 +332,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: 'codex',
             max_passes: body.max_passes,
+            fix_mode: body.fix_mode ?? 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -305,13 +348,13 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
-      expect(postedMaxPasses).toBe(3);
+      expect(postedBody).toMatchObject({ max_passes: 3, fix_mode: 'minimal' });
     });
   });
 
-  it('lets the review loop use a coding agent different from the main session agent', async () => {
+  it('starts a manual review loop in exhaustive fix mode when selected', async () => {
     const user = userEvent.setup();
-    let postedBody: { agent_type?: string; max_passes: number } | null = null;
+    let postedBody: { fix_mode?: ReviewLoopFixMode } | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -319,9 +362,10 @@ describe('SessionDetailPage', () => {
           data: {
             ...mockSessions[1],
             status: 'completed',
-            agent_type: 'codex',
             snapshot_key: 'snapshot-manual-review',
             sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
           },
         } satisfies SingleResponse<Session>);
       }),
@@ -332,7 +376,65 @@ describe('SessionDetailPage', () => {
         } satisfies ListResponse<SessionReviewLoop>);
       }),
       http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
-        postedBody = await request.json() as { agent_type?: string; max_passes: number };
+        postedBody = await request.json() as { fix_mode?: ReviewLoopFixMode };
+        return HttpResponse.json({
+          data: {
+            id: 'review-loop-exhaustive',
+            org_id: 'org-1',
+            session_id: params.id as string,
+            status: 'running',
+            source: 'manual',
+            agent_type: 'codex',
+            max_passes: 2,
+            fix_mode: postedBody.fix_mode ?? 'minimal',
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          },
+        } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    const dialog = screen.getByRole('dialog', { name: 'Review' });
+    expect(within(dialog).getByRole('radio', { name: 'Minimal fixes' })).toBeChecked();
+
+    await user.click(within(dialog).getByRole('radio', { name: 'Fix every finding' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+
+    await waitFor(() => {
+      expect(postedBody).toMatchObject({ fix_mode: 'exhaustive' });
+    });
+  });
+
+  it('lets the review loop use a coding agent different from the main session agent', async () => {
+    const user = userEvent.setup();
+    let postedBody: { agent_type?: string; max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            agent_type: 'codex',
+            snapshot_key: 'snapshot-manual-review',
+            sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+      http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+        postedBody = await request.json() as { agent_type?: string; max_passes: number; fix_mode?: ReviewLoopFixMode };
         return HttpResponse.json({
           data: {
             id: 'review-loop-selected-agent',
@@ -342,6 +444,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: postedBody.agent_type ?? 'codex',
             max_passes: postedBody.max_passes,
+            fix_mode: postedBody.fix_mode ?? 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -361,7 +464,7 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
-      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2 });
+      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2, fix_mode: 'minimal' });
     });
   });
 
@@ -388,6 +491,8 @@ describe('SessionDetailPage', () => {
             status: 'completed',
             snapshot_key: 'snapshot-manual-review',
             sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
             threads: [existingThread],
           },
         } satisfies SingleResponse<Session>);
@@ -410,6 +515,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: 'codex',
             max_passes: body.max_passes,
+            fix_mode: 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -451,6 +557,8 @@ describe('SessionDetailPage', () => {
             status: 'completed',
             snapshot_key: 'snapshot-mobile-review',
             sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
           },
         } satisfies SingleResponse<Session>);
       }),
@@ -472,6 +580,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: 'codex',
             max_passes: body.max_passes,
+            fix_mode: 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -929,7 +1038,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
-  it('shows a desktop header add-tab action that creates a tab directly', async () => {
+  it('only shows the desktop add-tab action in the agent tab strip', async () => {
     const sessionId = 'session-header-new-tab';
     const threads: SessionThread[] = [
       {
@@ -995,8 +1104,10 @@ describe('SessionDetailPage', () => {
     await screen.findByPlaceholderText('Send a message to Codex...');
 
     const headerActions = screen.getByTestId('session-header-actions');
-    const newTabButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
-    await user.click(newTabButton);
+    expect(within(headerActions).queryByRole('button', { name: 'Add agent tab' })).not.toBeInTheDocument();
+
+    const stripAddButton = screen.getByRole('button', { name: 'Add agent tab' });
+    await user.click(stripAddButton);
 
     await waitFor(() => {
       expect(createdThread).toBe(true);
@@ -1110,6 +1221,81 @@ describe('SessionDetailPage', () => {
     });
 
     expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
+  });
+
+  it('does not refetch the whole session after creating a blank tab', async () => {
+    const sessionId = 'session-create-tab-no-detail-refetch';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Claude Code',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let sessionDetailRequests = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionDetailRequests += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'claude_code',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string };
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type as SessionThread['agent_type'],
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Claude Code...')).toBeInTheDocument();
+    expect(sessionDetailRequests).toBe(1);
+
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    await user.click(addTabButtons[addTabButtons.length - 1] as HTMLButtonElement);
+
+    expect(await screen.findByPlaceholderText('Send a message to Claude Code 2...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sessionDetailRequests).toBe(1);
+    });
   });
 
   it('persists the selected model on a blank tab before the first thread send', async () => {
@@ -3061,6 +3247,7 @@ describe('SessionDetailPage', () => {
           data: {
             ...mockPRHealth,
             can_merge: true,
+            checks_confirmed: true,
             checks: [
               { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
             ],
@@ -3139,7 +3326,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findByText('PR #42 is waiting for required checks to report passing.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Merge$/ })).toBeDisabled();
 
     await waitFor(() => {
       expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(true);
@@ -3309,7 +3496,7 @@ describe('SessionDetailPage', () => {
     expect(screen.queryAllByText('PR created')).toHaveLength(0);
   });
 
-  it('hides the Merge button while CI is still in flight', async () => {
+  it('keeps the Merge button visible but disabled while CI is still in flight', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
@@ -3327,7 +3514,9 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText('PR health');
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+    const mergeButton = screen.getByRole('button', { name: /^Merge$/ });
+    expect(mergeButton).toBeDisabled();
+    expect(mergeButton).toHaveAttribute('title', 'Checks are still running.');
   });
 
   it('shows a Merge button that opens GitHub auth when the org requires GitHub user auth and the user is disconnected', async () => {
@@ -3337,6 +3526,7 @@ describe('SessionDetailPage', () => {
           data: {
             ...mockPRHealth,
             can_merge: true,
+            checks_confirmed: true,
             checks: [
               { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
             ],
@@ -3371,6 +3561,7 @@ describe('SessionDetailPage', () => {
           data: {
             ...mockPRHealth,
             can_merge: true,
+            checks_confirmed: true,
             checks: [
               { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
             ],
@@ -3400,7 +3591,7 @@ describe('SessionDetailPage', () => {
     );
   });
 
-  it('hides the Merge button when checks have not yet confirmed a passing state', async () => {
+  it('keeps the Merge button visible but disabled when checks have not yet confirmed a passing state', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
@@ -3418,7 +3609,9 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findByText('PR health');
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+    const mergeButton = screen.getByRole('button', { name: /^Merge$/ });
+    expect(mergeButton).toBeDisabled();
+    expect(mergeButton).toHaveAttribute('title', 'Waiting for GitHub to confirm required checks.');
   });
 
   it('shows the Merge button when GitHub has confirmed that the repo has no CI checks configured', async () => {
@@ -3465,7 +3658,7 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByText('PR #42 is blocked by GitHub merge requirements.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Merge$/ })).toBeDisabled();
   });
 
   it('stays on the original session after starting a PR repair action', async () => {
@@ -4099,7 +4292,7 @@ describe('SessionDetailPage', () => {
     expect(alert).not.toHaveTextContent('PR session expired');
   });
 
-  it('does not show Create PR button when session is running', async () => {
+  it('keeps Create PR visible but disabled when session is running', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
       status: 'running',
@@ -4123,7 +4316,9 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText('Agent is working...');
-    expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
+    const createPRButton = screen.getByRole('button', { name: /Create PR/ });
+    expect(createPRButton).toBeDisabled();
+    expect(createPRButton).toHaveAttribute('title', expect.stringContaining('Wait for the session to finish before creating a PR'));
   });
 
   it('does not show a checkpoint-missing notice for an active run before a checkpoint is expected', async () => {
@@ -7704,72 +7899,6 @@ describe('SessionDetailPage', () => {
 
     await waitFor(() => {
       expect(stripAddButton).toHaveFocus();
-    });
-  });
-
-  it('returns focus to the desktop header add-tab trigger when a new tab has no composer', async () => {
-    const sessionId = 'session-header-create-tab-no-composer';
-    const threads: SessionThread[] = [
-      {
-        id: 'thread-main',
-        session_id: sessionId,
-        org_id: 'org-1',
-        agent_type: 'pm_agent',
-        label: 'Planner',
-        status: 'idle',
-        current_turn: 1,
-        created_at: '2026-02-17T07:00:00Z',
-        cost_cents: 0,
-        pending_message_count: 0,
-      },
-    ];
-
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({
-          data: {
-            ...mockSessions[0],
-            id: sessionId,
-            agent_type: 'pm_agent',
-            status: 'idle',
-            sandbox_state: 'snapshotted',
-            threads,
-          },
-        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
-      }),
-      http.post('/api/v1/sessions/:id/threads', async () => {
-        const thread: SessionThread = {
-          id: 'thread-new',
-          session_id: sessionId,
-          org_id: 'org-1',
-          agent_type: 'codex',
-          label: 'Codex 2',
-          status: 'idle',
-          current_turn: 0,
-          created_at: '2026-02-17T07:04:00Z',
-          cost_cents: 0,
-          pending_message_count: 0,
-        };
-        threads.push(thread);
-        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
-      }),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(<SessionDetailContent id={sessionId} />);
-
-    const headerActions = await screen.findByTestId('session-header-actions');
-    const headerAddButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
-    await user.click(headerAddButton);
-
-    await waitFor(() => {
-      expect(headerAddButton).toHaveFocus();
     });
   });
 

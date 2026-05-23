@@ -39,6 +39,7 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	require.NoError(t, err, "Start should create the review loop")
 	require.Equal(t, threadID, *loop.ThreadID, "Start should bind the loop to the review thread")
 	require.Equal(t, models.AgentTypeClaudeCode, loop.AgentType, "Start should default to the session agent")
+	require.Equal(t, models.ReviewLoopFixModeMinimal, loop.FixMode, "Start should default to minimal fix mode")
 	require.Equal(t, &snapshotKey, loop.LoopStartCheckpointKey, "Start should record the snapshot checkpoint for the review loop")
 	require.Len(t, store.createdPasses, 1, "Start should create the first pass")
 	require.Equal(t, models.ReviewLoopPassStatusReviewing, store.createdPasses[0].Status, "first pass should start in reviewing state")
@@ -46,6 +47,32 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	require.Contains(t, threads.sent[0].Message, "/review", "Start should send the native review command")
 	require.Len(t, threads.sent[0].Commands, 1, "Start should persist a structured slash command")
 	require.Equal(t, "review", threads.sent[0].Commands[0].Name, "structured command should be /review")
+}
+
+func TestService_StartStoresRequestedFixMode(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/review-loop-fix-mode.tar.zst"
+	store := &fakeReviewLoopStore{}
+	threads := &fakeThreadService{
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
+		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Label: "Codex Review"},
+		message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+	}
+	svc := NewService(store, threads)
+
+	loop, err := svc.Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
+		MaxPasses: 2,
+		Source:    models.ReviewLoopSourceManual,
+		FixMode:   models.ReviewLoopFixModeExhaustive,
+	})
+
+	require.NoError(t, err, "Start should create the review loop with a requested fix mode")
+	require.Equal(t, models.ReviewLoopFixModeExhaustive, loop.FixMode, "Start should return the requested fix mode")
+	require.Equal(t, models.ReviewLoopFixModeExhaustive, store.createdLoops[0].FixMode, "Start should persist the requested fix mode")
 }
 
 func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
@@ -150,6 +177,7 @@ func TestService_OnThreadTurnCompleteDirtyThenClean(t *testing.T) {
 			Status:    models.ReviewLoopStatusRunning,
 			AgentType: models.AgentTypeCodex,
 			MaxPasses: 2,
+			FixMode:   models.ReviewLoopFixModeExhaustive,
 		},
 		latestPass: models.SessionReviewLoopPass{ID: passID, OrgID: orgID, LoopID: loopID, SessionID: sessionID, PassIndex: 1, Status: models.ReviewLoopPassStatusReviewing},
 	}
@@ -167,7 +195,7 @@ func TestService_OnThreadTurnCompleteDirtyThenClean(t *testing.T) {
 	err = svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "NEEDS_FIX_PASS")
 	require.NoError(t, err, "dirty decision should enqueue a fix pass")
 	require.Equal(t, models.ReviewLoopDecisionNeedsFix, store.fixDecision, "dirty decision should be persisted")
-	require.Contains(t, threads.sent[1].Message, "Fix the issues you identified", "fix prompt should reference the previous review")
+	require.Contains(t, threads.sent[1].Message, "Fix every issue", "exhaustive fix prompt should ask the agent to fix all review findings")
 	require.NotNil(t, threads.sent[1].ContinuationDedupeKeyOverride, "review fix prompt should use a dedicated continuation dedupe key")
 	require.Equal(t, reviewLoopContinuationDedupeKey(loopID, passID, "fix"), *threads.sent[1].ContinuationDedupeKeyOverride, "review fix prompt should not collide with the decision job")
 

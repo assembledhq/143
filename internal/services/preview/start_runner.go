@@ -295,6 +295,11 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	if input.Config == nil {
 		cfg, err := r.readWorkspacePreviewConfig(ctx, acq.Sandbox, payload.SessionID, "")
 		if err != nil {
+			if errors.Is(err, ErrInvalidConfig) {
+				msg := InvalidConfigMessage(err)
+				r.abort(ctx, reservation, hydratedID, msg)
+				return fmt.Errorf("PREVIEW_CONFIG_INVALID: %s: %w", msg, err)
+			}
 			r.abort(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
 			return fmt.Errorf("PREVIEW_CONFIG_READ_FAILED: %w", err)
 		}
@@ -371,8 +376,12 @@ func ClassifyLaunchFailure(err error) StartFailure {
 		return StartFailure{Code: "PREVIEW_INFRA_UNHEALTHY", Message: "preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: " + cause}
 	case errors.Is(err, ErrInitScriptFailed):
 		return StartFailure{Code: "PREVIEW_INIT_SCRIPT_FAILED", Message: "preview init script failed. Check the script referenced in .143/config.json. Details: " + cause}
+	case errors.Is(err, ErrInstallFailed):
+		return StartFailure{Code: "PREVIEW_INSTALL_FAILED", Message: "preview install failed before services started. Check the preview.install command in .143/config.json. Details: " + cause}
 	case errors.Is(err, ErrServiceNotReady):
 		return StartFailure{Code: "PREVIEW_SERVICE_NOT_READY", Message: "preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/config.json. Details: " + cause}
+	case errors.Is(err, ErrInvalidConfig):
+		return StartFailure{Code: "PREVIEW_CONFIG_INVALID", Message: InvalidConfigMessage(err)}
 	default:
 		return StartFailure{Code: "PREVIEW_START_FAILED", Message: "failed to start preview: " + cause}
 	}
@@ -508,8 +517,8 @@ func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.
 	}
 	cfg, err := ParseNamedConfig([]byte(content), previewConfigName)
 	if err != nil {
-		r.logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("path", repoconfig.ConfigPath).Msg("committed preview config failed to parse; falling back to defaults")
-		return nil, nil
+		r.logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("path", repoconfig.ConfigPath).Msg("committed preview config failed to parse")
+		return nil, fmt.Errorf("%w: parse %s: %w", ErrInvalidConfig, repoconfig.ConfigPath, err)
 	}
 	return cfg, nil
 }

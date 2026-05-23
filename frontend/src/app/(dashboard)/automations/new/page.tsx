@@ -1,14 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronDown, Loader2, Minus, Plus } from "lucide-react";
+import { ChevronDown, Loader2, Minus, Plus, Settings2, Sparkles } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -17,25 +25,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
-import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import { automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
-import { AutomationGoalEditor } from "@/components/automation-goal-editor";
+import { AutomationComposer } from "@/components/automation-composer";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
-import { cn } from "@/lib/utils";
 import {
   automationTemplates,
   featuredAutomationTemplateIDs,
   getAutomationTemplate,
+  type AutomationTemplate,
 } from "@/lib/automation-templates";
 import {
   getCodingAgentReasoningOptions,
@@ -49,7 +61,6 @@ import {
   minuteOptions,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
-import { AutomationEmojiPicker } from "../automation-emoji-picker";
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -57,6 +68,7 @@ export default function NewAutomationPage() {
   const { user, isLoading } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
   const initialTemplate = getAutomationTemplate(searchParams.get("template") ?? "");
+  const goalEditorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!isLoading && !canManage) {
@@ -64,7 +76,6 @@ export default function NewAutomationPage() {
     }
   }, [canManage, isLoading, router]);
 
-  // Form state
   const [name, setName] = useState(initialTemplate?.name ?? "");
   const [goal, setGoal] = useState(initialTemplate?.goal ?? "");
   const [iconValue, setIconValue] = useState("⚙️");
@@ -76,11 +87,10 @@ export default function NewAutomationPage() {
   );
   const [intervalRunHour, setIntervalRunHour] = useState("09");
   const [intervalRunMinute, setIntervalRunMinute] = useState("00");
-  // Default to the viewer's detected IANA zone, but let them override via
-  // TimezonePicker for the "schedule in a different region" case.
   const [detectedTimezone] = useState<string>(() => browserTimezone());
   const [timezone, setTimezone] = useState<string>(detectedTimezone);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [model, setModel] = useState<string | undefined>(undefined);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
@@ -95,15 +105,12 @@ export default function NewAutomationPage() {
   });
   const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
 
-  // Load repos
   const { data: reposData } = useQuery({
     queryKey: ["repositories"],
     queryFn: () => api.repositories.list(),
   });
   const repos = reposData?.data ?? [];
 
-  // Fall back to the first repo until the user picks one so the form has a
-  // valid default without syncing state inside an effect.
   const repoId = selectedRepoId || repos[0]?.id || "";
   const selectedRepo = repos.find((repo) => repo.id === repoId);
   const selectedBaseBranch = repoId
@@ -113,22 +120,23 @@ export default function NewAutomationPage() {
   const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
   const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
   const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
-  let prePRReviewDescription = "Off for agents without native review support.";
-  if (supportsNativeReviewLoop) {
-    prePRReviewDescription = effectivePrePRReviewLoops === 0
+  const prePRReviewDescription = supportsNativeReviewLoop
+    ? effectivePrePRReviewLoops === 0
       ? "Off"
-      : "Runs the coding agent's review/fix loop before opening a PR.";
-  }
+      : "Runs the coding agent's review/fix loop before opening a PR."
+    : "Off for agents without native review support.";
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
-  const applyTemplate = (templateId: string) => {
-    const t = getAutomationTemplate(templateId);
-    if (!t) return;
-    setName(t.name);
-    setGoal(t.goal);
-    setIntervalValue(t.defaultInterval);
-    setIntervalUnit(t.defaultUnit);
+  const applyTemplate = (template: AutomationTemplate) => {
+    setName(template.name);
+    setGoal(template.goal);
+    setIntervalValue(template.defaultInterval);
+    setIntervalUnit(template.defaultUnit);
+    setTemplateOpen(false);
+    requestAnimationFrame(() => {
+      goalEditorRef.current?.querySelector("textarea")?.focus();
+    });
   };
 
   const createMutation = useMutation({
@@ -167,7 +175,7 @@ export default function NewAutomationPage() {
         <div className="space-y-6">
           <PageHeader
             title="New automation"
-            description="Recurring agents that run on a schedule for your team."
+            description="Create a recurring agent for this team."
           />
           <NoReposWarning />
         </div>
@@ -182,345 +190,129 @@ export default function NewAutomationPage() {
     !goalLength.isTooLong &&
     repoId.length > 0;
 
-  const featuredTemplates = automationTemplates.filter((template) =>
-    featuredAutomationTemplateIDs.includes(template.id),
-  );
-
   return (
-    <PageContainer size="default">
+    <PageContainer size="wide">
       <div className="space-y-6">
         <PageHeader
           title="New automation"
-          description="Recurring agents that run on a schedule for your team."
+          description="Create a recurring agent for this team."
         />
 
-        {/* Templates */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <Label className="text-xs text-muted-foreground">
-              Start from a template
-            </Label>
-            <Button asChild variant="ghost" size="sm" className="h-7 px-2 text-xs">
-              <Link href="/automations/templates">Browse all templates</Link>
-            </Button>
-          </div>
+        <div className="mx-auto max-w-4xl">
+          <AutomationComposer
+            name={name}
+            onNameChange={setName}
+            iconValue={iconValue}
+            onIconChange={setIconValue}
+            goal={goal}
+            onGoalChange={setGoal}
+            repositoryId={repoId || undefined}
+            branch={selectedBaseBranch || selectedRepo?.default_branch || undefined}
+            agentType={effectiveAgentType}
+            goalEditorContainerRef={goalEditorRef}
+            footerControls={(
+              <>
+                <Select value={repoId} onValueChange={setSelectedRepoId}>
+                  <SelectTrigger className="h-9 w-full sm:w-[210px]" aria-label="Repository">
+                    <SelectValue placeholder="Select repo" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {repos.map((repo) => (
+                      <SelectItem key={repo.id} value={repo.id}>
+                        {repo.full_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
 
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {featuredTemplates.map((t) => {
-              const Icon = t.icon;
-              return (
-                <Card
-                  key={t.id}
-                  className={cn(
-                    "transition-colors",
-                    name === t.name && "border-primary bg-primary/5"
-                  )}
-                >
-                  <CardHeader className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <div className="rounded-md border border-border bg-muted/50 p-2">
-                        <Icon className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <CardTitle className="text-sm">{t.name}</CardTitle>
-                        <CardDescription className="line-clamp-2">
-                          {t.summary}
-                        </CardDescription>
-                      </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="flex flex-wrap gap-2">
-                      {t.tags.slice(0, 3).map((tag) => (
-                        <span
-                          key={tag}
-                          className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground"
-                        >
-                          {tag}
-                        </span>
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1">
+                  <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
+                  <Input
+                    id="interval-value"
+                    aria-label="Interval value"
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={intervalValue}
+                    onChange={(e) => {
+                      const parsed = parseInt(e.target.value, 10);
+                      setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
+                    }}
+                    className="h-7 w-16 px-2 text-base sm:text-xs"
+                  />
+                  <Select
+                    value={intervalUnit}
+                    onValueChange={(v) => {
+                      if (v === "hours" || v === "days" || v === "weeks") {
+                        setIntervalUnit(v);
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="h-7 w-24 text-base sm:text-xs" aria-label="Interval unit">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="hours">hours</SelectItem>
+                      <SelectItem value="days">days</SelectItem>
+                      <SelectItem value="weeks">weeks</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
+                  <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
+                    <SelectTrigger className="h-7 w-18 text-base sm:text-xs" aria-label="Run at hour">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {hourOptions.map((h) => (
+                        <SelectItem key={h} value={h}>{h}</SelectItem>
                       ))}
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => applyTemplate(t.id)}
-                    >
-                      Use template
-                    </Button>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-        </div>
+                    </SelectContent>
+                  </Select>
+                  <span className="text-sm text-muted-foreground">:</span>
+                  <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
+                    <SelectTrigger className="h-7 w-18 text-base sm:text-xs" aria-label="Run at minute">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {minuteOptions.map((m) => (
+                        <SelectItem key={m} value={m}>{m}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <TimezonePicker
+                    value={timezone}
+                    onChange={setTimezone}
+                    detected={detectedTimezone}
+                    className="w-full sm:w-auto"
+                  />
+                </div>
 
-        {/* Main form */}
-        <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-          <div
-            data-testid="automation-identity-row"
-            className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
-          >
-            <div className="space-y-1.5">
-              <Label>Emoji</Label>
-              <AutomationEmojiPicker
-                value={iconValue}
-                onChange={setIconValue}
-                className="w-16"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="name">Name</Label>
-              <Input
-                id="name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Find flaky tests"
-              />
-            </div>
-          </div>
+                {!advancedOpen ? (
+                  <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+                    <SelectTrigger className="h-9 w-full sm:w-[150px]" aria-label="Run as">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="org">Organization</SelectItem>
+                      <SelectItem value="personal">Personal</SelectItem>
+                    </SelectContent>
+                  </Select>
+                ) : null}
 
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="goal">Goal</Label>
-              <span
-                className={cn(
-                  "text-xs tabular-nums",
-                  goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
-                )}
-              >
-                {goalLength.countText}
-              </span>
-            </div>
-            <AutomationGoalEditor
-              id="goal"
-              value={goal}
-              onChange={setGoal}
-              repositoryId={repoId || undefined}
-              branch={selectedBaseBranch || selectedRepo?.default_branch || undefined}
-              agentType={effectiveAgentType}
-              placeholder="Describe what the automation should do each run..."
-              rows={3}
-              ariaInvalid={goalLength.isTooLong}
-            />
-            <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
-              {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
-            </p>
-          </div>
+                {!advancedOpen ? (
+                  <AutomationModelSelect
+                    ariaLabel="Model"
+                    value={model}
+                    onValueChange={setModel}
+                  />
+                ) : null}
 
-          <div className="space-y-1.5">
-            <Label htmlFor="scope">
-              Scope{" "}
-              <span className="text-muted-foreground font-normal">
-                (optional)
-              </span>
-            </Label>
-            <Input
-              id="scope"
-              value={scope}
-              onChange={(e) => setScope(e.target.value)}
-              placeholder="e.g. src/payments/, tests/"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <Label>Repository</Label>
-            <Select value={repoId} onValueChange={setSelectedRepoId}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select a repository" />
-              </SelectTrigger>
-              <SelectContent>
-                {repos.map((repo) => (
-                  <SelectItem key={repo.id} value={repo.id}>
-                    {repo.full_name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label>Run as</Label>
-            <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
-              <SelectTrigger aria-label="Run as">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="org">Organization</SelectItem>
-                <SelectItem value="personal">Personal</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Choose whether this automation runs with organization credentials and opens PRs as 143-bot, or uses the creator&apos;s coding-agent preferences and GitHub identity.
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="Decrease review passes"
-                onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
-                disabled={!supportsNativeReviewLoop}
-              >
-                <Minus className="h-4 w-4" />
-              </Button>
-              <Input
-                id="pre-pr-review-loops"
-                aria-label="Review passes"
-                type="number"
-                min={0}
-                max={5}
-                value={effectivePrePRReviewLoops}
-                onChange={(e) => {
-                  const parsed = parseInt(e.target.value, 10);
-                  setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
-                }}
-                disabled={!supportsNativeReviewLoop}
-                className="w-20 text-center"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="Increase review passes"
-                onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
-                disabled={!supportsNativeReviewLoop}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {prePRReviewDescription}
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label id="schedule-label">Schedule</Label>
-            <div className="grid gap-3 md:grid-cols-2">
-              <div
-                className="flex items-center gap-2"
-                role="group"
-                aria-labelledby="schedule-label"
-              >
-                <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
-                <Input
-                  id="interval-value"
-                  aria-label="Interval value"
-                  type="number"
-                  min={1}
-                  max={365}
-                  value={intervalValue}
-                  onChange={(e) => {
-                    const parsed = parseInt(e.target.value, 10);
-                    setIntervalValue(
-                      Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
-                    );
-                  }}
-                  className="w-20"
-                />
-                <Select
-                  value={intervalUnit}
-                  onValueChange={(v) => {
-                    if (v === "hours" || v === "days" || v === "weeks") {
-                      setIntervalUnit(v);
-                    }
-                  }}
-                >
-                  <SelectTrigger className="w-28" aria-label="Interval unit">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="hours">hours</SelectItem>
-                    <SelectItem value="days">days</SelectItem>
-                    <SelectItem value="weeks">weeks</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-wrap items-start gap-2 sm:items-center">
-                <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
-                <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
-                  <SelectTrigger className="w-20" aria-label="Run at hour">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {hourOptions.map((h) => (
-                      <SelectItem key={h} value={h}>
-                        {h}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <span className="text-sm text-muted-foreground">:</span>
-                <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
-                  <SelectTrigger className="w-20" aria-label="Run at minute">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {minuteOptions.map((m) => (
-                      <SelectItem key={m} value={m}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <TimezonePicker
-                  value={timezone}
-                  onChange={setTimezone}
-                  detected={detectedTimezone}
-                  className="w-full sm:w-auto"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Advanced settings */}
-          <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-            <CollapsibleTrigger className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
-              <ChevronDown
-                className={cn(
-                  "h-3.5 w-3.5 transition-transform",
-                  advancedOpen && "rotate-180",
-                )}
-              />
-              Advanced options
-            </CollapsibleTrigger>
-            <CollapsibleContent className="space-y-4 pt-3">
-              <div className="space-y-1.5">
-                <Label>Base branch</Label>
-                <BranchPicker
-                  repositoryId={repoId}
-                  value={selectedBaseBranch}
-                  defaultBranch={selectedRepo?.default_branch}
-                  onValueChange={(branch) =>
-                    setBaseBranchByRepoId((prev) => ({ ...prev, [repoId]: branch }))
-                  }
-                  label="Base branch"
-                  disabled={!repoId}
-                  buttonClassName="w-full justify-between"
-                  contentClassName="w-[var(--radix-popover-trigger-width)]"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="automation-model">Model</Label>
-                <AutomationModelSelect
-                  id="automation-model"
-                  ariaLabel="Model"
-                  value={model}
-                  onValueChange={setModel}
-                />
-              </div>
-              {showReasoningSelector ? (
-                <div className="space-y-1.5">
-                  <Label htmlFor="automation-reasoning">Reasoning</Label>
+                {showReasoningSelector && !advancedOpen ? (
                   <Select
                     value={reasoningEffort || "__default__"}
                     onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
                   >
-                    <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
+                    <SelectTrigger className="h-9 w-full sm:w-[160px]" aria-label="Reasoning">
                       <SelectValue placeholder="Default reasoning" />
                     </SelectTrigger>
                     <SelectContent>
@@ -532,51 +324,242 @@ export default function NewAutomationPage() {
                       ))}
                     </SelectContent>
                   </Select>
-                </div>
-              ) : null}
-              <div className="space-y-1.5">
-                <Label>Priority</Label>
-                <Select
-                  value={String(priority)}
-                  onValueChange={(v) => setPriority(parseInt(v, 10))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="0">Critical</SelectItem>
-                    <SelectItem value="25">High</SelectItem>
-                    <SelectItem value="50">Medium</SelectItem>
-                    <SelectItem value="75">Low</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
-
-          {/* Submit */}
-          <div className="flex items-center gap-3 pt-2">
-            <Button
-              onClick={() => createMutation.mutate()}
-              disabled={!canSubmit || createMutation.isPending || redirecting}
-            >
-              {createMutation.isPending || redirecting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Creating...
-                </>
-              ) : (
-                "Create automation"
-              )}
-            </Button>
-            {createMutation.isError && (
-              <p className="text-xs text-destructive">
-                Failed to create automation. Please try again.
-              </p>
+                ) : null}
+              </>
             )}
-          </div>
+            secondaryControls={(
+              <>
+                <TemplatePicker open={templateOpen} onOpenChange={setTemplateOpen} onSelect={applyTemplate} />
+                <Button asChild variant="ghost" size="sm">
+                  <Link href="/automations/templates">Browse all templates</Link>
+                </Button>
+                <Sheet modal={false} open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                  <SheetTrigger asChild>
+                    <Button type="button" variant="outline" size="sm">
+                      <Settings2 className="mr-2 h-4 w-4" />
+                      Advanced options
+                    </Button>
+                  </SheetTrigger>
+                  <SheetContent className="sm:max-w-lg">
+                    <SheetHeader>
+                      <SheetTitle>Advanced settings</SheetTitle>
+                      <SheetDescription>
+                        Tune lower-frequency defaults for branch, scope, priority, review, and timezone.
+                      </SheetDescription>
+                    </SheetHeader>
+                    <div className="mt-6 space-y-5">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="scope">Scope <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                        <Input
+                          id="scope"
+                          value={scope}
+                          onChange={(e) => setScope(e.target.value)}
+                          placeholder="e.g. src/payments/, tests/"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Run as</Label>
+                        <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+                          <SelectTrigger aria-label="Run as">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="org">Organization</SelectItem>
+                            <SelectItem value="personal">Personal</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Base branch</Label>
+                        <BranchPicker
+                          repositoryId={repoId}
+                          value={selectedBaseBranch}
+                          defaultBranch={selectedRepo?.default_branch}
+                          onValueChange={(branch) =>
+                            setBaseBranchByRepoId((prev) => ({ ...prev, [repoId]: branch }))
+                          }
+                          label="Base branch"
+                          disabled={!repoId}
+                          buttonClassName="w-full justify-between"
+                          contentClassName="w-[var(--radix-popover-trigger-width)]"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="advanced-timezone">Timezone</Label>
+                        <TimezonePicker
+                          value={timezone}
+                          onChange={setTimezone}
+                          detected={detectedTimezone}
+                          className="w-full"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Priority</Label>
+                        <Select value={String(priority)} onValueChange={(v) => setPriority(parseInt(v, 10))}>
+                          <SelectTrigger aria-label="Priority">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="0">Critical</SelectItem>
+                            <SelectItem value="25">High</SelectItem>
+                            <SelectItem value="50">Medium</SelectItem>
+                            <SelectItem value="75">Low</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            aria-label="Decrease review passes"
+                            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+                            disabled={!supportsNativeReviewLoop}
+                          >
+                            <Minus className="h-4 w-4" />
+                          </Button>
+                          <Input
+                            id="pre-pr-review-loops"
+                            aria-label="Review passes"
+                            type="number"
+                            min={0}
+                            max={5}
+                            value={effectivePrePRReviewLoops}
+                            onChange={(e) => {
+                              const parsed = parseInt(e.target.value, 10);
+                              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+                            }}
+                            disabled={!supportsNativeReviewLoop}
+                            className="w-20 text-center"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            aria-label="Increase review passes"
+                            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+                            disabled={!supportsNativeReviewLoop}
+                          >
+                            <Plus className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{prePRReviewDescription}</p>
+                      </div>
+                      <div className="flex justify-end gap-2 pt-2">
+                        <SheetClose asChild>
+                          <Button type="button" variant="outline">Cancel</Button>
+                        </SheetClose>
+                        <SheetClose asChild>
+                          <Button type="button">Apply</Button>
+                        </SheetClose>
+                      </div>
+                    </div>
+                  </SheetContent>
+                </Sheet>
+              </>
+            )}
+            submitArea={(
+              <div className="flex items-center gap-3">
+                {createMutation.isError && (
+                  <p className="text-xs text-destructive">
+                    Failed to create automation. Please try again.
+                  </p>
+                )}
+                <Button
+                  onClick={() => createMutation.mutate()}
+                  disabled={!canSubmit || createMutation.isPending || redirecting}
+                >
+                  {createMutation.isPending || redirecting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    "Create automation"
+                  )}
+                </Button>
+              </div>
+            )}
+          />
         </div>
       </div>
     </PageContainer>
+  );
+}
+
+function TemplatePicker({
+  open,
+  onOpenChange,
+  onSelect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSelect: (template: AutomationTemplate) => void;
+}) {
+  const featured = useMemo(
+    () => automationTemplates.filter((template) => featuredAutomationTemplateIDs.includes(template.id)),
+    [],
+  );
+  const remaining = useMemo(
+    () => automationTemplates.filter((template) => !featuredAutomationTemplateIDs.includes(template.id)),
+    [],
+  );
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" size="sm">
+          <Sparkles className="mr-2 h-4 w-4" />
+          Templates
+          <ChevronDown className="ml-2 h-3.5 w-3.5" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[min(36rem,calc(100vw-2rem))] p-0" align="start">
+        <Command>
+          <CommandInput placeholder="Search templates..." />
+          <CommandList className="max-h-[420px]">
+            <CommandEmpty>No templates found.</CommandEmpty>
+            <TemplateGroup heading="Featured" templates={featured} onSelect={onSelect} />
+            <TemplateGroup heading="All templates" templates={remaining} onSelect={onSelect} />
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function TemplateGroup({
+  heading,
+  templates,
+  onSelect,
+}: {
+  heading: string;
+  templates: AutomationTemplate[];
+  onSelect: (template: AutomationTemplate) => void;
+}) {
+  return (
+    <CommandGroup heading={heading}>
+      {templates.map((template) => {
+        const Icon = template.icon;
+        return (
+          <CommandItem
+            key={template.id}
+            value={`${template.name} ${template.summary} ${template.tags.join(" ")}`}
+            onSelect={() => onSelect(template)}
+            className="items-start gap-3 py-3"
+          >
+            <span className="mt-0.5 rounded-md border border-border bg-muted/50 p-1.5">
+              <Icon className="h-4 w-4" />
+            </span>
+            <span className="min-w-0 space-y-1">
+              <span className="block text-sm font-medium">{template.name}</span>
+              <span className="line-clamp-2 block text-xs text-muted-foreground">{template.summary}</span>
+            </span>
+          </CommandItem>
+        );
+      })}
+    </CommandGroup>
   );
 }

@@ -183,6 +183,7 @@ type PreviewLogStep string
 
 const (
 	PreviewLogStepBuild          PreviewLogStep = "build"
+	PreviewLogStepInstall        PreviewLogStep = "install"
 	PreviewLogStepInit           PreviewLogStep = "init"
 	PreviewLogStepStart          PreviewLogStep = "start"
 	PreviewLogStepProxy          PreviewLogStep = "proxy"
@@ -193,6 +194,7 @@ const (
 func (s PreviewLogStep) Validate() error {
 	switch s {
 	case PreviewLogStepBuild,
+		PreviewLogStepInstall,
 		PreviewLogStepInit,
 		PreviewLogStepStart,
 		PreviewLogStepProxy,

@@ -258,6 +258,11 @@ type OrgSettings struct {
 	// Zero falls back to DefaultMaxSessionDurationSeconds.
 	MaxSessionDurationSeconds int `json:"max_session_duration_seconds,omitempty"`
 
+	// PreviewMaxPreviewsPerUser limits how many active previews one user can
+	// keep running in this organization. Zero falls back to
+	// DefaultPreviewMaxPreviewsPerUser.
+	PreviewMaxPreviewsPerUser int `json:"preview_max_previews_per_user,omitempty"`
+
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
 
 	// LinearAutomation controls how 143 reflects session events back into
@@ -575,6 +580,10 @@ const (
 	DefaultAutomaticExtensionSeconds       = 10 * 60
 	DefaultMaxAutomaticExtensionSeconds    = 30 * 60
 	DefaultAbsoluteRuntimeCeilingSeconds   = 90 * 60
+
+	DefaultPreviewMaxPreviewsPerUser = 4
+	MinPreviewMaxPreviewsPerUser     = 1
+	MaxPreviewMaxPreviewsPerUser     = 20
 )
 
 // ContextLimits returns the default context limits for this org size.
@@ -754,6 +763,13 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.MaxSessionDurationSeconds = MinMaxSessionDurationSeconds
 	} else if s.MaxSessionDurationSeconds > MaxMaxSessionDurationSeconds {
 		s.MaxSessionDurationSeconds = MaxMaxSessionDurationSeconds
+	}
+	if s.PreviewMaxPreviewsPerUser == 0 {
+		s.PreviewMaxPreviewsPerUser = DefaultPreviewMaxPreviewsPerUser
+	} else if s.PreviewMaxPreviewsPerUser < MinPreviewMaxPreviewsPerUser {
+		s.PreviewMaxPreviewsPerUser = MinPreviewMaxPreviewsPerUser
+	} else if s.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser {
+		s.PreviewMaxPreviewsPerUser = MaxPreviewMaxPreviewsPerUser
 	}
 
 	if s.RuntimeBudgets.NoProgressTimeoutSeconds <= 0 {

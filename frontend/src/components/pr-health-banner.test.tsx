@@ -38,7 +38,7 @@ describe("PRHealthBanner", () => {
   it("uses text-sm for the header and text-xs for non-header copy", () => {
     renderWithProviders(
       <PRHealthBanner
-        health={baseHealth}
+        health={{ ...baseHealth, checks_confirmed: true }}
         pendingAction={null}
         repairError={null}
         mergeAuthRequired={false}
@@ -53,10 +53,10 @@ describe("PRHealthBanner", () => {
     expect(screen.getByText("PR #42 is healthy.")).toHaveClass("text-xs");
   });
 
-  it("hides the Merge button when can_merge is false", () => {
+  it("keeps the Merge button visible but disabled when can_merge is false", async () => {
     renderWithProviders(
       <PRHealthBanner
-        health={baseHealth}
+        health={{ ...baseHealth, checks_confirmed: true }}
         pendingAction={null}
         repairError={null}
         mergeAuthRequired={false}
@@ -66,7 +66,10 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+    const button = screen.getByRole("button", { name: /^Merge$/ });
+    expect(button).toBeDisabled();
+
+    expect(button).toHaveAttribute("title", "GitHub is not allowing this PR to merge yet.");
   });
 
   it("renders an optional Review action in the PR action row", async () => {
@@ -92,6 +95,72 @@ describe("PRHealthBanner", () => {
     expect(button).not.toBeDisabled();
     await userEvent.setup().click(button);
     expect(onReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("orders PR detail actions as Merge, Resolve conflicts, Review, then Push changes", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_merge: true,
+          checks_confirmed: true,
+          can_resolve_conflicts: true,
+          checks: [
+            { name: "Unit tests", category: "test", status: "passed" },
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        reviewAction={{
+          disabled: false,
+          spinning: false,
+          onClick: vi.fn(),
+        }}
+        pushChanges={{
+          label: "Push changes",
+          disabled: false,
+          spinning: false,
+          showError: false,
+          onClick: vi.fn(),
+        }}
+      />,
+    );
+
+    const labels = screen.getAllByRole("button").map((button) => button.textContent);
+    expect(labels).toEqual(
+      ["Merge", "Resolve conflicts", "Review", "Push changes"],
+    );
+  });
+
+  it("shows the disabled Review action reason in a hover tooltip", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={baseHealth}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        reviewAction={{
+          disabled: true,
+          spinning: false,
+          title: "Review can start after the current turn finishes",
+          onClick: vi.fn(),
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /^Review$/ });
+    expect(button).toBeDisabled();
+
+    await userEvent.setup().hover(button.parentElement as HTMLElement);
+
+    expect(await screen.findByRole("tooltip", { name: "Review can start after the current turn finishes" })).toBeInTheDocument();
   });
 
 	it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
@@ -192,7 +261,7 @@ describe("PRHealthBanner", () => {
 		expect(screen.getByText("Connect your GitHub account to merge this pull request as yourself.")).toBeInTheDocument();
 	});
 
-  it("hides the Merge button until checks are explicitly confirmed as passed", () => {
+  it("keeps the Merge button visible but disabled until checks are explicitly confirmed as passed", async () => {
     renderWithProviders(
       <PRHealthBanner
         health={{ ...baseHealth, can_merge: true, checks_confirmed: false, checks: [] }}
@@ -205,7 +274,10 @@ describe("PRHealthBanner", () => {
 			/>,
 		);
 
-    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+    const button = screen.getByRole("button", { name: /^Merge$/ });
+    expect(button).toBeDisabled();
+
+    expect(button).toHaveAttribute("title", "Waiting for GitHub to confirm required checks.");
   });
 
   it("shows the Merge button when GitHub has confirmed that no CI checks are configured", () => {
@@ -451,7 +523,7 @@ describe("PRHealthBanner", () => {
 
     expect(screen.getByText("Fix tests running")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Fix tests" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Merge$/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Open repair session" })).toBeInTheDocument();
   });
 
@@ -483,7 +555,7 @@ describe("PRHealthBanner", () => {
     expect(screen.getByText("Resolve conflicts running")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resolve conflicts" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Fix tests" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Merge$/ })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Open repair session" })).toBeNull();
     expect(screen.queryByText("Resolve conflicts first. CI may need to rerun afterward.")).toBeNull();
   });

@@ -10,6 +10,7 @@ import { PageContainer } from "@/components/page-container";
 import { RepoPMSettingsEditor } from "@/components/repo-pm-settings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { usePageTitle } from "@/hooks/use-page-title";
 import type { Repository, SingleResponse } from "@/lib/types";
 
 export default function RepositoryDetailPage({
@@ -18,13 +19,17 @@ export default function RepositoryDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  return <RepositoryDetailContent id={id} />;
+}
 
+export function RepositoryDetailContent({ id }: { id: string }) {
   const { data, isLoading } = useQuery<SingleResponse<Repository>>({
     queryKey: ["repository", id],
     queryFn: () => api.repositories.get(id),
   });
 
   const repo = data?.data;
+  usePageTitle(repo?.full_name, "Repository");
 
   if (isLoading) {
     return (
