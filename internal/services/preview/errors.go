@@ -31,6 +31,10 @@ var (
 	// returned a non-zero exit code or could not be read from the workspace.
 	ErrInitScriptFailed = errors.New("preview init script failed")
 
+	// ErrInstallFailed means a preview.install command returned non-zero,
+	// timed out, or could not prepare its lockfile-based cache state.
+	ErrInstallFailed = errors.New("preview install failed")
+
 	// ErrServiceNotReady means an application service was launched but its
 	// readiness probe never passed within the configured timeout. The user's
 	// preview command likely crashed at boot or never bound to its declared

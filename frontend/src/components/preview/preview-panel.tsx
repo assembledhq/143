@@ -536,6 +536,7 @@ export function PreviewPanel({
         code === PREVIEW_ERROR_CODES.INFRA_START_FAILED ||
         code === PREVIEW_ERROR_CODES.INFRA_UNHEALTHY ||
         code === PREVIEW_ERROR_CODES.INIT_SCRIPT_FAILED ||
+        code === PREVIEW_ERROR_CODES.INSTALL_FAILED ||
         code === PREVIEW_ERROR_CODES.SERVICE_NOT_READY
       ) {
         setMutationError(err.message);
@@ -1050,7 +1051,7 @@ export function PreviewPanel({
               className={cn(
                 "overflow-y-hidden whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
                 showFullStartupLogs
-                  ? "overflow-y-auto sm:max-h-[min(56vh,28rem)] text-foreground"
+                  ? "max-h-[min(56vh,28rem)] overflow-y-auto text-foreground"
                   : "line-clamp-6",
                 previewLogsQuery.isError && showFullStartupLogs && "text-muted-foreground",
               )}

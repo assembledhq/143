@@ -60,6 +60,8 @@ export const PREVIEW_ERROR_CODES = {
   // 422 — a user-supplied init script (seed SQL etc.) returned a non-zero
   // exit code or could not be read from the workspace.
   INIT_SCRIPT_FAILED: "PREVIEW_INIT_SCRIPT_FAILED",
+  // 422 — preview.install failed before any services were started.
+  INSTALL_FAILED: "PREVIEW_INSTALL_FAILED",
   // 422 — an application service was launched but its readiness probe
   // never passed within the configured timeout. The service likely
   // crashed at boot or is bound to a different port than it declares in

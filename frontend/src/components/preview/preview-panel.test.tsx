@@ -635,7 +635,7 @@ describe("PreviewPanel component", () => {
       );
     });
     expect(startupLogRegion).not.toHaveClass("line-clamp-6");
-    expect(startupLogRegion).toHaveClass("sm:max-h-[min(56vh,28rem)]");
+    expect(startupLogRegion).toHaveClass("max-h-[min(56vh,28rem)]");
     expect(startupLogRegion).toHaveClass("overflow-y-auto");
     expect(startupLogRegion).not.toHaveClass("overflow-y-hidden");
     expect(screen.getByRole("button", { name: "Show summary" })).toBeInTheDocument();

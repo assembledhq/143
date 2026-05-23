@@ -1,10 +1,21 @@
 package preview
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestClassifyLaunchFailure_InstallFailed(t *testing.T) {
+	t.Parallel()
+
+	failure := ClassifyLaunchFailure(fmt.Errorf("%w: npm ci exited with code 1", ErrInstallFailed))
+
+	require.Equal(t, "PREVIEW_INSTALL_FAILED", failure.Code, "install failures should get a dedicated preview start error code")
+	require.Contains(t, failure.Message, "preview.install", "install failure message should point users at the install config")
+	require.Contains(t, failure.Message, "npm ci exited with code 1", "install failure message should include provider details")
+}
 
 func TestShouldReassignPreviewWorker(t *testing.T) {
 	t.Parallel()
