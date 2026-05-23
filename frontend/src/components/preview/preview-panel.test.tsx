@@ -1159,6 +1159,31 @@ describe("PreviewPanel component", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows invalid config details verbatim when .143/config.json cannot be parsed", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const backendMessage =
+      "Invalid .143/config.json preview config: parse preview config: invalid character 'n' looking for beginning of object key string. Fix the committed config and start preview again.";
+    const err = new Error(backendMessage);
+    (err as Error & { code?: string }).code = "PREVIEW_CONFIG_INVALID";
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(backendMessage)).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(`Failed to start preview: ${backendMessage}`)
+    ).not.toBeInTheDocument();
+  });
+
   // Provider-side launch failures (image pull, infra health, init script,
   // readiness) carry a backend-built message that names the failing image
   // or service and the underlying cause. We pass it through verbatim — if

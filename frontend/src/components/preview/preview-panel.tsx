@@ -555,6 +555,12 @@ export function PreviewPanel({
         setMutationError(err.message);
         return;
       }
+      if (code === PREVIEW_ERROR_CODES.CONFIG_INVALID) {
+        // Backend message includes the exact parse/validation failure and the
+        // committed file that needs to be fixed.
+        setMutationError(err.message);
+        return;
+      }
       // Provider-side launch failures (image pull, infra health, init
       // script, readiness probe). The backend builds a message that
       // names the failing image / service and includes the underlying

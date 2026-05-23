@@ -2,6 +2,7 @@ package preview
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -50,17 +51,50 @@ const (
 	MaxPort              = 65535
 )
 
+var ErrInvalidConfig = errors.New("invalid preview config")
+
+func InvalidConfigMessage(err error) string {
+	detail := "unknown error"
+	if err != nil {
+		detail = err.Error()
+		detail = strings.TrimPrefix(detail, ErrInvalidConfig.Error()+": ")
+		detail = strings.TrimPrefix(detail, "parse "+repoconfig.ConfigPath+": ")
+		detail = strings.TrimPrefix(detail, "validate "+repoconfig.ConfigPath+": ")
+	}
+	return fmt.Sprintf("Invalid %s preview config: %s. Fix the committed config and start preview again.", repoconfig.ConfigPath, detail)
+}
+
 // =============================================================================
 // Raw preview config (direct JSON unmarshal of the nested "preview" section in
 // .143/config.json).
 // =============================================================================
+
+type previewVersion string
+
+func (v *previewVersion) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*v = ""
+		return nil
+	}
+	var asString string
+	if err := json.Unmarshal(data, &asString); err == nil {
+		*v = previewVersion(asString)
+		return nil
+	}
+	var asNumber json.Number
+	if err := json.Unmarshal(data, &asNumber); err == nil {
+		*v = previewVersion(asNumber.String())
+		return nil
+	}
+	return fmt.Errorf("version must be a string or number")
+}
 
 // rawPreviewConfig is the direct JSON representation of the nested preview
 // section inside .143/config.json.
 // It supports both single-service (top-level command/port) and multi-service
 // (services map) formats.
 type rawPreviewConfig struct {
-	Version        string                                 `json:"version"`
+	Version        previewVersion                         `json:"version"`
 	Name           string                                 `json:"name"`
 	Primary        string                                 `json:"primary,omitempty"`
 	Services       map[string]models.ServiceConfig        `json:"services,omitempty"`
@@ -110,7 +144,7 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	}
 
 	cfg := &models.PreviewConfig{
-		Version:        raw.Version,
+		Version:        string(raw.Version),
 		Name:           raw.Name,
 		Infrastructure: raw.Infrastructure,
 		Credentials:    raw.Credentials,
