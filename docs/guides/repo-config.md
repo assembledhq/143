@@ -94,6 +94,12 @@ You can use any one of them on its own, or combine them in a single file.
   "preview": {
     "name": "frontend",
     "primary": "frontend",
+    "install": {
+      "command": ["npm", "ci", "--no-audit", "--no-fund"],
+      "lockfiles": ["frontend/package-lock.json"],
+      "clean_paths": ["frontend/node_modules"],
+      "verify_paths": ["frontend/node_modules/.bin/next"]
+    },
     "services": {
       "frontend": {
         "command": ["npm", "run", "dev"],
@@ -196,6 +202,13 @@ Good examples:
 - `pnpm install --frozen-lockfile`
 - `bundle install`
 
+Use `preview.install` when dependency installation is needed specifically before preview services start.
+
+Good examples:
+
+- `npm ci --no-audit --no-fund`
+- `pnpm install --frozen-lockfile`
+
 Use `validation` when you want extra deterministic checks as part of validation.
 
 Good examples:
@@ -218,6 +231,7 @@ If you're unsure, these defaults are usually right:
 
 - Prefer `dependencies` for supported tool binaries that 143 can install consistently.
 - Start with `bootstrap.commands` if installs are required.
+- Prefer `preview.install` over service `command` scripts for preview dependency installs.
 - Add `validation.commands` for fast, deterministic checks.
 - Keep preview credentials as `{ "mode": "none" }` unless secrets are actually required.
 - Use platform-managed infrastructure before wiring previews to shared staging systems.
@@ -231,6 +245,7 @@ If you're unsure, these defaults are usually right:
 - Reusing the same port across preview services
 - Setting `cwd` or `init_script` to a path outside the repo
 - Forgetting that preview config belongs under the top-level `preview` key
+- Running `npm install` or `pnpm install` inside every preview service command instead of using `preview.install`
 
 ## Related Guides
 
@@ -402,6 +417,7 @@ In this form, 143 treats the preview as a single service and normalizes it inter
 | `preview.version` | string | no | Optional version marker. Accepted by the parser; useful for explicit config revisions. |
 | `preview.name` | string | no | Human-readable label. Recommended. |
 | `preview.primary` | string | yes for multi-service | Must match a key in `preview.services`. |
+| `preview.install` | object | no | Optional dependency install phase that runs before services. |
 | `preview.services` | object | yes for multi-service | Map of service name to service config. |
 | `preview.infrastructure` | object | no | Map of infrastructure name to infrastructure config. |
 | `preview.credentials` | object | yes | Use `{ "mode": "none" }` when no secrets are needed. |
@@ -421,9 +437,38 @@ Rules:
 - Maximum 4 services per preview config.
 - Maximum 2 infrastructure entries per preview config.
 
+### `preview.install`
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["pnpm", "install", "--frozen-lockfile"],
+      "cwd": ".",
+      "lockfiles": ["pnpm-lock.yaml"],
+      "clean_paths": ["node_modules", "apps/*/node_modules", "packages/*/node_modules"],
+      "verify_paths": ["node_modules/.modules.yaml"],
+      "timeout_seconds": 420
+    }
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `preview.install.command` | `string[]` | yes | argv for the install command. |
+| `preview.install.cwd` | string | no | Command working directory, relative to repo root. Defaults to repo root. |
+| `preview.install.lockfiles` | `string[]` | no | Repo-relative files included in the cache key. |
+| `preview.install.clean_paths` | `string[]` | no | Repo-relative paths or simple globs to remove before reinstalling. 143 never deletes undeclared paths. |
+| `preview.install.verify_paths` | `string[]` | no | Repo-relative paths that must exist before a cached install can be reused. |
+| `preview.install.timeout_seconds` | number | no | Defaults to 420. Max 1800. |
+
+Use this instead of putting package-manager installs in `preview.services.*.command`. 143 writes a platform-owned success marker under `.143/cache/preview-install/` only after the command exits successfully. If the marker is missing, lockfile/config hash changes, or a verify path is missing, 143 removes only `clean_paths` and reruns the install.
+
 For the nested preview reference, use [Preview environments](./previews.md). That guide owns:
 
 - `services`
+- `install`
 - `ready`
 - `infrastructure`
 - `credentials`
