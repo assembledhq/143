@@ -540,7 +540,7 @@ After the core loop is proven with Sentry:
 
 No service discovery or orchestrator required. A new node joins the cluster by pointing at the same `DATABASE_URL`. See [10-infrastructure.md](10-infrastructure.md) for full details.
 
-Routine production fleet deploys target only `app` and `worker` roles. DB, Redis, and logging rollouts are explicit maintenance actions, and app-host Docker daemon restarts require an explicit maintenance flag so frequent deploys do not recycle the Caddy origin in front of Cloudflare.
+Routine production fleet deploys target only `app` and `worker` roles. DB, Redis, and logging rollouts are explicit maintenance actions, app-host Docker daemon restarts require an explicit maintenance flag, and routine app deploys leave Caddy running unless its Dockerfile, Caddyfile, or edge env changed so frequent deploys do not recycle the Cloudflare-facing origin.
 
 ## Systems
 
