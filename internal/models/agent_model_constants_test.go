@@ -299,6 +299,12 @@ func TestValidateSettingsModels(t *testing.T) {
 			},
 		},
 		{
+			name: "accepts preview capacity within bounds",
+			settings: OrgSettings{
+				PreviewMaxPreviewsPerUser: 4,
+			},
+		},
+		{
 			name: "accepts valid llm model",
 			settings: OrgSettings{
 				LLMModel: "gpt-5.4-mini",
@@ -328,6 +334,20 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "rejects invalid pm model",
 			settings: OrgSettings{
 				PMModel: "invalid-model",
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview capacity below minimum",
+			settings: OrgSettings{
+				PreviewMaxPreviewsPerUser: -1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview capacity above maximum",
+			settings: OrgSettings{
+				PreviewMaxPreviewsPerUser: 999,
 			},
 			wantErr: true,
 		},

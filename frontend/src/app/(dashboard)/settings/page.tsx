@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/page-header";
@@ -13,6 +14,7 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
 import { useAutosave } from "@/hooks/useAutosave";
+import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import {
   applyOrgSettingsPatch,
   coalesceSettingsPatch,
@@ -25,6 +27,10 @@ const PR_AUTHORSHIP_OPTIONS = [
   { value: "app_only", label: "App only", description: "Always create PRs as the 143 GitHub App" },
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
+
+const DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER = 4;
+const MIN_PREVIEW_MAX_PREVIEWS_PER_USER = 1;
+const MAX_PREVIEW_MAX_PREVIEWS_PER_USER = 20;
 
 const settingsTimestampFormatter = new Intl.DateTimeFormat("en-US", {
   dateStyle: "long",
@@ -178,6 +184,57 @@ function PRAuthorshipSettings() {
   );
 }
 
+function PreviewCapacitySettings() {
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+
+  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const currentMaxPreviewsPerUser =
+    settings.preview_max_previews_per_user ?? DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
+  const autosave = useOrgSettingsAutosave();
+  const maxPreviewsPerUserField = useAutosaveNumericField({
+    serverValue: currentMaxPreviewsPerUser,
+    autosave,
+    toPatch: (value) => ({ settings: { preview_max_previews_per_user: value } }),
+    clamp: (value) =>
+      Math.min(
+        MAX_PREVIEW_MAX_PREVIEWS_PER_USER,
+        Math.max(MIN_PREVIEW_MAX_PREVIEWS_PER_USER, value),
+      ),
+  });
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-medium text-foreground">Preview capacity</h2>
+        <AutosaveIndicator status={autosave.status} />
+      </div>
+      <Card>
+        <CardContent>
+          <div className="max-w-[560px] space-y-2">
+            <Label htmlFor="preview-max-previews-per-user">Active previews per user</Label>
+            <Input
+              id="preview-max-previews-per-user"
+              type="number"
+              inputMode="numeric"
+              min={MIN_PREVIEW_MAX_PREVIEWS_PER_USER}
+              max={MAX_PREVIEW_MAX_PREVIEWS_PER_USER}
+              value={maxPreviewsPerUserField.value}
+              onChange={maxPreviewsPerUserField.onChange}
+              onBlur={maxPreviewsPerUserField.onBlur}
+            />
+            <p className="text-xs text-muted-foreground">
+              Limits how many previews one user can keep running at once. Higher values consume more worker capacity.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
@@ -223,6 +280,7 @@ export default function SettingsPage() {
           </Card>
         </section>
 
+        {user?.role === "admin" && <PreviewCapacitySettings />}
         {user?.role === "admin" && <PRAuthorshipSettings />}
       </div>
     </PageContainer>

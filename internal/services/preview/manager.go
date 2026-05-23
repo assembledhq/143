@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,7 +28,7 @@ import (
 // =============================================================================
 
 const (
-	DefaultMaxPreviewsPerUser   = 2
+	DefaultMaxPreviewsPerUser   = models.DefaultPreviewMaxPreviewsPerUser
 	DefaultMaxPreviewsPerOrg    = 5
 	DefaultMaxPreviewsPerWorker = 3
 
@@ -65,6 +66,7 @@ const (
 type Manager struct {
 	store        *db.PreviewStore
 	sessionStore *db.SessionStore
+	orgSettings  OrgSettingsStore
 	provider     PreviewCapableProvider
 	// sandboxProvider is used to destroy the underlying sandbox container
 	// when the last holder (preview or turn) releases its hold. Optional —
@@ -98,23 +100,28 @@ type Manager struct {
 	pollStopMu  sync.Mutex
 	pollStopChs map[uuid.UUID]chan struct{}
 
-	// Caps (configurable per org in future; hardcoded for MVP).
+	// Caps. maxPerUser is the process fallback; org settings can override it.
 	maxPerUser   int
 	maxPerOrg    int
 	maxPerWorker int
 }
 
+type OrgSettingsStore interface {
+	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
+}
+
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
-	Store           *db.PreviewStore
-	SessionStore    *db.SessionStore
-	Provider        PreviewCapableProvider
-	SandboxProvider agent.SandboxProvider // used for destroy on final hold release
-	Inspector       PreviewInspector
-	SnapshotCache   *SnapshotCache
-	HMRWatcher      *HMRWatcher // optional; enables HMR screenshot capture
-	Logger          zerolog.Logger
-	WorkerNodeID    string
+	Store            *db.PreviewStore
+	SessionStore     *db.SessionStore
+	OrgSettingsStore OrgSettingsStore
+	Provider         PreviewCapableProvider
+	SandboxProvider  agent.SandboxProvider // used for destroy on final hold release
+	Inspector        PreviewInspector
+	SnapshotCache    *SnapshotCache
+	HMRWatcher       *HMRWatcher // optional; enables HMR screenshot capture
+	Logger           zerolog.Logger
+	WorkerNodeID     string
 
 	// MaxPerUser / MaxPerOrg / MaxPerWorker cap concurrent active previews.
 	// Zero (the default) is NOT "unlimited" — it means "fall back to the
@@ -143,6 +150,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	m := &Manager{
 		store:                 cfg.Store,
 		sessionStore:          cfg.SessionStore,
+		orgSettings:           cfg.OrgSettingsStore,
 		provider:              cfg.Provider,
 		sandboxProvider:       cfg.SandboxProvider,
 		inspector:             cfg.Inspector,
@@ -1271,13 +1279,18 @@ func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.U
 }
 
 func (m *Manager) checkConcurrencyCapsWithStore(ctx context.Context, store *db.PreviewStore, orgID, userID uuid.UUID, workerNodeID string) error {
+	maxPerUser, err := m.maxPreviewsPerUser(ctx, orgID)
+	if err != nil {
+		return err
+	}
+
 	// Per-user cap.
 	userCount, err := store.CountActivePreviewsByUser(ctx, orgID, userID)
 	if err != nil {
 		return fmt.Errorf("count user previews: %w", err)
 	}
-	if userCount >= m.maxPerUser {
-		return fmt.Errorf("%w: you already have %d active previews (limit %d) — stop one before starting another", ErrPreviewCapacity, userCount, m.maxPerUser)
+	if userCount >= maxPerUser {
+		return &CapacityError{Scope: CapacityScopeUser, Active: userCount, Limit: maxPerUser}
 	}
 
 	// Per-org cap.
@@ -1300,6 +1313,47 @@ func (m *Manager) checkConcurrencyCapsWithStore(ctx context.Context, store *db.P
 	}
 
 	return nil
+}
+
+func (m *Manager) maxPreviewsPerUser(ctx context.Context, orgID uuid.UUID) (int, error) {
+	if m.orgSettings == nil {
+		return m.maxPerUser, nil
+	}
+
+	org, err := m.orgSettings.GetByID(ctx, orgID)
+	if err != nil {
+		return 0, fmt.Errorf("load org preview settings: %w", err)
+	}
+	hasOrgSetting, err := hasPreviewMaxPreviewsPerUserSetting(org.Settings)
+	if err != nil {
+		return 0, fmt.Errorf("parse org preview settings: %w", err)
+	}
+	if !hasOrgSetting {
+		return m.maxPerUser, nil
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return 0, fmt.Errorf("parse org preview settings: %w", err)
+	}
+	if settings.PreviewMaxPreviewsPerUser > 0 {
+		return settings.PreviewMaxPreviewsPerUser, nil
+	}
+	return m.maxPerUser, nil
+}
+
+func hasPreviewMaxPreviewsPerUserSetting(raw json.RawMessage) (bool, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false, nil
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return false, err
+	}
+	if settings == nil {
+		return false, nil
+	}
+	_, ok := settings["preview_max_previews_per_user"]
+	return ok, nil
 }
 
 // =============================================================================
