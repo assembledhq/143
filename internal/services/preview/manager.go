@@ -654,6 +654,28 @@ func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []str
 	}
 }
 
+func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+
+	msg := fmt.Sprintf("preview install failed: %s", errMsg)
+	if len(tail) > 0 {
+		msg += "\n--- last output ---\n" + strings.Join(tail, "\n")
+	}
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: o.previewID,
+		OrgID:             o.orgID,
+		Level:             "error",
+		Step:              models.PreviewLogStepInstall,
+		Message:           msg,
+	}
+	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
+		o.manager.logger.Warn().Err(err).
+			Str("preview_id", o.previewID.String()).
+			Msg("observer: failed to write preview install log")
+	}
+}
+
 // pollSupportServiceStatus polls the provider until all support services leave
 // "starting" status, then persists the final statuses to the database. This
 // runs in a background goroutine after a progressive preview start.

@@ -5,10 +5,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -275,10 +277,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
 	}
 
-	// Phase 4: Build service environment with injected credentials.
+	// Phase 4: Run the platform-managed install phase before services start.
+	if err := d.runPreviewInstall(ctx, state, cfg.Install, observer); err != nil {
+		d.cleanupState(handle)
+		return nil, fmt.Errorf("%w: %v", preview.ErrInstallFailed, err)
+	}
+
+	// Phase 5: Build service environment with injected credentials.
 	svcEnvs := d.buildServiceEnvs(cfg, infraCreds, extraEnv)
 
-	// Phase 5: Start application services in dependency order
+	// Phase 6: Start application services in dependency order
 	// (support services first, then primary).
 	primaryPort := 0
 	for name, svcCfg := range cfg.Services {
@@ -300,7 +308,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	}
 	state.primaryPort = primaryPort
 
-	// Phase 6: Wait for readiness probes.
+	// Phase 7: Wait for readiness probes.
 	//
 	// Progressive preview: when cfg.Progressive is true and this is a
 	// multi-service config, report readiness as soon as the primary service
@@ -948,6 +956,233 @@ func (d *DockerPreviewProvider) runInitScript(
 			}
 		}
 	}
+}
+
+// =============================================================================
+// Preview install management
+// =============================================================================
+
+const previewInstallRuntimeVersion = "docker-preview-install-v1"
+
+type previewInstallCacheKey struct {
+	RuntimeVersion  string                      `json:"runtime_version"`
+	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
+	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	Command         []string                    `json:"command"`
+	Cwd             string                      `json:"cwd"`
+	Lockfiles       []previewInstallLockfileKey `json:"lockfiles"`
+	CleanPaths      []string                    `json:"clean_paths"`
+	VerifyPaths     []string                    `json:"verify_paths"`
+	TimeoutSeconds  int                         `json:"timeout_seconds"`
+}
+
+type previewInstallLockfileKey struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, observer preview.ServiceObserver) error {
+	if install == nil {
+		return nil
+	}
+	timeout := time.Duration(install.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Duration(preview.DefaultInstallTimeoutSeconds) * time.Second
+	}
+
+	cacheKey, err := d.computePreviewInstallCacheKey(ctx, state.sandbox, install)
+	if err != nil {
+		notifyInstallFailed(observer, err.Error(), nil)
+		return err
+	}
+	markerPath := fmt.Sprintf(".143/cache/preview-install/%s.done", cacheKey)
+	if d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
+		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
+		return nil
+	}
+
+	cmd, err := buildPreviewInstallCommand(install, markerPath)
+	if err != nil {
+		notifyInstallFailed(observer, err.Error(), nil)
+		return err
+	}
+	outputTail := make([]string, 0, serviceTailLines)
+	appendTail := func(line []byte) {
+		text := string(line)
+		if len(outputTail) >= serviceTailLines {
+			outputTail = outputTail[1:]
+		}
+		outputTail = append(outputTail, text)
+		d.logger.Debug().Str("output", text).Msg("preview install output")
+	}
+	installCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	stderrSplitter := &previewLineSplitter{onLine: appendTail}
+	exitCode, err := d.executor.ExecStream(installCtx, state.sandbox, cmd, appendTail, stderrSplitter)
+	stderrSplitter.flush()
+	if err != nil || exitCode != 0 {
+		errMsg := formatPreviewInstallError(exitCode, err, timeout, installCtx.Err())
+		notifyInstallFailed(observer, errMsg, outputTail)
+		return fmt.Errorf("%s", errMsg)
+	}
+	d.logger.Info().Str("marker", markerPath).Msg("preview install completed")
+	return nil
+}
+
+func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Context, sb *agent.Sandbox, install *models.PreviewInstallConfig) (string, error) {
+	lockfiles := make([]previewInstallLockfileKey, 0, len(install.Lockfiles))
+	for _, lockfile := range install.Lockfiles {
+		cleanPath, err := cleanPreviewInstallRepoPath(lockfile, false)
+		if err != nil {
+			return "", fmt.Errorf("preview.install.lockfiles path %q: %w", lockfile, err)
+		}
+		body, err := d.executor.ReadFile(ctx, sb, cleanPath)
+		if err != nil {
+			return "", fmt.Errorf("read preview.install lockfile %q: %w", cleanPath, err)
+		}
+		sum := sha256.Sum256(body)
+		lockfiles = append(lockfiles, previewInstallLockfileKey{Path: cleanPath, SHA256: fmt.Sprintf("%x", sum[:])})
+	}
+	sort.Slice(lockfiles, func(i, j int) bool { return lockfiles[i].Path < lockfiles[j].Path })
+
+	cwd := install.Cwd
+	if cwd == "" {
+		cwd = "."
+	}
+	if _, err := cleanPreviewInstallRepoPath(cwd, false); err != nil {
+		return "", fmt.Errorf("preview.install.cwd %q: %w", cwd, err)
+	}
+	key := previewInstallCacheKey{
+		RuntimeVersion: previewInstallRuntimeVersion,
+		Command:        append([]string(nil), install.Command...),
+		Cwd:            cwd,
+		Lockfiles:      lockfiles,
+		CleanPaths:     sortedStringCopy(install.CleanPaths),
+		VerifyPaths:    sortedStringCopy(install.VerifyPaths),
+		TimeoutSeconds: install.TimeoutSeconds,
+	}
+	if sb != nil {
+		key.SandboxProvider = sb.Provider
+		if sb.Metadata != nil {
+			key.SandboxImage = sb.Metadata["image"]
+		}
+	}
+	payload, err := json.Marshal(key)
+	if err != nil {
+		return "", fmt.Errorf("marshal preview install cache key: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func (d *DockerPreviewProvider) previewInstallCacheValid(ctx context.Context, sb *agent.Sandbox, markerPath string, verifyPaths []string) bool {
+	if _, err := d.executor.ReadFile(ctx, sb, markerPath); err != nil {
+		return false
+	}
+	for _, verifyPath := range verifyPaths {
+		cleanPath, err := cleanPreviewInstallRepoPath(verifyPath, false)
+		if err != nil {
+			return false
+		}
+		if !d.previewInstallPathExists(ctx, sb, cleanPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *DockerPreviewProvider) previewInstallPathExists(ctx context.Context, sb *agent.Sandbox, repoPath string) bool {
+	exitCode, err := d.executor.Exec(ctx, sb, "test -e "+shellEscape(repoPath), io.Discard, io.Discard)
+	return err == nil && exitCode == 0
+}
+
+func buildPreviewInstallCommand(install *models.PreviewInstallConfig, markerPath string) (string, error) {
+	var parts []string
+	parts = append(parts, "mkdir -p .143/cache/preview-install")
+	if len(install.CleanPaths) > 0 {
+		cleanArgs := make([]string, 0, len(install.CleanPaths))
+		for _, cleanPath := range install.CleanPaths {
+			arg, err := cleanPreviewInstallRepoPath(cleanPath, true)
+			if err != nil {
+				return "", fmt.Errorf("preview.install.clean_paths path %q: %w", cleanPath, err)
+			}
+			cleanArgs = append(cleanArgs, arg)
+		}
+		parts = append(parts, "rm -rf -- "+strings.Join(cleanArgs, " "))
+	}
+
+	escapedCmd := make([]string, 0, len(install.Command))
+	for _, arg := range install.Command {
+		escapedCmd = append(escapedCmd, shellEscape(arg))
+	}
+	installCmd := strings.Join(escapedCmd, " ")
+	cwd := install.Cwd
+	if cwd == "" {
+		cwd = "."
+	}
+	if cwd != "." {
+		cleanCwd, err := cleanPreviewInstallRepoPath(cwd, false)
+		if err != nil {
+			return "", fmt.Errorf("preview.install.cwd %q: %w", cwd, err)
+		}
+		installCmd = fmt.Sprintf("(cd %s && %s)", shellEscape(cleanCwd), installCmd)
+	}
+	parts = append(parts, installCmd)
+	parts = append(parts, fmt.Sprintf("printf 'ok\\n' > %s", shellEscape(markerPath)))
+	return strings.Join(parts, " && "), nil
+}
+
+func cleanPreviewInstallRepoPath(raw string, allowGlob bool) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if strings.HasPrefix(raw, "/") {
+		return "", fmt.Errorf("absolute paths are not allowed")
+	}
+	if strings.ContainsAny(raw, " \t\r\n;&|`$(){}[]<>!?\\\"'") {
+		return "", fmt.Errorf("unsupported shell metacharacter")
+	}
+	if !allowGlob && strings.Contains(raw, "*") {
+		return "", fmt.Errorf("glob paths are not allowed here")
+	}
+	clean := path.Clean(raw)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path escapes the repo root")
+	}
+	if allowGlob {
+		for _, part := range strings.Split(clean, "/") {
+			if part == ".." {
+				return "", fmt.Errorf("path escapes the repo root")
+			}
+		}
+	}
+	if allowGlob && clean == "." {
+		return "", fmt.Errorf("path is too broad to clean")
+	}
+	return clean, nil
+}
+
+func sortedStringCopy(values []string) []string {
+	copied := append([]string(nil), values...)
+	sort.Strings(copied)
+	return copied
+}
+
+func formatPreviewInstallError(exitCode int, err error, timeout time.Duration, ctxErr error) string {
+	if ctxErr != nil {
+		return fmt.Sprintf("timed out after %s", timeout)
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("exited with code %d", exitCode)
+}
+
+func notifyInstallFailed(observer preview.ServiceObserver, errMsg string, tail []string) {
+	if observer == nil {
+		return
+	}
+	observer.OnInstallFailed(errMsg, tail)
 }
 
 // =============================================================================
