@@ -7,17 +7,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewLoopReviewPrompt(t *testing.T) {
+func TestReviewLoopReviewPromptMinimal(t *testing.T) {
 	t.Parallel()
 
 	got := ReviewLoopReviewPrompt(ReviewLoopReviewPromptData{
 		AgentType: models.AgentTypeClaudeCode,
+		FixMode:   models.ReviewLoopFixModeMinimal,
 	})
 	require.Contains(t, got, "/review", "review prompt should include the native slash command")
 	require.Contains(t, got, "Fix nits when they are local, low-risk", "review prompt should include the nit policy")
 	require.Contains(t, got, "current workspace diff", "review prompt should target the current sandbox diff")
 	require.NotContains(t, got, "files already touched", "review prompt should not block relevant fixes only because the file was untouched")
 	require.Contains(t, got, "stale or outdated adjacent code", "review prompt should allow relevant low-risk stale-code cleanup")
+}
+
+func TestReviewLoopReviewPromptExhaustive(t *testing.T) {
+	t.Parallel()
+
+	got := ReviewLoopReviewPrompt(ReviewLoopReviewPromptData{
+		AgentType: models.AgentTypeClaudeCode,
+		FixMode:   models.ReviewLoopFixModeExhaustive,
+	})
+	require.Contains(t, got, "/review", "review prompt should include the native slash command")
+	require.Contains(t, got, "Report every issue", "exhaustive review prompt should ask for every review finding")
+	require.Contains(t, got, "Do not defer broad or risky findings", "exhaustive review prompt should not tell the reviewer to leave findings for later")
+	require.Contains(t, got, "current workspace diff", "review prompt should target the current sandbox diff")
+	require.NotContains(t, got, "Fix nits when they are local, low-risk", "exhaustive review prompt should not use the minimal nit policy")
+	require.NotContains(t, got, "leave it for later", "exhaustive review prompt should not ask the reviewer to defer findings")
 }
 
 func TestReviewLoopDecisionPrompt(t *testing.T) {
