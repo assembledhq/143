@@ -30,10 +30,11 @@ func TestReviewLoopReviewPromptExhaustive(t *testing.T) {
 	})
 	require.Contains(t, got, "/review", "review prompt should include the native slash command")
 	require.Contains(t, got, "Report every issue", "exhaustive review prompt should ask for every review finding")
-	require.Contains(t, got, "Do not defer broad or risky findings", "exhaustive review prompt should not tell the reviewer to leave findings for later")
+	require.Contains(t, got, "Do not defer findings", "exhaustive review prompt should not tell the reviewer to leave findings for later")
 	require.Contains(t, got, "current workspace diff", "review prompt should target the current sandbox diff")
 	require.NotContains(t, got, "Fix nits when they are local, low-risk", "exhaustive review prompt should not use the minimal nit policy")
 	require.NotContains(t, got, "leave it for later", "exhaustive review prompt should not ask the reviewer to defer findings")
+	require.NotContains(t, got, "impossible or unsafe", "exhaustive review prompt should stay concise because the native review is already thorough")
 }
 
 func TestReviewLoopDecisionPrompt(t *testing.T) {

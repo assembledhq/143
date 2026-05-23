@@ -323,11 +323,7 @@ In exhaustive mode, the product rule is: **report every relevant review finding
 so the next fix pass can address it**. The review-loop prompt tells the agent:
 
 ```text
-Report every issue you find that is relevant to whether this workspace diff
-should ship. Do not defer broad or risky findings as later work: include them in
-the review output so the follow-up fix pass can address them or explicitly
-explain why they are impossible or unsafe to fix in this sandbox. Keep findings
-grounded in this diff and nearby code it makes stale or inconsistent.
+Report every issue you find. Do not defer findings as later work.
 ```
 
 The only structured decision the platform needs is whether the loop should

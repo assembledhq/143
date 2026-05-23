@@ -1,5 +1,5 @@
 /review the current workspace diff. If you find issues, report them in your normal review format.
 
-{{if eq .FixMode "exhaustive"}}Report every issue you find that is relevant to whether this workspace diff should ship. Do not defer broad or risky findings as later work: include them in the review output so the follow-up fix pass can address them or explicitly explain why they are impossible or unsafe to fix in this sandbox. Keep findings grounded in this diff and nearby code it makes stale or inconsistent.{{else}}
+{{if eq .FixMode "exhaustive"}}Report every issue you find. Do not defer findings as later work.{{else}}
 Fix nits when they are local, low-risk, and relevant to the current change. Use your judgment: if the change makes stale or outdated adjacent code obsolete, remove or adjust it even when that code was not directly modified by the original diff. Do not expand the scope of the diff just to satisfy subjective style preferences. If a nit is broad, risky, or unrelated to the current change, leave it for later and mention it in your summary.
 {{end}}
