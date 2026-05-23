@@ -221,6 +221,7 @@ func LinkedIssuesContext(data LinkedIssueContextData) string {
 
 type ReviewLoopReviewPromptData struct {
 	AgentType any
+	FixMode   any
 }
 
 func ReviewLoopReviewPrompt(data ReviewLoopReviewPromptData) string {
