@@ -108,6 +108,14 @@ func (e *previewHTTPError) Error() string {
 	return e.message
 }
 
+func previewCapacityMessage(err error) string {
+	var capacityErr *preview.CapacityError
+	if errors.As(err, &capacityErr) {
+		return capacityErr.UserMessage()
+	}
+	return preview.PreviewCapacityMessage
+}
+
 func newPreviewHTTPError(status int, code, message string, err error) *previewHTTPError {
 	return &previewHTTPError{status: status, code: code, message: message, err: err}
 }
@@ -570,7 +578,7 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, previewCapacityMessage(err), err)
 		}
 		if errors.Is(err, preview.ErrInvalidConfig) {
 			return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_CONFIG_INVALID", preview.InvalidConfigMessage(err), err)
@@ -639,7 +647,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, preview.PreviewCapacityMessage, err)
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, previewCapacityMessage(err), err)
 		}
 		if errors.Is(err, preview.ErrInvalidConfig) {
 			return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_CONFIG_INVALID", preview.InvalidConfigMessage(err), err)
