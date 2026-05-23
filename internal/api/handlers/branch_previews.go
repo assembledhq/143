@@ -792,7 +792,12 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 		resp.PreviewURL = &url
 	}
 	if instance.PreviewTargetID != nil {
-		if target, targetErr := h.previews.GetPreviewTarget(r.Context(), orgID, *instance.PreviewTargetID); targetErr == nil {
+		target, targetErr := h.previews.GetPreviewTarget(r.Context(), orgID, *instance.PreviewTargetID)
+		if targetErr != nil && !errors.Is(targetErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load preview target", targetErr)
+			return
+		}
+		if targetErr == nil {
 			if !previewTokenAllows(r.Context(), "previews:read", target.RepositoryID) {
 				writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read this preview")
 				return
@@ -1037,6 +1042,10 @@ func (h *BranchPreviewHandler) Stop(w http.ResponseWriter, r *http.Request) {
 	}
 	if instance.PreviewTargetID != nil {
 		target, targetErr := h.previews.GetPreviewTarget(r.Context(), orgID, *instance.PreviewTargetID)
+		if targetErr != nil && !errors.Is(targetErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load preview target", targetErr)
+			return
+		}
 		if targetErr == nil && !previewTokenAllows(r.Context(), "previews:stop", target.RepositoryID) {
 			writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to stop this preview")
 			return
@@ -1089,6 +1098,13 @@ func (h *BranchPreviewHandler) MintBootstrapToken(w http.ResponseWriter, r *http
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "PREVIEW_NOT_FOUND", "preview not found", err)
 		return
+	}
+	if instance.PreviewTargetID != nil {
+		target, targetErr := h.previews.GetPreviewTarget(r.Context(), orgID, *instance.PreviewTargetID)
+		if targetErr == nil && !previewTokenAllows(r.Context(), "previews:read", target.RepositoryID) {
+			writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to access this preview")
+			return
+		}
 	}
 	if !instance.Status.IsActive() {
 		writeError(w, r, http.StatusConflict, "PREVIEW_NOT_ACTIVE", "preview is not active")
