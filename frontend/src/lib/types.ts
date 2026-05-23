@@ -402,6 +402,7 @@ export interface SessionThreadFileEvent {
 
 export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
 export type ReviewLoopSource = 'manual' | 'automation';
+export type ReviewLoopFixMode = 'minimal' | 'exhaustive';
 export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
 export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
 
@@ -415,6 +416,7 @@ export interface SessionReviewLoop {
   source: ReviewLoopSource;
   agent_type: string;
   max_passes: number;
+  fix_mode: ReviewLoopFixMode;
   completed_passes: number;
   review_required: boolean;
   bypassed_by_user_id?: string;

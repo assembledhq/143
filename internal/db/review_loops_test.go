@@ -28,7 +28,7 @@ func TestSessionReviewLoopStore_CreateLoopFiltersOrgOnRead(t *testing.T) {
 	startedAt := time.Now().UTC()
 
 	mock.ExpectQuery("INSERT INTO session_review_loops").
-		WithArgs(anyArgs(16)...).
+		WithArgs(anyArgs(17)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at"}).AddRow(uuid.New(), startedAt))
 
 	loop := &models.SessionReviewLoop{
@@ -45,7 +45,7 @@ func TestSessionReviewLoopStore_CreateLoopFiltersOrgOnRead(t *testing.T) {
 	require.NoError(t, err, "CreateLoop should insert a loop row")
 
 	rows := pgxmock.NewRows(reviewLoopColumnsForTest()).AddRow(
-		loop.ID, orgID, sessionID, nil, &threadID, "running", "manual", "claude_code", 2, 0,
+		loop.ID, orgID, sessionID, nil, &threadID, "running", "manual", "claude_code", 2, "minimal", 0,
 		false, nil, nil, nil, nil, nil, &startedBy, startedAt, nil,
 	)
 	mock.ExpectQuery("SELECT .+ FROM session_review_loops WHERE id = @id AND org_id = @org_id").
@@ -119,7 +119,7 @@ func TestSessionReviewLoopStore_CreateLoopWithInitialPassIsAtomic(t *testing.T) 
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO session_review_loops").
-		WithArgs(anyArgs(16)...).
+		WithArgs(anyArgs(17)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at"}).AddRow(loopID, startedAt))
 	mock.ExpectQuery("INSERT INTO session_review_loop_passes").
 		WithArgs(anyArgs(16)...).
@@ -164,7 +164,7 @@ func TestSessionReviewLoopStore_CreateLoopWithInitialPassRollsBackOnPassFailure(
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO session_review_loops").
-		WithArgs(anyArgs(16)...).
+		WithArgs(anyArgs(17)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at"}).AddRow(uuid.New(), time.Now().UTC()))
 	mock.ExpectQuery("INSERT INTO session_review_loop_passes").
 		WithArgs(anyArgs(16)...).
@@ -342,7 +342,7 @@ func TestSessionReviewLoopStore_MarkLoopFailedAndEnqueueOpenPRIsAtomic(t *testin
 func reviewLoopColumnsForTest() []string {
 	return []string{
 		"id", "org_id", "session_id", "automation_run_id", "thread_id", "status", "source", "agent_type",
-		"max_passes", "completed_passes", "review_required", "bypassed_by_user_id", "bypass_reason",
+		"max_passes", "fix_mode", "completed_passes", "review_required", "bypassed_by_user_id", "bypass_reason",
 		"loop_start_checkpoint_key", "latest_checkpoint_key", "latest_summary", "started_by_user_id", "started_at", "completed_at",
 	}
 }

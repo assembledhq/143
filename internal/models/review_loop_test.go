@@ -65,6 +65,32 @@ func TestReviewLoopPassStatusValidate(t *testing.T) {
 	}
 }
 
+func TestReviewLoopFixModeValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    ReviewLoopFixMode
+		wantErr bool
+	}{
+		{name: "minimal", mode: ReviewLoopFixModeMinimal},
+		{name: "exhaustive", mode: ReviewLoopFixModeExhaustive},
+		{name: "invalid", mode: ReviewLoopFixMode("bogus"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.mode.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "invalid review loop fix mode should be rejected")
+				return
+			}
+			require.NoError(t, err, "valid review loop fix mode should be accepted")
+		})
+	}
+}
+
 func TestAgentSupportsNativeReview(t *testing.T) {
 	t.Parallel()
 
