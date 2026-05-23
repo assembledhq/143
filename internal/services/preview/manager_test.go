@@ -1134,6 +1134,43 @@ func TestCheckConcurrencyCaps_UsesOrgPreviewLimit(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCheckConcurrencyCaps_FallsBackToConfiguredPreviewLimitWhenOrgSettingAbsent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store: store,
+		OrgSettingsStore: staticOrgSettingsStore{
+			settings: json.RawMessage(`{}`),
+		},
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+		MaxPerUser:   6,
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(5))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
+	require.NoError(t, err, "missing org setting should preserve configured per-user preview fallback")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCheckConcurrencyCaps_UserExceeded(t *testing.T) {
 	t.Parallel()
 

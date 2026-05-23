@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -1322,6 +1323,13 @@ func (m *Manager) maxPreviewsPerUser(ctx context.Context, orgID uuid.UUID) (int,
 	if err != nil {
 		return 0, fmt.Errorf("load org preview settings: %w", err)
 	}
+	hasOrgSetting, err := hasPreviewMaxPreviewsPerUserSetting(org.Settings)
+	if err != nil {
+		return 0, fmt.Errorf("parse org preview settings: %w", err)
+	}
+	if !hasOrgSetting {
+		return m.maxPerUser, nil
+	}
 	settings, err := models.ParseOrgSettings(org.Settings)
 	if err != nil {
 		return 0, fmt.Errorf("parse org preview settings: %w", err)
@@ -1330,6 +1338,21 @@ func (m *Manager) maxPreviewsPerUser(ctx context.Context, orgID uuid.UUID) (int,
 		return settings.PreviewMaxPreviewsPerUser, nil
 	}
 	return m.maxPerUser, nil
+}
+
+func hasPreviewMaxPreviewsPerUserSetting(raw json.RawMessage) (bool, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false, nil
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return false, err
+	}
+	if settings == nil {
+		return false, nil
+	}
+	_, ok := settings["preview_max_previews_per_user"]
+	return ok, nil
 }
 
 // =============================================================================
