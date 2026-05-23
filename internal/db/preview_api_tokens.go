@@ -15,7 +15,7 @@ import (
 )
 
 const previewAPITokenColumns = `id, org_id, name, token_hash, scopes, repository_ids,
-	created_by_user_id, last_used_at, revoked_at, created_at`
+	created_by_user_id, last_used_at, revoked_at, created_at` // #nosec G101 -- SQL column list, not a credential
 
 type PreviewAPITokenStore struct {
 	db DBTX
