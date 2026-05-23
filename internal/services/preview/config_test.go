@@ -1047,6 +1047,10 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 			require.True(t, ok, "dogfood preview config should define the frontend service")
 			require.Contains(t, frontend.Env, "NEXT_PUBLIC_API_URL", "dogfood preview should explicitly neutralize public API origin inherited from the surrounding environment")
 			require.Equal(t, "", frontend.Env["NEXT_PUBLIC_API_URL"], "dogfood preview must force same-origin API calls so preview CSRF cookies match the request origin")
+			server, ok := cfg.Services["server"]
+			require.True(t, ok, "dogfood preview config should define the server service")
+			require.Equal(t, "api", server.Env["MODE"], "dogfood preview server should avoid worker mode because the sandbox has no Docker socket")
+			require.Equal(t, "0", server.Env["PREVIEW_GATEWAY_PORT"], "dogfood preview server should disable the nested preview gateway to avoid binding the platform preview port")
 			return
 		}
 		parent := filepath.Dir(dir)
