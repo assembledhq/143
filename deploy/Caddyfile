@@ -45,6 +45,28 @@
 	}
 }
 
+# Preview gateway responses can reflect a single preview, worker, or sandbox
+# becoming unavailable. Do not apply passive 5xx health marking here: the
+# wildcard route has one API gateway upstream, so poisoning it turns one
+# preview failure into a short wildcard-preview outage.
+(preview_gateway_upstream_defaults) {
+	lb_try_duration 10s
+	lb_try_interval 250ms
+	lb_policy first
+
+	health_uri /healthz
+	health_interval 2s
+	health_timeout 2s
+
+	flush_interval -1
+
+	transport http {
+		keepalive 30s
+		keepalive_idle_conns 32
+		dial_timeout 5s
+	}
+}
+
 www.{$DOMAIN:143.dev} {
 	redir https://{$DOMAIN:143.dev}{uri} permanent
 }
@@ -64,7 +86,7 @@ www.{$DOMAIN:143.dev} {
 				refresh 2s
 			}
 			lb_retries 5
-			import upstream_defaults
+			import preview_gateway_upstream_defaults
 		}
 	}
 	handle {
@@ -75,7 +97,7 @@ www.{$DOMAIN:143.dev} {
 				refresh 2s
 			}
 			lb_retries 0
-			import upstream_defaults
+			import preview_gateway_upstream_defaults
 		}
 	}
 }
