@@ -33,6 +33,7 @@ import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { PlanTab } from "./plan-tab";
 import { WorkTab } from "./work-tab";
 import { MobileBackButton } from "@/components/mobile-back-button";
+import { usePageTitle } from "@/hooks/use-page-title";
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "Low", numeric: 75 },
@@ -183,6 +184,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
   });
 
   const detail = data?.data;
+  usePageTitle(detail?.project.title, "Project");
 
   if (isLoading) {
     return (

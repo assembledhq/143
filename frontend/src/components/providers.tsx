@@ -5,6 +5,7 @@ import { NuqsAdapter } from "nuqs/adapters/next/app";
 import { useState, useEffect } from "react";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ThemeProvider } from "@/components/theme-provider";
+import { DocumentTitle } from "@/components/document-title";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
@@ -62,6 +63,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <NuqsAdapter>
         <QueryClientProvider client={queryClient}>
           <ErrorBoundary>
+            <DocumentTitle />
             {children}
           </ErrorBoundary>
         </QueryClientProvider>

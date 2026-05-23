@@ -161,6 +161,14 @@ describe('SessionDetailPage', () => {
     expect(elements.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('updates the browser tab title with the session title', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await waitFor(() => {
+      expect(document.title).toBe('143 | Fixed TypeError by adding null check');
+    });
+  });
+
   it('shows agent type label', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
