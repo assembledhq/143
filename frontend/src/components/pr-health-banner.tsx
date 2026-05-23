@@ -366,15 +366,6 @@ function normalizeCheckStatus(status?: string): PullRequestCheckStatus {
   }
 }
 
-function checksAllowMerge(
-  checksConfirmed: boolean,
-  checks: Array<{ status: PullRequestCheckStatus }>,
-) {
-  return checks.length === 0
-    ? checksConfirmed
-    : checks.every((check) => check.status === "passed");
-}
-
 // prHealthAllowsMerge mirrors the merge gating the banner uses internally so
 // callers outside the banner (keyboard shortcuts, command palette) can decide
 // whether to expose the merge action without re-deriving the rule.

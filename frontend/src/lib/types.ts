@@ -753,6 +753,7 @@ export interface OrgSettings {
   execution_aggressiveness?: number;
   max_concurrent_runs?: number;
   max_session_duration_seconds?: number;
+  preview_max_previews_per_user?: number;
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {
