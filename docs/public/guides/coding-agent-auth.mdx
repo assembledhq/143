@@ -1,0 +1,38 @@
+---
+title: Coding-agent auth
+description: Configure coding-agent credentials so 143 can run sessions reliably.
+section: Guides
+order: 15
+status: beta
+audience: engineer
+tags:
+  - agents
+  - auth
+  - codex
+llm_summary: Configure personal or organization-level coding-agent authentication so 143 sessions can run with Codex or supported fallback agents.
+---
+
+# Coding-agent auth
+
+143 can run different coding agents depending on the organization setup. Codex is the recommended default path, while other supported agents can be configured when a team already standardizes on them.
+
+## Who configures auth
+
+- **Personal auth** lets a user run sessions under their own coding-agent account.
+- **Organization fallback auth** lets an org provide a shared fallback for supported workflows.
+- **Agent-specific settings** control model, reasoning, and execution preferences where supported.
+
+## Good defaults
+
+- Start with Codex unless your team has a strong existing provider preference.
+- Keep personal credentials scoped to the user.
+- Use organization fallback credentials only when the team explicitly wants that behavior.
+- Rotate credentials when a provider account changes ownership.
+
+## Verify
+
+Start a small session after connecting credentials. A working auth setup can start the agent, stream progress, ask questions when needed, and return a diff.
+
+<Callout type="warning" title="Credential handling">
+Never paste provider API keys into prompts, issue comments, or repo config files. Use the credential surfaces in 143 settings.
+</Callout>

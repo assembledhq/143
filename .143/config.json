@@ -25,7 +25,8 @@
         "env": {
           "MODE": "api",
           "LOG_LEVEL": "info",
-          "DEMO_MODE": "true"
+          "DEMO_MODE": "true",
+          "PREVIEW_GATEWAY_PORT": "0"
         },
         "ready": {
           "http_path": "/readyz",
