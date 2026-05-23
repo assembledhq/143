@@ -324,7 +324,11 @@ func reviewLoopContinuationDedupeKey(loopID, passID uuid.UUID, phase string) str
 }
 
 func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass, userID *uuid.UUID, opts ...sendOption) (*models.SessionMessage, error) {
-	arguments := strings.TrimPrefix(prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), "/review")
+	reviewPrompt := prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{
+		AgentType: loop.AgentType,
+		FixMode:   loop.FixMode,
+	})
+	arguments := strings.TrimPrefix(reviewPrompt, "/review")
 	arguments = strings.TrimSpace(arguments)
 	command := models.SessionInputCommand{
 		Kind:      "command",
@@ -335,7 +339,7 @@ func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop
 		Arguments: arguments,
 		Source:    models.SessionInputCommandSourceBuiltin,
 	}
-	return s.sendPlain(ctx, *loop, prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), userID, append(opts, withCommands(command))...)
+	return s.sendPlain(ctx, *loop, reviewPrompt, userID, append(opts, withCommands(command))...)
 }
 
 func withCommands(commands ...models.SessionInputCommand) sendOption {
