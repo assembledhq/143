@@ -1,0 +1,131 @@
+import { describe, expect, it } from "vitest";
+
+import type { PullRequestHealthResponse } from "./types";
+import {
+  deriveCreatePRActionState,
+  deriveMergeActionState,
+  derivePushChangesActionState,
+} from "./session-pr-action-state";
+
+const baseHealth: PullRequestHealthResponse = {
+  pull_request_id: "pr-123",
+  pull_request_number: 42,
+  repository: "acme/widgets",
+  url: "https://github.com/acme/widgets/pull/42",
+  status: "open",
+  head_sha: "head-sha",
+  base_sha: "base-sha",
+  health_version: 1,
+  merge_state: "clean",
+  has_conflicts: false,
+  failing_test_count: 0,
+  needs_agent_action: false,
+  summary: "healthy",
+  checks: [{ name: "unit", category: "test", status: "passed" }],
+  checks_confirmed: true,
+  can_resolve_conflicts: false,
+  can_fix_tests: false,
+  can_merge: true,
+  enrichment_status: "ready",
+  enrichment_requested: true,
+  enrichment_ready: true,
+  conflict_detail_available: false,
+  failing_test_detail_available: false,
+  active_repairs: [],
+};
+
+describe("session PR action state", () => {
+  it("maps create PR lifecycle blockers into visible disabled states", () => {
+    const base = {
+      canShipPR: true,
+      hasPR: false,
+      hasSessionChanges: true,
+      hasSnapshot: true,
+      isRunning: false,
+      builderReviewAllowsPR: true,
+      snapshotUnavailable: false,
+      ghBlocked: false,
+      queueingPR: false,
+      creatingPR: false,
+      finalizingPR: false,
+      prState: "idle" as const,
+      hasRecoverableError: false,
+    };
+
+    const tests = [
+      {
+        name: "running",
+        input: { ...base, isRunning: true },
+        reason: "Wait for the session to finish before creating a PR",
+      },
+      {
+        name: "review required",
+        input: { ...base, builderReviewAllowsPR: false },
+        reason: "Run Review successfully before creating a PR",
+      },
+      {
+        name: "snapshot missing",
+        input: { ...base, hasSnapshot: false },
+        reason: "A reusable sandbox snapshot is required before creating a PR",
+      },
+    ];
+
+    for (const tt of tests) {
+      const state = deriveCreatePRActionState(tt.input);
+      expect(state.visible, `${tt.name} should keep Create PR discoverable`).toBe(true);
+      expect(state.disabled, `${tt.name} should disable Create PR`).toBe(true);
+      expect(state.disabledReason, `${tt.name} should explain the disabled state`).toBe(tt.reason);
+    }
+  });
+
+  it("maps push changes lifecycle blockers into visible disabled states", () => {
+    const state = derivePushChangesActionState({
+      canShipPR: true,
+      hasOpenPR: true,
+      hasUnpushedChanges: true,
+      hasSnapshot: true,
+      isRunning: true,
+      builderReviewAllowsPR: true,
+      snapshotUnavailable: false,
+      ghBlocked: false,
+      queueingPush: false,
+      pushingChanges: false,
+      pushState: "idle",
+    });
+
+    expect(state.visible, "Push changes should remain visible when temporarily blocked").toBe(true);
+    expect(state.disabled, "Push changes should be disabled while the session runs").toBe(true);
+    expect(state.disabledReason, "Push changes should explain the running-session blocker").toBe("Wait for the session to finish before pushing changes");
+  });
+
+  it("maps merge health states into stable visible states", () => {
+    const tests = [
+      {
+        name: "pending checks",
+        health: { ...baseHealth, can_merge: false, checks: [{ name: "unit", category: "test" as const, status: "pending" as const }] },
+        disabled: true,
+        reason: "Checks are still running.",
+      },
+      {
+        name: "unconfirmed checks",
+        health: { ...baseHealth, checks_confirmed: false, checks: [] },
+        disabled: true,
+        reason: "Waiting for GitHub to confirm required checks.",
+      },
+      {
+        name: "healthy",
+        health: baseHealth,
+        disabled: false,
+        reason: undefined,
+      },
+    ];
+
+    for (const tt of tests) {
+      const state = deriveMergeActionState({ health: tt.health, hasActiveRepair: false, pendingAction: null });
+      expect(state.visible, `${tt.name} should keep Merge in the PR lifecycle row`).toBe(true);
+      expect(state.disabled, `${tt.name} should map Merge disabled state`).toBe(tt.disabled);
+      expect(state.disabledReason, `${tt.name} should map Merge reason`).toBe(tt.reason);
+    }
+  });
+});
+
