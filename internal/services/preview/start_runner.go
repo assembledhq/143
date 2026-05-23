@@ -201,6 +201,8 @@ func ClassifyLaunchFailure(err error) StartFailure {
 		return StartFailure{Code: "PREVIEW_INFRA_UNHEALTHY", Message: "preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: " + cause}
 	case errors.Is(err, ErrInitScriptFailed):
 		return StartFailure{Code: "PREVIEW_INIT_SCRIPT_FAILED", Message: "preview init script failed. Check the script referenced in .143/config.json. Details: " + cause}
+	case errors.Is(err, ErrInstallFailed):
+		return StartFailure{Code: "PREVIEW_INSTALL_FAILED", Message: "preview install failed before services started. Check the preview.install command in .143/config.json. Details: " + cause}
 	case errors.Is(err, ErrServiceNotReady):
 		return StartFailure{Code: "PREVIEW_SERVICE_NOT_READY", Message: "preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/config.json. Details: " + cause}
 	case errors.Is(err, ErrInvalidConfig):
