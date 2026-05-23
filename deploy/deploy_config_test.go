@@ -54,7 +54,7 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	require.Contains(t, deployText, "CLOUDFLARE_API_TOKEN=%s", "app deploys should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
 	require.Contains(t, deployText, "PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
 	require.Contains(t, deployText, "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "app deploys should project the frontend preview-origin fallback into /opt/143/.env on the app host")
-	buildIndex := strings.Index(deployText, `echo "Building custom Caddy image..."`)
+	buildIndex := strings.Index(deployText, `echo "Dockerfile.caddy changed — building custom Caddy image..."`)
 	reconcileCallIndex := strings.LastIndex(deployText, `reconcile_caddy_service`)
 	reloadIndex := strings.LastIndex(deployText, `caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`)
 	require.NotEqual(t, -1, buildIndex, "deploy.sh should build caddy in the app-role execution path")
@@ -68,6 +68,21 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	require.Contains(t, string(provisionScript), "CLOUDFLARE_API_TOKEN=%s", "fresh app provisioning should project the Cloudflare DNS-challenge token into /opt/143/.env for compose interpolation")
 	require.Contains(t, string(provisionScript), "PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the preview origin template into /opt/143/.env so the app host can override the production preview domain")
 	require.Contains(t, string(provisionScript), "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the frontend preview-origin fallback into /opt/143/.env on the app host")
+}
+
+func TestRoutineAppDeployLeavesUnchangedCaddyRunning(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, "stage_caddy_dockerfile_if_changed", "app deploy should compare staged Dockerfile.caddy before rebuilding the edge image")
+	require.Contains(t, deployText, "caddy_env_fingerprint_changed", "app deploy should compare Caddy-specific env before recreating the edge container")
+	require.Contains(t, deployText, "Caddy inputs unchanged — leaving caddy running.", "routine app deploys should skip Caddy rebuild/reconcile when only API/frontend code changed")
+	require.Contains(t, deployText, `if stage_caddy_dockerfile_if_changed; then`, "deploy.sh should build the custom Caddy image only when Dockerfile.caddy changed")
+	require.NotContains(t, deployText, `echo "Building custom Caddy image..."
+    docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should not unconditionally rebuild Caddy because compose may recreate the Cloudflare-facing origin")
 }
 
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
