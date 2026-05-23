@@ -158,6 +158,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { deriveCreatePRActionState, derivePushChangesActionState } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
@@ -4746,59 +4747,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
-  const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
     : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
-  const showPRAction =
-    canShipPR && (
-      canAttemptCreatePR ||
-      canCreatePR ||
-      showExpiredPRAction ||
-      queueingPR ||
-      creatingPR ||
-      finalizingPR ||
-      prState === "failed" ||
-      Boolean(prActionError)
-    );
-
-  let prActionLabel = "Create PR";
-  let prActionSpinning = false;
-  let prActionDisabled = false;
-  let prActionTitle: string | undefined;
-
-  if (queueingPR) {
-    prActionLabel = "Queueing PR…";
-    prActionSpinning = true;
-    prActionDisabled = true;
-    prActionTitle = "Sending the PR request to the queue";
-  } else if (creatingPR) {
-    prActionLabel = "Creating PR…";
-    prActionSpinning = true;
-    prActionDisabled = true;
-    prActionTitle = "Pushing changes and opening the pull request";
-  } else if (snapshotUnavailable) {
-    prActionDisabled = true;
-    prActionTitle = snapshotMessage;
-  } else if (localPRActionError) {
-    prActionLabel = "Retry";
-    prActionTitle = localPRActionError.message;
-  } else if (succeededButNoPR) {
-    prActionLabel = "Finalizing PR…";
-    prActionSpinning = true;
-    prActionDisabled = true;
-  } else if (canAttemptCreatePR && !builderReviewAllowsPR) {
-    prActionDisabled = true;
-    prActionTitle = "Run Review successfully before creating a PR";
-  } else if (prState === "failed") {
-    prActionLabel = "Retry";
-    prActionTitle = session.pr_creation_error || "PR creation failed";
-  } else if (ghBlocked) {
-    prActionDisabled = true;
-    prActionTitle = "Connect your GitHub account to create PRs";
-  }
+  const createPRAction = deriveCreatePRActionState({
+    canShipPR,
+    hasPR,
+    hasSessionChanges,
+    hasSnapshot,
+    isRunning,
+    builderReviewAllowsPR,
+    snapshotUnavailable,
+    snapshotMessage,
+    ghBlocked,
+    queueingPR,
+    creatingPR,
+    finalizingPR,
+    prState,
+    prCreationError: session.pr_creation_error,
+    localError: snapshotUnavailable ? undefined : localPRActionError?.message,
+    hasRecoverableError: Boolean(prActionError),
+  });
+  const showPRAction = createPRAction.visible;
+  const prActionLabel = createPRAction.label;
+  const prActionSpinning = createPRAction.spinning;
+  const prActionDisabled = createPRAction.disabled;
+  const prActionTitle = createPRAction.disabledReason;
 
   const branchState = session.branch_creation_state;
   const queueingBranch = localBranchState === "submitting";
@@ -4824,48 +4800,33 @@ export function SessionDetailContent({ id }: { id: string }) {
   // alongside Resolve conflicts / Fix tests / Merge so all PR-level
   // actions live in one place, while still hiding Push changes when the
   // latest session head already matches the remote PR branch.
-  const pushAvailable = hasPR && prStatus === "open" && !!session.has_unpushed_changes;
   const pushState = session.pr_push_state;
   const queueingPush = localPushState === "submitting";
   const pushingChanges =
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = canShipPR && builderReviewAllowsPR && pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = canShipPR && pushAvailable && (canPushChanges || !builderReviewAllowsPR || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
-  let pushActionLabel = "Push changes";
-  let pushActionSpinning = false;
-  let pushActionDisabled = false;
-  let pushActionTitle: string | undefined;
-  if (queueingPush) {
-    pushActionLabel = "Queueing…";
-    pushActionSpinning = true;
-    pushActionDisabled = true;
-    pushActionTitle = "Sending the push request to the queue";
-  } else if (pushingChanges) {
-    pushActionLabel = "Pushing…";
-    pushActionSpinning = true;
-    pushActionDisabled = true;
-    pushActionTitle = "Pushing changes to the PR branch";
-  } else if (snapshotUnavailable) {
-    pushActionDisabled = true;
-    pushActionTitle = snapshotMessage;
-  } else if (localPushActionError) {
-    pushActionLabel = "Retry";
-    pushActionTitle = localPushActionError.message;
-  } else if (pushState === "failed") {
-    pushActionLabel = "Retry";
-    pushActionTitle = session.pr_push_error || "Push to PR failed";
-  } else if (ghBlocked) {
-    pushActionDisabled = true;
-    pushActionTitle = "Connect your GitHub account to push changes";
-  } else if (pushAvailable && !builderReviewAllowsPR) {
-    pushActionDisabled = true;
-    pushActionTitle = "Run Review successfully before pushing changes";
-  } else if (isRunning) {
-    pushActionDisabled = true;
-    pushActionTitle = "Wait for the session to finish before pushing";
-  }
+  const pushAction = derivePushChangesActionState({
+    canShipPR,
+    hasOpenPR: hasPR && prStatus === "open",
+    hasUnpushedChanges: !!session.has_unpushed_changes,
+    hasSnapshot,
+    isRunning,
+    builderReviewAllowsPR,
+    snapshotUnavailable,
+    snapshotMessage,
+    ghBlocked,
+    queueingPush,
+    pushingChanges,
+    pushState,
+    pushError: session.pr_push_error,
+    localError: localPushActionError?.message,
+  });
+  const showPushAction = pushAction.visible;
+  const pushActionLabel = pushAction.label;
+  const pushActionSpinning = pushAction.spinning;
+  const pushActionDisabled = pushAction.disabled;
+  const pushActionTitle = pushAction.disabledReason;
 
   function handleMergeAction() {
     if (ghBlocked) {
@@ -5072,7 +5033,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {canManageSession && canUseNativeReviewLoop && !hasPR ? (
+          {canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -5096,6 +5057,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       size="sm"
                       className="w-full gap-1.5 sm:w-auto"
                       disabled={reviewActionDisabled}
+                      title={reviewActionDisabledReason}
                       onClick={() => setReviewSetupOpen(true)}
                     >
                       {startReviewLoopMutation.isPending || reviewLoopRunning ? (
