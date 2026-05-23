@@ -138,7 +138,7 @@ export default function PreviewLandingPage({
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                     <div>
                       <p className="font-medium text-foreground">Preview expired</p>
-                      <p className="text-muted-foreground">Use "Start latest" to launch a fresh runtime.</p>
+                      <p className="text-muted-foreground">Use &quot;Start latest&quot; to launch a fresh runtime.</p>
                     </div>
                   </div>
                 ) : null}
