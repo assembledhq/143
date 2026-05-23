@@ -1,6 +1,6 @@
 # Design: Goal-First Automation UX
 
-> **Status:** Proposed | **Last reviewed:** 2026-05-22
+> **Status:** Implemented | **Last reviewed:** 2026-05-22
 
 ## Problem
 

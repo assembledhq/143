@@ -38,6 +38,25 @@ describe("AutomationDetailPage", () => {
   beforeEach(() => {
     currentUserRole.value = "member";
     pushMock.mockReset();
+    server.use(
+      http.get("*/api/v1/repositories/repo-1", () => HttpResponse.json({
+        data: {
+          id: "repo-1",
+          org_id: "org-1",
+          integration_id: "int-1",
+          github_id: 1,
+          full_name: "acme/repo",
+          default_branch: "main",
+          private: false,
+          clone_url: "https://github.com/acme/repo.git",
+          installation_id: 10,
+          status: "active",
+          settings: {},
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+    );
   });
 
   it("matches the schedule controls and labels to the app input sizing", async () => {
@@ -92,7 +111,7 @@ describe("AutomationDetailPage", () => {
     });
     expect(screen.getByRole("button", { name: "Change automation emoji" })).toHaveTextContent("🧪");
 
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
 
     const timezoneButton = screen.getByTitle("UTC");
     const scheduleRow = timezoneButton.parentElement;
@@ -169,7 +188,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     const intervalInput = screen.getByLabelText("Interval value");
     await user.clear(intervalInput);
 
@@ -182,6 +201,83 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(updateBody).toMatchObject({ interval_value: 2 });
     });
+  });
+
+  it("shows readable metadata and run actions in the details rail", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "## Goal\nCheck release health",
+          scope: "",
+          icon_type: "emoji",
+          icon_value: "🧪",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          identity_scope: "org",
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("limit") === "5") {
+          return HttpResponse.json({
+            data: [{
+              id: "run-1",
+              automation_id: "auto-1",
+              triggered_at: "2026-01-02T00:00:00Z",
+              triggered_by: "manual",
+              goal_snapshot: "Check release health",
+              status: "completed_noop",
+              created_at: "2026-01-02T00:00:00Z",
+              updated_at: "2026-01-02T00:00:00Z",
+            }],
+            meta: {},
+          });
+        }
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    expect(await screen.findByText("Check release health")).toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(await screen.findByText("acme/repo")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run now" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByRole("dialog", { name: "Automation details" })).toBeInTheDocument();
+    expect(screen.getAllByText("acme/repo").length).toBeGreaterThan(1);
   });
 
   it("hides member-only automation actions from builders", async () => {
@@ -236,8 +332,8 @@ describe("AutomationDetailPage", () => {
 
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run now" })).not.toBeInTheDocument();
-
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
+    expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
   });
 
@@ -351,7 +447,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(await screen.findByRole("button", { name: "Base branch" }));
     await user.type(await screen.findByPlaceholderText("Search branches..."), "ops");
     await user.click(await screen.findByText("release/ops"));
@@ -418,7 +514,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
     await user.click(await screen.findByText("Personal automation"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
@@ -486,7 +582,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("button", { name: "Automation emoji" }));
     await user.click(await screen.findByRole("option", { name: /Rocket/ }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
@@ -544,7 +640,7 @@ describe("AutomationDetailPage", () => {
     renderWithProviders(<AutomationDetailPage />);
 
     await screen.findByText("Weekly audit");
-    await userEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
 
     const identityRow = screen.getByTestId("automation-settings-identity-row");
     expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
@@ -613,7 +709,7 @@ describe("AutomationDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "Change automation emoji" }));
     await user.click(await screen.findByRole("option", { name: /Rocket/ }));
 
-    expect(screen.getByRole("tab", { name: "Runs" })).toHaveAttribute("data-state", "active");
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     await waitFor(() => {
       expect(updateBody).toMatchObject({ icon_type: "emoji", icon_value: "🚀" });
     });
@@ -688,7 +784,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
 
     const goalInput = screen.getByLabelText("Goal");
     await user.clear(goalInput);
@@ -775,7 +871,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
 
     const goalInput = screen.getByLabelText("Goal");
     await user.clear(goalInput);
@@ -834,7 +930,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Settings" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
 
     fireEvent.change(screen.getByLabelText("Goal"), {
       target: { value: "x".repeat(AUTOMATION_GOAL_MAX_LENGTH + 1) },
@@ -947,7 +1043,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByText("claude-sonnet-4-6"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
@@ -1048,7 +1144,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(await screen.findByRole("button", { name: "Base branch" }));
     await user.type(await screen.findByPlaceholderText("Search branches..."), "ops");
     await user.click(await screen.findByText("release/ops"));
@@ -1144,7 +1240,7 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
     await user.click(await screen.findByText("High"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));

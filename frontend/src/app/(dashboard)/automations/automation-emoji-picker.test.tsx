@@ -1,6 +1,6 @@
 import { fireEvent, renderWithProviders, screen, within } from "@/test/test-utils";
 import { describe, expect, it } from "vitest";
-import { AutomationEmojiPicker } from "./automation-emoji-picker";
+import { AutomationEmojiPicker } from "@/components/automation-emoji-picker";
 
 describe("AutomationEmojiPicker", () => {
   it("shows a broad searchable emoji dropdown and selects an emoji", async () => {
