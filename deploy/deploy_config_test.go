@@ -70,6 +70,60 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	require.Contains(t, string(provisionScript), "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the frontend preview-origin fallback into /opt/143/.env on the app host")
 }
 
+func TestPreviewWildcardProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
+	t.Parallel()
+
+	caddyfile, err := os.ReadFile("../deploy/Caddyfile")
+	require.NoError(t, err, "test should read the Caddyfile")
+	caddyText := string(caddyfile)
+
+	previewBlock := extractCaddySiteBlock(t, caddyText, "*.preview.{$DOMAIN:143.dev}")
+	previewDefaults := extractCaddySnippetBlock(t, caddyText, "preview_gateway_upstream_defaults")
+	require.Contains(t, caddyText, "(preview_gateway_upstream_defaults)", "Caddyfile should define preview-gateway-specific upstream defaults")
+	require.Contains(t, previewBlock, "import preview_gateway_upstream_defaults", "preview wildcard routes should use preview-gateway-specific proxy defaults")
+	require.Contains(t, previewDefaults, "health_uri /healthz", "preview gateway upstream defaults should keep active health checks for API startup and drain windows")
+	require.Contains(t, previewDefaults, "health_interval 2s", "preview gateway upstream defaults should actively refresh API health state")
+	require.Contains(t, previewDefaults, "health_timeout 2s", "preview gateway upstream defaults should bound active health probes")
+	require.NotContains(t, previewBlock, "import upstream_defaults", "preview wildcard routes must not inherit main app passive health checks")
+	require.NotContains(t, previewDefaults, "unhealthy_status 502 503 504", "per-preview 5xx responses must not mark the single preview gateway upstream unhealthy")
+	require.NotContains(t, previewDefaults, "fail_duration 10s", "preview gateway proxying should not fan out one preview failure into a 10s wildcard outage")
+}
+
+func extractCaddySnippetBlock(t *testing.T, caddyText, snippetName string) string {
+	t.Helper()
+
+	return extractCaddyBlock(t, caddyText, "("+snippetName+")")
+}
+
+func extractCaddySiteBlock(t *testing.T, caddyText, siteHeader string) string {
+	t.Helper()
+
+	return extractCaddyBlock(t, caddyText, siteHeader)
+}
+
+func extractCaddyBlock(t *testing.T, caddyText, blockHeader string) string {
+	t.Helper()
+
+	start := strings.Index(caddyText, blockHeader+" {")
+	require.NotEqual(t, -1, start, "Caddyfile should contain the requested site block")
+
+	blockStart := start + len(blockHeader) + 1
+	depth := 0
+	for i := blockStart; i < len(caddyText); i++ {
+		switch caddyText[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return caddyText[start : i+1]
+			}
+		}
+	}
+	require.Fail(t, "Caddy site block should have a matching closing brace")
+	return ""
+}
+
 func TestRoutineAppDeployLeavesUnchangedCaddyRunning(t *testing.T) {
 	t.Parallel()
 
