@@ -33,8 +33,22 @@ func TestReviewLoopDecisionPrompt(t *testing.T) {
 func TestReviewLoopFixPrompt(t *testing.T) {
 	t.Parallel()
 
-	got := ReviewLoopFixPrompt()
+	got := ReviewLoopFixPrompt(ReviewLoopFixPromptData{
+		FixMode: models.ReviewLoopFixModeMinimal,
+	})
 	require.Contains(t, got, "Fix the issues you identified", "fix prompt should refer to the agent's previous review")
 	require.Contains(t, got, "Preserve the scope", "fix prompt should constrain broad rewrites")
+	require.Contains(t, got, "minimal necessary changes", "minimal fix prompt should preserve current review-loop behavior")
 	require.Contains(t, got, "Run relevant verification", "fix prompt should ask for verification")
+}
+
+func TestReviewLoopFixPromptExhaustive(t *testing.T) {
+	t.Parallel()
+
+	got := ReviewLoopFixPrompt(ReviewLoopFixPromptData{
+		FixMode: models.ReviewLoopFixModeExhaustive,
+	})
+	require.Contains(t, got, "Fix every issue", "exhaustive fix prompt should ask the agent to fix all review findings")
+	require.Contains(t, got, "Do not defer", "exhaustive fix prompt should prevent leaving review findings for later turns")
+	require.NotContains(t, got, "minimal necessary changes", "exhaustive fix prompt should not use the minimal fix policy")
 }

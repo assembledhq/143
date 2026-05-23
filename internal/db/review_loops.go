@@ -20,7 +20,7 @@ func NewSessionReviewLoopStore(db DBTX) *SessionReviewLoopStore {
 }
 
 const reviewLoopSelectColumns = `id, org_id, session_id, automation_run_id, thread_id,
-	status, source, agent_type, max_passes, completed_passes, review_required,
+	status, source, agent_type, max_passes, fix_mode, completed_passes, review_required,
 	bypassed_by_user_id, bypass_reason, loop_start_checkpoint_key, latest_checkpoint_key,
 	latest_summary, started_by_user_id, started_at, completed_at`
 
@@ -68,14 +68,20 @@ func createLoopOn(ctx context.Context, q DBTX, loop *models.SessionReviewLoop) e
 	if err := loop.AgentType.Validate(); err != nil {
 		return err
 	}
+	if loop.FixMode == "" {
+		loop.FixMode = models.ReviewLoopFixModeMinimal
+	}
+	if err := loop.FixMode.Validate(); err != nil {
+		return err
+	}
 	query := `
 		INSERT INTO session_review_loops (
 			org_id, session_id, automation_run_id, thread_id, status, source, agent_type,
-			max_passes, completed_passes, review_required, bypassed_by_user_id, bypass_reason,
+			max_passes, fix_mode, completed_passes, review_required, bypassed_by_user_id, bypass_reason,
 			loop_start_checkpoint_key, latest_checkpoint_key, latest_summary, started_by_user_id
 		) VALUES (
 			@org_id, @session_id, @automation_run_id, @thread_id, @status, @source, @agent_type,
-			@max_passes, @completed_passes, @review_required, @bypassed_by_user_id, @bypass_reason,
+			@max_passes, @fix_mode, @completed_passes, @review_required, @bypassed_by_user_id, @bypass_reason,
 			@loop_start_checkpoint_key, @latest_checkpoint_key, @latest_summary, @started_by_user_id
 		)
 		RETURNING id, started_at`
@@ -88,6 +94,7 @@ func createLoopOn(ctx context.Context, q DBTX, loop *models.SessionReviewLoop) e
 		"source":                    loop.Source,
 		"agent_type":                loop.AgentType,
 		"max_passes":                loop.MaxPasses,
+		"fix_mode":                  loop.FixMode,
 		"completed_passes":          loop.CompletedPasses,
 		"review_required":           loop.ReviewRequired,
 		"bypassed_by_user_id":       loop.BypassedByUserID,

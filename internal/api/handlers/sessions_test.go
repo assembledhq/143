@@ -166,7 +166,7 @@ var sessionColumns = []string{
 
 var reviewLoopColumns = []string{
 	"id", "org_id", "session_id", "automation_run_id", "thread_id",
-	"status", "source", "agent_type", "max_passes", "completed_passes", "review_required",
+	"status", "source", "agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 	"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
 	"latest_summary", "started_by_user_id", "started_at", "completed_at",
 }
@@ -175,7 +175,7 @@ func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, sour
 	now := time.Now()
 	return []any{
 		loopID, uuid.New(), sessionID, nil, nil,
-		status, source, "claude_code", 2, 1, false,
+		status, source, "claude_code", 2, "minimal", 1, false,
 		nil, nil, nil, latestCheckpointKey,
 		nil, nil, now, &now,
 	}
