@@ -4414,7 +4414,6 @@ export function SessionDetailContent({ id }: { id: string }) {
       setNewThreadModel("");
       setActiveThreadId(response.data.id);
       setComposerSelectedModel(getInitialComposerSelectedModel(response.data));
-      queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {
       setPendingThreadPreview(null);
