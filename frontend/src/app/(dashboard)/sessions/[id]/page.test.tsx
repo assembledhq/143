@@ -969,7 +969,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
-  it('shows a desktop header add-tab action that creates a tab directly', async () => {
+  it('only shows the desktop add-tab action in the agent tab strip', async () => {
     const sessionId = 'session-header-new-tab';
     const threads: SessionThread[] = [
       {
@@ -1035,8 +1035,10 @@ describe('SessionDetailPage', () => {
     await screen.findByPlaceholderText('Send a message to Codex...');
 
     const headerActions = screen.getByTestId('session-header-actions');
-    const newTabButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
-    await user.click(newTabButton);
+    expect(within(headerActions).queryByRole('button', { name: 'Add agent tab' })).not.toBeInTheDocument();
+
+    const stripAddButton = screen.getByRole('button', { name: 'Add agent tab' });
+    await user.click(stripAddButton);
 
     await waitFor(() => {
       expect(createdThread).toBe(true);
@@ -7753,72 +7755,6 @@ describe('SessionDetailPage', () => {
 
     await waitFor(() => {
       expect(stripAddButton).toHaveFocus();
-    });
-  });
-
-  it('returns focus to the desktop header add-tab trigger when a new tab has no composer', async () => {
-    const sessionId = 'session-header-create-tab-no-composer';
-    const threads: SessionThread[] = [
-      {
-        id: 'thread-main',
-        session_id: sessionId,
-        org_id: 'org-1',
-        agent_type: 'pm_agent',
-        label: 'Planner',
-        status: 'idle',
-        current_turn: 1,
-        created_at: '2026-02-17T07:00:00Z',
-        cost_cents: 0,
-        pending_message_count: 0,
-      },
-    ];
-
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({
-          data: {
-            ...mockSessions[0],
-            id: sessionId,
-            agent_type: 'pm_agent',
-            status: 'idle',
-            sandbox_state: 'snapshotted',
-            threads,
-          },
-        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
-      }),
-      http.post('/api/v1/sessions/:id/threads', async () => {
-        const thread: SessionThread = {
-          id: 'thread-new',
-          session_id: sessionId,
-          org_id: 'org-1',
-          agent_type: 'codex',
-          label: 'Codex 2',
-          status: 'idle',
-          current_turn: 0,
-          created_at: '2026-02-17T07:04:00Z',
-          cost_cents: 0,
-          pending_message_count: 0,
-        };
-        threads.push(thread);
-        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
-      }),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(<SessionDetailContent id={sessionId} />);
-
-    const headerActions = await screen.findByTestId('session-header-actions');
-    const headerAddButton = within(headerActions).getByRole('button', { name: 'Add agent tab' });
-    await user.click(headerAddButton);
-
-    await waitFor(() => {
-      expect(headerAddButton).toHaveFocus();
     });
   });
 

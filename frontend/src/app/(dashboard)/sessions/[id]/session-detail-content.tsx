@@ -426,7 +426,6 @@ type PRActionErrorState = {
   message: string;
 };
 
-type AddTabTriggerSource = "strip" | "header";
 type PendingThreadPreview = Pick<
   SessionThread,
   "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override"
@@ -3901,8 +3900,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [newThreadLabel, setNewThreadLabel] = useState("");
   const focusComposerAfterThreadCreateRef = useRef(false);
   const addTabButtonRef = useRef<HTMLButtonElement>(null);
-  const headerAddTabButtonRef = useRef<HTMLButtonElement>(null);
-  const lastAddTabTriggerSourceRef = useRef<AddTabTriggerSource>("strip");
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
@@ -4441,19 +4438,13 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
 
-      if (lastAddTabTriggerSourceRef.current === "header") {
-        headerAddTabButtonRef.current?.focus();
-        return;
-      }
-
       addTabButtonRef.current?.focus();
     });
 
     return () => window.cancelAnimationFrame(rafID);
   }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
 
-  const handleCreateThreadFrom = useCallback((source: AddTabTriggerSource) => {
-    lastAddTabTriggerSourceRef.current = source;
+  const handleCreateThread = useCallback(() => {
     createThreadMutation.mutate(buildDefaultThreadRequest());
   }, [buildDefaultThreadRequest, createThreadMutation]);
 
@@ -5257,23 +5248,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <LinkedIssueChips session={session} />
               </div>
               <div className="flex items-center gap-2" data-testid="session-header-actions">
-                <Button
-                  ref={headerAddTabButtonRef}
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100"
-                  aria-label="Add agent tab"
-                  title="Add agent tab"
-                  onClick={() => handleCreateThreadFrom("header")}
-                  disabled={createThreadMutation.isPending}
-                >
-                  {createThreadMutation.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Plus className="h-3.5 w-3.5" />
-                  )}
-                </Button>
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
                     variant="ghost"
@@ -5302,7 +5276,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
-            onAddTab={() => handleCreateThreadFrom("strip")}
+            onAddTab={handleCreateThread}
             addTabPending={createThreadMutation.isPending}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
