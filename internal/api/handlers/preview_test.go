@@ -1412,7 +1412,7 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response body should decode as an error response")
 	require.Equal(t, preview.PreviewCapacityCode, resp.Error.Code, "capacity errors should keep their stable API code")
-	require.Equal(t, preview.PreviewCapacityMessage, resp.Error.Message, "capacity errors should show a user-facing recovery message")
+	require.Equal(t, "You have reached your per-user preview limit: 999 active previews out of 4 allowed. Stop one of your previews or ask an admin to raise the per-user preview limit in General settings.", resp.Error.Message, "per-user capacity errors should explain the configured user limit")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
