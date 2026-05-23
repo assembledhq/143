@@ -415,7 +415,7 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 		Network:     baseCfg.Network,
 	}
 
-	if IsConnected(baseCfg) || diffCfg.Install == nil {
+	if IsConnected(baseCfg) {
 		resolved.Install = cloneInstallConfig(baseCfg.Install)
 	} else {
 		resolved.Install = cloneInstallConfig(diffCfg.Install)

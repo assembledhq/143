@@ -766,6 +766,36 @@ func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 	}
 }
 
+func TestResolveConfig_NonConnectedCanRemoveInstall(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := &models.PreviewConfig{
+		Version: "3",
+		Primary: "app",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		Credentials:    models.CredentialConfig{Mode: "none"},
+	}
+	diffCfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"go", "run", "."}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+	}
+
+	resolved := ResolveConfig(baseCfg, diffCfg)
+
+	require.Nil(t, resolved.Install, "non-connected preview should use nil install from diff instead of keeping stale base install")
+	require.Equal(t, []string{"go", "run", "."}, resolved.Services["app"].Command, "non-connected preview should still resolve runtime service fields from diff")
+}
+
 func TestIsConnected(t *testing.T) {
 	t.Parallel()
 
