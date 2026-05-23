@@ -34,7 +34,7 @@ func (envCredentialProvider) defaultActiveStatus(cred *models.DecryptedCredentia
 	}
 	if cred.Status == "" {
 		copy := *cred
-		copy.Status = models.CodingCredentialStatusActive
+		copy.Status = models.CredentialStatusActive
 		return &copy
 	}
 	return cred
@@ -44,7 +44,7 @@ func (envCredentialProvider) defaultActiveStatuses(creds []models.DecryptedCrede
 	out := make([]models.DecryptedCredential, len(creds))
 	for i, c := range creds {
 		if c.Status == "" {
-			c.Status = models.CodingCredentialStatusActive
+			c.Status = models.CredentialStatusActive
 		}
 		out[i] = c
 	}
@@ -89,7 +89,7 @@ func defaultUserActiveStatus(cred *models.DecryptedUserCredential) *models.Decry
 	}
 	if cred.Status == "" {
 		copy := *cred
-		copy.Status = models.CodingCredentialStatusActive
+		copy.Status = models.CredentialStatusActive
 		return &copy
 	}
 	return cred
@@ -1285,12 +1285,12 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 			name: "disabled personal row is skipped",
 			userCred: &envUserCredentialProvider{
 				personal: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "personal"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "personal"}},
 				},
 			},
 			orgCred: &envCredentialProvider{
 				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
 				},
 			},
 			wantKey: "org",
@@ -1299,12 +1299,12 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 			name: "invalid team row is skipped, falls through to org",
 			userCred: &envUserCredentialProvider{
 				team: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusInvalid, Config: models.AnthropicConfig{APIKey: "team"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusInvalid, Config: models.AnthropicConfig{APIKey: "team"}},
 				},
 			},
 			orgCred: &envCredentialProvider{
 				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
 				},
 			},
 			wantKey: "org",
@@ -1314,7 +1314,7 @@ func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
 			userCred: &envUserCredentialProvider{},
 			orgCred: &envCredentialProvider{
 				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CodingCredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "org"}},
+					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "org"}},
 				},
 			},
 			wantNil: true,
@@ -1355,7 +1355,7 @@ func TestAgentEnvUnifiedResolverEmptyDoesNotFallbackToLegacy(t *testing.T) {
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
 			models.ProviderAnthropic: {
 				ID:     legacyCredID,
-				Status: models.CodingCredentialStatusActive,
+				Status: models.CredentialStatusActive,
 				Config: models.AnthropicConfig{APIKey: "legacy-key"},
 			},
 		},
@@ -1396,7 +1396,7 @@ func TestAgentEnvUnifiedListErrorFallsBackToLegacy(t *testing.T) {
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
 			models.ProviderAnthropic: {
 				ID:     legacyCredID,
-				Status: models.CodingCredentialStatusActive,
+				Status: models.CredentialStatusActive,
 				Config: models.AnthropicConfig{APIKey: "legacy-key"},
 			},
 		},
@@ -1424,7 +1424,7 @@ func TestAgentEnvLegacyFallbackWhenUnifiedUnwired(t *testing.T) {
 
 	userCred := &envUserCredentialProvider{
 		personal: map[models.ProviderName]*models.DecryptedUserCredential{
-			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
+			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
 		},
 	}
 

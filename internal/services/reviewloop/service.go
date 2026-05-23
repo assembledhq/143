@@ -112,7 +112,7 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	if err != nil {
 		return nil, err
 	}
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		return nil, ErrSessionSnapshotExpired
 	}
 	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {

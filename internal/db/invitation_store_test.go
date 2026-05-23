@@ -52,7 +52,7 @@ func TestInvitationStore_Create(t *testing.T) {
 	err = store.Create(context.Background(), inv)
 	require.NoError(t, err)
 	require.Equal(t, generatedID, inv.ID)
-	require.Equal(t, "pending", inv.Status)
+	require.Equal(t, models.InvitationStatusPending, inv.Status)
 	require.Equal(t, now, inv.CreatedAt)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -145,7 +145,7 @@ func TestInvitationStore_GetByToken(t *testing.T) {
 	require.Equal(t, id, inv.ID)
 	require.NotNil(t, inv.Email)
 	require.Equal(t, "user@example.com", *inv.Email)
-	require.Equal(t, "pending", inv.Status)
+	require.Equal(t, models.InvitationStatusPending, inv.Status)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -314,7 +314,7 @@ func TestInvitationStore_GetByID(t *testing.T) {
 	require.Equal(t, id, inv.ID)
 	require.NotNil(t, inv.Email)
 	require.Equal(t, "invitee@example.com", *inv.Email)
-	require.Equal(t, "pending", inv.Status)
+	require.Equal(t, models.InvitationStatusPending, inv.Status)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -375,7 +375,7 @@ func TestInvitationStore_ListPendingForUser(t *testing.T) {
 	require.Len(t, rows, 2)
 	require.Equal(t, "Acme", rows[0].OrgName)
 	require.Equal(t, "Alice", rows[0].InviterName)
-	require.Equal(t, "member", rows[0].Role)
+	require.Equal(t, models.RoleMember, rows[0].Role)
 	require.Equal(t, "Globex", rows[1].OrgName)
 	require.Equal(t, "Bob", rows[1].InviterName)
 	require.NoError(t, mock.ExpectationsWereMet())

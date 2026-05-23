@@ -752,8 +752,8 @@ func terminalExpiryAt(session *models.Session) time.Time {
 	return time.Now().Add(sessionStreamExpiryAfter)
 }
 
-func isTerminalSessionStatus(status string) bool {
-	switch models.SessionStatus(status) {
+func isTerminalSessionStatus(status models.SessionStatus) bool {
+	switch status {
 	case models.SessionStatusCompleted, models.SessionStatusFailed, models.SessionStatusCancelled, models.SessionStatusPRCreated, models.SessionStatusSkipped:
 		return true
 	default:

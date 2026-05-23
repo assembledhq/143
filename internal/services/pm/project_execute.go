@@ -28,7 +28,7 @@ func (s *Service) executeProjectPlan(ctx context.Context, orgID uuid.UUID, pp *P
 	if pp.StatusRecommendation != "" {
 		switch pp.StatusRecommendation {
 		case "completed":
-			if err := s.projects.UpdateStatus(ctx, orgID, pp.ProjectID, string(models.ProjectStatusCompleted)); err != nil {
+			if err := s.projects.UpdateStatus(ctx, orgID, pp.ProjectID, models.ProjectStatusCompleted); err != nil {
 				s.logger.Warn().Err(err).Msg("failed to update project status to completed")
 			}
 			// Record cycle even on completion.
@@ -220,9 +220,9 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 			OrgID:          orgID,
 			PrimaryIssueID: task.IssueID,
 			AgentType:      agentType,
-			Status:         string(models.SessionStatusPending),
-			AutonomyLevel:  string(models.DefaultSessionAutonomy),
-			TokenMode:      tokenModeFromTaskComplexity(task.Complexity),
+			Status:         models.SessionStatusPending,
+			AutonomyLevel:  models.DefaultSessionAutonomy,
+			TokenMode:      models.SessionTokenMode(tokenModeFromTaskComplexity(task.Complexity)),
 			PMPlanID:       &planID,
 			Title:          &task.Title,
 			PMApproach:     &approach,
@@ -263,12 +263,12 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 // canDispatchForProject returns how many tasks can be dispatched for this project
 // based on execution mode and currently running tasks.
 func (s *Service) canDispatchForProject(ctx context.Context, orgID uuid.UUID, project *models.Project) int {
-	runningCount, err := s.projectTasks.CountByProjectAndStatus(ctx, orgID, project.ID, string(models.ProjectTaskStatusRunning))
+	runningCount, err := s.projectTasks.CountByProjectAndStatus(ctx, orgID, project.ID, models.ProjectTaskStatusRunning)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("failed to count running project tasks")
 		return 0
 	}
-	delegatedCount, err := s.projectTasks.CountByProjectAndStatus(ctx, orgID, project.ID, string(models.ProjectTaskStatusDelegated))
+	delegatedCount, err := s.projectTasks.CountByProjectAndStatus(ctx, orgID, project.ID, models.ProjectTaskStatusDelegated)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("failed to count delegated project tasks")
 		return 0

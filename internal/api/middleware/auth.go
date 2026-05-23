@@ -241,7 +241,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	// to behave correctly during the compatibility window. New code should
 	// read ActiveRoleFromContext and OrgIDFromContext directly.
 	if activeRole != "" {
-		user.Role = activeRole
+		user.Role = models.Role(activeRole)
 		user.OrgID = activeOrgID
 	}
 
@@ -340,7 +340,7 @@ func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUI
 		} else {
 			m, err := stores.Memberships.Get(r.Context(), userID, requested)
 			if err == nil {
-				return membershipResolution{orgID: m.OrgID, role: m.Role, fromHeader: true}, nil
+				return membershipResolution{orgID: m.OrgID, role: string(m.Role), fromHeader: true}, nil
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
 				return membershipResolution{}, err
@@ -354,7 +354,7 @@ func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUI
 	if session.LastOrgID != nil {
 		m, err := stores.Memberships.Get(r.Context(), userID, *session.LastOrgID)
 		if err == nil {
-			return membershipResolution{orgID: m.OrgID, role: m.Role, membershipRevoked: revoked}, nil
+			return membershipResolution{orgID: m.OrgID, role: string(m.Role), membershipRevoked: revoked}, nil
 		}
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return membershipResolution{}, err
@@ -373,7 +373,7 @@ func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUI
 		}
 		return membershipResolution{}, err
 	}
-	return membershipResolution{orgID: m.OrgID, role: m.Role, membershipRevoked: revoked}, nil
+	return membershipResolution{orgID: m.OrgID, role: string(m.Role), membershipRevoked: revoked}, nil
 }
 
 func maybeRefreshSession(w http.ResponseWriter, r *http.Request, store *db.AuthSessionStore, csrfKey []byte, logger zerolog.Logger, session models.AuthSession) {

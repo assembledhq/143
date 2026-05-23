@@ -61,7 +61,7 @@ type CredentialStore interface {
 	ListByProvider(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCredential, error)
 	ClaimNextRoundRobin(ctx context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error)
 	DisableByID(ctx context.Context, scope models.Scope, id uuid.UUID) error
-	UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error
 	UpsertByID(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error
 	ExistsForProviderByID(ctx context.Context, scope models.Scope, id uuid.UUID, provider models.ProviderName) (bool, error)
 }
@@ -698,7 +698,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
 			return nil, wrapAuthInvalid(fmt.Errorf("refresh token already used by another client"))
 		}
-		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, "invalid"); err != nil {
+		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); err != nil {
 			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
 		return nil, wrapAuthInvalid(fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode))
@@ -810,7 +810,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		// then try the next one. RefreshTokenByID may have already done
 		// this for some HTTP error paths; the second update is a no-op.
 		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, "invalid"); statusErr != nil {
+		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
 			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
 		}
 	}

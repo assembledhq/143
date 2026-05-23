@@ -23,13 +23,13 @@ func (m *gatherIssueStoreMock) GetByID(ctx context.Context, orgID, issueID uuid.
 }
 
 func (m *gatherIssueStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error) {
-	if err := m.errByKey[filters.Status]; err != nil {
+	if err := m.errByKey[string(filters.Status)]; err != nil {
 		return nil, err
 	}
-	return m.byStatus[filters.Status], nil
+	return m.byStatus[string(filters.Status)], nil
 }
 
-func (m *gatherIssueStoreMock) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+func (m *gatherIssueStoreMock) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status models.IssueStatus) error {
 	return nil
 }
 
@@ -76,7 +76,7 @@ func (m *gatherSessionStoreMock) ListRecentByOrg(ctx context.Context, orgID uuid
 	return m.recent, nil
 }
 
-func (m *gatherSessionStoreMock) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
+func (m *gatherSessionStoreMock) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	return nil
 }
 

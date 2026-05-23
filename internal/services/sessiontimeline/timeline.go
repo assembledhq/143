@@ -248,7 +248,13 @@ func metadataType(log *models.SessionLog) string {
 }
 
 func isHiddenLog(log *models.SessionLog) bool {
-	return parseMetadata(log.Metadata).Visibility == "hidden"
+	return parseMetadata(log.Metadata).Visibility == "hidden" || isRecoverableCodexRouterDiagnostic(log.Message)
+}
+
+func isRecoverableCodexRouterDiagnostic(message string) bool {
+	return strings.Contains(message, "codex_core::tools::router:") &&
+		(strings.Contains(message, "write_stdin failed: stdin is closed for this session") ||
+			strings.Contains(message, "apply_patch verification failed: Failed to find expected lines"))
 }
 
 func parseMetadata(raw json.RawMessage) logMetadata {

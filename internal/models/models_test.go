@@ -17,6 +17,7 @@ func TestRepository_IsActive(t *testing.T) {
 		want   bool
 	}{
 		{RepositoryStatusActive, true},
+		{RepositoryStatusPaused, false},
 		{RepositoryStatusDisconnected, false},
 		{"", false},
 		{"unknown", false},
@@ -26,7 +27,7 @@ func TestRepository_IsActive(t *testing.T) {
 		tc := tc
 		t.Run(string(tc.status), func(t *testing.T) {
 			t.Parallel()
-			repo := Repository{Status: string(tc.status)}
+			repo := Repository{Status: tc.status}
 			if got := repo.IsActive(); got != tc.want {
 				t.Fatalf("IsActive() = %v, want %v (status %q)", got, tc.want, tc.status)
 			}
@@ -50,7 +51,7 @@ func TestSessionListItem_MarshalJSON_PreservesEnrichment(t *testing.T) {
 			InteractionMode:  SessionInteractionModeSingleRun,
 			ValidationPolicy: SessionValidationPolicyOnTurnComplete,
 			AgentType:        AgentTypeClaudeCode,
-			Status:           string(SessionStatusRunning),
+			Status:           SessionStatusRunning,
 			AutonomyLevel:    "supervised",
 			TokenMode:        "low",
 			LastActivityAt:   now,
@@ -60,7 +61,7 @@ func TestSessionListItem_MarshalJSON_PreservesEnrichment(t *testing.T) {
 		LastViewedAt: &now,
 		PRSummary: &PRSummary{
 			Status:   "open",
-			CIStatus: "green",
+			CIStatus: PullRequestCIStatusSuccess,
 			Number:   prNumber,
 			URL:      "https://example.com/pr/42",
 		},
@@ -184,7 +185,7 @@ func TestSessionDetail_MarshalJSON_PreservesThreads(t *testing.T) {
 			Origin:           SessionOriginIssueTrigger,
 			InteractionMode:  SessionInteractionModeSingleRun,
 			ValidationPolicy: SessionValidationPolicyOnTurnComplete,
-			Status:           string(SessionStatusRunning),
+			Status:           SessionStatusRunning,
 			LastActivityAt:   time.Now().UTC(),
 			CreatedAt:        time.Now().UTC(),
 		},

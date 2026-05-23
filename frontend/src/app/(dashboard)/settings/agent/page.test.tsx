@@ -309,6 +309,23 @@ describe("Agent settings page", () => {
 
     expect(screen.queryByText("Agent-specific access")).not.toBeInTheDocument();
   });
+
+  it("shows a shared empty state when the org fallback stack has no auths", async () => {
+    installHandlers();
+    server.use(
+      http.get("/api/v1/settings/coding-auths", () =>
+        HttpResponse.json({
+          data: [],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText("No org coding auths yet")).toBeInTheDocument();
+    expect(screen.getByText(/Add an org-level auth so coding-agent sessions/)).toBeInTheDocument();
+  });
 });
 
 describe("reorderRows", () => {

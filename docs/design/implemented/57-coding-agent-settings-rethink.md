@@ -9,6 +9,7 @@ Implemented in this pass:
 - Added an organization-scoped coding-auth stack API with persisted row priority, create/update/disable operations, and reorder support.
 - Reworked the organization settings screen around a prioritized auth table with explicit default state, move actions, and a right-side detail sheet.
 - Reworked the personal settings screen around a default-auth card, backup list, and clearer effective-resolution summary.
+- Standardized the empty auth-stack states on the shared inline empty-state component. Personal auths, account-level org fallback, and org-level coding auths now render as explicit setup states with a clear title, explanatory sentence, and local action where the viewer can act.
 - Updated the system overview to reference this design from `implemented/`.
 
 Notable boundary:

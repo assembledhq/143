@@ -216,7 +216,7 @@ type LinksChangedNotifier func(ctx context.Context, orgID, sessionID uuid.UUID, 
 // IntegrationReader is the narrow surface the service needs to check
 // integration status for an org.
 type IntegrationReader interface {
-	GetByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider string) (models.Integration, error)
+	GetByOrgAndProvider(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider) (models.Integration, error)
 }
 
 // IntegrationWriter is the optional surface used by Mark/ClearIntegration*
@@ -224,11 +224,11 @@ type IntegrationReader interface {
 // or a successful probe. Optional and nil-safe so test harnesses (and any
 // wiring path that doesn't need write access) can stay minimal.
 type IntegrationWriter interface {
-	UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status string) error
+	UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status models.IntegrationStatus) error
 	UpdateConfig(ctx context.Context, orgID, integrationID uuid.UUID, config json.RawMessage) error
 	// UpdateStatusAndConfig is used by Mark/ClearIntegration* when both
 	// fields need to change so the row can't be observed mid-flip.
-	UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status string, config json.RawMessage) error
+	UpdateStatusAndConfig(ctx context.Context, orgID, integrationID uuid.UUID, status models.IntegrationStatus, config json.RawMessage) error
 }
 
 // CredentialReader is the narrow surface the service needs to resolve a
@@ -640,7 +640,7 @@ func (s *Service) Enabled(ctx context.Context, orgID uuid.UUID) bool {
 	if s == nil || s.integrations == nil {
 		return false
 	}
-	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, "linear")
+	integration, err := s.integrations.GetByOrgAndProvider(ctx, orgID, models.IntegrationProviderLinear)
 	if err != nil {
 		return false
 	}

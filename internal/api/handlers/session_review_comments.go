@@ -398,7 +398,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 		if h.threadStore != nil {
 			threads, err := h.threadStore.ListBySession(r.Context(), orgID, sessionID)
 			if err != nil {
-				if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+				if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, models.SessionStatusIdle); revertErr != nil {
 					h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after thread lookup failure")
 				}
 				writeError(w, r, http.StatusInternalServerError, "THREAD_LOOKUP_FAILED", "failed to look up session threads")
@@ -421,7 +421,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 		}
 
 		if err := h.messageStore.Create(r.Context(), msg); err != nil {
-			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, models.SessionStatusIdle); revertErr != nil {
 				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after message creation failure")
 			}
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message")
@@ -447,7 +447,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 					h.logger.Error().Err(delErr).Int64("message_id", msg.ID).Msg("failed to delete orphaned message after enqueue failure")
 				}
 			}
-			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, string(models.SessionStatusIdle)); revertErr != nil {
+			if revertErr := h.sessionStore.UpdateStatus(r.Context(), orgID, sessionID, models.SessionStatusIdle); revertErr != nil {
 				h.logger.Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session to idle after enqueue failure")
 			}
 			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job")

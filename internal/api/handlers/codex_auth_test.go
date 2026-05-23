@@ -99,7 +99,7 @@ func (s *codexCredentialStoreStub) DisableByID(_ context.Context, _ models.Scope
 	return nil
 }
 
-func (s *codexCredentialStoreStub) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ string) error {
+func (s *codexCredentialStoreStub) UpdateStatusByID(_ context.Context, _ models.Scope, _ uuid.UUID, _ models.CodingCredentialRowStatus) error {
 	return nil
 }
 

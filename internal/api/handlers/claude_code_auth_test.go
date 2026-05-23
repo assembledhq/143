@@ -98,7 +98,7 @@ func (s *claudeStoreStub) DisableByID(context.Context, models.Scope, uuid.UUID) 
 	s.disabled = true
 	return nil
 }
-func (s *claudeStoreStub) UpdateStatusByID(context.Context, models.Scope, uuid.UUID, string) error {
+func (s *claudeStoreStub) UpdateStatusByID(context.Context, models.Scope, uuid.UUID, models.CodingCredentialRowStatus) error {
 	return nil
 }
 func (s *claudeStoreStub) UpsertByID(context.Context, models.Scope, uuid.UUID, models.ProviderConfig) error {

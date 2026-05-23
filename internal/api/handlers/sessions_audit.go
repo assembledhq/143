@@ -17,12 +17,12 @@ func sessionAuditSnapshot(session *models.Session, issue *models.Issue, extra ma
 	details := map[string]any{
 		"session_id":        session.ID.String(),
 		"agent_type":        string(session.AgentType),
-		"status":            session.Status,
-		"origin":            session.Origin,
-		"interaction_mode":  session.InteractionMode,
-		"validation_policy": session.ValidationPolicy,
-		"autonomy_level":    session.AutonomyLevel,
-		"token_mode":        session.TokenMode,
+		"status":            string(session.Status),
+		"origin":            string(session.Origin),
+		"interaction_mode":  string(session.InteractionMode),
+		"validation_policy": string(session.ValidationPolicy),
+		"autonomy_level":    string(session.AutonomyLevel),
+		"token_mode":        string(session.TokenMode),
 	}
 	if session.PrimaryIssueID != nil {
 		details["issue_id"] = session.PrimaryIssueID.String()

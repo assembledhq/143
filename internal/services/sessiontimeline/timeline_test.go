@@ -34,7 +34,7 @@ func makeLog(t *testing.T, overrides func(*models.SessionLog), createdAt string,
 		SessionID:  uuid.MustParse("11111111-1111-1111-1111-111111111111"),
 		OrgID:      uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 		TurnNumber: 1,
-		Level:      level,
+		Level:      models.SessionLogLevel(level),
 		Message:    message,
 		Timestamp:  mustTime(t, createdAt),
 	}
@@ -99,6 +99,18 @@ func TestComposeTimeline_HiddenVisibilityMetadataKeepsErrorAsLog(t *testing.T) {
 	result := Compose(nil, logs)
 	require.Len(t, result, 1, "hidden diagnostic should remain in the timeline as a hidden log entry")
 	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "hidden diagnostic should not be returned as a user-visible error")
+}
+
+func TestComposeTimeline_CodexApplyPatchVerificationDiagnosticKeepsErrorAsLog(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, nil, "2026-01-01T00:00:01Z", "error", "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx:\n    const formattedMessage = composerPlanMode && activeThread?.agent_type === \"claude_code\""),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 1, "recoverable Codex apply_patch diagnostics should remain available in the timeline")
+	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "recoverable Codex apply_patch diagnostics should not be returned as user-visible errors")
 }
 
 func TestComposeTimeline_DedupesLegacyRowsWithoutMetadata(t *testing.T) {

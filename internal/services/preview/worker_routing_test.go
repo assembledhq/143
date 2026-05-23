@@ -247,7 +247,7 @@ func TestWorkerSelector_SelectStartNode(t *testing.T) {
 		_, err = selector.SelectStartNode(context.Background(), orgID, &models.Session{
 			ID:           sessionID,
 			ContainerID:  &containerID,
-			SandboxState: string(models.SandboxStateRunning),
+			SandboxState: models.SandboxStateRunning,
 		})
 		require.ErrorIs(t, err, ErrLegacySessionWorkerOwnership, "SelectStartNode should fail closed for legacy live sessions")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

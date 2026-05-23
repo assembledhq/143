@@ -95,7 +95,7 @@ func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row mod
 		Label:          row.Label,
 		EncryptedCfg:   encrypted,
 		Priority:       row.Priority,
-		Status:         row.Status,
+		Status:         models.CodingCredentialRowStatus(row.Status),
 		CreatedBy:      row.CreatedBy,
 		LastVerifiedAt: row.LastVerifiedAt,
 		CreatedAt:      row.CreatedAt,
@@ -180,7 +180,7 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		Label:                   label,
 		EncryptedCfg:            encrypted,
 		Priority:                priority,
-		Status:                  row.Status,
+		Status:                  models.CodingCredentialRowStatus(row.Status),
 		CreatedBy:               &row.UserID,
 		LastVerifiedAt:          row.LastVerifiedAt,
 		CreatedAt:               row.CreatedAt,
@@ -380,7 +380,7 @@ type mirroredRow struct {
 	Label          string
 	EncryptedCfg   []byte
 	Priority       int
-	Status         string
+	Status         models.CodingCredentialRowStatus
 	CreatedBy      *uuid.UUID
 	LastVerifiedAt *time.Time
 	CreatedAt      time.Time
@@ -413,7 +413,7 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 		"label":                       row.Label,
 		"config":                      row.EncryptedCfg,
 		"priority":                    row.Priority,
-		"status":                      row.Status,
+		"status":                      string(row.Status),
 		"created_by":                  row.CreatedBy,
 		"last_verified_at":            row.LastVerifiedAt,
 		"created_at":                  row.CreatedAt,
@@ -475,7 +475,7 @@ func (s *CodingCredentialStore) updateMirroredRowByNaturalKey(ctx context.Contex
 		"label":                       row.Label,
 		"config":                      row.EncryptedCfg,
 		"priority":                    row.Priority,
-		"status":                      row.Status,
+		"status":                      string(row.Status),
 		"last_verified_at":            row.LastVerifiedAt,
 		"updated_at":                  row.UpdatedAt,
 		"team_default_origin_user_id": row.TeamDefaultOriginUserID,

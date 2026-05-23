@@ -15,7 +15,7 @@ import (
 func TestAutomationAuditSnapshot_Interval(t *testing.T) {
 	t.Parallel()
 
-	v, u := 3, "days"
+	v, u := 3, models.ScheduleUnitDays
 	runAt := "09:35"
 	a := &models.Automation{
 		Name:          "Refresh caches",
@@ -60,7 +60,7 @@ func TestAutomationAuditDiff_OnlyChangedFields(t *testing.T) {
 	t.Parallel()
 
 	oldV, newV := 1, 7
-	oldU, newU := "days", "days"
+	oldU, newU := models.ScheduleUnitDays, models.ScheduleUnitDays
 	old := models.Automation{
 		Name: "a", Goal: "g", ExecutionMode: "sequential", MaxConcurrent: 1,
 		BaseBranch: "main", IdentityScope: models.AutomationIdentityScopeOrg, ScheduleType: models.AutomationScheduleInterval,

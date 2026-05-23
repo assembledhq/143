@@ -374,7 +374,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 
 	ciStatus := deriveAggregateCIStatus(summary.Checks)
-	if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, ciStatus); err != nil {
+	if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, models.PullRequestCIStatus(ciStatus)); err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during pull request health sync")
 	}
 
@@ -623,17 +623,17 @@ func (s *PRService) repairWorkspaceMode(session models.Session) (models.PullRequ
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
 		return models.PullRequestRepairWorkspaceModePRHeadReconstruction, "missing snapshot"
 	}
-	if session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == models.SandboxStateDestroyed {
 		return models.PullRequestRepairWorkspaceModePRHeadReconstruction, "destroyed sandbox"
 	}
 	switch session.Status {
-	case string(models.SessionStatusIdle),
-		string(models.SessionStatusCompleted),
-		string(models.SessionStatusPRCreated),
-		string(models.SessionStatusFailed),
-		string(models.SessionStatusCancelled),
-		string(models.SessionStatusAwaitingInput),
-		string(models.SessionStatusNeedsHumanGuidance):
+	case models.SessionStatusIdle,
+		models.SessionStatusCompleted,
+		models.SessionStatusPRCreated,
+		models.SessionStatusFailed,
+		models.SessionStatusCancelled,
+		models.SessionStatusAwaitingInput,
+		models.SessionStatusNeedsHumanGuidance:
 		return models.PullRequestRepairWorkspaceModeSnapshotContinuation, ""
 	default:
 		return models.PullRequestRepairWorkspaceModeSnapshotContinuation, "session is not resumable"
@@ -970,13 +970,13 @@ func stripWhitespace(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
 
-func isSessionTerminalStatus(status string) bool {
+func isSessionTerminalStatus(status models.SessionStatus) bool {
 	switch status {
-	case string(models.SessionStatusCompleted),
-		string(models.SessionStatusPRCreated),
-		string(models.SessionStatusFailed),
-		string(models.SessionStatusCancelled),
-		string(models.SessionStatusSkipped):
+	case models.SessionStatusCompleted,
+		models.SessionStatusPRCreated,
+		models.SessionStatusFailed,
+		models.SessionStatusCancelled,
+		models.SessionStatusSkipped:
 		return true
 	default:
 		return false

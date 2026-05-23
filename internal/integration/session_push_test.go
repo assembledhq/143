@@ -44,7 +44,7 @@ func TestIntegration_SendMessage_EnqueuesContinueSessionJob(t *testing.T) {
 	orgID := seedOrg(t, pool)
 	user := seedUser(t, pool, orgID)
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusIdle),
+		Status:      models.SessionStatusIdle,
 		CurrentTurn: 1,
 	})
 
@@ -83,7 +83,7 @@ func TestIntegration_SendMessage_EnqueuesContinueSessionJob(t *testing.T) {
 	//    after ClaimIdle would produce frozen sessions in production.
 	updated, err := db.NewSessionStore(pool).GetByID(context.Background(), orgID, session.ID)
 	require.NoError(t, err)
-	require.Equal(t, string(models.SessionStatusRunning), updated.Status,
+	require.Equal(t, models.SessionStatusRunning, updated.Status,
 		"ClaimIdle should have transitioned the session to running")
 
 	// 3. jobs — exactly one continue_session job, queue=agent, payload
@@ -114,7 +114,7 @@ func TestIntegration_SendMessage_RunningSessionSkipsJob(t *testing.T) {
 	orgID := seedOrg(t, pool)
 	user := seedUser(t, pool, orgID)
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusRunning),
+		Status:      models.SessionStatusRunning,
 		CurrentTurn: 2,
 	})
 
@@ -149,7 +149,7 @@ func TestIntegration_SendMessage_RejectsDestroyedSnapshot(t *testing.T) {
 	orgID := seedOrg(t, pool)
 	user := seedUser(t, pool, orgID)
 	session := seedSession(t, pool, orgID, sessionOpts{
-		Status:      string(models.SessionStatusCompleted),
+		Status:      models.SessionStatusCompleted,
 		CurrentTurn: 3,
 	})
 	// Mark the snapshot destroyed (the reaper does this in production).

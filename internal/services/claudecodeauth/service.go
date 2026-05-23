@@ -136,7 +136,7 @@ type CredentialStore interface {
 	ListByProvider(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCredential, error)
 	ClaimNextLabeledRoundRobin(ctx context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error)
 	DisableByID(ctx context.Context, scope models.Scope, id uuid.UUID) error
-	UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	UpdateStatusByID(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error
 	UpsertByID(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error
 	ExistsForProviderByID(ctx context.Context, scope models.Scope, id uuid.UUID, provider models.ProviderName) (bool, error)
 	// HasActiveLabeled reports whether at least one active labeled credential
@@ -405,7 +405,7 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 	// Only pending_auth rows should be completable. If the row is already
 	// active or has been invalidated, fail closed rather than risking
 	// overwriting live tokens with a replayed (and expired) code.
-	if cred.Status != string(SubscriptionStatusPendingAuth) {
+	if cred.Status != models.CredentialStatusPendingAuth {
 		return nil, ErrPendingAuthNotFound
 	}
 	// Reject pastes that arrive after the TTL window. UpdatedAt moves
@@ -677,7 +677,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
 			return nil, fmt.Errorf("refresh token already used by another client")
 		}
-		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, "invalid"); err != nil {
+		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); err != nil {
 			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
 		// Drop the per-credential refresh mutex so sync.Map doesn't grow
@@ -806,7 +806,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		}
 
 		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, "invalid"); statusErr != nil {
+		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
 			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
 		}
 		// Drop the per-credential refresh mutex — the credential is out of

@@ -86,6 +86,35 @@ describe("buildTimeline", () => {
     expect(result[0].kind).toBe("error");
   });
 
+  it("keeps hidden error logs behind the log toggle", () => {
+    const logs = [
+      makeLog({
+        id: 1,
+        created_at: "2026-01-01T00:00:01Z",
+        level: "error",
+        message: "benign diagnostic",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic" },
+      }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
+  });
+
+  it("keeps recoverable Codex apply_patch diagnostics behind the log toggle", () => {
+    const logs = [
+      makeLog({
+        id: 1,
+        created_at: "2026-01-01T00:00:01Z",
+        level: "error",
+        message: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx:\n    const formattedMessage = composerPlanMode && activeThread?.agent_type === \"claude_code\"",
+      }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
+  });
+
   it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {
     const logs = [
       makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text" }),

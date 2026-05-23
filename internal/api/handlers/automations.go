@@ -202,7 +202,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent    *int                            `json:"max_concurrent"`
 		BaseBranch       *string                         `json:"base_branch"`
 		IdentityScope    *models.AutomationIdentityScope `json:"identity_scope"`
-		ScheduleType     *string                         `json:"schedule_type"`
+		ScheduleType     *models.AutomationScheduleType  `json:"schedule_type"`
 		IntervalValue    *int                            `json:"interval_value"`
 		IntervalUnit     *models.ScheduleUnit            `json:"interval_unit"`
 		IntervalRunAt    *string                         `json:"interval_run_at"`
@@ -276,7 +276,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	scheduleType := models.AutomationScheduleInterval
 	if req.ScheduleType != nil {
 		scheduleType = *req.ScheduleType
-		if err := models.ValidateAutomationScheduleType(scheduleType); err != nil {
+		if err := scheduleType.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
@@ -298,11 +298,11 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// persist them as NULL. The DB CHECK constraint
 	// (chk_automations_schedule_fields) also enforces this XOR relationship.
 	var intervalValuePtr *int
-	var intervalUnitPtr *string
+	var intervalUnitPtr *models.ScheduleUnit
 	var intervalRunAtPtr *string
 	if scheduleType == models.AutomationScheduleInterval {
 		intervalValue := 1
-		intervalUnit := "days"
+		intervalUnit := models.ScheduleUnitDays
 		if req.IntervalValue != nil {
 			if *req.IntervalValue <= 0 || *req.IntervalValue > 365 {
 				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL", "interval_value must be between 1 and 365")
@@ -315,7 +315,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
 				return
 			}
-			intervalUnit = string(*req.IntervalUnit)
+			intervalUnit = *req.IntervalUnit
 		}
 		intervalValuePtr = &intervalValue
 		intervalUnitPtr = &intervalUnit
@@ -343,13 +343,13 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		cronExpressionPtr = &expr
 	}
 
-	execMode := "sequential"
+	execMode := models.AutomationExecutionModeSequential
 	if req.ExecutionMode != nil && *req.ExecutionMode != "" {
 		if err := req.ExecutionMode.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
 			return
 		}
-		execMode = string(*req.ExecutionMode)
+		execMode = models.AutomationExecutionMode(*req.ExecutionMode)
 	}
 
 	maxConcurrent := 1
@@ -505,7 +505,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent    *int                            `json:"max_concurrent"`
 		BaseBranch       *string                         `json:"base_branch"`
 		IdentityScope    *models.AutomationIdentityScope `json:"identity_scope"`
-		ScheduleType     *string                         `json:"schedule_type"`
+		ScheduleType     *models.AutomationScheduleType  `json:"schedule_type"`
 		IntervalValue    *int                            `json:"interval_value"`
 		IntervalUnit     *models.ScheduleUnit            `json:"interval_unit"`
 		IntervalRunAt    *string                         `json:"interval_run_at"`
@@ -624,7 +624,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_EXECUTION_MODE", err.Error())
 			return
 		}
-		automation.ExecutionMode = string(*req.ExecutionMode)
+		automation.ExecutionMode = models.AutomationExecutionMode(*req.ExecutionMode)
 	}
 	if req.IdentityScope != nil {
 		identityScope := models.AutomationIdentityScope(*req.IdentityScope)
@@ -694,7 +694,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// against an interval automation) which masked client bugs.
 	effectiveScheduleType := automation.ScheduleType
 	if req.ScheduleType != nil {
-		if err := models.ValidateAutomationScheduleType(*req.ScheduleType); err != nil {
+		if err := req.ScheduleType.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
@@ -754,7 +754,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
 			return
 		}
-		intervalUnit := string(*req.IntervalUnit)
+		intervalUnit := *req.IntervalUnit
 		automation.IntervalUnit = &intervalUnit
 		scheduleChanged = true
 	}

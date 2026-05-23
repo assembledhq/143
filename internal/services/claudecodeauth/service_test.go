@@ -104,10 +104,10 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, scope models.
 	for _, cred := range m.creds {
 		if m.scopesMatch(cred.ID, scope) && cred.Provider == cfg.Provider() && cred.Label == label {
 			if cred.Status != "pending_auth" && cred.Status != "disabled" {
-				return nil, &db.ErrCredentialLabelTaken{Label: label, ExistingStatus: cred.Status}
+				return nil, &db.ErrCredentialLabelTaken{Label: label, ExistingStatus: string(cred.Status)}
 			}
 			cred.Config = cfg
-			cred.Status = "pending_auth"
+			cred.Status = models.CredentialStatusPendingAuth
 			cred.UpdatedAt = now
 			return &cred.ID, nil
 		}
@@ -195,14 +195,14 @@ func (m *mockCredentialStore) DisableByID(_ context.Context, scope models.Scope,
 		return m.disableErr
 	}
 	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) {
-		cred.Status = "disabled"
+		cred.Status = models.CredentialStatusDisabled
 	}
 	return nil
 }
 
-func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, scope models.Scope, id uuid.UUID, status string) error {
+func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error {
 	if cred, ok := m.creds[id]; ok && m.scopesMatch(cred.ID, scope) {
-		cred.Status = status
+		cred.Status = models.CredentialStatus(status)
 	}
 	return nil
 }
@@ -237,7 +237,7 @@ func (m *mockCredentialStore) DisableLabeled(_ context.Context, scope models.Sco
 	}
 	for _, cred := range m.creds {
 		if m.scopesMatch(cred.ID, scope) && cred.Provider == provider && cred.Label != "" {
-			cred.Status = "disabled"
+			cred.Status = models.CredentialStatusDisabled
 		}
 	}
 	return nil
@@ -465,7 +465,7 @@ func TestDisconnectForOrg_RejectsUnlabeledAnthropicAPIKey(t *testing.T) {
 
 	err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: orgID}, apiKeyID)
 	require.ErrorIs(t, err, ErrCredentialNotFound, "Claude subscription disconnect should reject an Anthropic API-key row")
-	require.Equal(t, "active", store.creds[apiKeyID].Status, "Anthropic API-key row should remain active")
+	require.Equal(t, models.CredentialStatusActive, store.creds[apiKeyID].Status, "Anthropic API-key row should remain active")
 }
 
 func TestListSubscriptions_SkipsAPIKeyRow(t *testing.T) {
@@ -1733,7 +1733,7 @@ func TestInitiateOAuth_PersonalScope(t *testing.T) {
 
 	cred, err := store.GetByProviderAndLabel(context.Background(), personalScope, models.ProviderAnthropic, "personal-claude")
 	require.NoError(t, err, "personal pending row must be persisted")
-	require.Equal(t, "pending_auth", cred.Status, "personal row must start in pending_auth")
+	require.Equal(t, models.CredentialStatusPendingAuth, cred.Status, "personal row must start in pending_auth")
 	require.NotNil(t, cred.CreatedBy)
 	require.Equal(t, userID, *cred.CreatedBy)
 

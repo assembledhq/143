@@ -28,7 +28,7 @@ type mockCodingCredentialStore struct {
 	listResolveMultiFn func(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, error)
 	createFn           func(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error)
 	renameFn           func(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error
-	updateStatusFn     func(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	updateStatusFn     func(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error
 	disableFn          func(ctx context.Context, scope models.Scope, id uuid.UUID) error
 	moveFn             func(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
 	reorderFn          func(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
@@ -114,7 +114,7 @@ func (m *mockCodingCredentialStore) Rename(ctx context.Context, scope models.Sco
 	return nil
 }
 
-func (m *mockCodingCredentialStore) UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error {
+func (m *mockCodingCredentialStore) UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error {
 	if m.updateStatusFn != nil {
 		return m.updateStatusFn(ctx, scope, id, status)
 	}
@@ -739,7 +739,7 @@ func TestCodingCredentialHandlerUpdateRejectsPendingAuthPromotion(t *testing.T) 
 				UpdatedAt: now,
 			}, nil
 		},
-		updateStatusFn: func(context.Context, models.Scope, uuid.UUID, string) error {
+		updateStatusFn: func(context.Context, models.Scope, uuid.UUID, models.CodingCredentialRowStatus) error {
 			updateCalled = true
 			return nil
 		},
@@ -773,7 +773,7 @@ func TestCodingCredentialHandlerUpdateRejectsClientSideActiveStatus(t *testing.T
 			storeCalled = true
 			return nil, db.ErrCodingCredentialNotFound
 		},
-		updateStatusFn: func(_ context.Context, _ models.Scope, _ uuid.UUID, status string) error {
+		updateStatusFn: func(_ context.Context, _ models.Scope, _ uuid.UUID, status models.CodingCredentialRowStatus) error {
 			storeCalled = true
 			return nil
 		},
@@ -878,7 +878,7 @@ func TestCodingCredentialHandlerUpdateBranches(t *testing.T) {
 						require.Equal(t, label, gotLabel, "Update should pass the requested label")
 						return nil
 					},
-					updateStatusFn: func(_ context.Context, _ models.Scope, id uuid.UUID, status string) error {
+					updateStatusFn: func(_ context.Context, _ models.Scope, id uuid.UUID, status models.CodingCredentialRowStatus) error {
 						require.Equal(t, rowID, id, "Update should update the requested id")
 						require.Equal(t, disabled, status, "Update should pass the requested status")
 						return nil

@@ -24,17 +24,17 @@ type fakeIntegrationStore struct {
 	mu             sync.Mutex
 	row            models.Integration
 	notFoundErr    error // when set, GetByOrgAndProvider returns this instead of a row
-	statusCalls    []string
+	statusCalls    []models.IntegrationStatus
 	configCalls    []json.RawMessage
 	statusCfgCalls []statusAndConfigCall
 }
 
 type statusAndConfigCall struct {
-	status string
+	status models.IntegrationStatus
 	config json.RawMessage
 }
 
-func (f *fakeIntegrationStore) GetByOrgAndProvider(_ context.Context, _ uuid.UUID, _ string) (models.Integration, error) {
+func (f *fakeIntegrationStore) GetByOrgAndProvider(_ context.Context, _ uuid.UUID, _ models.IntegrationProvider) (models.Integration, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.notFoundErr != nil {
@@ -43,11 +43,11 @@ func (f *fakeIntegrationStore) GetByOrgAndProvider(_ context.Context, _ uuid.UUI
 	return f.row, nil
 }
 
-func (f *fakeIntegrationStore) UpdateStatus(_ context.Context, _, _ uuid.UUID, status string) error {
+func (f *fakeIntegrationStore) UpdateStatus(_ context.Context, _, _ uuid.UUID, status models.IntegrationStatus) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statusCalls = append(f.statusCalls, status)
-	f.row.Status = models.IntegrationStatus(status)
+	f.row.Status = status
 	return nil
 }
 
@@ -59,11 +59,11 @@ func (f *fakeIntegrationStore) UpdateConfig(_ context.Context, _, _ uuid.UUID, c
 	return nil
 }
 
-func (f *fakeIntegrationStore) UpdateStatusAndConfig(_ context.Context, _, _ uuid.UUID, status string, cfg json.RawMessage) error {
+func (f *fakeIntegrationStore) UpdateStatusAndConfig(_ context.Context, _, _ uuid.UUID, status models.IntegrationStatus, cfg json.RawMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statusCfgCalls = append(f.statusCfgCalls, statusAndConfigCall{status: status, config: cfg})
-	f.row.Status = models.IntegrationStatus(status)
+	f.row.Status = status
 	f.row.Config = cfg
 	return nil
 }
@@ -93,7 +93,7 @@ func TestMarkIntegrationUnauthorized_FlipsStatusAndStampsConfig(t *testing.T) {
 	require.Empty(t, store.statusCalls, "should not call UpdateStatus alone")
 	require.Empty(t, store.configCalls, "should not call UpdateConfig alone")
 	require.Len(t, store.statusCfgCalls, 1, "config+status should be patched in one atomic call")
-	require.Equal(t, string(models.IntegrationStatusError), store.statusCfgCalls[0].status)
+	require.Equal(t, models.IntegrationStatusError, store.statusCfgCalls[0].status)
 
 	var patched map[string]any
 	require.NoError(t, json.Unmarshal(store.statusCfgCalls[0].config, &patched))
@@ -156,7 +156,7 @@ func TestMarkIntegrationUnauthorized_RestampWhenStaleStamp(t *testing.T) {
 	require.Empty(t, store.statusCalls)
 	require.Empty(t, store.configCalls)
 	require.Len(t, store.statusCfgCalls, 1, "stale timestamp should be refreshed via atomic write")
-	require.Equal(t, string(models.IntegrationStatusError), store.statusCfgCalls[0].status)
+	require.Equal(t, models.IntegrationStatusError, store.statusCfgCalls[0].status)
 	var refreshed map[string]any
 	require.NoError(t, json.Unmarshal(store.statusCfgCalls[0].config, &refreshed))
 	stampedAt, err := time.Parse(time.RFC3339, refreshed[models.IntegrationConfigAuthErrorAtKey].(string))
@@ -207,7 +207,7 @@ func TestClearIntegrationUnauthorized_RestoresStatusAndStripsMarkers(t *testing.
 	require.Empty(t, store.statusCalls)
 	require.Empty(t, store.configCalls)
 	require.Len(t, store.statusCfgCalls, 1)
-	require.Equal(t, string(models.IntegrationStatusActive), store.statusCfgCalls[0].status)
+	require.Equal(t, models.IntegrationStatusActive, store.statusCfgCalls[0].status)
 
 	var cleared map[string]any
 	require.NoError(t, json.Unmarshal(store.statusCfgCalls[0].config, &cleared))
@@ -259,7 +259,7 @@ func TestClearIntegrationUnauthorized_OnlyStatusDirty(t *testing.T) {
 
 	require.Empty(t, store.configCalls)
 	require.Empty(t, store.statusCfgCalls)
-	require.Equal(t, []string{string(models.IntegrationStatusActive)}, store.statusCalls)
+	require.Equal(t, []models.IntegrationStatus{models.IntegrationStatusActive}, store.statusCalls)
 }
 
 func TestClearIntegrationUnauthorized_NoOpWhenAlreadyHealthy(t *testing.T) {

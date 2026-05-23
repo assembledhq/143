@@ -79,7 +79,7 @@ func newForkSessionThreadHandler(stores *Stores, services *Services, logger zero
 			RepositoryID:  source.RepositoryID,
 			AgentType:     thread.AgentType,
 			ModelOverride: thread.ModelOverride,
-			Status:        string(models.SessionStatusIdle),
+			Status:        models.SessionStatusIdle,
 			Origin:        models.SessionOriginManual,
 			TargetBranch:  source.TargetBranch,
 			Title:         &title,
