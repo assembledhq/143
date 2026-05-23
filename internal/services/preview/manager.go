@@ -18,6 +18,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -244,7 +245,7 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		return nil, fmt.Errorf("preview store is not configured")
 	}
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
-		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
+		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
 
 	existing, err := store.GetActivePreviewForSession(ctx, input.OrgID, input.SessionID)
@@ -342,7 +343,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		return nil, fmt.Errorf("sandbox must not be nil")
 	}
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
-		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
+		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
 
 	// If the caller resolved a different config after reservation (autodetect

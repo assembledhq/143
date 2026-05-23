@@ -46,6 +46,10 @@ export const PREVIEW_ERROR_CODES = {
   // didn't supply an explicit config, so the backend has nothing to launch.
   // User fix is to commit the config file (see docs/guides/previews.md).
   NO_CONFIG: "PREVIEW_NO_CONFIG",
+  // 422 — .143/config.json exists, but the preview section cannot be parsed or
+  // fails structural validation. Backend message includes the specific config
+  // error and the recovery action.
+  CONFIG_INVALID: "PREVIEW_CONFIG_INVALID",
   // 422 — a preview infrastructure container's image is not on the worker
   // and the on-demand pull failed (registry unreachable, image renamed,
   // rate-limit, no egress). The user-visible message names the image so an
