@@ -161,12 +161,20 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
 	if m.listByThreadFn != nil {
 		return m.listByThreadFn(ctx, orgID, threadID)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
+	if m.listByThreadTurnsFn != nil {
+		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
 	}
 	return nil, nil
 }
@@ -1560,6 +1568,26 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 			expectedLen:  0,
 		},
 		{
+			name:           "success with turn filter",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "log lookup should be scoped to the request organization")
+					require.Equal(t, threadID, gotThreadID, "log lookup should target the requested thread")
+					require.Equal(t, []int{5, 6, 7}, turnNumbers, "log lookup should pass normalized loaded turn numbers")
+					return []models.SessionLog{
+						{ID: 1, SessionID: sessionID, ThreadID: &threadID, Level: "info", Message: "loaded turn", TurnNumber: 7, Timestamp: now},
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  1,
+		},
+		{
 			name:           "invalid session ID",
 			sessionIDParam: "bad-id",
 			threadIDParam:  threadID.String(),
@@ -1596,7 +1624,11 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 			handler, deps := newThreadHandler(t)
 			tt.setupDeps(deps)
 
-			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/logs", "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
+			target := "/api/v1/sessions/" + tt.sessionIDParam + "/threads/" + tt.threadIDParam + "/logs"
+			if tt.name == "success with turn filter" {
+				target += "?turn_numbers=7,6,7,5,bad"
+			}
+			req := threadRequest(http.MethodGet, target, "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
 			w := httptest.NewRecorder()
 
 			handler.GetThreadLogs(w, req)
