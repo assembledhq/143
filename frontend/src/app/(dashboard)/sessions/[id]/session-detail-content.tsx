@@ -153,6 +153,7 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { usePageTitle } from "@/hooks/use-page-title";
 import {
   useSessionKeyboardShortcuts,
   type SessionDetailTab,
@@ -2916,6 +2917,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     [user],
   );
   const session = data?.data;
+  usePageTitle(session ? sessionTitle(session) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
     centerMode === "review" ||
