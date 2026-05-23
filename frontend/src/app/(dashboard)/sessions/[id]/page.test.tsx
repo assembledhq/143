@@ -1154,6 +1154,81 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByPlaceholderText('Send a message to Codex 2...')).toBeInTheDocument();
   });
 
+  it('does not refetch the whole session after creating a blank tab', async () => {
+    const sessionId = 'session-create-tab-no-detail-refetch';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Claude Code',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-02-17T07:00:00Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+    let sessionDetailRequests = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionDetailRequests += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'idle',
+            agent_type: 'claude_code',
+            sandbox_state: 'ready',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/:id/thread-file-events', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post('/api/v1/sessions/:id/threads', async ({ request, params }) => {
+        const body = await request.json() as { label: string; agent_type: string };
+        const thread: SessionThread = {
+          id: 'thread-new',
+          session_id: params.id as string,
+          org_id: 'org-1',
+          agent_type: body.agent_type as SessionThread['agent_type'],
+          label: body.label,
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:04:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        };
+        threads.push(thread);
+        return HttpResponse.json({ data: thread } satisfies SingleResponse<SessionThread>, { status: 201 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByPlaceholderText('Send a message to Claude Code...')).toBeInTheDocument();
+    expect(sessionDetailRequests).toBe(1);
+
+    const addTabButtons = screen.getAllByRole('button', { name: 'Add agent tab' });
+    await user.click(addTabButtons[addTabButtons.length - 1] as HTMLButtonElement);
+
+    expect(await screen.findByPlaceholderText('Send a message to Claude Code 2...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sessionDetailRequests).toBe(1);
+    });
+  });
+
   it('persists the selected model on a blank tab before the first thread send', async () => {
     const sessionId = 'session-persist-model-before-first-send';
     const threads: SessionThread[] = [
