@@ -81,9 +81,10 @@ When you click Start Preview on a session:
 
 1. The preview manager loads the repo's `.143/config.json` and reads its `preview` section.
 2. It provisions any declared [infrastructure](#infrastructure) (Postgres, Redis, MySQL) as sidecar containers.
-3. It starts each declared service inside the sandbox as an OS process, in dependency order.
-4. Each service must pass its readiness probe before the next starts.
-5. Once all services are ready, the preview is reachable from the session page via an isolated domain (`<preview-id>.preview.143.dev`) — **not** the 143 app origin.
+3. It runs `preview.install`, if configured, before any app service starts.
+4. It starts each declared service inside the sandbox as an OS process, in dependency order.
+5. Each service must pass its readiness probe before the next starts.
+6. Once all services are ready, the preview is reachable from the session page via an isolated domain (`<preview-id>.preview.143.dev`) — **not** the 143 app origin.
 
 Services share the sandbox's filesystem and `localhost` network namespace, so they can talk to each other directly. Nothing in the preview shares cookies, storage, or API origin with the 143 app.
 
@@ -96,6 +97,7 @@ Services share the sandbox's filesystem and `localhost` network namespace, so th
 | `preview.version` | no | Optional version marker. |
 | `preview.name` | no | Human label shown in the UI. Recommended. |
 | `preview.primary` | yes for multi-service | Key from `preview.services` that the gateway proxies browser traffic to. |
+| `preview.install` | no | Optional platform-managed dependency install phase. See [Install](#install). |
 | `preview.services` | yes for multi-service | Map of service name → [service config](#services). |
 | `preview.infrastructure` | no | Map of infra name → [infrastructure config](#infrastructure). Max 2. |
 | `preview.credentials` | yes | [Credential config](#credentials). Use `{"mode": "none"}` if no secrets needed. |
@@ -133,6 +135,68 @@ This is valid when your preview is just one service:
 ```
 
 143 normalizes this internally into a single-entry `services` map.
+
+### Install
+
+Use `preview.install` when a preview needs dependencies before services can boot. This keeps dependency installation out of service `command` scripts and gives 143 a first-class cache marker, cleanup policy, timeout, and error code.
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci", "--no-audit", "--no-fund"],
+      "cwd": ".",
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules", "packages/*/node_modules"],
+      "verify_paths": ["node_modules/.bin/next"],
+      "timeout_seconds": 420
+    }
+  }
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `command` | `string[]` | Required when `install` is present. Runs before services start. |
+| `cwd` | `string` | Command working directory, relative to the repo root. Defaults to repo root. |
+| `lockfiles` | `string[]` | Repo-relative files included in the install cache key. Missing files fail the install phase. |
+| `clean_paths` | `string[]` | Repo-relative paths or simple globs to remove before reinstalling. Nothing is auto-deleted unless listed here. |
+| `verify_paths` | `string[]` | Repo-relative paths that must exist for a cached install to be reused. |
+| `timeout_seconds` | `int` | Defaults to 420 seconds. Max 1800 seconds. |
+
+143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
+
+Npm workspace example:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci", "--no-audit", "--no-fund"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules", "packages/*/node_modules"],
+      "verify_paths": ["node_modules/.bin/next"]
+    }
+  }
+}
+```
+
+Pnpm example:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["pnpm", "install", "--frozen-lockfile"],
+      "lockfiles": ["pnpm-lock.yaml"],
+      "clean_paths": ["node_modules", "apps/*/node_modules", "packages/*/node_modules"],
+      "verify_paths": ["node_modules/.modules.yaml"]
+    }
+  }
+}
+```
+
+Keep package-manager details explicit. 143 does not auto-detect npm, yarn, pnpm, bun, or delete `node_modules` unless you declare that path in `clean_paths`.
 
 ### Services
 
@@ -311,6 +375,7 @@ Fields read from the **session diff** (reflect agent changes):
 
 - Per-service `command`, `cwd`, `port`, `env`, `ready`.
 - `infrastructure.*.init_script` — so seed data can change alongside schema changes.
+- `install` — for non-connected previews, dependency install behavior can change with the app branch.
 
 For connected previews (anything with `credentials.mode != "none"` or non-empty `network.destinations`), **everything** pins to the base branch. A diff can't change launch behavior when secrets are in scope. This is enforced in code, not by policy.
 
@@ -338,6 +403,7 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 | `port N conflicts with service X` | Two services declared the same port. Each needs a unique port inside the sandbox. |
 | `ready.http_path contains invalid characters` | Path must match `/[a-zA-Z0-9/_.\-?&=%]*`. No shell metacharacters. |
 | Service times out on readiness | Increase `ready.timeout_seconds`. For heavy builds, first-start can exceed 90s. |
+| `PREVIEW_INSTALL_FAILED` | `preview.install.command` failed before services started. Expand startup logs for the captured install output tail. |
 | `EADDRINUSE` in logs | Another service in the same config already bound that port. Ports share the sandbox's network namespace. |
 | Preview works locally but not inside the sandbox | Service is binding to `127.0.0.1`. Bind to `0.0.0.0` (the gateway injects `HOST=0.0.0.0` for most frameworks). |
 | Infrastructure placeholder showing as literal `{{username}}` | Double braces are required, and the name is `username` (not `user`). |
@@ -350,6 +416,8 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 **Can I add a custom infrastructure image?** Not in MVP. Use a managed destination to reach an external staging instance, or stick to the platform templates.
 
 **How do I test config changes?** Commit `.143/config.json` and start a new session. There's no dry-run yet — invalid configs surface as a `PREVIEW_START_FAILED` error with the validation message.
+
+**Can I see npm's full debug log?** 143 captures the preview process output tail in `preview_logs`, not package-manager internal files such as `/home/sandbox/.npm/_logs/...`. If you need that file in the preview UI, make the repo's install command print it on failure.
 
 **Does the preview use my production secrets?** No. Secrets come from admin-configured credential sets, never from the repo or agent. Without a `credentials` block, the preview has no secrets at all.
 

@@ -18,7 +18,10 @@ also releasing the thread. The session overview must therefore render the
 review as failed instead of continuing to show a stale loading/running state.
 
 Manual session detail now exposes a `Review` action that starts a two-pass loop
-in the current sandbox. Automations persist `pre_pr_review_loops`; new
+in the current sandbox. Manual setup includes a fix-mode choice: the default
+`minimal` mode preserves the original behavior by fixing only the minimum
+needed to clear the review, while `exhaustive` instructs fix turns to address
+every finding from the previous review pass before the next pass. Automations persist `pre_pr_review_loops`; new
 automations default to one pass, existing rows backfill to zero, and the
 `open_pr` worker gate starts or waits for the automation review loop before
 publication. Clean automation loops enqueue PR creation again; loops that hit
@@ -107,10 +110,12 @@ rather than in the persistent header action cluster. Before a PR exists, the
 action appears in a compact review card. After a PR exists, it moves into the PR
 health action row next to `Merge`, `Fix tests`, and related PR actions.
 
-Clicking `Review` opens a focused setup dialog with two decisions:
-which native-review-capable coding agent should review, and how many
-back-and-forth passes to allow. The dialog is used on mobile and desktop so the
-setup controls do not depend on a popover inside the mobile details sheet.
+Clicking `Review` opens a focused setup dialog with three decisions:
+which native-review-capable coding agent should review, whether fix turns
+should make minimal review-clearing changes or fix every review finding, and
+how many back-and-forth passes to allow. The dialog is used on mobile and
+desktop so the setup controls do not depend on a popover inside the mobile
+details sheet.
 
 ```text
 Review
@@ -122,6 +127,10 @@ Runs /review and fixes issues in this session's sandbox.
 Review passes
 [ - ] 2 [ + ]
 1 quick pass · 2 standard · 3+ deeper polish
+
+Fix mode
+(*) Minimal fixes
+( ) Fix every finding
 
 [ Start review ]
 ```
@@ -137,6 +146,9 @@ Design choices:
   pass without creating a separate session. The selector falls back to the main
   session agent when no supported alternative exists.
 - The setup dialog must clearly state that the loop runs in the current sandbox.
+- Minimal fixes is the default fix mode to preserve existing review-loop
+  behavior; Fix every finding is explicit because it can increase scope,
+  latency, and token cost.
 
 ### Manual session timeline
 
@@ -196,12 +208,22 @@ model. The adapter decides how to serialize it for the selected agent.
 The fix pass always runs in the same review-loop tab as the review pass. There
 is no product option to choose another fixer.
 
-The fix instruction should reference the agent's own previous review output:
+The fix instruction should reference the agent's own previous review output.
+In minimal mode:
 
 ```text
-Fix the issues you identified in the previous review pass. Preserve the scope
-of the current change. Add or update tests when appropriate. Run relevant
-verification and report anything you could not verify.
+Fix the issues you identified in the previous review pass using the minimal
+necessary changes. Preserve the scope of the current change. Add or update
+tests when appropriate. Run relevant verification and report anything you could
+not verify.
+```
+
+In exhaustive mode:
+
+```text
+Fix every issue you identified in the previous review pass. Do not defer any
+review finding to a later turn unless it is impossible or unsafe to fix in this
+sandbox.
 ```
 
 The product does not need to parse every finding into a platform-owned schema

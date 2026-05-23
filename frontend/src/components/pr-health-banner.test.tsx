@@ -97,6 +97,45 @@ describe("PRHealthBanner", () => {
     expect(onReview).toHaveBeenCalledTimes(1);
   });
 
+  it("orders PR detail actions as Merge, Resolve conflicts, Review, then Push changes", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_merge: true,
+          checks_confirmed: true,
+          can_resolve_conflicts: true,
+          checks: [
+            { name: "Unit tests", category: "test", status: "passed" },
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        reviewAction={{
+          disabled: false,
+          spinning: false,
+          onClick: vi.fn(),
+        }}
+        pushChanges={{
+          label: "Push changes",
+          disabled: false,
+          spinning: false,
+          showError: false,
+          onClick: vi.fn(),
+        }}
+      />,
+    );
+
+    const labels = screen.getAllByRole("button").map((button) => button.textContent);
+    expect(labels).toEqual(
+      ["Merge", "Resolve conflicts", "Review", "Push changes"],
+    );
+  });
+
   it("shows the disabled Review action reason in a hover tooltip", async () => {
     renderWithProviders(
       <PRHealthBanner

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -595,9 +596,10 @@ func (h *hangingSandboxExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _
 // concurrent use because progressive support and the startService goroutine
 // can both fire it at the same time.
 type recordingObserver struct {
-	mu          sync.Mutex
-	readyCalls  []recordedReady
-	failedCalls []recordedFailed
+	mu                 sync.Mutex
+	readyCalls         []recordedReady
+	failedCalls        []recordedFailed
+	installFailedCalls []recordedInstallFailed
 }
 
 type recordedReady struct {
@@ -608,6 +610,11 @@ type recordedReady struct {
 
 type recordedFailed struct {
 	name   string
+	errMsg string
+	tail   []string
+}
+
+type recordedInstallFailed struct {
 	errMsg string
 	tail   []string
 }
@@ -628,6 +635,15 @@ func (r *recordingObserver) OnServiceFailed(name, errMsg string, tail []string) 
 	})
 }
 
+func (r *recordingObserver) OnInstallFailed(errMsg string, tail []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.installFailedCalls = append(r.installFailedCalls, recordedInstallFailed{
+		errMsg: errMsg,
+		tail:   append([]string(nil), tail...),
+	})
+}
+
 func (r *recordingObserver) ready() []recordedReady {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -640,6 +656,12 @@ func (r *recordingObserver) failed() []recordedFailed {
 	return append([]recordedFailed(nil), r.failedCalls...)
 }
 
+func (r *recordingObserver) installFailed() []recordedInstallFailed {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedInstallFailed(nil), r.installFailedCalls...)
+}
+
 // fakeServiceExecutor lets a single test customize what each kind of exec
 // call returns. ExecStream simulates the long-running service process
 // (npm run dev / sh script.sh); Exec handles the readiness curl probes
@@ -647,6 +669,7 @@ func (r *recordingObserver) failed() []recordedFailed {
 type fakeServiceExecutor struct {
 	execStreamFn func(ctx context.Context, cmd string, onLine func([]byte)) (int, error)
 	execFn       func(ctx context.Context, cmd string) (int, error)
+	readFileFn   func(ctx context.Context, path string) ([]byte, error)
 }
 
 func (f *fakeServiceExecutor) ExecStream(ctx context.Context, _ *agent.Sandbox, cmd string, onLine func(line []byte), _ io.Writer) (int, error) {
@@ -663,7 +686,10 @@ func (f *fakeServiceExecutor) Exec(ctx context.Context, _ *agent.Sandbox, cmd st
 	return 0, nil
 }
 
-func (f *fakeServiceExecutor) ReadFile(_ context.Context, _ *agent.Sandbox, _ string) ([]byte, error) {
+func (f *fakeServiceExecutor) ReadFile(ctx context.Context, _ *agent.Sandbox, path string) ([]byte, error) {
+	if f.readFileFn != nil {
+		return f.readFileFn(ctx, path)
+	}
 	return nil, nil
 }
 
@@ -1068,6 +1094,198 @@ func TestStartPreview_StandardMode_NotifiesObserverPerService(t *testing.T) {
 	// Cleanup.
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+func TestStartPreview_RunsPreviewInstallBeforeServices(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var streamCalls []string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, onLine func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				onLine([]byte("installed dependencies"))
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			switch {
+			case path == "package-lock.json":
+				return []byte(`{"lockfileVersion":3}`), nil
+			case strings.Contains(path, ".143/cache/preview-install/"):
+				return nil, os.ErrNotExist
+			case path == "node_modules/.bin/next":
+				return nil, os.ErrNotExist
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
+	cfg := previewInstallTestConfig()
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, &recordingObserver{})
+	require.NoError(t, err, "StartPreview should succeed after preview.install completes")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	mu.Lock()
+	calls := append([]string(nil), streamCalls...)
+	mu.Unlock()
+	require.Len(t, calls, 2, "preview.install and the service should each run once")
+	require.Contains(t, calls[0], "'npm' 'ci'", "preview.install should run before any service command")
+	require.Contains(t, calls[0], "rm -rf -- node_modules packages/*/node_modules", "preview.install should clean only declared clean paths")
+	require.NotContains(t, calls[0], ".next", "preview.install cleanup should not remove undeclared paths")
+	require.Contains(t, calls[1], "'npm' 'run' 'dev'", "service command should run after preview.install")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_SkipsPreviewInstallWhenMarkerAndVerifyPathsExist(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var streamCalls []string
+	var readPaths []string
+	var execCalls []string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			mu.Lock()
+			execCalls = append(execCalls, cmd)
+			mu.Unlock()
+			if strings.HasPrefix(cmd, "test -e ") {
+				return 0, nil
+			}
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			mu.Lock()
+			readPaths = append(readPaths, path)
+			mu.Unlock()
+			switch {
+			case path == "package-lock.json":
+				return []byte(`{"lockfileVersion":3}`), nil
+			case strings.Contains(path, ".143/cache/preview-install/"):
+				return []byte("ok\n"), nil
+			case path == "node_modules/.bin/next":
+				return []byte("binary"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
+	cfg := previewInstallTestConfig()
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, &recordingObserver{})
+	require.NoError(t, err, "StartPreview should succeed when preview.install cache is valid")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	mu.Lock()
+	calls := append([]string(nil), streamCalls...)
+	paths := append([]string(nil), readPaths...)
+	execs := append([]string(nil), execCalls...)
+	mu.Unlock()
+	require.Len(t, calls, 1, "valid install marker and verify path should skip preview.install command")
+	require.NotContains(t, calls[0], "'npm' 'ci'", "service command should not include skipped install command")
+	require.Contains(t, calls[0], "'npm' 'run' 'dev'", "service command should still start")
+	require.Contains(t, paths, "package-lock.json", "install cache key should read declared lockfile")
+	require.Contains(t, strings.Join(execs, "\n"), "test -e 'node_modules/.bin/next'", "install skip should verify declared verify path")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_PreviewInstallFailureStopsBeforeServices(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var streamCalls []string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(_ context.Context, cmd string, onLine func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				onLine([]byte("npm warn tar TAR_ENTRY_ERROR ENOENT"))
+				onLine([]byte("npm error enoent Could not read package-lock.json"))
+				return 1, nil
+			}
+			return 0, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, previewInstallTestConfig(), nil, obs)
+	require.Nil(t, handle, "StartPreview should not return a handle when preview.install fails")
+	require.Error(t, err, "StartPreview should fail when preview.install exits non-zero")
+	require.ErrorIs(t, err, preview.ErrInstallFailed, "StartPreview should classify install failures with ErrInstallFailed")
+
+	mu.Lock()
+	calls := append([]string(nil), streamCalls...)
+	mu.Unlock()
+	require.Len(t, calls, 1, "service command should not run after preview.install failure")
+	require.Contains(t, calls[0], "'npm' 'ci'", "the only stream command should be preview.install")
+	failures := obs.installFailed()
+	require.Len(t, failures, 1, "observer should receive the install failure")
+	require.Contains(t, failures[0].errMsg, "exited with code 1", "install failure should include the exit code")
+	require.Equal(t, []string{
+		"npm warn tar TAR_ENTRY_ERROR ENOENT",
+		"npm error enoent Could not read package-lock.json",
+	}, failures[0].tail, "observer should receive the install output tail")
+}
+
+func previewInstallTestConfig() *models.PreviewConfig {
+	return &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Install: &models.PreviewInstallConfig{
+			Command:        []string{"npm", "ci"},
+			Lockfiles:      []string{"package-lock.json"},
+			CleanPaths:     []string{"node_modules", "packages/*/node_modules"},
+			VerifyPaths:    []string{"node_modules/.bin/next"},
+			TimeoutSeconds: 420,
+		},
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
 }
 
 // TestStartPreview_ProgressiveMode_NotifiesObserver covers Phase 6's

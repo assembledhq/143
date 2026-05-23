@@ -2961,6 +2961,30 @@ func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID).(*managerServiceObserver)
+
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "install", "msg", json.RawMessage(`null`), time.Now()))
+
+	tail := []string{"npm warn tar TAR_ENTRY_ERROR ENOENT", "npm error enoent"}
+	obs.OnInstallFailed("exited with code 1", tail)
+	require.NoError(t, mock.ExpectationsWereMet(), "install failure observer should persist an install preview log without touching service rows")
+}
+
 func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
 	t.Parallel()
 

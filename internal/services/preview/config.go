@@ -49,6 +49,9 @@ const (
 	MaxInfraPerConfig    = 2
 	MinPort              = 1024
 	MaxPort              = 65535
+
+	DefaultInstallTimeoutSeconds = 420
+	MaxInstallTimeoutSeconds     = 1800
 )
 
 var ErrInvalidConfig = errors.New("invalid preview config")
@@ -97,6 +100,7 @@ type rawPreviewConfig struct {
 	Version        previewVersion                         `json:"version"`
 	Name           string                                 `json:"name"`
 	Primary        string                                 `json:"primary,omitempty"`
+	Install        *models.PreviewInstallConfig           `json:"install,omitempty"`
 	Services       map[string]models.ServiceConfig        `json:"services,omitempty"`
 	Infrastructure map[string]models.InfrastructureConfig `json:"infrastructure,omitempty"`
 	Credentials    models.CredentialConfig                `json:"credentials"`
@@ -146,6 +150,7 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	cfg := &models.PreviewConfig{
 		Version:        string(raw.Version),
 		Name:           raw.Name,
+		Install:        cloneInstallConfig(raw.Install),
 		Infrastructure: raw.Infrastructure,
 		Credentials:    raw.Credentials,
 		Network:        raw.Network,
@@ -180,6 +185,7 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	if cfg.Infrastructure == nil {
 		cfg.Infrastructure = make(map[string]models.InfrastructureConfig)
 	}
+	defaultPreviewInstallConfig(cfg.Install)
 
 	return cfg, nil
 }
@@ -267,6 +273,8 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 		}
 	}
 
+	errs = append(errs, validatePreviewInstallConfig(cfg.Install)...)
+
 	// Per-infrastructure validation.
 	for name, infra := range cfg.Infrastructure {
 		if _, ok := supportedTemplates[infra.Template]; !ok {
@@ -303,6 +311,7 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 // validHTTPPath only allows safe characters in readiness probe paths to prevent
 // shell injection when the path is interpolated into a curl command.
 var validHTTPPath = regexp.MustCompile(`^/[a-zA-Z0-9/_.\-?&=%]*$`)
+var validPreviewInstallCleanPath = regexp.MustCompile(`^[A-Za-z0-9_./@*+\-]+$`)
 
 // isValidHTTPPath checks that a readiness probe HTTP path contains only safe characters.
 func isValidHTTPPath(path string) bool {
@@ -319,6 +328,68 @@ func validatePathInsideRepo(field, path string) []string {
 		return []string{fmt.Sprintf("%s: path %q escapes the repo root", field, path)}
 	}
 	return nil
+}
+
+func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string {
+	if install == nil {
+		return nil
+	}
+	var errs []string
+	if len(install.Command) == 0 {
+		errs = append(errs, "preview.install.command is required")
+	} else {
+		for i, part := range install.Command {
+			if strings.TrimSpace(part) == "" {
+				errs = append(errs, fmt.Sprintf("preview.install.command[%d] is required", i))
+			}
+		}
+	}
+	if install.Cwd != "" {
+		errs = append(errs, validatePathInsideRepo("preview.install.cwd", install.Cwd)...)
+	}
+	for i, path := range install.Lockfiles {
+		field := fmt.Sprintf("preview.install.lockfiles[%d]", i)
+		if strings.TrimSpace(path) == "" {
+			errs = append(errs, field+" is required")
+			continue
+		}
+		errs = append(errs, validatePathInsideRepo(field, path)...)
+	}
+	for i, path := range install.CleanPaths {
+		field := fmt.Sprintf("preview.install.clean_paths[%d]", i)
+		if strings.TrimSpace(path) == "" {
+			errs = append(errs, field+" is required")
+			continue
+		}
+		errs = append(errs, validatePathInsideRepo(field, path)...)
+		if clean := filepath.Clean(path); clean == "." {
+			errs = append(errs, fmt.Sprintf("%s: path %q is too broad to clean", field, path))
+		}
+		if !validPreviewInstallCleanPath.MatchString(path) {
+			errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, path))
+		}
+	}
+	for i, path := range install.VerifyPaths {
+		field := fmt.Sprintf("preview.install.verify_paths[%d]", i)
+		if strings.TrimSpace(path) == "" {
+			errs = append(errs, field+" is required")
+			continue
+		}
+		errs = append(errs, validatePathInsideRepo(field, path)...)
+	}
+	if install.TimeoutSeconds < 0 || install.TimeoutSeconds > MaxInstallTimeoutSeconds {
+		errs = append(errs, fmt.Sprintf("preview.install.timeout_seconds must be between 1 and %d seconds when set", MaxInstallTimeoutSeconds))
+	}
+	return errs
+}
+
+func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
+	if install == nil {
+		return
+	}
+	if install.TimeoutSeconds == 0 {
+		install.TimeoutSeconds = DefaultInstallTimeoutSeconds
+	}
 }
 
 // =============================================================================
@@ -343,6 +414,13 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 		Credentials: baseCfg.Credentials,
 		Network:     baseCfg.Network,
 	}
+
+	if IsConnected(baseCfg) {
+		resolved.Install = cloneInstallConfig(baseCfg.Install)
+	} else {
+		resolved.Install = cloneInstallConfig(diffCfg.Install)
+	}
+	defaultPreviewInstallConfig(resolved.Install)
 
 	// Infrastructure: structure from base, init_script from diff (unless connected).
 	resolved.Infrastructure = make(map[string]models.InfrastructureConfig, len(baseCfg.Infrastructure))
@@ -381,6 +459,18 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 	}
 
 	return resolved
+}
+
+func cloneInstallConfig(install *models.PreviewInstallConfig) *models.PreviewInstallConfig {
+	if install == nil {
+		return nil
+	}
+	cloned := *install
+	cloned.Command = append([]string(nil), install.Command...)
+	cloned.Lockfiles = append([]string(nil), install.Lockfiles...)
+	cloned.CleanPaths = append([]string(nil), install.CleanPaths...)
+	cloned.VerifyPaths = append([]string(nil), install.VerifyPaths...)
+	return &cloned
 }
 
 // IsConnected returns true if the config references managed credentials or destinations.
