@@ -153,9 +153,9 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     # compose can still interpolate them when it parses the compose file.
     # .env.local is owned by provisioning and we abort if it's missing instead
     # of silently coming up with empty/unsafe defaults.
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nWORKER_PREVIEW_DRAIN_TIMEOUT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
-      "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
+      "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${WORKER_PREVIEW_DRAIN_TIMEOUT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
       "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" '
           set -euo pipefail
@@ -467,6 +467,11 @@ fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
+  "WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS=${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}" \
+  "WORKER_BLUE_GREEN_PORT_START=${WORKER_BLUE_GREEN_PORT_START:-}" \
+  "WORKER_BLUE_GREEN_PORT_END=${WORKER_BLUE_GREEN_PORT_END:-}" \
+  "WORKER_BASE_NODE_ID=${WORKER_BASE_NODE_ID:-}" \
+  "WORKER_DRAIN_TIMEOUT=${WORKER_DRAIN_TIMEOUT:-}" \
   "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
   "SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}" \
   "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
@@ -846,13 +851,25 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "$service rolled over successfully."
   }
 
-  # drain_worker_service SERVICE — send SIGTERM to the current worker and wait
-  # for it to exit after draining its active jobs. The worker process handles
-  # SIGTERM by marking itself draining, stopping new claims, and waiting for
-  # in-flight work to finish before exiting.
+  resolve_worker_drain_timeout_seconds() {
+    local timeout="${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}"
+    if [ -z "$timeout" ]; then
+      case "${WORKER_DRAIN_TIMEOUT:-}" in
+        ''|*[!0-9]*) timeout="14400" ;;
+        *) timeout="$WORKER_DRAIN_TIMEOUT" ;;
+      esac
+    fi
+    echo "$timeout"
+  }
+
+  # drain_worker_service SERVICE — legacy blocking worker drain helper. Kept
+  # for manual recovery paths; routine worker deploys use blue/green
+  # generations below so the deploy completes after the new generation is
+  # healthy while old preview owners drain in the background.
   drain_worker_service() {
     local service="$1"
-    local timeout="${WORKER_DRAIN_TIMEOUT:-7200}"
+    local timeout
+    timeout="$(resolve_worker_drain_timeout_seconds)"
     local waited=0
     local cid
 
@@ -875,6 +892,188 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
 
     echo "$service drained successfully."
+  }
+
+  drain_worker_containers_blocking() {
+    local containers="${1:-}"
+    local timeout waited cid running_count
+    timeout="$(resolve_worker_drain_timeout_seconds)"
+    waited=0
+
+    if [ -z "$containers" ]; then
+      echo "ERROR: no worker containers available to drain." >&2
+      return 1
+    fi
+
+    echo "Requesting blocking drain for existing worker containers (timeout ${timeout}s)..."
+    for cid in $containers; do
+      if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+        docker kill --signal=TERM "$cid" >/dev/null
+      fi
+    done
+
+    while true; do
+      running_count=0
+      for cid in $containers; do
+        if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+          running_count=$((running_count + 1))
+        fi
+      done
+      if [ "$running_count" -eq 0 ]; then
+        echo "Existing worker containers drained successfully."
+        return 0
+      fi
+      if [ "$waited" -ge "$timeout" ]; then
+        echo "ERROR: worker container drain timed out after ${timeout}s (${running_count} still running)" >&2
+        return 1
+      fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+  }
+
+  read_worker_env_value() {
+    local key="$1"
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' /opt/143/.env
+  }
+
+  sanitize_compose_project() {
+    local raw="$1" sanitized
+    sanitized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+    if [ -z "$sanitized" ]; then
+      sanitized="worker"
+    fi
+    printf '%.63s' "$sanitized"
+  }
+
+  list_running_worker_containers() {
+    docker ps --filter "label=com.docker.compose.service=worker" --format '{{.ID}}'
+  }
+
+  worker_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+      if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+        return 0
+      fi
+    fi
+    docker ps --format '{{.Ports}}' | grep -Eq "(^|, |:)${port}->8080/tcp"
+  }
+
+  worker_blue_green_extra_ports_configured() {
+    local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
+    local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
+
+    [ "$start" != "8080" ] || [ "$end" != "$start" ]
+  }
+
+  find_free_worker_port() {
+    local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
+    local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
+    local port
+
+    if [[ "$start" == *[!0-9]* ]] || [[ "$end" == *[!0-9]* ]]; then
+      echo "ERROR: WORKER_BLUE_GREEN_PORT_START and WORKER_BLUE_GREEN_PORT_END must be numeric." >&2
+      return 1
+    fi
+    if [ "$start" -gt "$end" ]; then
+      echo "ERROR: WORKER_BLUE_GREEN_PORT_START ($start) must be <= WORKER_BLUE_GREEN_PORT_END ($end)." >&2
+      return 1
+    fi
+    if [ "$start" != "$end" ]; then
+      echo "Worker blue/green port range ${start}-${end} is enabled; app-to-worker network must allow every configured worker blue/green port." >&2
+    fi
+
+    for port in $(seq "$start" "$end"); do
+      if ! worker_port_in_use "$port"; then
+        echo "$port"
+        return 0
+      fi
+    done
+    echo "ERROR: no free worker host port in ${start}-${end}" >&2
+    return 1
+  }
+
+  start_worker_generation() {
+    local node_id="$1" host_port="$2" base_url="$3" project="$4"
+    local cid
+
+    echo "Starting worker generation node_id=$node_id port=$host_port project=$project..."
+    NODE_ID="$node_id" \
+      WORKER_HOST_PORT="$host_port" \
+      PREVIEW_INTERNAL_BASE_URL="$base_url" \
+      IMAGE_TAG="$IMAGE_TAG" \
+      docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
+
+    cid="$(NODE_ID="$node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" docker compose -p "$project" -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+    if [ -z "$cid" ]; then
+      echo "ERROR: could not find new worker generation container"
+      return 1
+    fi
+
+    if ! wait_container_healthy "$cid" 180; then
+      echo "Rolling back failed worker generation ${cid:0:12}..."
+      docker stop "$cid" >/dev/null 2>&1 || true
+      docker rm "$cid" >/dev/null 2>&1 || true
+      return 1
+    fi
+    STARTED_WORKER_CID="$cid"
+  }
+
+  drain_old_worker_containers() {
+    local new_cid="$1"
+    local old_containers="${2:-}"
+    local timeout
+    timeout="$(resolve_worker_drain_timeout_seconds)"
+    if [ -z "$old_containers" ]; then
+      echo "No old worker containers to drain."
+      return 0
+    fi
+
+    mkdir -p /var/log/143
+    for cid in $old_containers; do
+      if [ "$cid" = "$new_cid" ]; then
+        continue
+      fi
+      if ! docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+        continue
+      fi
+      echo "Requesting background drain for old worker container ${cid:0:12} (timeout ${timeout}s)..."
+      nohup docker stop -t "$timeout" "$cid" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
+    done
+  }
+
+  deploy_worker_blue_green() {
+    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid
+
+    old_containers="$(list_running_worker_containers || true)"
+    base_node_id="${WORKER_BASE_NODE_ID:-$(read_worker_env_value NODE_ID)}"
+    worker_private_ip="$(read_worker_env_value WORKER_PRIVATE_IP)"
+    if [ -z "$base_node_id" ] || [ -z "$worker_private_ip" ]; then
+      echo "ERROR: NODE_ID and WORKER_PRIVATE_IP must be present in /opt/143/.env for worker blue/green deploy." >&2
+      return 1
+    fi
+
+    generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
+    node_id="${base_node_id}-g${generation}"
+    if ! host_port="$(find_free_worker_port)"; then
+      if [ -n "$old_containers" ] && ! worker_blue_green_extra_ports_configured; then
+        echo "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain."
+        drain_worker_containers_blocking "$old_containers"
+        old_containers=""
+        host_port="$(find_free_worker_port)" || return 1
+      else
+        return 1
+      fi
+    fi
+    base_url="http://${worker_private_ip}:${host_port}"
+    project="$(sanitize_compose_project "143-${node_id}")"
+
+    STARTED_WORKER_CID=""
+    start_worker_generation "$node_id" "$host_port" "$base_url" "$project"
+    new_cid="$STARTED_WORKER_CID"
+    drain_old_worker_containers "$new_cid" "$old_containers"
+    echo "Worker generation ${new_cid:0:12} is healthy; old workers are draining in the background."
   }
 
   dump_diagnostics() {
@@ -1111,15 +1310,17 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   elif [ "$ROLE" = "worker" ]; then
     run_worker_session_deploy_guardrail
 
-    # Workers remain single-replica, but we drain the old replica before
-    # replacement so accepted long-running sessions are not interrupted.
+    # Worker deploys use per-generation node IDs and host ports. The new
+    # generation becomes active first; old generations are marked draining by
+    # their own SIGTERM handlers and keep serving owned previews until they
+    # stop naturally or hit the preview drain timeout.
     #
-    # Worker drain can take up to WORKER_DRAIN_TIMEOUT (default 45m in the
-    # process, capped by docker stop_grace_period). Holding an SSH session
-    # — and therefore a CI runner minute — open that long is wasteful, so
-    # CI sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
-    # host-side process and return immediately. Manual deploys leave it
-    # unset to keep the synchronous "did it work?" feedback loop.
+    # Worker drain can take up to the in-process job drain plus preview drain
+    # budget, capped by docker stop_grace_period. Holding an SSH session —
+    # and therefore a CI runner minute — open that long is wasteful, so CI
+    # sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
+    # host-side process and return immediately. Manual deploys leave it unset
+    # to keep the synchronous "did it work?" feedback loop.
     if [ -n "${WORKER_DEPLOY_DETACH:-}" ]; then
       mkdir -p /var/log/143
       sha_short="${IMAGE_TAG:0:7}"
@@ -1136,7 +1337,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f drain_worker_service wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_port_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
@@ -1144,6 +1345,11 @@ IMAGE_TAG='$IMAGE_TAG'
 DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'
 DOCKER_PRUNE_UNTIL='${DOCKER_PRUNE_UNTIL:-24h}'
 DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
+WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS='${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}'
+WORKER_BLUE_GREEN_PORT_START='${WORKER_BLUE_GREEN_PORT_START:-}'
+WORKER_BLUE_GREEN_PORT_END='${WORKER_BLUE_GREEN_PORT_END:-}'
+WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
+WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
 
 # Always write a status file so the verify step has a deterministic signal.
 # If we exit before the success line writes "ok", the trap leaves "fail".
@@ -1161,15 +1367,10 @@ trap on_exit EXIT
 rm -f "\$STATUS_FILE"
 
 cd /opt/143
-echo "[\$(date -u -Iseconds)] starting detached worker rollover (tag=$IMAGE_TAG)"
-drain_worker_service "\$HEALTH_SERVICE"
-docker compose -f "\$COMPOSE_FILE" up -d --no-deps --force-recreate "\$HEALTH_SERVICE"
-cid="\$(docker compose -f "\$COMPOSE_FILE" ps -q "\$HEALTH_SERVICE" | head -1)"
-if [ -n "\$cid" ]; then
-  wait_container_healthy "\$cid" 120 || { echo "[\$(date -u -Iseconds)] HEALTH CHECK FAILED"; exit 1; }
-fi
+echo "[\$(date -u -Iseconds)] starting detached worker blue/green deploy (tag=$IMAGE_TAG)"
+deploy_worker_blue_green
 prune_docker_deploy_artifacts worker
-echo "[\$(date -u -Iseconds)] rollover succeeded"
+echo "[\$(date -u -Iseconds)] blue/green deploy succeeded"
 echo "ok" > "\$STATUS_FILE"
 EOS
       chmod 700 "$rollover_script"
@@ -1190,17 +1391,7 @@ EOS
       echo "  status: $status_file (poll for 'ok' / 'fail')"
       echo "  follow: ssh deploy@<host> tail -f $log_file"
     else
-      drain_worker_service "$HEALTH_SERVICE"
-      docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
-
-      CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
-      if [ -n "$CONTAINER_ID" ]; then
-        if ! wait_container_healthy "$CONTAINER_ID" 120; then
-          echo "ERROR: new worker failed health check"
-          exit 1
-        fi
-      fi
-      echo "$HEALTH_SERVICE restarted successfully."
+      deploy_worker_blue_green
     fi
 
   else

@@ -7,6 +7,7 @@ set -euo pipefail
 
 SANDBOX_NETWORK="${1:-143-sandbox}"
 SANDBOX_SUBNET="172.30.0.0/24"
+DEFAULT_NETWORK="${2:-143_default}"
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
   echo "ERROR: reconcile-worker-host.sh must run as root." >&2
@@ -35,6 +36,14 @@ elif [ "$EXISTING_SANDBOX_SUBNET" != "$SANDBOX_SUBNET" ]; then
   echo "    3. Re-run deploy (or provision-worker) for this host." >&2
   echo "  Step 1 will drain in-flight coding turns; plan for a maintenance window." >&2
   exit 1
+fi
+
+# Worker blue/green generations run as separate compose projects but must share
+# the same default bridge so the worker can resolve support services such as
+# chrome by container DNS name. Compose treats this network as external.
+if ! docker network inspect "$DEFAULT_NETWORK" >/dev/null 2>&1; then
+  docker network create --driver bridge \
+    --label managed-by=143 "$DEFAULT_NETWORK"
 fi
 
 # Install iptables-persistent so the egress block survives reboots. This is

@@ -224,7 +224,8 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(compose), "${NODE_ID:?", "worker compose should require NODE_ID rather than silently falling back to a random container hostname")
 	require.Contains(t, string(compose), "${PREVIEW_INTERNAL_BASE_URL:?", "worker compose should require PREVIEW_INTERNAL_BASE_URL — without it, parseWorkerNode rejects the node and StartPreview returns PREVIEW_NO_WORKERS")
 	require.Contains(t, string(compose), "${DOCKER_GID:?", "worker compose should require the host docker group GID instead of defaulting to a distro-specific value that can block docker.sock access")
-	require.Contains(t, string(compose), ":8080:8080", "worker compose should publish port 8080 so the app node can reach the worker's internal preview API")
+	require.Contains(t, string(compose), "${WORKER_HOST_PORT:-8080}:8080", "worker compose should publish a configurable host port so blue/green generations can overlap on one worker host")
+	require.Contains(t, string(compose), "name: 143_default", "worker compose should attach every generation project to the shared default network so chrome remains reachable")
 
 	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
 	require.NoError(t, err, "test should read the worker cloud-init template")
@@ -251,6 +252,24 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(deployScript), `DOCKER_GID="$(getent group docker | cut -d: -f3)"`, "deploy.sh should backfill DOCKER_GID for workers provisioned before the value was written to .env.local")
 	require.Contains(t, string(deployScript), "cat /opt/143/.env.local >> /opt/143/.env", "deploy.sh worker branch should re-append .env.local into .env on every deploy — without this, every secret refresh wipes the per-host identity")
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID, WORKER_PRIVATE_IP, or DOCKER_GID")
+}
+
+func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, "deploy_worker_blue_green", "worker deploy should use a blue/green generation rollout")
+	require.Contains(t, deploy, "start_worker_generation", "worker deploy should start the new generation before draining old containers")
+	require.Contains(t, deploy, "drain_old_worker_containers", "worker deploy should drain old worker containers after the new generation is healthy")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PORT_START", "worker deploy should allocate worker generation ports from a configurable range")
+	require.Contains(t, deploy, "WORKER_HOST_PORT", "worker deploy should pass the allocated host port into docker compose")
+	require.Contains(t, deploy, `local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"`, "worker deploy should default to the existing worker port only unless operators explicitly open a blue/green range")
+	require.Contains(t, deploy, "app-to-worker network must allow every configured worker blue/green port", "worker deploy should warn operators that app nodes must be able to reach every advertised worker generation port")
+	require.Contains(t, deploy, "drain_worker_containers_blocking", "worker deploy should fall back to a blocking drain when no extra blue/green port is configured")
+	require.Contains(t, deploy, "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain.", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
 }
 
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
@@ -646,7 +665,7 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `"SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}"`, "deploy should pass the executor network override through SSH to the remote host")
 	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
 	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
-	require.Contains(t, deployText, `$(declare -f drain_worker_service wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the prune helper in the host-side script")
+	require.Contains(t, deployText, `deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the blue/green and prune helpers in the host-side script")
 	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
@@ -1008,11 +1027,11 @@ func TestWorkerDeployRunsReconciliationBeforeCompose(t *testing.T) {
 
 	syncIndex := strings.Index(deployText, "$PROJECT_DIR/deploy/scripts/reconcile-worker-host.sh")
 	reconcileIndex := strings.LastIndex(deployText, "run_worker_host_reconcile")
-	composeIndex := strings.Index(deployText, "docker compose -f \"$COMPOSE_FILE\" up -d --no-deps --force-recreate \"$HEALTH_SERVICE\"")
+	composeIndex := strings.LastIndex(deployText, "deploy_worker_blue_green")
 
 	require.NotEqual(t, -1, syncIndex, "worker deploy should sync reconcile-worker-host.sh before running it")
 	require.NotEqual(t, -1, reconcileIndex, "worker deploy should repair worker host invariants through the canonical reconciliation script")
-	require.NotEqual(t, -1, composeIndex, "worker deploy should still recreate the worker service")
+	require.NotEqual(t, -1, composeIndex, "worker deploy should still start a new worker generation")
 	require.Less(t, syncIndex, reconcileIndex, "worker deploy must sync the latest reconciliation script before executing it")
 	require.Less(t, reconcileIndex, composeIndex, "worker deploy must repair host invariants before the new worker starts")
 }
