@@ -249,7 +249,7 @@ type Config struct {
 	// and org, then a per-worker safety net).
 	//
 	// Semantics of 0: fall back to the compile-time default in
-	// internal/services/preview/manager.go (currently 2 per user, 5 per
+	// internal/services/preview/manager.go (currently 4 per user, 5 per
 	// org, 3 per worker). 0 does NOT mean "unlimited" — if you genuinely
 	// want to disable a cap, raise it to a large sentinel like 1_000_000.
 	// Any value > 0 is used verbatim.

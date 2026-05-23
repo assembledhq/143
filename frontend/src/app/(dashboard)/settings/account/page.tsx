@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
@@ -11,6 +11,7 @@ import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
+import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -78,20 +79,32 @@ function statusLabel(status: CodingAuthStatus | string | undefined) {
 
 function CredentialList({
   rows,
-  emptyMessage,
+  emptyState,
   readOnly = false,
   onDelete,
 }: {
   rows: CodingCredentialSummary[];
-  emptyMessage: string;
+  emptyState: {
+    icon: LucideIcon;
+    title: string;
+    description: string;
+    action?: {
+      label: string;
+      onClick: () => void;
+    };
+  };
   readOnly?: boolean;
   onDelete?: (id: string) => void;
 }) {
   if (rows.length === 0) {
     return (
-      <div className="px-4 py-4 text-xs text-muted-foreground">
-        {emptyMessage}
-      </div>
+      <EmptyState
+        variant="inline"
+        icon={emptyState.icon}
+        title={emptyState.title}
+        description={emptyState.description}
+        action={emptyState.action}
+      />
     );
   }
 
@@ -394,7 +407,15 @@ export default function AccountPage() {
           <CardContent className="px-0 pb-6">
             <CredentialList
               rows={personalRows}
-              emptyMessage={'No personal auth configured. Click "Add auth" above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.'}
+              emptyState={{
+                icon: KeyRound,
+                title: "No personal auths yet",
+                description: "Add a personal auth to use your own subscription before org fallback.",
+                action: {
+                  label: "Add auth",
+                  onClick: () => setAddOpen(true),
+                },
+              }}
               onDelete={(id) => deleteMutation.mutate(id)}
             />
           </CardContent>
@@ -410,7 +431,11 @@ export default function AccountPage() {
           <CardContent className="px-0 pb-6">
             <CredentialList
               rows={orgRows}
-              emptyMessage="No org-level fallback configured."
+              emptyState={{
+                icon: ShieldCheck,
+                title: "No org fallback yet",
+                description: "Ask an admin to add an org-level fallback so sessions have shared credentials when personal auths are unavailable.",
+              }}
               readOnly
             />
           </CardContent>

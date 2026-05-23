@@ -502,6 +502,35 @@ describe('SessionSidebar', () => {
     expect(screen.getByText('Pending')).toBeInTheDocument();
   });
 
+  it('uses the same row padding frame for optimistic sessions and normal sessions', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Existing session' }),
+    ]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Creating sandbox...',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    });
+
+    renderWithProviders(<SessionSidebar />);
+
+    const optimisticOption = (await screen.findByText('Creating sandbox...')).closest('[role="option"]');
+    const normalOption = (await screen.findByText('Existing session')).closest('[role="option"]');
+    expect(optimisticOption).not.toBeNull();
+    expect(normalOption).not.toBeNull();
+
+    expect(optimisticOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+
+    const optimisticSurface = optimisticOption!.querySelector('[data-session-row-surface="true"]');
+    const normalSurface = normalOption!.querySelector('a');
+    expect(optimisticSurface).not.toBeNull();
+    expect(normalSurface).not.toBeNull();
+    expect(optimisticSurface!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+    expect(normalSurface!).toHaveClass('relative', 'block', 'min-w-0', 'flex-1', 'overflow-hidden', 'rounded-lg', 'px-3', 'py-2.5');
+  });
+
   it('hides a resolved optimistic row once its real session appears in the list', async () => {
     // Simulate the create flow: the optimistic has already been marked resolved
     // to real session id "s-real". The real row is served by the API.

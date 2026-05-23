@@ -412,12 +412,13 @@ func (s *SessionThreadStore) ClaimIdleForSession(ctx context.Context, orgID, ses
 // surfaces ErrThreadRunningLimitReached the same way, so callers can keep one
 // "limit hit, queue instead" branch regardless of which claim path failed.
 //
-// Does not reset started_at — the original thread start time remains the
-// authoritative "first activity" stamp. completed_at is cleared so the row
-// reflects the new in-flight turn rather than the previous terminal state.
-// failure_explanation and failure_category are intentionally preserved as
-// audit history of the prior run; mirrors SessionStore.ClaimForResume, which
-// also leaves session-level failure fields untouched on resume.
+// Resets started_at for the new turn so runtime watchdogs and the stuck-thread
+// reaper measure the resumed execution instead of the original thread age.
+// completed_at is cleared so the row reflects the new in-flight turn rather
+// than the previous terminal state. failure_explanation and failure_category
+// are intentionally preserved as audit history of the prior run; mirrors
+// SessionStore.ClaimForResume, which also leaves session-level failure fields
+// untouched on resume.
 func (s *SessionThreadStore) ClaimForResumeInSession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, error) {
 	return s.claimForSession(ctx, claimForSessionArgs{
 		orgID:             orgID,
@@ -454,9 +455,9 @@ func claimModeSetClause(mode claimMode) string {
 		// time-on-task surfaces have a precise begin stamp.
 		return "started_at = now(),"
 	case claimModeResume:
-		// Resume of a terminal/paused row — clear the stale completed_at
-		// from the previous turn so the row reflects the new in-flight one.
-		return "completed_at = NULL,"
+		// Resume of a terminal/paused row — refresh started_at for this turn
+		// and clear stale completed_at from the previous turn.
+		return "started_at = now(),\n\t\t    completed_at = NULL,"
 	default:
 		// Unreachable in normal code paths; panic is preferable to silently
 		// emitting an UPDATE that does the wrong thing.

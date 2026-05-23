@@ -725,42 +725,21 @@ func filterRefreshTokenLines(stderr string) string {
 // prompt argument is provided under non-TTY stdin; it is informational and the
 // CLI can still exit 0 after a successful turn.
 func filterCodexStderrLines(stderr string) string {
-	lines := strings.Split(stderr, "\n")
-	var kept []string
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if isBenignCodexDiagnostic(line) || isRefreshTokenError(line) {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return strings.Join(kept, "\n")
+	visible, _ := splitCodexStderrDiagnostics(stderr)
+	return strings.Join(visible, "\n")
 }
 
 func emitCodexStderrLogs(stderr []byte, logCh chan<- agent.LogEntry) string {
-	lines := strings.Split(string(stderr), "\n")
-	var kept []string
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
+	visible, hidden := splitCodexStderrDiagnostics(string(stderr))
+	for _, diagnostic := range hidden {
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   diagnostic.message,
+			Metadata:  codexHiddenDiagnosticMetadata(diagnostic.kind),
 		}
-		if isRefreshTokenError(line) {
-			continue
-		}
-		if isBenignCodexDiagnostic(line) {
-			logCh <- agent.LogEntry{
-				Timestamp: time.Now(),
-				Level:     "debug",
-				Message:   line,
-				Metadata:  codexHiddenDiagnosticMetadata(codexDiagnosticKind(line)),
-			}
-			continue
-		}
-		kept = append(kept, line)
 	}
-	filtered := strings.Join(kept, "\n")
+	filtered := strings.Join(visible, "\n")
 	if filtered != "" {
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
@@ -771,23 +750,62 @@ func emitCodexStderrLogs(stderr []byte, logCh chan<- agent.LogEntry) string {
 	return filtered
 }
 
-func isBenignCodexDiagnostic(msg string) bool {
-	trimmed := strings.TrimSpace(msg)
-	return trimmed == "Reading additional input from stdin..." ||
-		(strings.Contains(trimmed, "codex_core::tools::router:") &&
-			strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session"))
+type codexHiddenDiagnostic struct {
+	message string
+	kind    string
 }
 
-func codexDiagnosticKind(msg string) string {
+func splitCodexStderrDiagnostics(stderr string) ([]string, []codexHiddenDiagnostic) {
+	lines := strings.Split(string(stderr), "\n")
+	var visible []string
+	var hidden []codexHiddenDiagnostic
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if isRefreshTokenError(line) {
+			continue
+		}
+		if kind, multiline, ok := classifyBenignCodexDiagnostic(line); ok {
+			block := []string{line}
+			if multiline {
+				for i+1 < len(lines) && isCodexDiagnosticContinuation(lines[i+1]) {
+					i++
+					if strings.TrimSpace(lines[i]) != "" {
+						block = append(block, lines[i])
+					}
+				}
+			}
+			hidden = append(hidden, codexHiddenDiagnostic{
+				message: strings.Join(block, "\n"),
+				kind:    kind,
+			})
+			continue
+		}
+		visible = append(visible, line)
+	}
+	return visible, hidden
+}
+
+func classifyBenignCodexDiagnostic(msg string) (kind string, multiline bool, ok bool) {
 	trimmed := strings.TrimSpace(msg)
 	if strings.Contains(trimmed, "codex_core::tools::router:") &&
 		strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session") {
-		return "closed_stdin"
+		return "closed_stdin", false, true
+	}
+	if strings.Contains(trimmed, "codex_core::tools::router:") &&
+		strings.Contains(trimmed, "apply_patch verification failed: Failed to find expected lines") {
+		return "apply_patch_verification_failed", true, true
 	}
 	if trimmed == "Reading additional input from stdin..." {
-		return "stdin_notice"
+		return "stdin_notice", false, true
 	}
-	return "unknown"
+	return "", false, false
+}
+
+func isCodexDiagnosticContinuation(line string) bool {
+	return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
 }
 
 func codexHiddenDiagnosticMetadata(kind string) map[string]interface{} {

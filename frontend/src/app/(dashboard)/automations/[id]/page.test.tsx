@@ -34,6 +34,13 @@ vi.mock("./automation-stats-card", () => ({
   AutomationStatsCard: () => <div data-testid="automation-stats-card" />,
 }));
 
+const selectEmojiOption = async (name: string) => {
+  const listbox = await screen.findByRole("listbox");
+  const option = listbox.querySelector<HTMLElement>(`[role="option"][aria-label="${name}"]`);
+  expect(option).not.toBeNull();
+  fireEvent.click(option as HTMLElement);
+};
+
 describe("AutomationDetailPage", () => {
   beforeEach(() => {
     currentUserRole.value = "member";
@@ -584,7 +591,7 @@ describe("AutomationDetailPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("button", { name: "Automation emoji" }));
-    await user.click(await screen.findByRole("option", { name: /Rocket/ }));
+    await selectEmojiOption("Rocket");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
@@ -707,7 +714,7 @@ describe("AutomationDetailPage", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Change automation emoji" }));
-    await user.click(await screen.findByRole("option", { name: /Rocket/ }));
+    await selectEmojiOption("Rocket");
 
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     await waitFor(() => {
