@@ -6,7 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { api } from '@/lib/api';
-import type { Issue, PullRequest, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse, ThreadMessageWindowResponse } from '@/lib/types';
+import type { Issue, PullRequest, ReviewLoopFixMode, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse, ThreadMessageWindowResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -289,9 +289,9 @@ describe('SessionDetailPage', () => {
     expect(dialog.querySelector('.lucide-clipboard-list')).not.toBeInTheDocument();
   });
 
-  it('starts a manual review loop with the selected pass count', async () => {
+  it('starts a manual review loop with the selected pass count and default minimal fix mode', async () => {
     const user = userEvent.setup();
-    let postedMaxPasses = 0;
+    let postedBody: { max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -313,8 +313,8 @@ describe('SessionDetailPage', () => {
         } satisfies ListResponse<SessionReviewLoop>);
       }),
       http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
-        const body = await request.json() as { max_passes: number };
-        postedMaxPasses = body.max_passes;
+        const body = await request.json() as { max_passes: number; fix_mode?: ReviewLoopFixMode };
+        postedBody = body;
         return HttpResponse.json({
           data: {
             id: 'review-loop-selected-passes',
@@ -324,6 +324,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: 'codex',
             max_passes: body.max_passes,
+            fix_mode: body.fix_mode ?? 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -339,13 +340,70 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
-      expect(postedMaxPasses).toBe(3);
+      expect(postedBody).toMatchObject({ max_passes: 3, fix_mode: 'minimal' });
+    });
+  });
+
+  it('starts a manual review loop in exhaustive fix mode when selected', async () => {
+    const user = userEvent.setup();
+    let postedBody: { fix_mode?: ReviewLoopFixMode } | null = null;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            snapshot_key: 'snapshot-manual-review',
+            sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+      http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
+        postedBody = await request.json() as { fix_mode?: ReviewLoopFixMode };
+        return HttpResponse.json({
+          data: {
+            id: 'review-loop-exhaustive',
+            org_id: 'org-1',
+            session_id: params.id as string,
+            status: 'running',
+            source: 'manual',
+            agent_type: 'codex',
+            max_passes: 2,
+            fix_mode: postedBody.fix_mode ?? 'minimal',
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          },
+        } satisfies SingleResponse<SessionReviewLoop>, { status: 201 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    const dialog = screen.getByRole('dialog', { name: 'Review' });
+    expect(within(dialog).getByRole('radio', { name: 'Minimal fixes' })).toBeChecked();
+
+    await user.click(within(dialog).getByRole('radio', { name: 'Fix every finding' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+
+    await waitFor(() => {
+      expect(postedBody).toMatchObject({ fix_mode: 'exhaustive' });
     });
   });
 
   it('lets the review loop use a coding agent different from the main session agent', async () => {
     const user = userEvent.setup();
-    let postedBody: { agent_type?: string; max_passes: number } | null = null;
+    let postedBody: { agent_type?: string; max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -368,7 +426,7 @@ describe('SessionDetailPage', () => {
         } satisfies ListResponse<SessionReviewLoop>);
       }),
       http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
-        postedBody = await request.json() as { agent_type?: string; max_passes: number };
+        postedBody = await request.json() as { agent_type?: string; max_passes: number; fix_mode?: ReviewLoopFixMode };
         return HttpResponse.json({
           data: {
             id: 'review-loop-selected-agent',
@@ -378,6 +436,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: postedBody.agent_type ?? 'codex',
             max_passes: postedBody.max_passes,
+            fix_mode: postedBody.fix_mode ?? 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -397,7 +456,7 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
-      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2 });
+      expect(postedBody).toEqual({ agent_type: 'claude_code', max_passes: 2, fix_mode: 'minimal' });
     });
   });
 
@@ -448,6 +507,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: 'codex',
             max_passes: body.max_passes,
+            fix_mode: 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',
@@ -512,6 +572,7 @@ describe('SessionDetailPage', () => {
             source: 'manual',
             agent_type: 'codex',
             max_passes: body.max_passes,
+            fix_mode: 'minimal',
             completed_passes: 0,
             review_required: false,
             started_at: '2026-02-17T07:12:00Z',

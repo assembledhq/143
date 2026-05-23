@@ -17,6 +17,7 @@ import (
 
 var (
 	ErrInvalidPassCount         = errors.New("max_passes must be between 1 and 5")
+	ErrInvalidFixMode           = errors.New("fix_mode must be minimal or exhaustive")
 	ErrUnsupportedReviewAgent   = errors.New("agent does not support native review")
 	ErrSessionSnapshotExpired   = errors.New("session sandbox snapshot has expired")
 	ErrNoRunningReviewLoop      = errors.New("no running review loop for thread")
@@ -91,6 +92,7 @@ type StartReviewLoopRequest struct {
 	AgentType       models.AgentType
 	Model           string
 	MaxPasses       int
+	FixMode         models.ReviewLoopFixMode
 	Source          models.ReviewLoopSource
 	AutomationRunID *uuid.UUID
 	StartedByUserID *uuid.UUID
@@ -107,6 +109,13 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 	if err := source.Validate(); err != nil {
 		return nil, err
+	}
+	fixMode := req.FixMode
+	if fixMode == "" {
+		fixMode = models.ReviewLoopFixModeMinimal
+	}
+	if err := fixMode.Validate(); err != nil {
+		return nil, ErrInvalidFixMode
 	}
 	session, err := s.runtime.GetSession(ctx, orgID, sessionID)
 	if err != nil {
@@ -159,6 +168,7 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 		Source:          source,
 		AgentType:       agentType,
 		MaxPasses:       req.MaxPasses,
+		FixMode:         fixMode,
 		ReviewRequired:  req.ReviewRequired,
 		StartedByUserID: req.StartedByUserID,
 	}
@@ -241,7 +251,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 			}
 			return nil
 		}
-		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
+		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(prompts.ReviewLoopFixPromptData{FixMode: loop.FixMode}), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
 		if err != nil {
 			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
 			return err

@@ -464,7 +464,7 @@ export const handlers = [
   }),
 
   http.post('/api/v1/sessions/:id/review-loops', async ({ request, params }) => {
-    const body = await request.json() as { agent_type?: string; max_passes?: number };
+    const body = await request.json() as { agent_type?: string; max_passes?: number; fix_mode?: 'minimal' | 'exhaustive' };
     return HttpResponse.json({
       data: {
         id: 'review-loop-1',
@@ -474,6 +474,7 @@ export const handlers = [
         source: 'manual',
         agent_type: body.agent_type || 'codex',
         max_passes: body.max_passes ?? 2,
+        fix_mode: body.fix_mode ?? 'minimal',
         completed_passes: 0,
         review_required: false,
         started_at: '2026-02-17T07:12:00Z',
