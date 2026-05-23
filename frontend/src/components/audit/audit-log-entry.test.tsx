@@ -38,6 +38,21 @@ describe('AuditLogEntry', () => {
     expect(screen.getByText('created session')).toBeInTheDocument();
   });
 
+  it('allows long audit row labels to wrap on narrow screens', () => {
+    render(
+      <AuditLogEntry
+        entry={makeEntry({ action: 'session.pr_push_requested' })}
+        members={mockMembers}
+      />
+    );
+
+    expect(screen.getByRole('button')).toHaveClass('whitespace-normal');
+    expect(screen.getByText('session pr_push_requested').parentElement).toHaveClass(
+      'whitespace-normal',
+      'break-words'
+    );
+  });
+
   it('labels team role changes without saying member role', () => {
     render(
       <AuditLogEntry
