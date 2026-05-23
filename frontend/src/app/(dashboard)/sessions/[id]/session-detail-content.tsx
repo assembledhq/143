@@ -82,6 +82,7 @@ import {
 } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
@@ -130,7 +131,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -2745,6 +2746,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
   const [reviewPasses, setReviewPasses] = useState(2);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
+  const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -3639,6 +3641,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         agent_type: reviewAgentType,
         model: session?.agent_type === reviewAgentType ? session?.model_override : undefined,
         max_passes: reviewPasses,
+        fix_mode: reviewFixMode,
       }),
     onSuccess: (response) => {
       toast.success("Review loop started");
@@ -5497,6 +5500,34 @@ export function SessionDetailContent({ id }: { id: string }) {
                   Separate from the main session&apos;s {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} agent.
                 </p>
               )}
+            </div>
+            <div className="space-y-2">
+              <Label>Fix mode</Label>
+              <RadioGroup
+                value={reviewFixMode}
+                onValueChange={(value) => setReviewFixMode(value as ReviewLoopFixMode)}
+                className="grid gap-2"
+                disabled={startReviewLoopMutation.isPending}
+              >
+                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-input p-3 transition-colors hover:bg-muted/40 has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5">
+                  <RadioGroupItem value="minimal" aria-label="Minimal fixes" className="mt-0.5" />
+                  <span className="space-y-1">
+                    <span className="block text-xs font-medium text-foreground">Minimal fixes</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Fix only what is needed to clear the review while preserving the current scope.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-input p-3 transition-colors hover:bg-muted/40 has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5">
+                  <RadioGroupItem value="exhaustive" aria-label="Fix every finding" className="mt-0.5" />
+                  <span className="space-y-1">
+                    <span className="block text-xs font-medium text-foreground">Fix every finding</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Address every issue the review reports before starting the next review pass.
+                    </span>
+                  </span>
+                </label>
+              </RadioGroup>
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">

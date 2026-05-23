@@ -458,7 +458,7 @@ export const api = {
       get<import('./types').ListResponse<import('./types').SessionReviewComment>>(`/api/v1/sessions/${sessionId}/review-comments`),
     listReviewLoops: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`),
-    startReviewLoop: (sessionId: string, body: { agent_type?: string; model?: string; max_passes: number }) =>
+    startReviewLoop: (sessionId: string, body: { agent_type?: string; model?: string; max_passes: number; fix_mode?: import('./types').ReviewLoopFixMode }) =>
       post<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops`, body),
     getReviewLoop: (sessionId: string, loopId: string) =>
       get<import('./types').SingleResponse<import('./types').SessionReviewLoop>>(`/api/v1/sessions/${sessionId}/review-loops/${loopId}`),
