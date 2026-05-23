@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server";
+import { source } from "@/lib/source";
 import { getRawPublicDocBySlug } from "@/lib/docs/public-docs";
+import { getRawDocsStaticParams } from "@/lib/docs/raw-docs-route";
+
+export const dynamic = "force-static";
+
+export function generateStaticParams() {
+  return getRawDocsStaticParams(source.getPages());
+}
 
 interface RawDocsRouteContext {
   params: Promise<{

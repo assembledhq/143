@@ -17,6 +17,11 @@ export function docsLayoutOptions(): BaseLayoutProps {
     },
     links: [
       {
+        text: "Get started",
+        url: "/docs/getting-started",
+        active: "nested-url",
+      },
+      {
         text: "Guides",
         url: "/docs/guides",
         active: "nested-url",
@@ -35,7 +40,7 @@ export function docsLayoutOptions(): BaseLayoutProps {
         type: "icon",
         text: "GitHub",
         label: "Open GitHub repository",
-        url: "https://github.com/143",
+        url: "https://github.com/assembledhq/143",
         external: true,
         icon: <Github className="size-4" aria-hidden="true" />,
       },

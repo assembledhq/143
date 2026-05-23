@@ -4,6 +4,7 @@ import {
   getAllPublicDocs,
   getRawPublicDocBySlug,
   getPublicDocsLlmsText,
+  type LlmsPage,
 } from "./public-docs";
 
 describe("public docs source", () => {
@@ -32,7 +33,8 @@ describe("public docs source", () => {
   });
 
   it("generates llms.txt from the public docs index", () => {
-    const llms = getPublicDocsLlmsText();
+    const pages = getAllPublicDocs() satisfies LlmsPage[];
+    const llms = getPublicDocsLlmsText(pages);
 
     expect(llms).toContain("# 143.dev docs");
     expect(llms).toContain("- [Repo config](https://143.dev/docs/guides/repo-config)");

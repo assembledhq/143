@@ -238,8 +238,13 @@ export function getRawPublicDocBySlug(slug: string[]): RawPublicDoc {
   };
 }
 
-export function getPublicDocsLlmsText(origin = "https://143.dev") {
-  const docs = getAllPublicDocs();
+export interface LlmsPage {
+  title: string;
+  url: string;
+  llmSummary: string;
+}
+
+export function getPublicDocsLlmsText(pages: LlmsPage[], origin = "https://143.dev") {
   const lines = [
     "# 143.dev docs",
     "",
@@ -251,9 +256,9 @@ export function getPublicDocsLlmsText(origin = "https://143.dev") {
     "",
   ];
 
-  for (const doc of docs) {
-    lines.push(`- [${doc.title}](${origin}${doc.url}): ${doc.llmSummary}`);
-    lines.push(`  Raw Markdown: ${origin}${doc.rawMarkdownUrl}`);
+  for (const page of pages) {
+    lines.push(`- [${page.title}](${origin}${page.url}): ${page.llmSummary}`);
+    lines.push(`  Raw Markdown: ${origin}${page.url}.md`);
   }
 
   return `${lines.join("\n")}\n`;
