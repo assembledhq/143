@@ -1077,7 +1077,7 @@ export function PreviewPanel({
               variant="outline"
               onClick={() => {
                 setShowFullStartupLogs(false);
-                restartMutation.mutate();
+                startMutation.mutate();
               }}
               disabled={isMutating}
             >
