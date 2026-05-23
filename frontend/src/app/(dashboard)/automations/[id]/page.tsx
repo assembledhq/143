@@ -668,11 +668,8 @@ export default function AutomationDetailPage() {
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
           <main className="min-w-0 space-y-6">
             <section className="rounded-lg border border-border bg-card p-5">
-              <div className="mb-4 flex items-center justify-between gap-3">
+              <div className="mb-4">
                 <h2 className="text-sm font-semibold text-foreground">Goal</h2>
-                <Badge variant={automation.enabled ? "default" : "secondary"}>
-                  {automation.enabled ? "Active" : "Paused"}
-                </Badge>
               </div>
               <MarkdownContent
                 content={automation.goal}
@@ -683,15 +680,8 @@ export default function AutomationDetailPage() {
             <LatestRunSummary automationId={automationId} />
 
             <section className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold text-foreground">Run history</h2>
-                <Link href="#run-history" className="text-xs text-muted-foreground hover:text-foreground">
-                  View all runs
-                </Link>
-              </div>
-              <div id="run-history">
-                <RunsTab automationId={automationId} />
-              </div>
+              <h2 className="text-sm font-semibold text-foreground">Run history</h2>
+              <RunsTab automationId={automationId} />
             </section>
           </main>
 
@@ -731,7 +721,7 @@ function AutomationDetailRail({
             {automation.enabled ? "Active" : "Paused"}
           </Badge>
         </div>
-        {runActions ? <div>{runActions}</div> : null}
+        {runActions}
         <DetailList
           items={[
             ["Next run", automation.next_run_at ? new Date(automation.next_run_at).toLocaleString() : "-"],
@@ -765,7 +755,7 @@ function DetailList({ items }: { items: Array<[string, string]> }) {
 }
 
 function priorityLabel(priority?: number): string {
-  if (priority === undefined || priority === null) return "Medium";
+  if (priority === undefined) return "Medium";
   if (priority <= 0) return "Critical";
   if (priority <= 25) return "High";
   if (priority <= 50) return "Medium";
@@ -774,8 +764,8 @@ function priorityLabel(priority?: number): string {
 
 function LatestRunSummary({ automationId }: { automationId: string }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["automation-runs", automationId, "latest"],
-    queryFn: () => api.automations.listRuns(automationId, { limit: 1 }),
+    queryKey: ["automation-runs", automationId, "recent"],
+    queryFn: () => api.automations.listRuns(automationId, { limit: 5 }),
     refetchInterval: 10_000,
   });
   const latest = data?.data?.[0];
@@ -829,9 +819,8 @@ function RecentRunsRail({ automationId }: { automationId: string }) {
 
   return (
     <section className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
+      <div className="mb-3">
         <h2 className="text-sm font-semibold text-foreground">Previous runs</h2>
-        <span className="text-xs text-muted-foreground">{runs.length}</span>
       </div>
       {isLoading ? (
         <div className="h-20 animate-pulse rounded-md bg-muted/25" />
