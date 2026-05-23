@@ -20,21 +20,25 @@ export function docsLayoutOptions(): BaseLayoutProps {
         text: "Get started",
         url: "/docs/getting-started",
         active: "nested-url",
+        on: "nav",
       },
       {
         text: "Guides",
         url: "/docs/guides",
         active: "nested-url",
+        on: "nav",
       },
       {
         text: "Self-hosting",
         url: "/docs/self-hosting",
         active: "nested-url",
+        on: "nav",
       },
       {
         text: "Reference",
         url: "/docs/reference",
         active: "nested-url",
+        on: "nav",
       },
       {
         type: "icon",

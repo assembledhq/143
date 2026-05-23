@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import rootDocsMeta from "../../../../docs/public/meta.json";
 import {
   DOCS_BASE_PATH,
   getAllPublicDocs,
@@ -10,6 +11,15 @@ import {
 describe("public docs source", () => {
   it("uses docs/public as the only public content root", () => {
     expect(DOCS_BASE_PATH).toBe("docs/public");
+  });
+
+  it("does not duplicate section labels in the root docs sidebar", () => {
+    const pages = rootDocsMeta.pages;
+
+    expect(pages).not.toContain("---Get started---");
+    expect(pages).not.toContain("---Guides---");
+    expect(pages).not.toContain("---Self-hosting---");
+    expect(pages).not.toContain("---Reference---");
   });
 
   it("lists curated public docs with stable urls and metadata", () => {
