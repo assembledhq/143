@@ -196,8 +196,7 @@ The first review message includes the native command:
 
 ```text
 /review the current workspace diff. If you find issues, report them in your
-normal review format. Then, when asked to fix, address the issues you found and
-run relevant verification.
+normal review format.
 ```
 
 The command token is persisted through the existing structured slash-command
@@ -298,13 +297,15 @@ and other supported agents have their own review language and may change their
 finding formats over time. The product should preserve and display the native
 review output.
 
-### Nits and polish policy
+### Review and fix modes
 
 Even though the product should not normalize findings into platform severities,
-the loop must still be explicit about how to handle nits. The product rule is:
-**fix low-risk local nits only**.
+the loop must still be explicit about how to handle nits and deferred findings.
+The selected fix mode applies to both the initial review prompt and the
+follow-up fix prompt.
 
-The review-loop prompt tells the agent:
+In minimal mode, the product rule is: **fix low-risk local nits only**. The
+review-loop prompt tells the agent:
 
 ```text
 Fix nits when they are local, low-risk, and relevant to the current change. Use
@@ -316,8 +317,14 @@ leave it for later and mention it in your summary.
 ```
 
 This keeps the default loop useful for polish and stale-code cleanup without
-turning every review into an unbounded cleanup pass. It is not exposed as a
-setup option in v1.
+turning every review into an unbounded cleanup pass.
+
+In exhaustive mode, the product rule is: **report every relevant review finding
+so the next fix pass can address it**. The review-loop prompt tells the agent:
+
+```text
+Report every issue you find. Do not defer findings as later work.
+```
 
 The only structured decision the platform needs is whether the loop should
 continue. That decision should come from the coding agent, not from a generic
