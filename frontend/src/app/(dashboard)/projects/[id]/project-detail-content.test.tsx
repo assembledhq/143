@@ -129,6 +129,36 @@ describe("ProjectDetailContent", () => {
     expect(screen.getByText("Settings")).toBeInTheDocument();
   });
 
+  it("updates the browser tab title with the project title", async () => {
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Stabilize preview startup", goal: "Build something great",
+              status: "draft", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 0, completed_tasks: 0, failed_tasks: 0,
+              proposed_by_pm: false, source_issue_ids: [],
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+
+    await waitFor(() => {
+      expect(document.title).toBe("143 | Stabilize preview startup");
+    });
+  });
+
   it("shows active indicator for active projects", async () => {
     server.use(
       http.get("*/api/v1/projects/:id", () => {

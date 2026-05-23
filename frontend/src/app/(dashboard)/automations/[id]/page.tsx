@@ -35,6 +35,7 @@ import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
+import { usePageTitle } from "@/hooks/use-page-title";
 import type { Automation, AutomationRun } from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import {
@@ -414,6 +415,7 @@ export default function AutomationDetailPage() {
   });
 
   const automation = data?.data;
+  usePageTitle(automation?.name, "Automation");
 
   const { data: repositoryResponse } = useQuery({
     queryKey: ["repository", automation?.repository_id],

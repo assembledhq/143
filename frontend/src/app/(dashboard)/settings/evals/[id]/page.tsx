@@ -40,6 +40,7 @@ import {
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { ArrowLeft, Play, Trash2, Loader2, AlertTriangle } from "lucide-react";
+import { usePageTitle } from "@/hooks/use-page-title";
 import type { EvalRun, ScoringCriterion } from "@/lib/types";
 import { evalComplexityConfig, evalRunStatusConfig, evalSourceConfig } from "@/lib/types";
 
@@ -69,6 +70,7 @@ export default function EvalTaskDetailPage() {
   });
 
   const task = taskResponse?.data;
+  usePageTitle(task?.name, "Eval");
   const runs = runsResponse?.data ?? [];
 
   if (taskLoading) {
