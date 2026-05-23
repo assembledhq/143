@@ -799,7 +799,7 @@ func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
 
 	// The common "no .143/config.json committed" case: the underlying FileReader
 	// returns sandbox.ErrFileNotFound (wrapped). Must NOT bubble up — caller
-	// falls back to built-in defaults.
+	// surfaces PREVIEW_NO_CONFIG instead of an infrastructure failure.
 	h := &PreviewHandler{
 		fileReader: &fakeFileReader{errorsByPath: map[string]error{
 			repoconfig.ConfigPath: fmt.Errorf("read file %s: %w", repoconfig.ConfigPath, sandbox.ErrFileNotFound),
@@ -835,18 +835,17 @@ func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
 func TestReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	t.Parallel()
 
-	// Parse errors are a user authoring problem, not infrastructure. Returning
-	// (nil, nil) keeps the response shape identical to "file not present", so
-	// the caller surfaces PREVIEW_NO_CONFIG (the user fix is the same: commit
-	// a valid .143/config.json) instead of a misleading 500. The Warn log
-	// emitted by readWorkspacePreviewConfig is the operator-side breadcrumb.
+	// Parse errors are a user authoring problem, not missing config. Returning
+	// an explicit invalid-config error lets the caller avoid the misleading
+	// PREVIEW_NO_CONFIG path when the repo did commit .143/config.json.
 	h := &PreviewHandler{
 		fileReader: &fakeFileReader{content: "{not valid json"},
 		logger:     zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
-	require.NoError(t, err, "invalid JSON must not surface as a 500")
-	require.Nil(t, cfg)
+	require.Error(t, err, "invalid JSON must surface as invalid preview config")
+	require.ErrorIs(t, err, preview.ErrInvalidConfig, "invalid workspace config should use the stable invalid-config sentinel")
+	require.Nil(t, cfg, "invalid preview config should not return a fallback config")
 }
 
 func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
@@ -1210,6 +1209,47 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewHandler_StartPreview_AutoDetectInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = &fakeFileReader{content: "{not valid json"}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "invalid committed config should be a user-actionable 422")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response body should decode as an error response")
+	require.Equal(t, "PREVIEW_CONFIG_INVALID", resp.Error.Code, "invalid committed config should use the stable invalid-config code")
+	require.Contains(t, resp.Error.Message, "Invalid .143/config.json preview config", "message should name the committed config file")
+	require.Contains(t, resp.Error.Message, "invalid character", "message should include the parser's specific failure")
+	require.Contains(t, resp.Error.Message, "Fix the committed config", "message should include a recovery action")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewHandler_StartPreview_SnapshotUnavailable_NoSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -1372,7 +1412,7 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response body should decode as an error response")
 	require.Equal(t, preview.PreviewCapacityCode, resp.Error.Code, "capacity errors should keep their stable API code")
-	require.Equal(t, preview.PreviewCapacityMessage, resp.Error.Message, "capacity errors should show a user-facing recovery message")
+	require.Equal(t, "You have reached your per-user preview limit: 999 active previews out of 4 allowed. Stop one of your previews or ask an admin to raise the per-user preview limit in General settings.", resp.Error.Message, "per-user capacity errors should explain the configured user limit")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

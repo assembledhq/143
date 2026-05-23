@@ -159,6 +159,44 @@ describe('SettingsPage', () => {
     });
   });
 
+  it('shows and saves the active previews per user setting', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { preview_max_previews_per_user: 7 },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const input = await screen.findByLabelText('Active previews per user');
+    await waitFor(() => {
+      expect(input).toHaveValue(7);
+    });
+
+    const user = userEvent.setup();
+    await user.click(input);
+    await user.keyboard('{Control>}a{/Control}4');
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { preview_max_previews_per_user: 4 },
+      });
+    });
+  });
+
+  it('defaults the active previews per user setting to four', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Active previews per user')).toHaveValue(4);
+    });
+  });
+
   it('shows a saved indicator only on the pull requests section after PR changes', async () => {
     renderWithProviders(<SettingsPage />);
 

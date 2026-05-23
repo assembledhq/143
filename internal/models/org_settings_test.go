@@ -30,6 +30,7 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
+	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
 }
 
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {
@@ -456,6 +457,47 @@ func TestParseOrgSettings_MaxSessionDuration_InRange(t *testing.T) {
 	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":600}`))
 	require.NoError(t, err)
 	require.Equal(t, 600, s.MaxSessionDurationSeconds, "in-range value should pass through")
+}
+
+func TestParseOrgSettings_PreviewMaxPreviewsPerUser(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected int
+	}{
+		{
+			name:     "zero defaults",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":0}`),
+			expected: DefaultPreviewMaxPreviewsPerUser,
+		},
+		{
+			name:     "custom value passes through",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":7}`),
+			expected: 7,
+		},
+		{
+			name:     "below minimum clamps up",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":-1}`),
+			expected: MinPreviewMaxPreviewsPerUser,
+		},
+		{
+			name:     "above maximum clamps down",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":999}`),
+			expected: MaxPreviewMaxPreviewsPerUser,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept preview capacity settings")
+			require.Equal(t, tt.expected, s.PreviewMaxPreviewsPerUser, "preview capacity should be normalized")
+		})
+	}
 }
 
 func TestParseOrgSettings_RuntimeBudgets_Defaults(t *testing.T) {

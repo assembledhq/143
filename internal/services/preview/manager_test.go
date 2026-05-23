@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -246,6 +247,18 @@ func newTestManager(mock pgxmock.PgxPoolIface, provider PreviewCapableProvider) 
 	})
 }
 
+type staticOrgSettingsStore struct {
+	settings json.RawMessage
+	err      error
+}
+
+func (s staticOrgSettingsStore) GetByID(_ context.Context, id uuid.UUID) (models.Organization, error) {
+	if s.err != nil {
+		return models.Organization{}, s.err
+	}
+	return models.Organization{ID: id, Settings: s.settings}, nil
+}
+
 // =============================================================================
 // Existing tests
 // =============================================================================
@@ -306,6 +319,7 @@ func TestNewManager_Defaults(t *testing.T) {
 	t.Parallel()
 
 	m := NewManager(ManagerConfig{})
+	require.Equal(t, 4, DefaultMaxPreviewsPerUser, "default per-user preview cap should be four")
 	require.Equal(t, DefaultMaxPreviewsPerUser, m.maxPerUser)
 	require.Equal(t, DefaultMaxPreviewsPerOrg, m.maxPerOrg)
 	require.Equal(t, DefaultMaxPreviewsPerWorker, m.maxPerWorker)
@@ -1083,6 +1097,80 @@ func TestCheckConcurrencyCaps_UnderLimits(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestCheckConcurrencyCaps_UsesOrgPreviewLimit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store: store,
+		OrgSettingsStore: staticOrgSettingsStore{
+			settings: json.RawMessage(`{"preview_max_previews_per_user":4}`),
+		},
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+		MaxPerUser:   2,
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
+	require.NoError(t, err, "org settings should raise the effective per-user preview limit")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCheckConcurrencyCaps_FallsBackToConfiguredPreviewLimitWhenOrgSettingAbsent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store: store,
+		OrgSettingsStore: staticOrgSettingsStore{
+			settings: json.RawMessage(`{}`),
+		},
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+		MaxPerUser:   6,
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(5))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
+	require.NoError(t, err, "missing org setting should preserve configured per-user preview fallback")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCheckConcurrencyCaps_UserExceeded(t *testing.T) {
 	t.Parallel()
 
@@ -1095,16 +1183,52 @@ func TestCheckConcurrencyCaps_UserExceeded(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 
-	// User count: 2 (at limit of 2).
+	// User count: 4 (at the default per-user limit).
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(4))
 
 	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrPreviewCapacity)
-	require.Contains(t, err.Error(), "you already have")
+	require.Contains(t, err.Error(), "per-user preview limit")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCheckConcurrencyCaps_UserExceededReturnsClearPerUserMessage(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store: store,
+		OrgSettingsStore: staticOrgSettingsStore{
+			settings: json.RawMessage(`{"preview_max_previews_per_user":4}`),
+		},
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(4))
+
+	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
+	require.Error(t, err, "at-limit preview count should fail")
+	require.ErrorIs(t, err, ErrPreviewCapacity, "capacity errors should wrap the sentinel")
+
+	var capacityErr *CapacityError
+	require.True(t, errors.As(err, &capacityErr), "per-user capacity errors should expose structured capacity details")
+	require.Equal(t, CapacityScopeUser, capacityErr.Scope, "capacity scope should identify the per-user limit")
+	require.Equal(t, "You have reached your per-user preview limit: 4 active previews out of 4 allowed. Stop one of your previews or ask an admin to raise the per-user preview limit in General settings.", capacityErr.UserMessage(), "capacity message should explain the per-user limit")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestCheckConcurrencyCaps_OrgExceeded(t *testing.T) {

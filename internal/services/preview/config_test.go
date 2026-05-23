@@ -2,6 +2,7 @@ package preview
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -90,6 +91,47 @@ func TestParseConfig_MultiService(t *testing.T) {
 	if len(cfg.Services) != 2 {
 		t.Errorf("len(Services) = %d, want 2", len(cfg.Services))
 	}
+}
+
+func TestParseConfig_AcceptsNumericVersionMarker(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": 1,
+			"name": "Full Stack",
+			"primary": "frontend",
+			"services": {
+				"frontend": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/", "timeout_seconds": 90}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept numeric preview.version markers from committed repo configs")
+	require.Equal(t, "1", cfg.Version, "ParseConfig should preserve a numeric version marker as its JSON text")
+	require.Equal(t, "frontend", cfg.Primary, "ParseConfig should still parse the rest of the preview section")
+}
+
+func TestInvalidConfigMessage(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("%w: parse .143/config.json: parse preview config: invalid character 'n' looking for beginning of object key string", ErrInvalidConfig)
+
+	msg := InvalidConfigMessage(err)
+
+	require.Equal(
+		t,
+		"Invalid .143/config.json preview config: parse preview config: invalid character 'n' looking for beginning of object key string. Fix the committed config and start preview again.",
+		msg,
+		"InvalidConfigMessage should include the specific config failure and a recovery action without duplicating path prefixes",
+	)
 }
 
 func TestParseConfig_WithInfrastructure(t *testing.T) {

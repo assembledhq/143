@@ -91,22 +91,35 @@ function SessionSidebarOptionFrame({
   );
 }
 
-function SessionSidebarLinkSurface({
+function SessionSidebarRowSurface({
   href,
   ariaCurrent,
   className,
   children,
 }: {
-  href: string;
+  href?: string;
   ariaCurrent?: "page";
   className?: string;
   children: ReactNode;
 }) {
+  const surfaceClassName = cn(sessionSidebarLinkSurfaceClass, className);
+  if (!href) {
+    return (
+      <div
+        data-session-row-surface="true"
+        className={surfaceClassName}
+      >
+        {children}
+      </div>
+    );
+  }
+
   return (
     <Link
       href={href}
       aria-current={ariaCurrent}
-      className={cn(sessionSidebarLinkSurfaceClass, className)}
+      data-session-row-surface="true"
+      className={surfaceClassName}
     >
       {children}
     </Link>
@@ -195,28 +208,35 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
 function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
   const cfg = statusConfig.pending;
   return (
-    <div className="block rounded-lg px-3 py-2.5 mb-0.5">
-      <div className="flex items-start gap-2.5 min-w-0">
-        <div className="mt-1.5 shrink-0">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
-          </span>
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium text-foreground truncate leading-snug">
-            {session.title}
-          </p>
-          <div className="flex items-center gap-3 mt-0.5">
-            <span className="text-xs text-muted-foreground shrink-0">
-              <span>{cfg.label}</span>
-              <AnimatedEllipsis />
+    <SessionSidebarOptionFrame
+      id={`session-sidebar-option-${session.id}`}
+      ariaLabel={session.title}
+      ariaSelected={false}
+      className="mb-0.5"
+    >
+      <SessionSidebarRowSurface>
+        <div className="flex items-start gap-2.5 min-w-0">
+          <div className="mt-1.5 shrink-0">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
             </span>
-            <span className="text-xs text-muted-foreground/50">just now</span>
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-foreground truncate leading-snug">
+              {session.title}
+            </p>
+            <div className="flex items-center gap-3 mt-0.5">
+              <span className="text-xs text-muted-foreground shrink-0">
+                <span>{cfg.label}</span>
+                <AnimatedEllipsis />
+              </span>
+              <span className="text-xs text-muted-foreground/50">just now</span>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      </SessionSidebarRowSurface>
+    </SessionSidebarOptionFrame>
   );
 }
 
@@ -704,7 +724,7 @@ export function SessionSidebar() {
               ariaSelected={!currentActiveSessionId}
               className={!currentActiveSessionId ? "border-primary/20 bg-background shadow-sm ring-1 ring-primary/10" : undefined}
             >
-              <SessionSidebarLinkSurface
+              <SessionSidebarRowSurface
                 href={`/sessions/new${filterSuffix}`}
                 ariaCurrent="page"
                 className={
@@ -729,7 +749,7 @@ export function SessionSidebar() {
                     New session
                   </p>
                 </div>
-              </SessionSidebarLinkSurface>
+              </SessionSidebarRowSurface>
             </SessionSidebarOptionFrame>
           </div>
         )}
@@ -807,7 +827,7 @@ export function SessionSidebar() {
                   router.push(sessionHref);
                 }}
               >
-                <SessionSidebarLinkSurface
+                <SessionSidebarRowSurface
                   href={sessionHref}
                   ariaCurrent={isSelected ? "page" : undefined}
                   className={
@@ -874,7 +894,7 @@ export function SessionSidebar() {
                       )}
                     </div>
                   </div>
-                </SessionSidebarLinkSurface>
+                </SessionSidebarRowSurface>
               </SessionSidebarOptionFrame>
             </SwipeActionRow>
           );

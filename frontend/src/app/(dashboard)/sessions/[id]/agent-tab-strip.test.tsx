@@ -164,6 +164,7 @@ describe("AgentTabStrip", () => {
     expect(scrollWrapper).toHaveClass("overflow-y-hidden");
     expect(scrollWrapper).toHaveClass("pb-1");
     expect(activeTab).toHaveTextContent(/Main tab/i);
+    expect(activeTab).toHaveAttribute("data-state", "active");
     expect(activeTab).not.toHaveTextContent(/Idle/i);
     expect(activeTab).toHaveClass("data-[state=active]:text-primary");
     expect(activeTab).toHaveClass("data-[state=active]:bg-transparent");

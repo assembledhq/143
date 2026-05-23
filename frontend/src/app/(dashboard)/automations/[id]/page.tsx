@@ -1,10 +1,12 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Pause, Loader2, Minus, Plus } from "lucide-react";
+import { Play, Pause, Loader2, Minus, Plus, Settings2 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,10 +17,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { MarkdownContent } from "@/components/markdown";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
@@ -26,8 +35,8 @@ import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
-import type { Automation } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import type { Automation, AutomationRun } from "@/lib/types";
+import { cn, formatTimeAgo } from "@/lib/utils";
 import {
   getCodingAgentReasoningOptions,
   supportsReasoningEffort,
@@ -35,6 +44,7 @@ import {
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
 import { RunsTab } from "./runs-tab";
+import { RunCard } from "./run-card";
 import {
   browserTimezone,
   formatRunAtWithTimezone,
@@ -43,7 +53,7 @@ import {
   splitRunAt,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
-import { AutomationEmojiPicker } from "../automation-emoji-picker";
+import { AutomationEmojiPicker } from "@/components/automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
 const AutomationStatsCard = dynamic(
@@ -394,6 +404,8 @@ export default function AutomationDetailPage() {
   const { user } = useAuth();
   const automationId = params?.id as string;
   const canManage = user?.role === "admin" || user?.role === "member";
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["automation", automationId],
@@ -402,6 +414,12 @@ export default function AutomationDetailPage() {
   });
 
   const automation = data?.data;
+
+  const { data: repositoryResponse } = useQuery({
+    queryKey: ["repository", automation?.repository_id],
+    queryFn: () => api.repositories.get(automation?.repository_id ?? ""),
+    enabled: !!automation?.repository_id,
+  });
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automationId),
@@ -522,10 +540,99 @@ export default function AutomationDetailPage() {
     deleteMutation.isError ? "Failed to delete automation." :
     null;
 
+  const runActions = canManage ? (
+    <div className="flex flex-wrap items-center gap-2">
+      {automation.enabled ? (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => pauseMutation.mutate()}
+          disabled={pauseMutation.isPending}
+        >
+          {pauseMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          ) : (
+            <Pause className="h-3.5 w-3.5 mr-1.5" />
+          )}
+          Pause
+        </Button>
+      ) : (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => resumeMutation.mutate()}
+          disabled={resumeMutation.isPending}
+        >
+          {resumeMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5 mr-1.5" />
+          )}
+          Resume
+        </Button>
+      )}
+      <Button size="sm" onClick={handleRunNow} disabled={runNowMutation.isPending}>
+        {runNowMutation.isPending ? (
+          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+        ) : (
+          <Play className="h-3.5 w-3.5 mr-1.5" />
+        )}
+        Run now
+      </Button>
+    </div>
+  ) : undefined;
+  const headerActions = canManage ? (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>
+        <Settings2 className="mr-1.5 h-3.5 w-3.5" />
+        Edit
+      </Button>
+      <Button variant="outline" size="sm" className="lg:hidden" onClick={() => setDetailsOpen(true)}>
+        Details
+      </Button>
+    </div>
+  ) : (
+    <Button variant="outline" size="sm" className="lg:hidden" onClick={() => setDetailsOpen(true)}>
+      Details
+    </Button>
+  );
+  const repositoryName = repositoryResponse?.data.full_name ?? automation.repository_id ?? "-";
+
   return (
-    <PageContainer size="default">
+    <PageContainer size="wide">
       <div className="space-y-6">
         <MobileBackButton to="/automations" label="Back to automations" />
+        <Sheet modal={false} open={settingsOpen} onOpenChange={setSettingsOpen}>
+          <SheetContent className="sm:max-w-2xl">
+            <SheetHeader>
+              <SheetTitle>Automation settings</SheetTitle>
+              <SheetDescription>
+                Update the goal and recurring execution defaults.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="mt-6">
+              <SettingsTab key={automation.updated_at} automation={automation} canManage={canManage} />
+            </div>
+          </SheetContent>
+        </Sheet>
+        <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
+          <SheetContent className="sm:max-w-md">
+            <SheetHeader>
+              <SheetTitle>Automation details</SheetTitle>
+              <SheetDescription>
+                Schedule, identity, model, and recent run controls.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="mt-6">
+              <AutomationDetailRail
+                automation={automation}
+                schedule={schedule}
+                repositoryName={repositoryName}
+                runActions={runActions}
+              />
+            </div>
+          </SheetContent>
+        </Sheet>
         <PageHeader
           title={
             <span className="inline-flex min-w-0 items-center gap-3">
@@ -549,51 +656,7 @@ export default function AutomationDetailPage() {
             </span>
           }
           description={headerDescription}
-          action={canManage ? (
-            <div className="flex items-center gap-2">
-              {automation.enabled ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => pauseMutation.mutate()}
-                  disabled={pauseMutation.isPending}
-                >
-                  {pauseMutation.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                  ) : (
-                    <Pause className="h-3.5 w-3.5 mr-1.5" />
-                  )}
-                  Pause
-                </Button>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => resumeMutation.mutate()}
-                  disabled={resumeMutation.isPending}
-                >
-                  {resumeMutation.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                  ) : (
-                    <Play className="h-3.5 w-3.5 mr-1.5" />
-                  )}
-                  Resume
-                </Button>
-              )}
-              <Button
-                size="sm"
-                onClick={handleRunNow}
-                disabled={runNowMutation.isPending}
-              >
-                {runNowMutation.isPending ? (
-                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                ) : (
-                  <Play className="h-3.5 w-3.5 mr-1.5" />
-                )}
-                Run now
-              </Button>
-            </div>
-          ) : undefined}
+          action={headerActions}
         />
 
         {headerError && (
@@ -602,25 +665,183 @@ export default function AutomationDetailPage() {
           </div>
         )}
 
-        <AutomationStatsCard automationId={automationId} />
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
+          <main className="min-w-0 space-y-6">
+            <section className="rounded-lg border border-border bg-card p-5">
+              <div className="mb-4">
+                <h2 className="text-sm font-semibold text-foreground">Goal</h2>
+              </div>
+              <MarkdownContent
+                content={automation.goal}
+                className="text-sm leading-6 text-foreground [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm"
+              />
+            </section>
 
-        <Tabs defaultValue="runs">
-          <TabsList>
-            <TabsTrigger value="runs">Runs</TabsTrigger>
-            <TabsTrigger value="settings">Settings</TabsTrigger>
-          </TabsList>
-          <TabsContent value="runs" className="mt-4">
-            <RunsTab automationId={automationId} />
-          </TabsContent>
-          <TabsContent value="settings" className="mt-4">
-            {/* Key on updated_at so a polling refetch that captures a remote
-                edit remounts SettingsTab, reseeding its useState-from-props
-                form fields. Without this, the visible values would drift
-                from the server until the user manually reopens the tab. */}
-            <SettingsTab key={automation.updated_at} automation={automation} canManage={canManage} />
-          </TabsContent>
-        </Tabs>
+            <LatestRunSummary automationId={automationId} />
+
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold text-foreground">Run history</h2>
+              <RunsTab automationId={automationId} />
+            </section>
+          </main>
+
+          <aside className="hidden space-y-4 lg:sticky lg:top-4 lg:block">
+            <AutomationDetailRail
+              automation={automation}
+              schedule={schedule}
+              repositoryName={repositoryName}
+              runActions={runActions}
+            />
+            <AutomationStatsCard automationId={automationId} />
+            <RecentRunsRail automationId={automationId} />
+          </aside>
+        </div>
       </div>
     </PageContainer>
   );
+}
+
+function AutomationDetailRail({
+  automation,
+  schedule,
+  repositoryName,
+  runActions,
+}: {
+  automation: Automation;
+  schedule: string;
+  repositoryName: string;
+  runActions?: ReactNode;
+}) {
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-foreground">Status</h2>
+          <Badge variant={automation.enabled ? "default" : "secondary"}>
+            {automation.enabled ? "Active" : "Paused"}
+          </Badge>
+        </div>
+        {runActions}
+        <DetailList
+          items={[
+            ["Next run", automation.next_run_at ? new Date(automation.next_run_at).toLocaleString() : "-"],
+            ["Last ran", automation.last_run_at ? new Date(automation.last_run_at).toLocaleString() : "-"],
+            ["Repository", repositoryName],
+            ["Schedule", schedule],
+            ["Runs as", automation.identity_scope === "personal" ? "Personal" : "Organization"],
+            ["Model", automation.model_override || automation.agent_type || "Auto"],
+            ["Reasoning", automation.reasoning_effort || "Default"],
+            ["Base branch", automation.base_branch || "-"],
+            ["Priority", priorityLabel(automation.priority)],
+            ["Scope", automation.scope || "-"],
+          ]}
+        />
+      </div>
+    </section>
+  );
+}
+
+function DetailList({ items }: { items: Array<[string, string]> }) {
+  return (
+    <dl className="space-y-3 text-sm">
+      {items.map(([label, value]) => (
+        <div key={label} className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3">
+          <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+          <dd className="min-w-0 break-words text-xs text-foreground">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function priorityLabel(priority?: number): string {
+  if (priority === undefined) return "Medium";
+  if (priority <= 0) return "Critical";
+  if (priority <= 25) return "High";
+  if (priority <= 50) return "Medium";
+  return "Low";
+}
+
+function LatestRunSummary({ automationId }: { automationId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["automation-runs", automationId, "recent"],
+    queryFn: () => api.automations.listRuns(automationId, { limit: 5 }),
+    refetchInterval: 10_000,
+  });
+  const latest = data?.data?.[0];
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-5">
+      <h2 className="text-sm font-semibold text-foreground">Latest run</h2>
+      {isLoading ? (
+        <p className="mt-3 text-sm text-muted-foreground">Loading latest run...</p>
+      ) : latest ? (
+        <LatestRunBody run={latest} />
+      ) : (
+        <p className="mt-3 text-sm text-muted-foreground">
+          No runs yet. The first run will appear here after the schedule fires or when you run it manually.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function LatestRunBody({ run }: { run: AutomationRun }) {
+  const summary = run.result_summary || run.session?.title || statusLabel(run.status);
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
+          {statusLabel(run.status)}
+        </Badge>
+        <span className="text-xs text-muted-foreground">
+          {formatTimeAgo(run.triggered_at)}
+          {run.completed_at ? ` · ${new Date(run.completed_at).toLocaleString()}` : ""}
+        </span>
+      </div>
+      <p className="text-sm text-foreground">{summary}</p>
+      {run.session?.id ? (
+        <Button asChild variant="outline" size="sm">
+          <Link href={`/sessions/${run.session.id}`}>Open session</Link>
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function RecentRunsRail({ automationId }: { automationId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["automation-runs", automationId, "recent"],
+    queryFn: () => api.automations.listRuns(automationId, { limit: 5 }),
+    refetchInterval: 10_000,
+  });
+  const runs = data?.data ?? [];
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-foreground">Previous runs</h2>
+      </div>
+      {isLoading ? (
+        <div className="h-20 animate-pulse rounded-md bg-muted/25" />
+      ) : runs.length > 0 ? (
+        <div className="space-y-2">
+          {runs.map((run) => (
+            <RunCard key={run.id} run={run} />
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">No runs yet.</p>
+      )}
+    </section>
+  );
+}
+
+function statusLabel(status: AutomationRun["status"]): string {
+  switch (status) {
+    case "completed_noop":
+      return "No-op";
+    default:
+      return status.replaceAll("_", " ");
+  }
 }

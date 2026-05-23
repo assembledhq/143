@@ -158,6 +158,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { deriveCreatePRActionState, derivePushChangesActionState } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
@@ -425,7 +426,6 @@ type PRActionErrorState = {
   message: string;
 };
 
-type AddTabTriggerSource = "strip" | "header";
 type PendingThreadPreview = Pick<
   SessionThread,
   "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override"
@@ -3900,8 +3900,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [newThreadLabel, setNewThreadLabel] = useState("");
   const focusComposerAfterThreadCreateRef = useRef(false);
   const addTabButtonRef = useRef<HTMLButtonElement>(null);
-  const headerAddTabButtonRef = useRef<HTMLButtonElement>(null);
-  const lastAddTabTriggerSourceRef = useRef<AddTabTriggerSource>("strip");
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   // Tracks an in-flight agent-switch PATCH so the send-time PATCH can wait
@@ -4440,19 +4438,13 @@ export function SessionDetailContent({ id }: { id: string }) {
         return;
       }
 
-      if (lastAddTabTriggerSourceRef.current === "header") {
-        headerAddTabButtonRef.current?.focus();
-        return;
-      }
-
       addTabButtonRef.current?.focus();
     });
 
     return () => window.cancelAnimationFrame(rafID);
   }, [activeThread?.id, composerCanSendMessage, session?.agent_type]);
 
-  const handleCreateThreadFrom = useCallback((source: AddTabTriggerSource) => {
-    lastAddTabTriggerSourceRef.current = source;
+  const handleCreateThread = useCallback(() => {
     createThreadMutation.mutate(buildDefaultThreadRequest());
   }, [buildDefaultThreadRequest, createThreadMutation]);
 
@@ -4746,59 +4738,34 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotState,
     localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
-  const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
     : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
       (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
-  const showPRAction =
-    canShipPR && (
-      canAttemptCreatePR ||
-      canCreatePR ||
-      showExpiredPRAction ||
-      queueingPR ||
-      creatingPR ||
-      finalizingPR ||
-      prState === "failed" ||
-      Boolean(prActionError)
-    );
-
-  let prActionLabel = "Create PR";
-  let prActionSpinning = false;
-  let prActionDisabled = false;
-  let prActionTitle: string | undefined;
-
-  if (queueingPR) {
-    prActionLabel = "Queueing PR…";
-    prActionSpinning = true;
-    prActionDisabled = true;
-    prActionTitle = "Sending the PR request to the queue";
-  } else if (creatingPR) {
-    prActionLabel = "Creating PR…";
-    prActionSpinning = true;
-    prActionDisabled = true;
-    prActionTitle = "Pushing changes and opening the pull request";
-  } else if (snapshotUnavailable) {
-    prActionDisabled = true;
-    prActionTitle = snapshotMessage;
-  } else if (localPRActionError) {
-    prActionLabel = "Retry";
-    prActionTitle = localPRActionError.message;
-  } else if (succeededButNoPR) {
-    prActionLabel = "Finalizing PR…";
-    prActionSpinning = true;
-    prActionDisabled = true;
-  } else if (canAttemptCreatePR && !builderReviewAllowsPR) {
-    prActionDisabled = true;
-    prActionTitle = "Run Review successfully before creating a PR";
-  } else if (prState === "failed") {
-    prActionLabel = "Retry";
-    prActionTitle = session.pr_creation_error || "PR creation failed";
-  } else if (ghBlocked) {
-    prActionDisabled = true;
-    prActionTitle = "Connect your GitHub account to create PRs";
-  }
+  const createPRAction = deriveCreatePRActionState({
+    canShipPR,
+    hasPR,
+    hasSessionChanges,
+    hasSnapshot,
+    isRunning,
+    builderReviewAllowsPR,
+    snapshotUnavailable,
+    snapshotMessage,
+    ghBlocked,
+    queueingPR,
+    creatingPR,
+    finalizingPR,
+    prState,
+    prCreationError: session.pr_creation_error,
+    localError: snapshotUnavailable ? undefined : localPRActionError?.message,
+    hasRecoverableError: Boolean(prActionError),
+  });
+  const showPRAction = createPRAction.visible;
+  const prActionLabel = createPRAction.label;
+  const prActionSpinning = createPRAction.spinning;
+  const prActionDisabled = createPRAction.disabled;
+  const prActionTitle = createPRAction.disabledReason;
 
   const branchState = session.branch_creation_state;
   const queueingBranch = localBranchState === "submitting";
@@ -4824,48 +4791,33 @@ export function SessionDetailContent({ id }: { id: string }) {
   // alongside Resolve conflicts / Fix tests / Merge so all PR-level
   // actions live in one place, while still hiding Push changes when the
   // latest session head already matches the remote PR branch.
-  const pushAvailable = hasPR && prStatus === "open" && !!session.has_unpushed_changes;
   const pushState = session.pr_push_state;
   const queueingPush = localPushState === "submitting";
   const pushingChanges =
     (localPushState === "queued" && pushState !== "failed" && pushState !== "succeeded") ||
     pushState === "queued" ||
     pushState === "pushing";
-  const canPushChanges = canShipPR && builderReviewAllowsPR && pushAvailable && hasSnapshot && !isRunning;
-  const showPushAction = canShipPR && pushAvailable && (canPushChanges || !builderReviewAllowsPR || queueingPush || pushingChanges || pushState === "failed" || localPushActionError);
-  let pushActionLabel = "Push changes";
-  let pushActionSpinning = false;
-  let pushActionDisabled = false;
-  let pushActionTitle: string | undefined;
-  if (queueingPush) {
-    pushActionLabel = "Queueing…";
-    pushActionSpinning = true;
-    pushActionDisabled = true;
-    pushActionTitle = "Sending the push request to the queue";
-  } else if (pushingChanges) {
-    pushActionLabel = "Pushing…";
-    pushActionSpinning = true;
-    pushActionDisabled = true;
-    pushActionTitle = "Pushing changes to the PR branch";
-  } else if (snapshotUnavailable) {
-    pushActionDisabled = true;
-    pushActionTitle = snapshotMessage;
-  } else if (localPushActionError) {
-    pushActionLabel = "Retry";
-    pushActionTitle = localPushActionError.message;
-  } else if (pushState === "failed") {
-    pushActionLabel = "Retry";
-    pushActionTitle = session.pr_push_error || "Push to PR failed";
-  } else if (ghBlocked) {
-    pushActionDisabled = true;
-    pushActionTitle = "Connect your GitHub account to push changes";
-  } else if (pushAvailable && !builderReviewAllowsPR) {
-    pushActionDisabled = true;
-    pushActionTitle = "Run Review successfully before pushing changes";
-  } else if (isRunning) {
-    pushActionDisabled = true;
-    pushActionTitle = "Wait for the session to finish before pushing";
-  }
+  const pushAction = derivePushChangesActionState({
+    canShipPR,
+    hasOpenPR: hasPR && prStatus === "open",
+    hasUnpushedChanges: !!session.has_unpushed_changes,
+    hasSnapshot,
+    isRunning,
+    builderReviewAllowsPR,
+    snapshotUnavailable,
+    snapshotMessage,
+    ghBlocked,
+    queueingPush,
+    pushingChanges,
+    pushState,
+    pushError: session.pr_push_error,
+    localError: localPushActionError?.message,
+  });
+  const showPushAction = pushAction.visible;
+  const pushActionLabel = pushAction.label;
+  const pushActionSpinning = pushAction.spinning;
+  const pushActionDisabled = pushAction.disabled;
+  const pushActionTitle = pushAction.disabledReason;
 
   function handleMergeAction() {
     if (ghBlocked) {
@@ -5072,7 +5024,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {canManageSession && canUseNativeReviewLoop && !hasPR ? (
+          {canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -5096,6 +5048,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       size="sm"
                       className="w-full gap-1.5 sm:w-auto"
                       disabled={reviewActionDisabled}
+                      title={reviewActionDisabledReason}
                       onClick={() => setReviewSetupOpen(true)}
                     >
                       {startReviewLoopMutation.isPending || reviewLoopRunning ? (
@@ -5295,23 +5248,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 <LinkedIssueChips session={session} />
               </div>
               <div className="flex items-center gap-2" data-testid="session-header-actions">
-                <Button
-                  ref={headerAddTabButtonRef}
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100"
-                  aria-label="Add agent tab"
-                  title="Add agent tab"
-                  onClick={() => handleCreateThreadFrom("header")}
-                  disabled={createThreadMutation.isPending}
-                >
-                  {createThreadMutation.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Plus className="h-3.5 w-3.5" />
-                  )}
-                </Button>
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
                     variant="ghost"
@@ -5340,7 +5276,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             overlapsByThreadId={overlapsByThreadId}
             statusConfig={statusConfig}
             onActiveThreadChange={setActiveThreadId}
-            onAddTab={() => handleCreateThreadFrom("strip")}
+            onAddTab={handleCreateThread}
             addTabPending={createThreadMutation.isPending}
             onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
             onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
