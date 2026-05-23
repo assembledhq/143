@@ -1346,7 +1346,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Try Again button in failed state ---------- */
 
-  it("calls restart mutation when Try Again is clicked in failed state", async () => {
+  it("calls start mutation when Try Again is clicked in failed state", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus({
@@ -1364,8 +1364,9 @@ describe("PreviewPanel component", () => {
     await user.click(screen.getByText("Try Again"));
 
     await waitFor(() => {
-      expect(mockRestart).toHaveBeenCalledWith("sess-1");
+      expect(mockStart).toHaveBeenCalledWith("sess-1");
     });
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
   /* ---------- Bootstrap origin enforcement ---------- */
