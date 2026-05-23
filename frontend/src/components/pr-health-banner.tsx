@@ -197,6 +197,24 @@ export function PRHealthBanner({
                   </div>
                 )}
                 <div className="flex flex-wrap gap-2">
+                  {canShowMergeButton && (
+                    <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
+                      <Button
+                        size="sm"
+                        variant="default"
+                        disabled={mergeAction.disabled}
+                        title={mergeAction.disabledReason ?? "Merge PR (p m)"}
+                        onClick={onMerge}
+                      >
+                        {mergeAction.spinning ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <GitMerge className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        {mergeAction.label}
+                      </Button>
+                    </DisabledTooltip>
+                  )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
                       <Button
@@ -230,24 +248,6 @@ export function PRHealthBanner({
                           <Wrench className="mr-1.5 h-3.5 w-3.5" />
                         )}
                         {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
-                      </Button>
-                    </DisabledTooltip>
-                  )}
-                  {canShowMergeButton && (
-                    <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        disabled={mergeAction.disabled}
-                        title={mergeAction.disabledReason ?? "Merge PR (p m)"}
-                        onClick={onMerge}
-                      >
-                        {mergeAction.spinning ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <GitMerge className="mr-1.5 h-3.5 w-3.5" />
-                        )}
-                        {mergeAction.label}
                       </Button>
                     </DisabledTooltip>
                   )}
