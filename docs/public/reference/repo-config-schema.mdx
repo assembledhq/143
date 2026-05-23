@@ -1,0 +1,33 @@
+---
+title: Repo config schema
+description: Top-level fields supported by `.143/config.json`.
+section: Reference
+order: 51
+status: beta
+audience: engineer
+tags:
+  - repo-config
+  - schema
+llm_summary: Field-level reference for top-level `.143/config.json` sections including dependencies, bootstrap, validation, and preview.
+---
+
+# Repo config schema
+
+`.143/config.json` supports these top-level sections.
+
+<ConfigField name="dependencies" type="object" description="Tool name to version map for supported sandbox-installed dependencies." />
+<ConfigField name="bootstrap.commands" type="string[]" description="Setup commands run before normal agent work." />
+<ConfigField name="validation.commands" type="string[]" description="Repository-specific checks run during validation." />
+<ConfigField name="preview" type="object" description="Live preview configuration. See the preview reference for fields." />
+
+## Constraints
+
+- The file must be valid JSON.
+- Commands should be deterministic and safe to run in a sandbox.
+- Secret values must not be stored in the file.
+- Paths should be relative to the repository root.
+
+## Related
+
+- [Repo config guide](/docs/guides/repo-config)
+- [Preview config reference](/docs/reference/preview-config)

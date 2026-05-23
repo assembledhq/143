@@ -1,0 +1,44 @@
+---
+title: Preview config
+description: Field-level reference for the `preview` section of `.143/config.json`.
+section: Reference
+order: 52
+status: beta
+audience: engineer
+tags:
+  - previews
+  - reference
+  - repo-config
+llm_summary: Field-level reference for preview configuration including services, readiness, infrastructure, credentials, and network settings.
+---
+
+# Preview config
+
+The `preview` section tells 143 how to start and expose an app inside a session.
+
+## Top-level fields
+
+<ConfigField name="preview.name" type="string" description="Human label shown in the UI." />
+<ConfigField name="preview.primary" type="string" description="Service key that receives browser traffic in multi-service previews." />
+<ConfigField name="preview.services" type="object" description="Map of service name to service config." />
+<ConfigField name="preview.infrastructure" type="object" description="Optional managed sidecars such as Postgres or Redis." />
+<ConfigField name="preview.credentials" type="object" required description='Credential injection policy. Use { "mode": "none" } if no secrets are needed.' />
+<ConfigField name="preview.network" type="object" required description='Network policy. Use { "mode": "managed" } for the default sandbox policy.' />
+
+## Service fields
+
+<ConfigField name="command" type="string[]" required description="Command argv executed directly inside the sandbox." />
+<ConfigField name="cwd" type="string" description="Working directory relative to the repo root." />
+<ConfigField name="port" type="integer" required description="Port the service binds to." />
+<ConfigField name="env" type="object" description="Non-secret environment variables." />
+<ConfigField name="ready.http_path" type="string" description="Path used for readiness checks." />
+<ConfigField name="ready.timeout_seconds" type="integer" defaultValue="90" description="Maximum wait before readiness fails." />
+
+## Infrastructure fields
+
+<ConfigField name="template" type="string" required description="Managed sidecar template such as `postgres-17` or `redis-7`." />
+<ConfigField name="init_script" type="string" description="Optional SQL or shell script relative to the repo root." />
+<ConfigField name="inject_env" type="object" description="Environment variables built from sidecar connection placeholders." />
+<ConfigField name="inject_into" type="string[]" description="Service names that receive injected environment variables." />
+
+For task-based examples, see [Preview environments](/docs/guides/previews).

@@ -1,0 +1,48 @@
+---
+title: Get started
+description: Connect a repository, start a coding-agent session, and ship the first reviewable change.
+section: Get started
+order: 1
+status: beta
+audience: evaluator
+tags:
+  - onboarding
+  - github
+  - sessions
+llm_summary: "Learn the shortest path to a successful 143 workflow: connect GitHub, start a session, review the diff, and open a PR."
+---
+
+# Get started
+
+The first useful 143 workflow is simple: connect GitHub, start a session in a repo, let the agent make a change, review the diff, and open a PR.
+
+<Steps>
+  <Step>
+    Connect GitHub so 143 can read repositories and create branches through its GitHub App.
+  </Step>
+  <Step>
+    Start a session with a specific repo, branch, coding agent, and prompt.
+  </Step>
+  <Step>
+    Review the transcript, diff, validation results, and preview when one is configured.
+  </Step>
+  <Step>
+    Open a PR and let repository-native CI/CD remain the source of truth.
+  </Step>
+</Steps>
+
+## What 143 needs
+
+143 works best when the repo includes:
+
+- A clear default branch.
+- A deterministic install/test path.
+- A `.143/config.json` file for repo-specific setup and validation.
+- Preview config when frontend or full-stack review matters.
+- Enough project context in issues, docs, and repository files for a coding agent to act safely.
+
+## Next steps
+
+- [Connect GitHub](/docs/getting-started/connect-github)
+- [Start a session](/docs/getting-started/start-a-session)
+- [Review and ship](/docs/getting-started/review-and-ship)

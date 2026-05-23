@@ -1,0 +1,47 @@
+---
+title: Autopilot
+description: Understand how 143 prioritizes issues and decides when agent work can run automatically.
+section: Guides
+order: 14
+status: beta
+audience: engineer
+tags:
+  - autopilot
+  - automation
+  - prioritization
+llm_summary: Autopilot ranks issues and runs coding-agent sessions only after configured autonomy, complexity, and concurrency gates pass.
+---
+
+# Autopilot
+
+Autopilot is the background automation surface for 143. It ranks work, shows what is likely to run, and explains when human review is required before an agent starts.
+
+## How Autopilot decides
+
+Autopilot evaluates gates in order:
+
+1. The organization autonomy setting allows automatic work.
+2. The issue complexity fits the configured autonomy level.
+3. The aggressiveness limit allows this complexity tier.
+4. Organization concurrency is below the active run cap.
+
+If any gate fails, the issue stays available for manual kick-off.
+
+## What you see
+
+The queue should make state explicit:
+
+- Ready for manual kick-off.
+- Queued or running.
+- Needs review.
+- Opened a PR.
+- Failed with actionable next steps.
+- Completed or shipped.
+
+## Good operating model
+
+Start with conservative automation and raise autonomy after the team trusts the repo config, validation commands, preview setup, and review expectations.
+
+<AgentNote>
+Automation eligibility is not the same as priority. An issue can be high priority but blocked from autorun by complexity, autonomy, or concurrency gates.
+</AgentNote>

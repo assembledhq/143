@@ -1,0 +1,81 @@
+---
+title: Preview environments
+description: Configure live previews so reviewers can inspect frontend and full-stack changes from a session.
+section: Guides
+order: 12
+status: stable
+audience: engineer
+tags:
+  - previews
+  - repo-config
+  - frontend
+llm_summary: Configure the `preview` section of `.143/config.json` so 143 can start services, check readiness, and expose a live session preview.
+---
+
+# Preview environments
+
+A preview is a live view of your app running inside a 143 session. When an agent edits a UI, reviewers can inspect the result next to the transcript and diff.
+
+## Single-service preview
+
+Use this for a frontend app with one dev server:
+
+```json
+{
+  "preview": {
+    "name": "frontend",
+    "command": ["npm", "run", "dev"],
+    "cwd": "frontend",
+    "port": 3000,
+    "ready": { "http_path": "/", "timeout_seconds": 120 },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  }
+}
+```
+
+## Full-stack preview
+
+Use services when the app needs a frontend and backend:
+
+```json
+{
+  "preview": {
+    "name": "full-stack",
+    "primary": "frontend",
+    "services": {
+      "frontend": {
+        "command": ["npm", "run", "dev"],
+        "cwd": "frontend",
+        "port": 3000,
+        "env": { "API_URL": "http://localhost:8080" },
+        "ready": { "http_path": "/" }
+      },
+      "server": {
+        "command": ["go", "run", "./cmd/server"],
+        "port": 8080,
+        "ready": { "http_path": "/healthz" }
+      }
+    },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  }
+}
+```
+
+## How readiness works
+
+143 starts declared services and waits for their readiness probes. A preview becomes available only after the primary service is reachable.
+
+<Steps>
+  <Step>143 reads `.143/config.json` from the repo.</Step>
+  <Step>It starts infrastructure and services in dependency order.</Step>
+  <Step>Each service must pass its readiness probe.</Step>
+  <Step>The session page exposes the preview on an isolated preview origin.</Step>
+</Steps>
+
+## When to use previews
+
+Previews are most useful for UI changes, full-stack workflow changes, and review paths where the correct result is easier to see than infer from a diff.
+
+For every supported field, see [Preview config reference](/docs/reference/preview-config).
