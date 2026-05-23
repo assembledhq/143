@@ -94,6 +94,33 @@ describe("PRHealthBanner", () => {
     expect(onReview).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the disabled Review action reason in a hover tooltip", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={baseHealth}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        reviewAction={{
+          disabled: true,
+          spinning: false,
+          title: "Review can start after the current turn finishes",
+          onClick: vi.fn(),
+        }}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /^Review$/ });
+    expect(button).toBeDisabled();
+
+    await userEvent.setup().hover(button.parentElement as HTMLElement);
+
+    expect(await screen.findByRole("tooltip", { name: "Review can start after the current turn finishes" })).toBeInTheDocument();
+  });
+
 	it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
 		const onMerge = vi.fn();
 		renderWithProviders(

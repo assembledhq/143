@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { SyncTimeText } from "@/components/sync-time-text";
 
@@ -240,20 +241,22 @@ export function PRHealthBanner({
                     </Button>
                   )}
                   {reviewAction && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={reviewAction.disabled || pendingAction !== null}
-                      title={reviewAction.title}
-                      onClick={reviewAction.onClick}
-                    >
-                      {reviewAction.spinning ? (
-                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
-                      )}
-                      Review
-                    </Button>
+                    <DisabledTooltip disabled={reviewAction.disabled || pendingAction !== null} content={reviewAction.title}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={reviewAction.disabled || pendingAction !== null}
+                        title={reviewAction.title}
+                        onClick={reviewAction.onClick}
+                      >
+                        {reviewAction.spinning ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        Review
+                      </Button>
+                    </DisabledTooltip>
                   )}
                   {pushChanges && (
                     <Button
