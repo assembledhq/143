@@ -63,6 +63,10 @@ func (s *PreviewAPITokenStore) Create(ctx context.Context, token *models.Preview
 	return nil
 }
 
+// GetByToken looks up a non-revoked preview API token by its plaintext value,
+// recording the access time atomically. The org is resolved from the token hash
+// itself rather than an explicit org_id because this is a pre-auth lookup.
+//
 // lint:allow-no-orgid reason="pre-auth bearer token lookup resolves the org from the token hash"
 func (s *PreviewAPITokenStore) GetByToken(ctx context.Context, token string) (models.PreviewAPIToken, error) {
 	hash := HashPreviewAPIToken(token)
