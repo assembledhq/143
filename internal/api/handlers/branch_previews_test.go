@@ -1120,6 +1120,7 @@ func TestBranchPreviewHandler_ListRejectsPreviewTokenForWrongRepo(t *testing.T) 
 }
 
 func TestBranchPreviewExpiresAt_NilTTLUsesDefaultHardTTL(t *testing.T) {
+	t.Parallel()
 	before := time.Now()
 	got := branchPreviewExpiresAt(nil)
 	after := time.Now()
@@ -1130,6 +1131,7 @@ func TestBranchPreviewExpiresAt_NilTTLUsesDefaultHardTTL(t *testing.T) {
 }
 
 func TestBranchPreviewExpiresAt_ZeroTTLUsesDefaultHardTTL(t *testing.T) {
+	t.Parallel()
 	zero := int64(0)
 	before := time.Now()
 	got := branchPreviewExpiresAt(&zero)
@@ -1141,6 +1143,7 @@ func TestBranchPreviewExpiresAt_ZeroTTLUsesDefaultHardTTL(t *testing.T) {
 }
 
 func TestBranchPreviewExpiresAt_BelowMinimumClampsToMinLifetimeTTL(t *testing.T) {
+	t.Parallel()
 	tooShort := int64(preview.MinLifetimeTTL.Seconds()) - 1
 	before := time.Now()
 	got := branchPreviewExpiresAt(&tooShort)
@@ -1152,6 +1155,7 @@ func TestBranchPreviewExpiresAt_BelowMinimumClampsToMinLifetimeTTL(t *testing.T)
 }
 
 func TestBranchPreviewExpiresAt_AboveMaximumClampsToDefaultMaxTTL(t *testing.T) {
+	t.Parallel()
 	tooLong := int64(preview.DefaultMaxTTL.Seconds()) + 1
 	before := time.Now()
 	got := branchPreviewExpiresAt(&tooLong)
@@ -1163,6 +1167,7 @@ func TestBranchPreviewExpiresAt_AboveMaximumClampsToDefaultMaxTTL(t *testing.T) 
 }
 
 func TestBranchPreviewExpiresAt_WithinRangePassesThrough(t *testing.T) {
+	t.Parallel()
 	mid := int64((preview.MinLifetimeTTL + preview.DefaultMaxTTL) / 2 / time.Second)
 	midDuration := time.Duration(mid) * time.Second
 	before := time.Now()
@@ -1175,6 +1180,7 @@ func TestBranchPreviewExpiresAt_WithinRangePassesThrough(t *testing.T) {
 }
 
 func TestBranchPreviewExpiresAt_ExactMinimumPassesThrough(t *testing.T) {
+	t.Parallel()
 	exact := int64(preview.MinLifetimeTTL.Seconds())
 	before := time.Now()
 	got := branchPreviewExpiresAt(&exact)
@@ -1288,6 +1294,7 @@ func TestBranchPreviewHandler_DecoratePreviewResponsePopulatesRepoMetadata(t *te
 }
 
 func TestBranchPreviewExpiresAt_ExactMaximumPassesThrough(t *testing.T) {
+	t.Parallel()
 	exact := int64(preview.DefaultMaxTTL.Seconds())
 	before := time.Now()
 	got := branchPreviewExpiresAt(&exact)
