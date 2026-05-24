@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
+import { safeExternalUrl } from "@/lib/utils";
 
 export default function PullRequestPreviewPage({
   params,
@@ -149,25 +150,25 @@ export default function PullRequestPreviewPage({
                 ) : null}
 
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  {preview.preview_url ? (
+                  {safeExternalUrl(preview.preview_url) ? (
                     <Button asChild>
-                      <a href={preview.preview_url}>
+                      <a href={safeExternalUrl(preview.preview_url)} target="_blank" rel="noopener noreferrer">
                         <ExternalLink className="h-4 w-4" />
                         Open preview
                       </a>
                     </Button>
                   ) : null}
-                  {preview.pull_request_url ? (
+                  {safeExternalUrl(preview.pull_request_url) ? (
                     <Button asChild variant="outline">
-                      <a href={preview.pull_request_url}>
+                      <a href={safeExternalUrl(preview.pull_request_url)} target="_blank" rel="noopener noreferrer">
                         <GitPullRequest className="h-4 w-4" />
                         Open PR
                       </a>
                     </Button>
                   ) : null}
-                  {preview.github_branch_url ? (
+                  {safeExternalUrl(preview.github_branch_url) ? (
                     <Button asChild variant="outline">
-                      <a href={preview.github_branch_url}>
+                      <a href={safeExternalUrl(preview.github_branch_url)} target="_blank" rel="noopener noreferrer">
                         <GitBranch className="h-4 w-4" />
                         Branch
                       </a>

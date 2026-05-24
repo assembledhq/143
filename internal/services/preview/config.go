@@ -374,6 +374,12 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	for name, svc := range cfg.Services {
 		if len(svc.Command) == 0 {
 			errs = append(errs, fmt.Sprintf("service %q: command is required", name))
+		} else {
+			for i, part := range svc.Command {
+				if strings.TrimSpace(part) == "" {
+					errs = append(errs, fmt.Sprintf("service %q: command[%d] must not be blank", name, i))
+				}
+			}
 		}
 		if svc.Port < MinPort || svc.Port > MaxPort {
 			errs = append(errs, fmt.Sprintf("service %q: port %d must be in range %d-%d", name, svc.Port, MinPort, MaxPort))
@@ -429,13 +435,17 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 }
 
 // validHTTPPath only allows safe characters in readiness probe paths to prevent
-// shell injection when the path is interpolated into a curl command.
+// shell injection when the path is interpolated into a curl command. The negative
+// lookahead equivalent is implemented by rejecting /.. sequences after the
+// character allowlist passes, since Go's regexp package is RE2 (no lookahead).
 var validHTTPPath = regexp.MustCompile(`^/[a-zA-Z0-9/_.\-?&=%]*$`)
+var traversalSequence = regexp.MustCompile(`/\.\.(/|$)`)
 var validPreviewInstallCleanPath = regexp.MustCompile(`^[A-Za-z0-9_./@*+\-]+$`)
 
-// isValidHTTPPath checks that a readiness probe HTTP path contains only safe characters.
+// isValidHTTPPath checks that a readiness probe HTTP path contains only safe
+// characters and does not contain path traversal sequences (/../).
 func isValidHTTPPath(path string) bool {
-	return validHTTPPath.MatchString(path)
+	return validHTTPPath.MatchString(path) && !traversalSequence.MatchString(path)
 }
 
 // validatePathInsideRepo checks that a relative path does not escape the repo root.
@@ -523,7 +533,7 @@ func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
 //
 // For connected previews (credentials.mode != "none"), ALL fields are pinned to
 // the base branch.
-func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig {
+func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) (*models.PreviewConfig, error) {
 	resolved := &models.PreviewConfig{
 		Version:     baseCfg.Version,
 		Name:        baseCfg.Name,
@@ -578,7 +588,10 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 		}
 	}
 
-	return resolved
+	if errs := ValidateConfig(resolved); len(errs) > 0 {
+		return nil, fmt.Errorf("resolved config is invalid: %s", strings.Join(errs, "; "))
+	}
+	return resolved, nil
 }
 
 func cloneInstallConfig(install *models.PreviewInstallConfig) *models.PreviewInstallConfig {

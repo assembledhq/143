@@ -221,7 +221,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		Sandbox:                   sb,
 		BaseCommitSHA:             target.CommitSHA,
 		ProfileName:               payload.ProfileName,
-		RequestID:                 target.RequestID,
+		RequestID:                 derefStringPtr(target.RequestID),
 		MetricsSource:             string(target.SourceType),
 		MetricsRepositoryFullName: repo.FullName,
 	}
@@ -492,11 +492,15 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 
 	actualID, err := r.sessions.PublishHydratedContainerID(ctx, orgID, session.ID, sandbox.ID)
 	if err != nil {
-		_ = r.sandboxProvider.Destroy(context.Background(), sandbox)
+		destroyCtx, destroyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = r.sandboxProvider.Destroy(destroyCtx, sandbox)
+		destroyCancel()
 		return acquireSandboxResult{Err: fmt.Errorf("publish container id: %w", err)}
 	}
 	if actualID != sandbox.ID {
-		_ = r.sandboxProvider.Destroy(context.Background(), sandbox)
+		destroyCtx, destroyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = r.sandboxProvider.Destroy(destroyCtx, sandbox)
+		destroyCancel()
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
 	}
 

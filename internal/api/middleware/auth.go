@@ -272,10 +272,16 @@ func handlePreviewAPIToken(w http.ResponseWriter, r *http.Request, next http.Han
 		}
 		return false
 	}
-	user, err := stores.Users.GetByIDGlobal(r.Context(), apiToken.CreatedByUserID)
+	// Single JOIN query: verify user exists and is still a member of the token's
+	// org. This replaces the prior two sequential queries (user lookup + membership
+	// check) and correctly handles the "creator left the org" revocation case.
+	user, err := stores.Users.GetByIDGlobalWithMembershipCheck(r.Context(), apiToken.CreatedByUserID, apiToken.OrgID)
 	if err != nil {
-		logger.Warn().Err(err).Str("user_id", apiToken.CreatedByUserID.String()).Msg("auth: preview api token user lookup failed")
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "preview api token user not found")
+		logger.Warn().Err(err).
+			Str("user_id", apiToken.CreatedByUserID.String()).
+			Str("org_id", apiToken.OrgID.String()).
+			Msg("auth: preview api token creator not found or no longer a member of the org")
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "preview api token creator is not an active member of the organization")
 		return true
 	}
 	ctx := WithUser(r.Context(), &user)

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
+import { safeExternalUrl } from "@/lib/utils";
 
 export default function PreviewStableLinkPage({
   params,
@@ -54,9 +55,9 @@ export default function PreviewStableLinkPage({
                   </div>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  {preview.preview_url ? (
+                  {safeExternalUrl(preview.preview_url) ? (
                     <Button asChild>
-                      <a href={preview.preview_url}>
+                      <a href={safeExternalUrl(preview.preview_url)} target="_blank" rel="noopener noreferrer">
                         <ExternalLink className="h-4 w-4" />
                         Open preview
                       </a>

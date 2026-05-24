@@ -723,7 +723,8 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// Primary comes from base.
 	if resolved.Primary != "frontend" {
@@ -800,7 +801,8 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// All service fields pinned to base.
 	fe := resolved.Services["frontend"]
@@ -841,7 +843,8 @@ func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// Only services from base should exist.
 	if len(resolved.Services) != 1 {
@@ -876,7 +879,8 @@ func TestResolveConfig_NonConnectedCanRemoveInstall(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	require.Nil(t, resolved.Install, "non-connected preview should use nil install from diff instead of keeping stale base install")
 	require.Equal(t, []string{"go", "run", "."}, resolved.Services["app"].Command, "non-connected preview should still resolve runtime service fields from diff")

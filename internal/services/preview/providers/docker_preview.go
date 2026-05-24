@@ -254,7 +254,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				phaseErr = fmt.Errorf("provision infrastructure %q: %w", name, err)
 				return phaseErr
 			}
+			d.mu.Lock()
 			state.infra[name] = ih
+			d.mu.Unlock()
 			infraCreds[name] = ih.Credential
 		}
 

@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
+import { ACTIVE_PREVIEW_STATUSES, CONTROLLABLE_PREVIEW_STATUSES, formatPreviewStatus } from "@/lib/preview-types";
+import { safeExternalUrl } from "@/lib/utils";
 
 export default function PreviewLandingPage({
   params,
@@ -46,13 +48,13 @@ export default function PreviewLandingPage({
 
   const preview = previewQuery.data?.data;
   const isExpired = preview?.status === "expired";
-  const isActive = preview?.status && ["ready", "partially_ready", "unhealthy", "starting"].includes(preview.status);
+  const isActive = preview?.status && ACTIVE_PREVIEW_STATUSES.includes(preview.status as any);
   const title = preview?.repository_full_name
     ? `${preview.repository_full_name}${preview.branch ? ` · ${preview.branch}` : ""}`
     : preview
-      ? `Preview ${preview.target_id.slice(0, 8)}`
+      ? `Preview ${(preview.target_id ?? preview.preview_id ?? "").slice(0, 8)}`
       : "Preview";
-  const status = preview?.status.replaceAll("_", " ") ?? "Loading";
+  const status = preview?.status ? formatPreviewStatus(preview.status) : "Loading";
 
   return (
     <PageContainer size="default">
@@ -64,20 +66,20 @@ export default function PreviewLandingPage({
         />
 
         {/* Hero: preview link */}
-        {previewQuery.isLoading ? null : preview?.preview_url ? (
+        {previewQuery.isLoading ? null : safeExternalUrl(preview?.preview_url) ? (
           <Card>
             <CardContent className="pt-4 pb-4">
               <div className="flex items-center gap-3">
                 <a
-                  href={preview.preview_url}
+                  href={safeExternalUrl(preview!.preview_url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex-1 truncate font-mono text-sm text-foreground underline-offset-4 hover:underline"
                 >
-                  {preview.preview_url}
+                  {preview!.preview_url}
                 </a>
                 <Button asChild size="sm">
-                  <a href={preview.preview_url} target="_blank" rel="noopener noreferrer">
+                  <a href={safeExternalUrl(preview!.preview_url)} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-4 w-4" />
                     Open preview
                   </a>
@@ -171,7 +173,7 @@ export default function PreviewLandingPage({
                         {preview.services.map((service) => (
                           <div key={service.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
                             <span className="truncate">{service.service_name}</span>
-                            <Badge variant={service.status === "ready" ? "default" : "secondary"}>{service.status.replaceAll("_", " ")}</Badge>
+                            <Badge variant={service.status === "ready" ? "default" : "secondary"}>{formatPreviewStatus(service.status)}</Badge>
                           </div>
                         ))}
                       </div>
@@ -182,7 +184,7 @@ export default function PreviewLandingPage({
                         {preview.infrastructure.map((infra) => (
                           <div key={infra.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
                             <span className="truncate">{infra.infra_name}</span>
-                            <Badge variant={infra.status === "healthy" ? "default" : "secondary"}>{infra.status.replaceAll("_", " ")}</Badge>
+                            <Badge variant={infra.status === "healthy" ? "default" : "secondary"}>{formatPreviewStatus(infra.status)}</Badge>
                           </div>
                         ))}
                       </div>
@@ -213,17 +215,17 @@ export default function PreviewLandingPage({
 
                 {/* Actions */}
                 <div className="flex flex-wrap gap-2">
-                  {preview.pull_request_url ? (
+                  {safeExternalUrl(preview.pull_request_url) ? (
                     <Button asChild variant="outline" size="sm">
-                      <a href={preview.pull_request_url} target="_blank" rel="noopener noreferrer">
+                      <a href={safeExternalUrl(preview.pull_request_url)} target="_blank" rel="noopener noreferrer">
                         <GitPullRequest className="h-4 w-4" />
                         PR
                       </a>
                     </Button>
                   ) : null}
-                  {preview.github_branch_url ? (
+                  {safeExternalUrl(preview.github_branch_url) ? (
                     <Button asChild variant="outline" size="sm">
-                      <a href={preview.github_branch_url} target="_blank" rel="noopener noreferrer">
+                      <a href={safeExternalUrl(preview.github_branch_url)} target="_blank" rel="noopener noreferrer">
                         <GitBranch className="h-4 w-4" />
                         Branch
                       </a>
@@ -267,7 +269,7 @@ export default function PreviewLandingPage({
                     <RotateCw className="h-4 w-4" />
                     Refresh
                   </Button>
-                  {preview.preview_id && ["ready", "partially_ready", "unhealthy"].includes(preview.status) ? (
+                  {preview.preview_id && CONTROLLABLE_PREVIEW_STATUSES.includes(preview.status as any) ? (
                     <Button
                       type="button"
                       variant="ghost"

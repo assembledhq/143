@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, ListResponse, Repository } from "@/lib/types";
+import { safeExternalUrl } from "@/lib/utils";
 
 export default function NewPreviewPage() {
   const searchParams = useSearchParams();
@@ -298,7 +299,7 @@ export default function NewPreviewPage() {
                 <p className="break-all text-sm text-muted-foreground">{result.stable_url}</p>
               </div>
               <Button asChild variant="outline">
-                <a href={result.stable_url}>
+                <a href={safeExternalUrl(result.stable_url)} target="_blank" rel="noopener noreferrer">
                   <ExternalLink className="h-4 w-4" />
                   Open
                 </a>

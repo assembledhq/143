@@ -296,7 +296,7 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 		Name:            input.Config.Name,
 		Status:          models.PreviewStatusStarting,
 		CurrentPhase:    "reserved",
-		RequestID:       input.RequestID,
+		RequestID:       nilIfEmpty(input.RequestID),
 		Provider:        ProviderDocker,
 		WorkerNodeID:    workerNodeID,
 		PrimaryService:  input.Config.Primary,
@@ -361,7 +361,7 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		Name:           input.Config.Name,
 		Status:         models.PreviewStatusStarting,
 		CurrentPhase:   "reserved",
-		RequestID:      input.RequestID,
+		RequestID:      nilIfEmpty(input.RequestID),
 		Provider:       ProviderDocker,
 		WorkerNodeID:   workerNodeID,
 		PrimaryService: input.Config.Primary,
@@ -1504,6 +1504,14 @@ func (m *Manager) checkConcurrencyCapsWithStore(ctx context.Context, store *db.P
 	return nil
 }
 
+// CheckPreviewCapacity performs a non-transactional quota pre-check for branch
+// previews. It returns ErrPreviewCapacity (check with errors.Is) when any cap
+// would be exceeded. This is a best-effort early check; the authoritative cap
+// enforcement runs atomically inside ReserveBranchPreviewForWorkerInTx.
+func (m *Manager) CheckPreviewCapacity(ctx context.Context, orgID, userID uuid.UUID, workerNodeID string) error {
+	return m.checkStandaloneConcurrencyCapsWithStore(ctx, m.store, orgID, userID, workerNodeID)
+}
+
 func (m *Manager) checkStandaloneConcurrencyCapsWithStore(ctx context.Context, store *db.PreviewStore, orgID, userID uuid.UUID, workerNodeID string) error {
 	maxPerUser, err := m.maxPreviewsPerUser(ctx, orgID)
 	if err != nil {
@@ -1754,4 +1762,21 @@ func generateToken() (string, error) {
 func hashToken(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:])
+}
+
+// nilIfEmpty returns a pointer to s, or nil when s is the empty string.
+// Used when mapping optional string fields to nullable DB columns.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// derefStringPtr dereferences a nullable string pointer, returning "" for nil.
+func derefStringPtr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

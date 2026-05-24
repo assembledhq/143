@@ -105,7 +105,7 @@ func (s *PreviewAPITokenStore) Revoke(ctx context.Context, orgID, tokenID uuid.U
 		return fmt.Errorf("revoke preview api token: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("preview api token not found")
+		return pgx.ErrNoRows
 	}
 	return nil
 }
