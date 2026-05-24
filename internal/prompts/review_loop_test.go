@@ -42,8 +42,8 @@ func TestReviewLoopDecisionPrompt(t *testing.T) {
 
 	got := ReviewLoopDecisionPrompt()
 	require.Contains(t, got, "REVIEW_CLEAN", "decision prompt should expose the clean sentinel")
-	require.Contains(t, got, "NEEDS_FIX_PASS", "decision prompt should expose the fix sentinel")
-	require.Contains(t, got, "Answer with one of", "decision prompt should constrain the response")
+	require.NotContains(t, got, "NEEDS_FIX_PASS", "decision prompt should not expose the old fix sentinel")
+	require.Contains(t, got, "fix the issues now", "decision prompt should ask the agent to fix remaining issues directly")
 	require.Contains(t, got, "coding judgment", "decision prompt should ask the agent to apply coding judgment")
 }
 
