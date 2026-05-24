@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -111,13 +113,14 @@ type DockerClient interface {
 // DockerProvider implements SandboxProvider using Docker containers
 // with optional gVisor (runsc) runtime for enhanced isolation.
 type DockerProvider struct {
-	client           DockerClient
-	runtime          string // "runsc" (gVisor) or "runc" (standard Docker)
-	network          string // pre-created Docker network with egress restrictions
-	resolvConf       string // host path bind-mounted at /etc/resolv.conf in sandboxes
-	healthImage      string // small image used to verify the configured runtime can start containers
-	requireDiskQuota bool
-	logger           zerolog.Logger
+	client                 DockerClient
+	runtime                string // "runsc" (gVisor) or "runc" (standard Docker)
+	network                string // pre-created Docker network with egress restrictions
+	resolvConf             string // host path bind-mounted at /etc/resolv.conf in sandboxes
+	healthImage            string // small image used to verify the configured runtime can start containers
+	requireDiskQuota       bool
+	authSocketPreflightDir string
+	logger                 zerolog.Logger
 }
 
 // DockerProviderOption configures a DockerProvider.
@@ -165,6 +168,14 @@ func WithHealthCheckImage(ref string) DockerProviderOption {
 func WithRequireDiskQuota(required bool) DockerProviderOption {
 	return func(p *DockerProvider) {
 		p.requireDiskQuota = required
+	}
+}
+
+// WithAuthSocketPreflightDir enables a startup-only proof that a sandbox can
+// connect to a bind-mounted per-session credential socket. Empty disables it.
+func WithAuthSocketPreflightDir(dir string) DockerProviderOption {
+	return func(p *DockerProvider) {
+		p.authSocketPreflightDir = dir
 	}
 }
 
@@ -261,6 +272,131 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 				return fmt.Errorf("runtime %s health check: test container exited with code %d", d.runtime, info.State.ExitCode)
 			}
 			d.logger.Info().Str("runtime", d.runtime).Msg("sandbox runtime health check passed")
+			if d.authSocketPreflightDir != "" {
+				if err := d.checkAuthSocketMount(ctx); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+}
+
+func (d *DockerProvider) checkAuthSocketMount(ctx context.Context) error {
+	sessionDir, err := os.MkdirTemp(d.authSocketPreflightDir, "preflight-*")
+	if err != nil {
+		return fmt.Errorf("sandbox auth socket health check: create preflight dir: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(sessionDir); err != nil {
+			d.logger.Warn().Err(err).Str("dir", sessionDir).Msg("sandbox auth socket health check: failed to remove preflight dir")
+		}
+	}()
+
+	sockPath := filepath.Join(sessionDir, sandboxauth.SocketFileName)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("sandbox auth socket health check: listen on %s: %w", sockPath, err)
+	}
+	defer ln.Close()
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		return fmt.Errorf("sandbox auth socket health check: chmod %s: %w", sockPath, err)
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serveErr <- err
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(sandboxauth.CallTimeout))
+		var req sandboxauth.Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			serveErr <- fmt.Errorf("decode request: %w", err)
+			return
+		}
+		if req.Op != sandboxauth.OpGet {
+			serveErr <- fmt.Errorf("unexpected op %q", req.Op)
+			return
+		}
+		if err := json.NewEncoder(conn).Encode(&sandboxauth.Response{
+			Token:    "preflight-token",
+			Username: sandboxauth.DefaultUsername,
+			Identity: sandboxauth.IdentityApp,
+		}); err != nil {
+			serveErr <- fmt.Errorf("encode response: %w", err)
+			return
+		}
+		serveErr <- nil
+	}()
+
+	cfg := agent.DefaultSandboxConfig()
+	pidsLimit := int64(64)
+	resp, err := d.client.ContainerCreate(ctx, &container.Config{
+		Image: cfg.Image,
+		User:  "sandbox",
+		Env: []string{
+			sandboxauth.SocketEnvVar + "=" + sandboxauth.SandboxSocketPath,
+		},
+		Cmd: []string{"sh", "-c", "143-tools auth-token --action=api >/dev/null"},
+	}, &container.HostConfig{
+		Runtime: d.runtime,
+		Resources: container.Resources{
+			PidsLimit: &pidsLimit,
+		},
+		Mounts: []mount.Mount{{
+			Type:   mount.TypeBind,
+			Source: sessionDir,
+			Target: sandboxauth.SandboxSocketDir,
+		}},
+	}, nil, nil, "")
+	if err != nil {
+		return fmt.Errorf("sandbox auth socket health check: create test container: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = d.client.ContainerRemove(cleanupCtx, resp.ID, container.RemoveOptions{Force: true})
+	}()
+
+	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("sandbox auth socket health check: start test container: %w", err)
+	}
+	if err := d.waitForOneShotContainer(ctx, resp.ID, "sandbox auth socket health check"); err != nil {
+		return err
+	}
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			return fmt.Errorf("sandbox auth socket health check: host socket exchange: %w", err)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("sandbox auth socket health check: wait for host socket exchange: %w", ctx.Err())
+	}
+	d.logger.Info().Str("runtime", d.runtime).Msg("sandbox auth socket health check passed")
+	return nil
+}
+
+func (d *DockerProvider) waitForOneShotContainer(ctx context.Context, containerID, label string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s: timed out waiting for test container: %w", label, ctx.Err())
+		case <-ticker.C:
+			info, err := d.client.ContainerInspect(ctx, containerID)
+			if err != nil {
+				return fmt.Errorf("%s: inspect test container: %w", label, err)
+			}
+			if info.State == nil || info.State.Running {
+				continue
+			}
+			if info.State.ExitCode != 0 {
+				return fmt.Errorf("%s: test container exited with code %d", label, info.State.ExitCode)
+			}
 			return nil
 		}
 	}
