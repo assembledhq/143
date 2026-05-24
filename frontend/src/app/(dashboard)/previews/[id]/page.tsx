@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
-import { ACTIVE_PREVIEW_STATUSES, CONTROLLABLE_PREVIEW_STATUSES, formatPreviewStatus } from "@/lib/preview-types";
+import { ACTIVE_PREVIEW_STATUSES, CONTROLLABLE_PREVIEW_STATUSES, formatPreviewStatus, type PreviewStatus } from "@/lib/preview-types";
 import { safeExternalUrl } from "@/lib/utils";
 
 export default function PreviewLandingPage({
@@ -48,7 +48,7 @@ export default function PreviewLandingPage({
 
   const preview = previewQuery.data?.data;
   const isExpired = preview?.status === "expired";
-  const isActive = preview?.status && ACTIVE_PREVIEW_STATUSES.includes(preview.status as any);
+  const isActive = preview?.status && ACTIVE_PREVIEW_STATUSES.includes(preview.status as PreviewStatus);
   const title = preview?.repository_full_name
     ? `${preview.repository_full_name}${preview.branch ? ` · ${preview.branch}` : ""}`
     : preview
@@ -269,7 +269,7 @@ export default function PreviewLandingPage({
                     <RotateCw className="h-4 w-4" />
                     Refresh
                   </Button>
-                  {preview.preview_id && CONTROLLABLE_PREVIEW_STATUSES.includes(preview.status as any) ? (
+                  {preview.preview_id && CONTROLLABLE_PREVIEW_STATUSES.includes(preview.status as PreviewStatus) ? (
                     <Button
                       type="button"
                       variant="ghost"

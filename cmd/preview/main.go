@@ -162,7 +162,7 @@ func resolveRepositoryID(apiURL, token, fullName string) (string, error) {
 			return "", err
 		}
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			return "", readErr
 		}
