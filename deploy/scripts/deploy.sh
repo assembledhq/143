@@ -1036,7 +1036,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # get patched on the next deploy.
   if [ "$ROLE" = "worker" ] && command -v runsc &>/dev/null; then
     DAEMON_JSON="/etc/docker/daemon.json"
-    if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -q "host-uds" "$DAEMON_JSON"; then
+    if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -Eq -- '--host-uds(=|[[:space:]]+)open' "$DAEMON_JSON"; then
       echo "Patching runsc runtime with --ignore-cgroups --host-uds=open..."
       sudo runsc install -- --ignore-cgroups --host-uds=open
       sudo systemctl restart docker

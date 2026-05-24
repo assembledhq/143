@@ -963,6 +963,18 @@ func TestWorkerDeployRunsReconciliationBeforeCompose(t *testing.T) {
 	require.Less(t, reconcileIndex, composeIndex, "worker deploy must repair host invariants before the new worker starts")
 }
 
+func TestWorkerDeployRequiresExactRunscHostUDSOpen(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read the deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `grep -Eq -- '--host-uds(=|[[:space:]]+)open' "$DAEMON_JSON"`, "worker deploy should verify runsc host UDS is open, not merely that a host-uds flag exists")
+	require.Contains(t, deployText, "sudo runsc install -- --ignore-cgroups --host-uds=open", "worker deploy should repair runsc with host UDS opened for sandbox credential sockets")
+	require.NotContains(t, deployText, `grep -q "host-uds" "$DAEMON_JSON"`, "worker deploy must not accept an arbitrary host-uds value because host-uds=none still breaks sandbox credential sockets")
+}
+
 func TestProvisionAndMakeExposeWorkerReconciliation(t *testing.T) {
 	t.Parallel()
 
