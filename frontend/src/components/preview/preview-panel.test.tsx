@@ -1020,6 +1020,24 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("starts a new preview when retrying after a failed preview", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "failed" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Retry Preview" })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Retry Preview" }));
+
+    await waitFor(() => {
+      expect(mockStart).toHaveBeenCalledWith("sess-1");
+    });
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
   /* ---------- Mutation error banner ---------- */
 
   it("shows mutation error banner when start fails", async () => {
