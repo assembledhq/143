@@ -1059,6 +1059,7 @@ func buildServices(
 		providers.WithResolvConf(cfg.SandboxResolvConf),
 		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+		providers.WithAuthSocketPreflightDir(cfg.SandboxAuthSocketDir),
 	)
 	mentionIndexCache := workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{
 		Redis:  redisClient,
@@ -1097,6 +1098,7 @@ func buildServices(
 					providers.WithResolvConf(cfg.SandboxResolvConf),
 					providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 					providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+					providers.WithAuthSocketPreflightDir(cfg.SandboxAuthSocketDir),
 				)
 				healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
 				fallbackErr := sandboxProvider.HealthCheck(healthCtx)
