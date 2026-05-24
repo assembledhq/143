@@ -22,6 +22,10 @@ func previewAnyArgs(n int) []any {
 	return args
 }
 
+func previewStringPtr(value string) *string {
+	return &value
+}
+
 // =============================================================================
 // Column lists for mock rows
 // =============================================================================
@@ -87,7 +91,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		id, sessionID, nil, orgID, userID, "bootstrap", "my-preview", "starting",
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", "req-1", "", now, now, now, nil,
+		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", previewStringPtr("req-1"), "", now, now, now, nil,
 		false,
 	}
 }
@@ -96,7 +100,7 @@ func newPreviewTargetRow(id, orgID, repoID, userID uuid.UUID, now time.Time) []a
 	return []any{
 		id, orgID, repoID, "feature/previews", "0123456789abcdef0123456789abcdef01234567", "default",
 		"sha256:config", "manual", "source-1", "https://example.com/source",
-		userID, "req-1", now,
+		userID, previewStringPtr("req-1"), now,
 	}
 }
 

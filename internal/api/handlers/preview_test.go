@@ -502,7 +502,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		previewID, sessionID, nil, orgID, userID, "bootstrap", "default", "starting",
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", "req-1", "", now, now, nil, nil,
+		"/", 512, 500, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil,
 		false,
 	}
 }
@@ -617,7 +617,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		previewID, sessionID, nil, orgID, userID, "bootstrap", "my-preview", "ready",
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, recycleConfig, recycleSandbox, "ready", "req-1", "", now, now, now, nil,
+		"/", 512, 500, recycleConfig, recycleSandbox, "ready", strPtr("req-1"), "", now, now, now, nil,
 		false,
 	}
 }

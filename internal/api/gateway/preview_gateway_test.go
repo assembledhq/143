@@ -21,6 +21,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func gatewayStringPtr(value string) *string {
+	return &value
+}
+
 func TestExtractPreviewID(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
@@ -724,7 +728,7 @@ func TestGateway_ProxyToWorker_Success(t *testing.T) {
 				previewID, sessionID, nil, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
 				"docker", "worker-1", "handle-1", "web", 3000,
 				"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
-				"/", 512, 500, []byte(`{}`), []byte(`{}`), "ready", "req-1", "", now, now, now, nil,
+				"/", 512, 500, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
 				false,
 			),
 		)
@@ -822,7 +826,7 @@ func TestGateway_ProxyToWorker_Failures(t *testing.T) {
 					previewID, sessionID, nil, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
 					"docker", "worker-missing", "handle-1", "web", 3000,
 					"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
-					"/", 512, 500, []byte(`{}`), []byte(`{}`), "ready", "req-1", "", now, now, now, nil,
+					"/", 512, 500, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
 					false,
 				),
 			)
@@ -880,7 +884,7 @@ func TestGateway_ProxyToWorker_Failures(t *testing.T) {
 					previewID, sessionID, nil, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
 					"docker", "worker-1", "handle-1", "web", 3000,
 					"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
-					"/", 512, 500, []byte(`{}`), []byte(`{}`), "ready", "req-1", "", now, now, now, nil,
+					"/", 512, 500, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
 					false,
 				),
 			)
