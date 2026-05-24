@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
@@ -15,6 +16,10 @@ type SessionLogStore struct {
 	db      DBTX
 	streams *cache.SessionStreams
 	logger  zerolog.Logger
+}
+
+type SessionLogFilterOptions struct {
+	TurnNumbers []int
 }
 
 func NewSessionLogStore(db DBTX) *SessionLogStore {
@@ -139,6 +144,38 @@ func (s *SessionLogStore) ListByThread(ctx context.Context, orgID, threadID uuid
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query thread logs: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+}
+
+func (s *SessionLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
+	if len(turnNumbers) == 0 {
+		return s.ListByThread(ctx, orgID, threadID)
+	}
+	pgTurns := make([]int32, 0, len(turnNumbers))
+	for _, turnNumber := range turnNumbers {
+		if turnNumber < 0 || turnNumber > math.MaxInt32 {
+			continue
+		}
+		pgTurns = append(pgTurns, int32(turnNumber))
+	}
+	if len(pgTurns) == 0 {
+		return []models.SessionLog{}, nil
+	}
+	query := `
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		FROM session_logs sl
+		WHERE sl.thread_id = @thread_id AND sl.org_id = @org_id
+		  AND sl.turn_number = ANY(@turn_numbers::int[])
+		ORDER BY sl.id ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"thread_id":    threadID,
+		"org_id":       orgID,
+		"turn_numbers": pgTurns,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query thread logs by turns: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
 }
