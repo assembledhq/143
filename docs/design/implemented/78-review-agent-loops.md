@@ -331,21 +331,25 @@ continue. That decision should come from the coding agent, not from a generic
 finding parser.
 
 After each review pass, the loop asks the same agent for a bounded continuation
-decision:
+turn:
 
 ```text
-Based on your latest review, are there remaining issues you should fix in this
-sandbox before this work is considered clean? Apply the nit policy above and use
-your coding judgment when deciding whether remaining nits require another fix
-pass. Answer with one of:
+Based on your latest review, decide whether this sandbox is clean. Apply the nit
+policy above and use your coding judgment when deciding whether remaining nits
+require action.
 
-- REVIEW_CLEAN
-- NEEDS_FIX_PASS
+If the review found no remaining issues that should be fixed, answer with
+exactly:
+
+REVIEW_CLEAN
+
+If the review found remaining issues that should be fixed, fix the issues now in
+this sandbox, run relevant verification, and summarize what changed.
 ```
 
-The UI can display the raw review output, the raw fix summary, and this compact
-decision. It should not reclassify findings into `blocking`, `major`, `minor`,
-or any other platform-wide severity scheme.
+The UI can display the raw review output, the raw fix summary, and the clean
+sentinel when present. It should not reclassify findings into `blocking`,
+`major`, `minor`, or any other platform-wide severity scheme.
 
 ## Execution Model
 
@@ -355,12 +359,11 @@ For `passIndex` from `1..max_review_passes`:
 2. Capture a loop checkpoint before the first review pass.
 3. Create or reuse the review-loop thread.
 4. Run the selected agent's native review command in that thread.
-5. Ask the same agent whether the latest review is clean or needs a fix pass.
+5. Ask the same agent whether the latest review is clean; if it is not clean,
+   the agent fixes the issues in that turn.
 6. If the agent reports `REVIEW_CLEAN`, mark the loop `clean` and stop.
-7. If the agent reports `NEEDS_FIX_PASS`, send the fix instruction in the same
-   thread.
-8. Wait for the fix pass to complete.
-9. Capture a checkpoint and continue to the next review pass.
+7. If the agent made fixes, capture the fix summary and continue to the next
+   review pass.
 
 After the final allowed pass:
 
@@ -689,7 +692,7 @@ for both review and fixes.
 - **Prefill then user sends:** rejected for the implemented loop because it
   leaves automation runs without a durable continuation point.
 
-Implemented behavior: auto-send the native review, decision, fix, and
+Implemented behavior: auto-send the native review, clean-or-fix, and
 confirmation prompts through the durable thread/message path.
 
 ## Rollout Status
@@ -705,8 +708,8 @@ confirmation prompts through the durable thread/message path.
 
 ### Phase 2: Sequential fix and confirmation
 
-- Add the agent decision step: `REVIEW_CLEAN` or `NEEDS_FIX_PASS`.
-- Send fix instructions in the same review-loop tab.
+- Add the agent clean-or-fix step: return `REVIEW_CLEAN` when clean, otherwise
+  fix the review findings in the same review-loop tab.
 - Run a second review pass after fixes.
 - Stop early when clean.
 - Support `max_passes` from `1..5`.

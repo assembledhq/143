@@ -229,11 +229,8 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		return s.store.MarkPassDeciding(ctx, orgID, pass.ID, summary, msg.ID)
 	case models.ReviewLoopPassStatusDeciding:
 		decision, err := parseDecision(summary)
-		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, err.Error())
-			return err
-		}
-		if decision == models.ReviewLoopDecisionClean {
+		switch {
+		case err == nil && decision == models.ReviewLoopDecisionClean:
 			if loop.AutomationRunID != nil {
 				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
 			}
@@ -241,45 +238,69 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 				return err
 			}
 			return nil
+		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
+			return s.startLegacyFixPass(ctx, orgID, loop, pass, decision)
+		case isMalformedDecision(summary):
+			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
+			return ErrUnrecognizedDecision
+		default:
+			return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
 		}
-		if pass.PassIndex >= loop.MaxPasses {
-			if loop.AutomationRunID != nil {
-				return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
-			}
-			if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues."); err != nil {
-				return err
-			}
-			return nil
-		}
-		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(prompts.ReviewLoopFixPromptData{FixMode: loop.FixMode}), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
-		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
-			return err
-		}
-		return s.store.MarkPassFixing(ctx, orgID, pass.ID, decision, msg.ID)
 	case models.ReviewLoopPassStatusFixing:
-		if err := s.store.MarkPassFixComplete(ctx, orgID, pass.ID, summary); err != nil {
-			return err
-		}
-		next := &models.SessionReviewLoopPass{
-			OrgID:     orgID,
-			LoopID:    loop.ID,
-			SessionID: loop.SessionID,
-			PassIndex: pass.PassIndex + 1,
-			Status:    models.ReviewLoopPassStatusReviewing,
-		}
-		if err := s.store.CreatePass(ctx, next); err != nil {
-			return err
-		}
-		msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
-		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start confirmation review: %s", err))
-			return err
-		}
-		return s.store.SetPassReviewMessage(ctx, orgID, next.ID, msg.ID)
+		return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
 	default:
 		return nil
 	}
+}
+
+func (s *Service) startLegacyFixPass(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision) error {
+	if pass.PassIndex >= loop.MaxPasses {
+		if loop.AutomationRunID != nil {
+			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+		}
+		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues."); err != nil {
+			return err
+		}
+		return nil
+	}
+	msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(prompts.ReviewLoopFixPromptData{FixMode: loop.FixMode}), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
+	if err != nil {
+		_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
+		return err
+	}
+	return s.store.MarkPassFixing(ctx, orgID, pass.ID, decision, msg.ID)
+}
+
+func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, summary string) error {
+	if err := s.store.MarkPassFixComplete(ctx, orgID, pass.ID, summary); err != nil {
+		return err
+	}
+	if pass.PassIndex >= loop.MaxPasses {
+		terminalSummary := "Review pass limit reached after fixes; confirmation review is still needed."
+		if loop.AutomationRunID != nil {
+			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+		}
+		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary); err != nil {
+			return err
+		}
+		return nil
+	}
+	next := &models.SessionReviewLoopPass{
+		OrgID:     orgID,
+		LoopID:    loop.ID,
+		SessionID: loop.SessionID,
+		PassIndex: pass.PassIndex + 1,
+		Status:    models.ReviewLoopPassStatusReviewing,
+	}
+	if err := s.store.CreatePass(ctx, next); err != nil {
+		return err
+	}
+	msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
+	if err != nil {
+		_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start confirmation review: %s", err))
+		return err
+	}
+	return s.store.SetPassReviewMessage(ctx, orgID, next.ID, msg.ID)
 }
 
 func (s *Service) OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error {
@@ -381,6 +402,12 @@ func parseDecision(summary string) (models.ReviewLoopDecision, error) {
 	default:
 		return "", ErrUnrecognizedDecision
 	}
+}
+
+func isMalformedDecision(summary string) bool {
+	trimmed := strings.TrimSpace(summary)
+	return strings.HasPrefix(trimmed, string(models.ReviewLoopDecisionClean)) ||
+		strings.HasPrefix(trimmed, string(models.ReviewLoopDecisionNeedsFix))
 }
 
 func reviewThreadLabel(agentType models.AgentType) string {

@@ -1,6 +1,7 @@
-Based on your latest review, are there remaining issues you should fix in this sandbox before this work is considered clean? Apply the nit policy from the review instruction and use your coding judgment when deciding whether remaining nits require another fix pass.
+Based on your latest review, decide whether this sandbox is clean. Apply the nit policy from the review instruction and use your coding judgment when deciding whether remaining nits require action.
 
-Answer with one of:
+If the review found no remaining issues that should be fixed, answer with exactly:
 
-- REVIEW_CLEAN
-- NEEDS_FIX_PASS
+REVIEW_CLEAN
+
+If the review found remaining issues that should be fixed, fix the issues now in this sandbox. Keep the fixes grounded in your review findings, add or update tests when appropriate, run relevant verification, and summarize what you changed and anything you could not verify.
