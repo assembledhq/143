@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -668,7 +669,7 @@ func parseTurnNumbers(raw string) []int {
 	seen := make(map[int]struct{})
 	for _, part := range strings.Split(raw, ",") {
 		value, err := strconv.Atoi(strings.TrimSpace(part))
-		if err != nil || value < 0 {
+		if err != nil || value < 0 || value > math.MaxInt32 {
 			continue
 		}
 		seen[value] = struct{}{}

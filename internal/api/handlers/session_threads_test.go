@@ -1648,3 +1648,11 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTurnNumbersRejectsOverflow(t *testing.T) {
+	t.Parallel()
+
+	turnNumbers := parseTurnNumbers("1,2147483647,2147483648,999999999999999999999999999999")
+
+	require.Equal(t, []int{1, 2147483647}, turnNumbers, "turn parsing should reject values that cannot fit in the database integer column")
+}

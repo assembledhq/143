@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
@@ -153,7 +154,13 @@ func (s *SessionLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID
 	}
 	pgTurns := make([]int32, 0, len(turnNumbers))
 	for _, turnNumber := range turnNumbers {
+		if turnNumber < 0 || turnNumber > math.MaxInt32 {
+			continue
+		}
 		pgTurns = append(pgTurns, int32(turnNumber))
+	}
+	if len(pgTurns) == 0 {
+		return []models.SessionLog{}, nil
 	}
 	query := `
 		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
