@@ -362,6 +362,43 @@ func TestService_OnThreadTurnCompleteAutomationDecisionFailureEnqueuesOpenPRGate
 	require.Equal(t, []string{"failed_open_pr"}, store.events, "invalid automation review decision should durably queue the PR gate")
 }
 
+func TestService_OnThreadTurnCompleteEmptyDecisionFailsLoop(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID:        loopID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			ThreadID:  &threadID,
+			Status:    models.ReviewLoopStatusRunning,
+			AgentType: models.AgentTypeCodex,
+			MaxPasses: 2,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID:        passID,
+			OrgID:     orgID,
+			LoopID:    loopID,
+			SessionID: sessionID,
+			PassIndex: 1,
+			Status:    models.ReviewLoopPassStatusDeciding,
+		},
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnComplete(context.Background(), orgID, threadID, " \n\t ")
+
+	require.ErrorIs(t, err, ErrUnrecognizedDecision, "empty review decision should fail instead of consuming another review pass")
+	require.Equal(t, loopID, store.failedLoopID, "empty review decision should mark the loop failed")
+	require.Empty(t, store.fixSummary, "empty review decision should not be recorded as a fix summary")
+	require.Empty(t, store.createdPasses, "empty review decision should not create a confirmation review pass")
+}
+
 func TestService_OnThreadTurnFailedMarksRunningLoopFailed(t *testing.T) {
 	t.Parallel()
 

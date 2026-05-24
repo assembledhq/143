@@ -240,6 +240,9 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 			return nil
 		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
 			return s.startLegacyFixPass(ctx, orgID, loop, pass, decision)
+		case summary == "":
+			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
+			return ErrUnrecognizedDecision
 		case isMalformedDecision(summary):
 			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
 			return ErrUnrecognizedDecision
