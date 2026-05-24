@@ -165,12 +165,20 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
 	if m.listByThreadFn != nil {
 		return m.listByThreadFn(ctx, orgID, threadID)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
+	if m.listByThreadTurnsFn != nil {
+		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
 	}
 	return nil, nil
 }
@@ -2581,6 +2589,21 @@ func TestService_GetLogs(t *testing.T) {
 			expectLen: 2,
 		},
 		{
+			name: "success with turn filter",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, turns []int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "filtered log lookup should preserve org scope")
+					require.Equal(t, threadID, gotThreadID, "filtered log lookup should preserve thread scope")
+					require.Equal(t, []int{5, 6}, turns, "filtered log lookup should pass requested turns")
+					return []models.SessionLog{{ID: 6}}, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
 			name: "thread not found",
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
@@ -2628,7 +2651,11 @@ func TestService_GetLogs(t *testing.T) {
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
 
-			logs, err := svc.GetLogs(context.Background(), orgID, sessionID, threadID)
+			opts := db.SessionLogFilterOptions{}
+			if tt.name == "success with turn filter" {
+				opts.TurnNumbers = []int{5, 6}
+			}
+			logs, err := svc.GetLogs(context.Background(), orgID, sessionID, threadID, opts)
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
 				return
