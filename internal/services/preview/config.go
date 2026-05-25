@@ -435,22 +435,22 @@ func validatePreviewResources(resources models.PreviewResourceRequirements) []st
 	}
 
 	if reqCPUSet && reqCPU > MaxPreviewCPUMillis {
-		errs = append(errs, fmt.Sprintf("preview.resources.requests.cpu must be at most 2 cores"))
+		errs = append(errs, "preview.resources.requests.cpu must be at most 2 cores")
 	}
 	if limitCPUSet && limitCPU > MaxPreviewCPUMillis {
-		errs = append(errs, fmt.Sprintf("preview.resources.limits.cpu must be at most 2 cores"))
+		errs = append(errs, "preview.resources.limits.cpu must be at most 2 cores")
 	}
 	if reqMemorySet && reqMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, fmt.Sprintf("preview.resources.requests.memory must be at most 1Gi"))
+		errs = append(errs, "preview.resources.requests.memory must be at most 1Gi")
 	}
 	if limitMemorySet && limitMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, fmt.Sprintf("preview.resources.limits.memory must be at most 1Gi"))
+		errs = append(errs, "preview.resources.limits.memory must be at most 1Gi")
 	}
 	if reqDiskSet && reqDisk > MaxPreviewEphemeralDiskMiB {
-		errs = append(errs, fmt.Sprintf("preview.resources.requests.ephemeral-storage must be at most 10Gi"))
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most 10Gi")
 	}
 	if limitDiskSet && limitDisk > MaxPreviewEphemeralDiskMiB {
-		errs = append(errs, fmt.Sprintf("preview.resources.limits.ephemeral-storage must be at most 10Gi"))
+		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most 10Gi")
 	}
 
 	if reqCPUSet && limitCPUSet && reqCPU > limitCPU {
