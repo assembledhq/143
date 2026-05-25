@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
@@ -506,6 +507,8 @@ type Orchestrator struct {
 	identityResolver   *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth        SandboxAuthServer    // can be nil — paired with identityResolver
 	users              UserLookup           // can be nil — needed for App-token Co-authored-by trailer
+	internalAPIURL     string
+	internalAPISecret  string
 	logger             zerolog.Logger
 	maxConcurrent      int
 	cancels            *CancelRegistry
@@ -744,11 +747,13 @@ type OrchestratorConfig struct {
 	// Users looks up the triggering user record for the App-token
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
-	Users         UserLookup
-	NodeID        string
-	IsDraining    func() bool
-	Logger        zerolog.Logger
-	MaxConcurrent int
+	Users             UserLookup
+	InternalAPIURL    string
+	InternalAPISecret string
+	NodeID            string
+	IsDraining        func() bool
+	Logger            zerolog.Logger
+	MaxConcurrent     int
 }
 
 type sandboxGitHubAuthState struct {
@@ -813,6 +818,8 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		identityResolver:   cfg.IdentityResolver,
 		sandboxAuth:        cfg.SandboxAuth,
 		users:              cfg.Users,
+		internalAPIURL:     cfg.InternalAPIURL,
+		internalAPISecret:  cfg.InternalAPISecret,
 		cancels:            cfg.Cancels,
 		threadCancels:      cfg.ThreadCancels,
 		logger:             cfg.Logger,
@@ -1014,6 +1021,24 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 		authState.userID = run.TriggeredByUserID
 	}
 	return authState, nil
+}
+
+func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
+	if o.internalAPIURL == "" || o.internalAPISecret == "" || session == nil || repoID == nil || sandboxCfg == nil {
+		return
+	}
+	if sandboxCfg.Env == nil {
+		sandboxCfg.Env = make(map[string]string)
+	}
+	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
+	internalToken, err := auth.GenerateSessionToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, tokenTTL)
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
+		return
+	}
+	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
+	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
+	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
 }
 
 func (o *Orchestrator) closeSandboxAuth(sessionID uuid.UUID, log zerolog.Logger) {
@@ -2119,6 +2144,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
+	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, &sandboxCfg, log)
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -2908,6 +2934,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
+	resolvedRepoID := session.RepositoryID
+	if resolvedRepoID == nil && promptIssue != nil {
+		resolvedRepoID = promptIssue.RepositoryID
+	}
+	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, &sandboxCfg, log)
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		authLog := log.Error().Err(authErr).
 			Str("session_id", session.ID.String()).
@@ -5568,6 +5599,9 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	// injected via sandbox env vars. The stub never makes HTTP requests.
 	if o.github != nil {
 		reg.RegisterCodeReviewSource(&integration.StubCodeReviewSource{ProviderName: "github"})
+	}
+	if o.internalAPIURL != "" && o.internalAPISecret != "" {
+		reg.RegisterPullRequestCreator(&integration.StubPullRequestCreator{ProviderName: "session"})
 	}
 
 	if !reg.HasAny() {

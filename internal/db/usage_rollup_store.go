@@ -125,6 +125,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			s.token_usage,
 			e.cpu_limit,
 			e.memory_limit_mb,
+			e.disk_limit_mb,
 			e.started_at,
 			COALESCE(e.stopped_at, @now) AS stopped_at,
 			COALESCE(e.container_minutes, EXTRACT(EPOCH FROM (COALESCE(e.stopped_at, @now) - e.started_at)) / 60.0) AS container_minutes,
@@ -165,6 +166,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			tokenUsageRaw   []byte
 			cpuLimit        float64
 			memoryMB        int
+			diskMB          int
 			startedAt       time.Time
 			stoppedAt       time.Time
 			minutes         float64
@@ -172,12 +174,12 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		)
 		if err := rows.Scan(&eventID, &sessionID, &userID,
 			&agentType, &modelUsed, &reasoningEffort, &tokenUsageRaw,
-			&cpuLimit, &memoryMB,
+			&cpuLimit, &memoryMB, &diskMB,
 			&startedAt, &stoppedAt, &minutes, &durationMs); err != nil {
 			return fmt.Errorf("scan container event: %w", err)
 		}
 
-		tier := fmt.Sprintf("%.0fcpu_%dmb", cpuLimit, memoryMB)
+		tier := fmt.Sprintf("%.0fcpu_%dmb_%ddiskmb", cpuLimit, memoryMB, diskMB)
 		key := dimKey{userID: userID, capacityTier: tier}
 
 		agg, ok := aggregates[key]
@@ -273,13 +275,13 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 			s.reasoning_effort,
 			s.token_usage,
 			COALESCE((
-				SELECT format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb)
+				SELECT format('%scpu_%smb_%sdiskmb', round(e.cpu_limit)::int, e.memory_limit_mb, e.disk_limit_mb)
 				FROM container_usage_events e
 				WHERE e.org_id = s.org_id
 				  AND e.session_id = s.id
 				  AND e.started_at < @hour_end
 				  AND COALESCE(e.stopped_at, @now) > @hour_start
-				GROUP BY round(e.cpu_limit)::int, e.memory_limit_mb
+				GROUP BY round(e.cpu_limit)::int, e.memory_limit_mb, e.disk_limit_mb
 				ORDER BY SUM(EXTRACT(EPOCH FROM (
 					LEAST(COALESCE(e.stopped_at, @now), @hour_end) - GREATEST(e.started_at, @hour_start)
 				))) DESC
@@ -1044,7 +1046,7 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 		sessionCountsCTE = `
 			WITH session_counts AS (
 				SELECT
-					format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb) AS key,
+					format('%scpu_%smb_%sdiskmb', round(e.cpu_limit)::int, e.memory_limit_mb, e.disk_limit_mb) AS key,
 					COUNT(DISTINCT e.session_id) AS distinct_sessions
 				FROM container_usage_events e
 				JOIN sessions s
@@ -1055,7 +1057,7 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 				  AND COALESCE(e.stopped_at, now()) > @start`
 		sessionCountsCTE = applySessionExecutionFilters(sessionCountsCTE, args, "s", filters)
 		sessionCountsCTE += `
-				GROUP BY format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb)
+				GROUP BY format('%scpu_%smb_%sdiskmb', round(e.cpu_limit)::int, e.memory_limit_mb, e.disk_limit_mb)
 			)`
 	} else {
 		sessionCountsCTE = `
@@ -1255,7 +1257,7 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 			SELECT
 				to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
 				'' AS user_email,
-				format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb) AS capacity_tier,
+				format('%scpu_%smb_%sdiskmb', round(e.cpu_limit)::int, e.memory_limit_mb, e.disk_limit_mb) AS capacity_tier,
 				COUNT(DISTINCT e.session_id) AS sessions
 			FROM days
 			JOIN container_usage_events e

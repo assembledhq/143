@@ -465,7 +465,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"preview_holding_container",
 }
 
@@ -502,7 +502,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		previewID, sessionID, orgID, userID, "bootstrap", "default", "starting",
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, json.RawMessage("{}"), json.RawMessage("{}"), "", now, now, nil, nil,
+		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "", now, now, nil, nil,
 		false,
 	}
 }
@@ -536,8 +536,8 @@ func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uu
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
-	// CreatePreviewInstance: 19 bound args.
-	insertArgs := make([]any, 19)
+	// CreatePreviewInstance: 20 bound args.
+	insertArgs := make([]any, 20)
 	for i := range insertArgs {
 		insertArgs[i] = pgxmock.AnyArg()
 	}
@@ -617,7 +617,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		previewID, sessionID, orgID, userID, "bootstrap", "my-preview", "ready",
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, recycleConfig, recycleSandbox, "", now, now, now, nil,
+		"/", 512, 500, 10240, recycleConfig, recycleSandbox, "", now, now, now, nil,
 		false,
 	}
 }
@@ -1480,7 +1480,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(19)...).
+		WithArgs(previewAnyArgs(20)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1574,7 +1574,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(19)...).
+		WithArgs(previewAnyArgs(20)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1743,7 +1743,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(19)...).
+		WithArgs(previewAnyArgs(20)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1844,7 +1844,7 @@ func TestPreviewHandler_StartPreview_HydrateReachesLaunch(t *testing.T) {
 	// always true here because the reservation persisted an empty recycle
 	// sandbox). Failing it proves the handler reached Launch; Abort then
 	// releases the hold.
-	updateCfgArgs := make([]any, 9)
+	updateCfgArgs := make([]any, 10)
 	for i := range updateCfgArgs {
 		updateCfgArgs[i] = pgxmock.AnyArg()
 	}
@@ -2186,7 +2186,7 @@ func TestPreviewHandler_StartPreview_ReuseZombieFallsThroughToHydrate(t *testing
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
 	// Fail Launch at UpdatePreviewReservationConfig to prove the handler
 	// advanced past acquireSandbox into the manager's launch phase.
-	updateCfgArgs := make([]any, 9)
+	updateCfgArgs := make([]any, 10)
 	for i := range updateCfgArgs {
 		updateCfgArgs[i] = pgxmock.AnyArg()
 	}
@@ -2249,7 +2249,7 @@ func TestPreviewHandler_StartPreview_ReuseInspectErrorFallsThroughToHydrate(t *t
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
-	updateCfgArgs := make([]any, 9)
+	updateCfgArgs := make([]any, 10)
 	for i := range updateCfgArgs {
 		updateCfgArgs[i] = pgxmock.AnyArg()
 	}
@@ -2307,7 +2307,7 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 	// Fail Launch at UpdatePreviewReservationConfig. Absence of a COALESCE CAS
 	// in the expectation list is what proves the reuse branch fired — the
 	// ExpectationsWereMet check at the bottom will reject an unexpected hydrate.
-	updateCfgArgs := make([]any, 9)
+	updateCfgArgs := make([]any, 10)
 	for i := range updateCfgArgs {
 		updateCfgArgs[i] = pgxmock.AnyArg()
 	}

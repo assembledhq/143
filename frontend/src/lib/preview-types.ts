@@ -97,6 +97,7 @@ export interface PreviewInstance {
   last_path: string;
   memory_limit_mb: number;
   cpu_limit_millis: number;
+  disk_limit_mb: number;
   error?: string;
   created_at: string;
   updated_at: string;

@@ -30,7 +30,7 @@ CREATE TABLE usage_hourly (
 
     -- Dimensional keys (nullable = "all" for that dimension)
     user_id             UUID REFERENCES users(id),
-    capacity_tier       TEXT,           -- e.g. "2cpu_4096mb", NULL = all tiers
+    capacity_tier       TEXT,           -- e.g. "2cpu_4096mb_10240diskmb", NULL = all tiers
 
     -- Container aggregates
     total_container_minutes   DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -63,7 +63,7 @@ CREATE INDEX idx_usage_hourly_org_user_hour
 - A rollup makes all dashboard queries O(hours) regardless of event count
 - The rollup job is idempotent: `INSERT ... ON CONFLICT DO UPDATE`, safe to re-run
 
-**Capacity tier derivation:** Concatenate `cpu_limit` and `memory_limit_mb` into a human-readable string (`"2cpu_4096mb"`). This avoids storing two float columns in the rollup and keeps cardinality bounded (we have 3-5 tiers).
+**Capacity tier derivation:** Concatenate `cpu_limit`, `memory_limit_mb`, and `disk_limit_mb` into a human-readable string (`"2cpu_4096mb_10240diskmb"`). This avoids storing separate dimension columns in the rollup and keeps cardinality bounded.
 
 ### Dimensional rollup levels and scaling
 
@@ -197,7 +197,7 @@ Query params:
   end       RFC3339 (default: now)
   group_by  "hour" (default) | "user" | "capacity"
   user_id   UUID (optional filter)
-  capacity  string (optional filter, e.g. "2cpu_4096mb")
+  capacity  string (optional filter, e.g. "2cpu_4096mb_10240diskmb")
 ```
 
 Response:
@@ -305,8 +305,8 @@ Response: `Content-Type: text/csv` with `Content-Disposition: attachment; filena
 
 ```csv
 date,hour_utc,user_email,capacity_tier,container_minutes,sessions,container_starts,peak_concurrent,input_tokens,output_tokens,llm_cost_usd
-2026-04-01,2026-04-01T00:00:00Z,john@acme.com,2cpu_4096mb,6.2,3,4,2,45200,12800,0.34
-2026-04-01,2026-04-01T01:00:00Z,john@acme.com,2cpu_4096mb,3.1,1,1,1,22100,8400,0.18
+2026-04-01,2026-04-01T00:00:00Z,john@acme.com,2cpu_4096mb_10240diskmb,6.2,3,4,2,45200,12800,0.34
+2026-04-01,2026-04-01T01:00:00Z,john@acme.com,2cpu_4096mb_10240diskmb,3.1,1,1,1,22100,8400,0.18
 ```
 
 When `granularity=daily`, the `hour_utc` column is omitted and rows are grouped by the `tz`-adjusted day. When `dimension=none`, user and capacity columns are omitted (org-level totals only).

@@ -415,6 +415,45 @@ type CreateIssueResult struct {
 }
 
 // --------------------------------------------------------------------------
+// PullRequestCreator — internal 143 PR creation
+// --------------------------------------------------------------------------
+
+// PullRequestCreator allows sandbox agents to request first-class 143 PR
+// creation for their current session instead of calling GitHub directly.
+type PullRequestCreator interface {
+	// Name returns the provider identifier (e.g. "session").
+	Name() string
+
+	// CreatePullRequest queues PR creation through the 143 session workflow.
+	CreatePullRequest(ctx context.Context, params CreatePullRequestParams) (*CreatePullRequestResult, error)
+}
+
+// CreatePullRequestParams describes a session PR creation request.
+type CreatePullRequestParams struct {
+	SessionID  string `json:"session_id,omitempty"`
+	Draft      *bool  `json:"draft,omitempty"`
+	AuthorMode string `json:"author_mode,omitempty"`
+}
+
+// CreatePullRequestResult is returned after PR creation has been queued.
+type CreatePullRequestResult struct {
+	Status    string `json:"status"`
+	SessionID string `json:"session_id"`
+}
+
+// StubPullRequestCreator is a no-op PullRequestCreator used only for skills
+// doc generation. The real sandbox CLI registers an internal API-backed
+// implementation when INTERNAL_API_TOKEN and INTERNAL_API_URL are present.
+type StubPullRequestCreator struct {
+	ProviderName string
+}
+
+func (s *StubPullRequestCreator) Name() string { return s.ProviderName }
+func (s *StubPullRequestCreator) CreatePullRequest(_ context.Context, _ CreatePullRequestParams) (*CreatePullRequestResult, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools create_pr) instead of direct API calls")
+}
+
+// --------------------------------------------------------------------------
 // ProjectProposer — internal 143 project proposal creation
 // --------------------------------------------------------------------------
 

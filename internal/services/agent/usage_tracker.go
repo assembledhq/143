@@ -26,6 +26,7 @@ type ActiveContainer struct {
 	StartedAt     time.Time
 	CPULimit      float64
 	MemoryLimitMB int
+	DiskLimitMB   int
 }
 
 // UsageTracker records container lifecycle events for billing observability.
@@ -76,6 +77,7 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 			Provider:      sandbox.Provider,
 			CPULimit:      cfg.CPULimit,
 			MemoryLimitMB: cfg.MemoryLimitMB,
+			DiskLimitMB:   cfg.DiskLimitGB * 1024,
 			Image:         cfg.Image,
 			StartedAt:     startedAt,
 		}
@@ -101,6 +103,7 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 		StartedAt:     startedAt,
 		CPULimit:      cfg.CPULimit,
 		MemoryLimitMB: cfg.MemoryLimitMB,
+		DiskLimitMB:   cfg.DiskLimitGB * 1024,
 	}
 	t.mu.Unlock()
 

@@ -422,6 +422,7 @@ In this form, 143 treats the preview as a single service and normalizes it inter
 | `preview.infrastructure` | object | no | Map of infrastructure name to infrastructure config. |
 | `preview.credentials` | object | yes | Use `{ "mode": "none" }` when no secrets are needed. |
 | `preview.network` | object | yes | Use `{ "mode": "managed" }` for the default behavior. |
+| `preview.resources` | object | no | Optional CPU, memory, and `ephemeral-storage` requests/limits using Kubernetes-style quantity strings. |
 | `preview.progressive` | boolean | no | Opt-in progressive readiness for multi-service previews. |
 | `preview.command` | `string[]` | yes for single-service | Single-service shorthand only. |
 | `preview.cwd` | string | no | Single-service shorthand only. |

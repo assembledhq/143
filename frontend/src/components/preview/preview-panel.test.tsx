@@ -103,6 +103,7 @@ function makePreviewStatus(
       last_path: "/",
       memory_limit_mb: 512,
       cpu_limit_millis: 500,
+      disk_limit_mb: 10240,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       ...overrides,
@@ -1038,6 +1039,24 @@ describe("PreviewPanel component", () => {
 
     await waitFor(() => {
       expect(mockEnsure).toHaveBeenCalledWith("sess-1");
+    });
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("starts a new preview when retrying after a failed preview", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "failed" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Retry Preview" })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Retry Preview" }));
+
+    await waitFor(() => {
+      expect(mockStart).toHaveBeenCalledWith("sess-1");
     });
     expect(mockRestart).not.toHaveBeenCalled();
   });

@@ -711,9 +711,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 		// Internal API routes (token-based auth — called by sandbox agents)
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
+		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Post("/issues", internalIssueHandler.Create)
+			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
 			r.Post("/projects/propose", internalProjectHandler.Propose)
 		})
 
