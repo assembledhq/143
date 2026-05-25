@@ -1804,8 +1804,5 @@ func isTransientPreviewDBError(err error) bool {
 		return false
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return false
-	}
-	return true
+	return !errors.As(err, &pgErr)
 }
