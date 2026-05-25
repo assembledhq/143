@@ -24,17 +24,18 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
 }
 
-func TestFrontendDockerfileRunsNestedStandaloneServer(t *testing.T) {
+func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
 	t.Parallel()
 
 	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
 	require.NoError(t, err, "test should read the frontend Dockerfile")
 	dockerfileText := string(dockerfile)
 
-	require.Contains(t, dockerfileText, "WORKDIR /app/frontend", "frontend image should run from Next's nested standalone output directory")
-	require.Contains(t, dockerfileText, "COPY --from=builder /app/.next/static ./frontend/.next/static", "frontend image should place static assets next to the nested standalone server")
-	require.Contains(t, dockerfileText, "COPY --from=builder /app/public ./frontend/public", "frontend image should place public assets next to the nested standalone server")
-	require.Contains(t, dockerfileText, `CMD ["node", "server.js"]`, "frontend image should start the server.js emitted into the nested standalone directory")
+	require.Contains(t, dockerfileText, "WORKDIR /app/frontend", "frontend image build and runtime should use Next's repo-scoped frontend directory")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/standalone ./", "frontend runtime image should copy the full repo-scoped standalone tree")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/static ./frontend/.next/static", "frontend runtime image should stage static assets next to the repo-scoped standalone server")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/public ./frontend/public", "frontend runtime image should stage public assets next to the repo-scoped standalone server")
+	require.Contains(t, dockerfileText, `CMD ["node", "server.js"]`, "frontend runtime image should start the server.js emitted into the frontend standalone directory")
 }
 
 func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
@@ -43,8 +44,8 @@ func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
 	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
 	require.NoError(t, err, "test should read the frontend Dockerfile")
 	dockerfileText := string(dockerfile)
-	sourceConfigCopyIndex := strings.Index(dockerfileText, "COPY frontend/source.config.ts ./")
-	publicDocsCopyIndex := strings.Index(dockerfileText, "COPY docs/public /docs/public")
+	sourceConfigCopyIndex := strings.Index(dockerfileText, "COPY frontend/source.config.ts ./frontend/")
+	publicDocsCopyIndex := strings.Index(dockerfileText, "COPY docs/public ./docs/public")
 	npmCIIndex := strings.Index(dockerfileText, "RUN npm ci")
 
 	require.NotEqual(t, -1, sourceConfigCopyIndex, "frontend image should copy the Fumadocs source config before install scripts run")
