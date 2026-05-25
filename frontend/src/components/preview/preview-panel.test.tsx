@@ -101,6 +101,7 @@ function makePreviewStatus(
       last_path: "/",
       memory_limit_mb: 512,
       cpu_limit_millis: 500,
+      disk_limit_mb: 10240,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       ...overrides,

@@ -24,8 +24,8 @@ func NewContainerUsageStore(db DBTX) *ContainerUsageStore {
 // RecordStart inserts a new container usage event when a sandbox is created.
 func (s *ContainerUsageStore) RecordStart(ctx context.Context, event *models.ContainerUsageEvent) error {
 	_, err := s.db.Exec(ctx, `
-		INSERT INTO container_usage_events (id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, image, started_at)
-		VALUES (@id, @org_id, @session_id, @container_id, @provider, @cpu_limit, @memory_limit_mb, @image, @started_at)`,
+		INSERT INTO container_usage_events (id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, disk_limit_mb, image, started_at)
+		VALUES (@id, @org_id, @session_id, @container_id, @provider, @cpu_limit, @memory_limit_mb, @disk_limit_mb, @image, @started_at)`,
 		pgx.NamedArgs{
 			"id":              event.ID,
 			"org_id":          event.OrgID,
@@ -34,6 +34,7 @@ func (s *ContainerUsageStore) RecordStart(ctx context.Context, event *models.Con
 			"provider":        event.Provider,
 			"cpu_limit":       event.CPULimit,
 			"memory_limit_mb": event.MemoryLimitMB,
+			"disk_limit_mb":   event.DiskLimitMB,
 			"image":           event.Image,
 			"started_at":      event.StartedAt,
 		})
@@ -90,15 +91,15 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 
 	// Capacity breakdown.
 	rows, err := s.db.Query(ctx, `
-		SELECT cpu_limit, memory_limit_mb,
+		SELECT cpu_limit, memory_limit_mb, disk_limit_mb,
 		       COALESCE(SUM(
 		           COALESCE(container_minutes, EXTRACT(EPOCH FROM (now() - started_at)) / 60.0)
 		       ), 0) AS minutes,
 		       COUNT(DISTINCT session_id) AS sessions
 		FROM container_usage_events
 		WHERE org_id = @org_id AND started_at >= @start AND started_at < @end
-		GROUP BY cpu_limit, memory_limit_mb
-		ORDER BY cpu_limit, memory_limit_mb`,
+		GROUP BY cpu_limit, memory_limit_mb, disk_limit_mb
+		ORDER BY cpu_limit, memory_limit_mb, disk_limit_mb`,
 		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
 	)
 	if err != nil {
@@ -109,7 +110,7 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 	buckets := make([]models.CapacityBucket, 0)
 	for rows.Next() {
 		var b models.CapacityBucket
-		if err := rows.Scan(&b.CPULimit, &b.MemoryLimitMB, &b.ContainerMinutes, &b.SessionCount); err != nil {
+		if err := rows.Scan(&b.CPULimit, &b.MemoryLimitMB, &b.DiskLimitMB, &b.ContainerMinutes, &b.SessionCount); err != nil {
 			return nil, fmt.Errorf("scan capacity bucket: %w", err)
 		}
 		buckets = append(buckets, b)
@@ -219,7 +220,7 @@ func (s *ContainerUsageStore) CountActive(ctx context.Context) (int64, error) {
 func (s *ContainerUsageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ContainerUsageEvent, error) {
 	const maxResults = 500
 	rows, err := s.db.Query(ctx, `
-		SELECT id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, image,
+		SELECT id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, disk_limit_mb, image,
 		       started_at, stopped_at, duration_ms, container_minutes, exit_reason, created_at
 		FROM container_usage_events
 		WHERE org_id = @org_id AND session_id = @session_id
@@ -237,7 +238,7 @@ func (s *ContainerUsageStore) ListBySession(ctx context.Context, orgID, sessionI
 		var e models.ContainerUsageEvent
 		if err := rows.Scan(
 			&e.ID, &e.OrgID, &e.SessionID, &e.ContainerID, &e.Provider,
-			&e.CPULimit, &e.MemoryLimitMB, &e.Image,
+			&e.CPULimit, &e.MemoryLimitMB, &e.DiskLimitMB, &e.Image,
 			&e.StartedAt, &e.StoppedAt, &e.DurationMs, &e.ContainerMinutes,
 			&e.ExitReason, &e.CreatedAt,
 		); err != nil {

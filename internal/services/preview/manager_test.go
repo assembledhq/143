@@ -124,7 +124,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"preview_holding_container",
 }
 
@@ -171,7 +171,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		id, sessionID, orgID, userID, "bootstrap", "my-preview", string(status),
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now, nil,
+		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now, nil,
 		false,
 	}
 }
@@ -1860,7 +1860,7 @@ func validPreviewConfig() *models.PreviewConfig {
 // the returned row, and the caller reads p.ID from the model after the call.
 func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time) {
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(19)...).
+		WithArgs(previewAnyArgs(20)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)...),
@@ -2150,7 +2150,7 @@ func TestLaunchPreview_Success(t *testing.T) {
 
 	// UpdatePreviewReservationConfig.
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// CreatePreviewService for web.
@@ -2203,7 +2203,7 @@ func TestLaunchPreview_ReservationNoLongerPending(t *testing.T) {
 
 	// UpdatePreviewReservationConfig: rows affected = 0 (status flipped).
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
@@ -2234,7 +2234,7 @@ func TestLaunchPreview_UpdateConfigError(t *testing.T) {
 	}
 
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnError(fmt.Errorf("db down"))
 
 	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
@@ -2268,7 +2268,7 @@ func TestLaunchPreview_HandlePersistError(t *testing.T) {
 	}
 
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// CreatePreviewService.
@@ -2315,7 +2315,7 @@ func TestLaunchPreview_ConcurrentStopDuringStartup(t *testing.T) {
 	}
 
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_services").
 		WithArgs(previewAnyArgs(7)...).
@@ -2361,7 +2361,7 @@ func TestLaunchPreview_ProviderStartError(t *testing.T) {
 	}
 
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_services").
 		WithArgs(previewAnyArgs(7)...).
@@ -2665,7 +2665,7 @@ func TestStartPreview_Success(t *testing.T) {
 
 	// Launch phase.
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_services").
 		WithArgs(previewAnyArgs(7)...).
@@ -2755,7 +2755,7 @@ func TestStartPreview_LaunchFailureAborts(t *testing.T) {
 
 	// Launch: config update ok, service insert ok, provider errors.
 	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_services").
 		WithArgs(previewAnyArgs(7)...).

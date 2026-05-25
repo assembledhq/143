@@ -1578,6 +1578,7 @@ export interface UsageSummary {
 export interface CapacityBucket {
   cpu_limit: number;
   memory_limit_mb: number;
+  disk_limit_mb: number;
   container_minutes: number;
   session_count: number;
 }

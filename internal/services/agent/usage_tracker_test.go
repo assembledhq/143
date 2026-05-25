@@ -61,6 +61,7 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 		Image:         "143-sandbox:latest",
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
+		DiskLimitGB:   10,
 	}
 
 	startedAt := time.Now().Add(-2 * time.Minute)
@@ -72,6 +73,7 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 	require.Equal(t, "docker", store.startCalls[0].Provider)
 	require.Equal(t, 2.0, store.startCalls[0].CPULimit)
 	require.Equal(t, 4096, store.startCalls[0].MemoryLimitMB)
+	require.Equal(t, 10240, store.startCalls[0].DiskLimitMB)
 	require.Equal(t, startedAt, store.startCalls[0].StartedAt, "DB and caller should use the same timestamp")
 
 	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, sandbox.ID, startedAt, "completed")

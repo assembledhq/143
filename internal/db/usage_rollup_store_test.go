@@ -406,17 +406,16 @@ func TestGetDailySessionCounts_Capacity(t *testing.T) {
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
 
-	// Regression guard (same as GetBreakdown capacity test): format() must use
-	// '%scpu_%smb' after casting, not '%0.0fcpu_%smb'.
-	mock.ExpectQuery(`format\('%scpu_%smb', round\(e\.cpu_limit\)::int, e\.memory_limit_mb\)`).
+	// Regression guard: capacity tiers include CPU, memory, and disk.
+	mock.ExpectQuery(`format\('%scpu_%smb_%sdiskmb', round\(e\.cpu_limit\)::int, e\.memory_limit_mb, e\.disk_limit_mb\)`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC"}).
 		WillReturnRows(pgxmock.NewRows([]string{"local_date", "user_email", "capacity_tier", "sessions"}).
-			AddRow("2026-04-01", "", "2cpu_4096mb", 2))
+			AddRow("2026-04-01", "", "2cpu_4096mb_10240diskmb", 2))
 
 	counts, err := store.GetDailySessionCounts(context.Background(), orgID, start, end, "capacity", "UTC", UsageExecutionFilters{})
 	require.NoError(t, err)
 	require.Len(t, counts, 1)
-	require.Equal(t, "2cpu_4096mb", counts[0].CapacityTier)
+	require.Equal(t, "2cpu_4096mb_10240diskmb", counts[0].CapacityTier)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -435,7 +434,7 @@ func TestGetDailySessionCounts_Capacity_WithFilters(t *testing.T) {
 	mock.ExpectQuery("JOIN sessions s").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC", "agent": agent}).
 		WillReturnRows(pgxmock.NewRows([]string{"local_date", "user_email", "capacity_tier", "sessions"}).
-			AddRow("2026-04-01", "", "2cpu_4096mb", 2))
+			AddRow("2026-04-01", "", "2cpu_4096mb_10240diskmb", 2))
 
 	counts, err := store.GetDailySessionCounts(context.Background(), orgID, start, end, "capacity", "UTC", UsageExecutionFilters{Agent: &agent})
 	require.NoError(t, err)
@@ -533,7 +532,7 @@ func TestRollupHour_NoEvents(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	// First query: container events — returns empty
-	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "disk_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
@@ -571,7 +570,7 @@ func TestRollupHour_UsesSessionModelOverrideColumn(t *testing.T) {
 	orgID := uuid.New()
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
-	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "disk_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("s\\.model_override").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
@@ -604,7 +603,7 @@ func TestRollupHour_TokenQueryError(t *testing.T) {
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	// First query: container events — returns empty
-	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "disk_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
@@ -637,11 +636,11 @@ func TestRollupHour_UnattributedUser(t *testing.T) {
 	eventID := uuid.New()
 
 	// Container event with uuid.Nil user (unattributed session).
-	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "disk_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols).AddRow(
-			eventID, sessionID, uuid.Nil, "codex", nil, nil, nil, 2.0, 4096,
+			eventID, sessionID, uuid.Nil, "codex", nil, nil, nil, 2.0, 4096, 10240,
 			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
 		))
 
@@ -650,7 +649,7 @@ func TestRollupHour_UnattributedUser(t *testing.T) {
 	mock.ExpectQuery("SELECT").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnRows(pgxmock.NewRows(tokenCols).AddRow(
-			uuid.Nil, "codex", nil, nil, nil, "2cpu_4096mb", int64(1000), int64(500), 0.25,
+			uuid.Nil, "codex", nil, nil, nil, "2cpu_4096mb_10240diskmb", int64(1000), int64(500), 0.25,
 		))
 
 	// Only 2 upserts expected: Level 3 (per-tier) + Level 4 (org-total).
@@ -689,11 +688,11 @@ func TestRollupHour_WithEvents(t *testing.T) {
 	modelUsed := "gpt-5.4"
 
 	// First query: container events — one event
-	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	eventCols := []string{"id", "session_id", "user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "cpu_limit", "memory_limit_mb", "disk_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
 	mock.ExpectQuery("SELECT").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols).AddRow(
-			eventID, sessionID, userID, "codex", &modelUsed, nil, []byte(`{"native_usage":{"model":"gpt-5.4"}}`), 2.0, 4096,
+			eventID, sessionID, userID, "codex", &modelUsed, nil, []byte(`{"native_usage":{"model":"gpt-5.4"}}`), 2.0, 4096, 10240,
 			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
 		))
 
@@ -702,7 +701,7 @@ func TestRollupHour_WithEvents(t *testing.T) {
 	mock.ExpectQuery("SELECT").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnRows(pgxmock.NewRows(tokenCols).AddRow(
-			userID, "codex", &modelUsed, nil, []byte(`{"native_usage":{"model":"gpt-5.4"}}`), "2cpu_4096mb", int64(1000), int64(500), 0.25,
+			userID, "codex", &modelUsed, nil, []byte(`{"native_usage":{"model":"gpt-5.4"}}`), "2cpu_4096mb_10240diskmb", int64(1000), int64(500), 0.25,
 		))
 
 	// Transaction: batch upsert wrapped in begin/commit
@@ -832,7 +831,7 @@ func TestGetTimeseries_CapacityFilterWithExecutionFiltersUsesExecutionRollups(t 
 	orgID := uuid.New()
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
-	capacity := "2cpu_4096mb"
+	capacity := "2cpu_4096mb_10240diskmb"
 	agent := "codex"
 
 	mock.ExpectQuery("FROM usage_hourly_execution uhe").
@@ -881,7 +880,7 @@ func TestGetTimeseries_CapacityGroupByWithExecutionFiltersUsesCapacityExecutionR
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
 	agent := "codex"
-	capacity := "2cpu_4096mb"
+	capacity := "2cpu_4096mb_10240diskmb"
 
 	mock.ExpectQuery("NULLIF\\(uhe\\.capacity_key, @unknown_capacity\\) AS capacity_tier").
 		WithArgs(pgx.NamedArgs{
@@ -1043,13 +1042,13 @@ func TestGetBreakdown_CapacityDimension(t *testing.T) {
 		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_tokens", "total_llm_cost_usd",
 	}
 	// Regression guard: Postgres format() only accepts %s/%I/%L specifiers, so
-	// the capacity_tier CTE must use '%scpu_%smb' (not '%0.0fcpu_%smb'). This
+	// the capacity_tier CTE must use CPU, memory, and disk. This
 	// regex only matches the fixed form; if someone reintroduces %f the test
 	// will fail with an unexpected-query error from pgxmock.
 	mock.ExpectQuery("FROM usage_hourly_execution uhe").
 		WithArgs(args).
 		WillReturnRows(pgxmock.NewRows(cols).
-			AddRow("2cpu_4096mb", "2cpu_4096mb", 100.0, 5, 5, 2, int64(2000), int64(1000), int64(3000), 1.0))
+			AddRow("2cpu_4096mb_10240diskmb", "2cpu_4096mb_10240diskmb", 100.0, 5, 5, 2, int64(2000), int64(1000), int64(3000), 1.0))
 
 	rows, err := store.GetBreakdown(context.Background(), orgID, start, end, "capacity", "sessions_desc", 10, UsageExecutionFilters{})
 	require.NoError(t, err)
@@ -1226,7 +1225,7 @@ func TestGetTimeseries_WithCapacityFilter(t *testing.T) {
 	orgID := uuid.New()
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
-	cap := "2cpu_4096mb"
+	cap := "2cpu_4096mb_10240diskmb"
 
 	cols := usageTimeseriesTestColumns()
 	mock.ExpectQuery("NULLIF\\(uhe\\.capacity_key, @unknown_capacity\\) AS capacity_tier").
@@ -1263,7 +1262,7 @@ func TestGetTimeseries_CapacityGroupBy(t *testing.T) {
 	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
 
 	cols := usageTimeseriesTestColumns()
-	cap := "2cpu_4096mb"
+	cap := "2cpu_4096mb_10240diskmb"
 	mock.ExpectQuery("SELECT uh.hour_utc").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end}).
 		WillReturnRows(pgxmock.NewRows(cols).AddRow(

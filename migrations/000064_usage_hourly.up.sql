@@ -7,7 +7,7 @@ CREATE TABLE usage_hourly (
 
     -- Dimensional keys (NULL = "all" for that dimension)
     user_id                   UUID REFERENCES users(id),
-    capacity_tier             TEXT,           -- e.g. "2cpu_4096mb", NULL = all tiers
+    capacity_tier             TEXT,           -- e.g. "2cpu_4096mb_10240diskmb", NULL = all tiers
 
     -- Container aggregates
     total_container_minutes   DOUBLE PRECISION NOT NULL DEFAULT 0,
