@@ -44,8 +44,9 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"IngestionWebhookHandler.HandleLinear": "external webhook, signature auth",
 
 		// Internal API routes — use claims.OrgID from internal JWT, not middleware.
-		"InternalIssueHandler.Create":    "internal API, uses claims.OrgID",
-		"InternalProjectHandler.Propose": "internal API, uses claims.OrgID",
+		"InternalIssueHandler.Create":       "internal API, uses claims.OrgID",
+		"InternalPullRequestHandler.Create": "internal API, uses claims.OrgID",
+		"InternalProjectHandler.Propose":    "internal API, uses claims.OrgID",
 
 		// Authenticated but legitimately no org-scoped data access.
 		"AuthHandler.Me":                     "returns user from context only",

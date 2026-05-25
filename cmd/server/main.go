@@ -1234,6 +1234,8 @@ func buildServices(
 		IdentityResolver:   identityResolver,
 		SandboxAuth:        sandboxAuthServer,
 		Users:              userStore,
+		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
+		InternalAPISecret:  cfg.SessionSecret,
 		NodeID:             cfg.NodeID,
 		Logger:             logger,
 	})
