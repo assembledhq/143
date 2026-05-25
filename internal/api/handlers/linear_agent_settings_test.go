@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -78,6 +79,44 @@ func TestLinearAgentSettingsHandler_GetStatusIncludesDefaultRepo(t *testing.T) {
 	require.True(t, resp.Data.Enabled, "status should preserve the enabled flag")
 }
 
+func TestLinearAgentSettingsHandler_GetStatusIncludesAvailableTeams(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	handler := NewLinearAgentSettingsHandler(LinearAgentSettingsConfig{
+		TeamKeys: linearTeamKeyListerFunc(func(ctx context.Context, gotOrgID uuid.UUID) ([]db.LinearTeamKey, error) {
+			require.Equal(t, orgID, gotOrgID, "team key lookup should be scoped to the request org")
+			return []db.LinearTeamKey{{
+				OrgID:         orgID,
+				IntegrationID: integrationID,
+				WorkspaceID:   "workspace-1",
+				TeamID:        "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+				TeamKey:       "VIR",
+				TeamName:      "Virtuous Cycle",
+			}}, nil
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/agent", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.GetStatus(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "status should be returned for an org-scoped request")
+	var resp models.SingleResponse[LinearAgentInstallStatus]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "status response should be valid JSON")
+	require.Equal(t, []db.LinearTeamKey{{
+		OrgID:         orgID,
+		IntegrationID: integrationID,
+		WorkspaceID:   "workspace-1",
+		TeamID:        "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+		TeamKey:       "VIR",
+		TeamName:      "Virtuous Cycle",
+	}}, resp.Data.AvailableTeams, "status should include cached Linear team keys so the UI can render a picker")
+}
+
 func TestLinearAgentSettingsHandler_PatchSettingsInvalidDefaultRepoReturns400(t *testing.T) {
 	t.Parallel()
 
@@ -118,5 +157,11 @@ func (r *linearAgentSettingsPatchRecorder) SetLinearAgentSettings(_ context.Cont
 type linearAgentSettingsLoaderFunc func(context.Context, uuid.UUID) (models.LinearAgentSettings, error)
 
 func (f linearAgentSettingsLoaderFunc) LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error) {
+	return f(ctx, orgID)
+}
+
+type linearTeamKeyListerFunc func(context.Context, uuid.UUID) ([]db.LinearTeamKey, error)
+
+func (f linearTeamKeyListerFunc) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]db.LinearTeamKey, error) {
 	return f(ctx, orgID)
 }

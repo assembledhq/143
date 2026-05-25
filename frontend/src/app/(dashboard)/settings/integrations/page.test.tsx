@@ -122,6 +122,7 @@ describe("IntegrationsPage", () => {
         app_user_name: "143",
         has_linear_integration: true,
         default_repo_id: "repo-1",
+        available_teams: [],
       },
     });
     linearAgentMappingsMock.mockResolvedValue({ data: [], meta: {} });
@@ -293,6 +294,64 @@ describe("IntegrationsPage", () => {
 
     await waitFor(() => {
       expect(updateLinearAgentMock).toHaveBeenCalledWith({ default_repo_id: "repo-2" });
+    });
+  });
+
+  it("lets admins pick a Linear team by readable name and stores the team key", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-linear",
+          org_id: "org-1",
+          provider: "linear",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        { id: "repo-143", org_id: "org-1", full_name: "assembledhq/143", status: "active" },
+      ],
+      meta: {},
+    });
+    linearAgentStatusMock.mockResolvedValueOnce({
+      data: {
+        enabled: true,
+        agent_scopes_granted: true,
+        app_user_name: "143",
+        has_linear_integration: true,
+        available_teams: [
+          {
+            org_id: "org-1",
+            integration_id: "integration-linear",
+            workspace_id: "workspace-1",
+            team_id: "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+            team_key: "VIR",
+            team_name: "Virtuous Cycle",
+            refreshed_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await screen.findByText("Linear agent routing");
+    await user.click(await screen.findByRole("combobox", { name: "Linear team" }));
+    await user.click(await screen.findByRole("option", { name: "Virtuous Cycle (VIR)" }));
+    await user.click(await screen.findByRole("combobox", { name: "Override repository" }));
+    await user.click(await screen.findByRole("option", { name: "assembledhq/143" }));
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(upsertLinearAgentMappingMock).toHaveBeenCalledWith({
+        linear_team_id: "VIR",
+        linear_project_id: undefined,
+        repository_id: "repo-143",
+      });
     });
   });
 });
