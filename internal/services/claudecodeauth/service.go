@@ -672,11 +672,12 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		return nil, fmt.Errorf("read refresh response: %w", err)
 	}
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		if strings.Contains(string(body), "refresh_token_reused") {
-			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
-			return nil, fmt.Errorf("refresh token already used by another client")
-		}
+	if isClaudeRefreshTokenReused(body) {
+		s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
+		return nil, fmt.Errorf("refresh token already used by another client")
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || isClaudeInvalidGrant(body) {
 		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); err != nil {
 			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
@@ -727,6 +728,20 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		Msg("Claude Code OAuth token refreshed")
 
 	return newSub, nil
+}
+
+func isClaudeRefreshTokenReused(body []byte) bool {
+	return strings.Contains(string(body), "refresh_token_reused")
+}
+
+func isClaudeInvalidGrant(body []byte) bool {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err == nil && payload.Error == "invalid_grant" {
+		return true
+	}
+	return strings.Contains(string(body), `"invalid_grant"`)
 }
 
 // maxRoundRobinAttempts caps how many distinct credentials GetValidToken

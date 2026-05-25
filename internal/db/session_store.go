@@ -1076,7 +1076,7 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
-		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusCompleted || status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
@@ -1162,6 +1162,10 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
@@ -1238,7 +1242,13 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running', started_at = now(), completed_at = NULL, last_activity_at = now()
+		SET status = 'running', started_at = now(), completed_at = NULL,
+		    error = NULL,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
@@ -1268,7 +1278,8 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running', completed_at = NULL, last_activity_at = now()
+		SET status = 'running', completed_at = NULL,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
@@ -1569,6 +1580,10 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
