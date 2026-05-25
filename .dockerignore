@@ -9,6 +9,8 @@ coverage.html
 frontend/node_modules
 frontend/.next
 frontend/coverage
-docs/
 *.md
 !README.md
+docs/*
+!docs/public
+!docs/public/**

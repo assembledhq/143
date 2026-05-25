@@ -191,6 +191,24 @@ describe("FileDiffSection", () => {
     expect(screen.getByText(/new line 2\|old:null\|new:2/)).toBeInTheDocument();
   });
 
+  it("bounds the initial line render for a very large single-file diff", async () => {
+    const user = userEvent.setup();
+    const lines = Array.from({ length: 901 }, (_, index) =>
+      makeLine("add", `added line ${index}`, null, index + 1)
+    );
+    const file = makeDiffFile({ hunks: [makeHunk(lines)] });
+
+    render(<FileDiffSection file={file} viewMode="unified" />);
+
+    expect(screen.getByText(/added line 799\|old:null\|new:800/)).toBeInTheDocument();
+    expect(screen.queryByText(/added line 800\|old:null\|new:801/)).not.toBeInTheDocument();
+    expect(screen.getByText("Showing first 800 of 901 diff lines in this file")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show more diff lines" }));
+
+    expect(screen.getByText(/added line 800\|old:null\|new:801/)).toBeInTheDocument();
+  });
+
   it("renders multiple hunks with context expanders between them", () => {
     const hunk1 = makeHunk(
       [

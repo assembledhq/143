@@ -37,6 +37,31 @@ func TestFrontendDockerfileRunsNestedStandaloneServer(t *testing.T) {
 	require.Contains(t, dockerfileText, `CMD ["node", "server.js"]`, "frontend image should start the server.js emitted into the nested standalone directory")
 }
 
+func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
+	t.Parallel()
+
+	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
+	require.NoError(t, err, "test should read the frontend Dockerfile")
+	dockerfileText := string(dockerfile)
+	sourceConfigCopyIndex := strings.Index(dockerfileText, "COPY frontend/source.config.ts ./")
+	publicDocsCopyIndex := strings.Index(dockerfileText, "COPY docs/public /docs/public")
+	npmCIIndex := strings.Index(dockerfileText, "RUN npm ci")
+
+	require.NotEqual(t, -1, sourceConfigCopyIndex, "frontend image should copy the Fumadocs source config before install scripts run")
+	require.NotEqual(t, -1, publicDocsCopyIndex, "frontend image should copy public docs before Fumadocs install scripts run")
+	require.NotEqual(t, -1, npmCIIndex, "frontend image should install dependencies with npm ci")
+	require.Less(t, sourceConfigCopyIndex, npmCIIndex, "source.config.ts should be available before npm ci runs postinstall")
+	require.Less(t, publicDocsCopyIndex, npmCIIndex, "docs/public should be available before npm ci runs postinstall")
+
+	dockerignore, err := os.ReadFile("../.dockerignore")
+	require.NoError(t, err, "test should read the root Docker ignore file")
+	dockerignoreText := string(dockerignore)
+	require.NotContains(t, dockerignoreText, "\ndocs/\n", "docker build context should not exclude the entire docs tree because docs/public is needed by the frontend image")
+	require.Contains(t, dockerignoreText, "docs/*", "docker build context should continue excluding non-public docs by default")
+	require.Contains(t, dockerignoreText, "!docs/public", "docker build context should include the public docs directory")
+	require.Contains(t, dockerignoreText, "!docs/public/**", "docker build context should include public docs files for Fumadocs generation")
+}
+
 func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	t.Parallel()
 
