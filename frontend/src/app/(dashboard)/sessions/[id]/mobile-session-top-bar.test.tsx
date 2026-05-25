@@ -67,10 +67,11 @@ describe("MobileSessionTopBar", () => {
     await user.click(screen.getByRole("button", { name: "Open session actions" }));
 
     const actionsSheet = await screen.findByRole("dialog", { name: "Session actions" });
-    expect(within(actionsSheet).getByText("Tabs")).toBeInTheDocument();
+    const tabsSection = within(actionsSheet).getByRole("region", { name: "Tabs" });
+    expect(within(tabsSection).getByText("Switch or add a conversation lane.")).toBeInTheDocument();
     expect(within(actionsSheet).getByRole("button", { name: "Switch to Main tab" })).toBeInTheDocument();
     expect(within(actionsSheet).getByRole("button", { name: "Switch to Review" })).toBeInTheDocument();
-    expect(within(actionsSheet).getByRole("button", { name: "Add agent tab" })).toBeInTheDocument();
+    expect(within(tabsSection).getByRole("button", { name: "Add agent tab" })).toBeInTheDocument();
     expect(within(actionsSheet).getByRole("button", { name: "Rename session" })).toBeInTheDocument();
     expect(within(actionsSheet).getByText("Active tab")).toBeInTheDocument();
   });
@@ -99,6 +100,38 @@ describe("MobileSessionTopBar", () => {
     );
 
     expect(headerButtons).toEqual(["Open session actions", "Open session details"]);
+  });
+
+  it("keeps the add tab action in the tabs section even with a single tab", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <MobileSessionTopBar
+        sessionTitle="Mobile session title"
+        detailButtonLabel="Open session details"
+        backTo="/sessions"
+        threads={[makeThread({ id: "thread-1", label: "Main tab" })]}
+        activeThreadId="thread-1"
+        viewedThreadIds={new Set(["thread-1"])}
+        onOpenDetails={vi.fn()}
+        onActiveThreadChange={vi.fn()}
+        onAddThread={vi.fn()}
+        onRenameSession={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open session actions" }));
+
+    const actionsSheet = await screen.findByRole("dialog", { name: "Session actions" });
+    const tabsSection = within(actionsSheet).getByRole("region", { name: "Tabs" });
+    const sessionSection = within(actionsSheet).getByRole("region", { name: "Session" });
+
+    expect(within(tabsSection).getByRole("button", { name: "Switch to Main tab" })).toBeInTheDocument();
+    expect(within(tabsSection).getByRole("button", { name: "Add agent tab" })).toBeInTheDocument();
+    expect(within(sessionSection).queryByRole("button", { name: "Add agent tab" })).not.toBeInTheDocument();
   });
 
   it("routes thread switching and the revert action through the session actions sheet", async () => {
