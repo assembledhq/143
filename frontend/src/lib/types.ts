@@ -143,6 +143,17 @@ export interface LinearAgentStatus {
   app_user_name?: string;
   has_linear_integration: boolean;
   default_repo_id?: string;
+  available_teams?: LinearTeamKey[];
+}
+
+export interface LinearTeamKey {
+  org_id: string;
+  integration_id: string;
+  workspace_id: string;
+  team_id: string;
+  team_key: string;
+  team_name: string;
+  refreshed_at: string;
 }
 
 export interface LinearTeamRepoMapping {

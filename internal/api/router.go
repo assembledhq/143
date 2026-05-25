@@ -389,6 +389,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// and install-status surfaces consumed by the settings UI.
 	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(handlers.LinearAgentSettingsConfig{
 		Mappings:      db.NewLinearTeamRepoMappingStore(pool),
+		TeamKeys:      db.NewLinearTeamKeyStore(pool),
 		Credentials:   credentialStore,
 		Settings:      linearAgentSettingsView,
 		AgentSessions: linearService.AgentSessionStore(),
