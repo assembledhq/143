@@ -1822,6 +1822,15 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
+		if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+			if run.Status == models.SessionStatusRunning {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Msg("open_pr waiting for running session snapshot")
+				return &RetryableError{Err: agent.ErrSnapshotPending}
+			}
+			return fmt.Errorf("session %s has no snapshot (status: %s)", runID, run.Status)
+		}
 
 		if stores.SessionIssueLinks != nil {
 			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)

@@ -16,9 +16,10 @@ import (
 
 // InternalTokenClaims are the claims embedded in an internal API token.
 type InternalTokenClaims struct {
-	OrgID     uuid.UUID `json:"org_id"`
-	RepoID    uuid.UUID `json:"repo_id"`
-	ExpiresAt time.Time `json:"exp"`
+	OrgID     uuid.UUID  `json:"org_id"`
+	RepoID    uuid.UUID  `json:"repo_id"`
+	SessionID *uuid.UUID `json:"session_id,omitempty"`
+	ExpiresAt time.Time  `json:"exp"`
 }
 
 // GenerateInternalToken creates a short-lived HMAC-signed token scoped to an org and repo.
@@ -40,6 +41,31 @@ func GenerateInternalToken(secret string, orgID uuid.UUID, repoID uuid.UUID, ttl
 	sig := mac.Sum(nil)
 
 	// Token format: base64(payload).base64(signature)
+	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return token, nil
+}
+
+// GenerateSessionToken creates a short-lived HMAC-signed token scoped to an org, repo, and session.
+// Use this instead of GenerateInternalToken when the token will be used for session-specific operations
+// such as PR creation, so the handler can enforce that the caller is acting on the correct session.
+func GenerateSessionToken(secret string, orgID uuid.UUID, repoID uuid.UUID, sessionID uuid.UUID, ttl time.Duration) (string, error) {
+	claims := InternalTokenClaims{
+		OrgID:     orgID,
+		RepoID:    repoID,
+		SessionID: &sessionID,
+		ExpiresAt: time.Now().Add(ttl),
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", fmt.Errorf("marshal claims: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write(payload); err != nil {
+		return "", fmt.Errorf("compute HMAC: %w", err)
+	}
+	sig := mac.Sum(nil)
+
 	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sig)
 	return token, nil
 }
