@@ -52,7 +52,7 @@ var branchPreviewInstanceTestCols = []string{
 	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"preview_holding_container",
 }
 
@@ -258,7 +258,7 @@ func TestBranchPreviewHandler_StopRejectsPreviewTokenWithoutStopScope(t *testing
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 
@@ -322,7 +322,7 @@ func TestBranchPreviewHandler_RestartRejectsPreviewTokenWithoutCreateScope(t *te
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 
@@ -394,7 +394,7 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 
@@ -464,7 +464,7 @@ func TestBranchPreviewHandler_MintBootstrapTokenRejectsPreviewTokenForDifferentR
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 
@@ -712,7 +712,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			instanceID, sessionID, nil, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "hdl-session-1", "", 0,
 			"", head, now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 
@@ -723,7 +723,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			instanceID, sessionID, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", head, now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 
@@ -1215,7 +1215,7 @@ func TestBranchPreviewHandler_StopFailsClosedOnPreviewTargetDBError(t *testing.T
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
 			false,
 		))
 

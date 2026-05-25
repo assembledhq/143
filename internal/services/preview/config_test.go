@@ -326,6 +326,48 @@ func TestParseConfig_WithPreviewInstall(t *testing.T) {
 	require.Equal(t, DefaultInstallTimeoutSeconds, cfg.Install.TimeoutSeconds, "install timeout should default when omitted")
 }
 
+func TestParseConfig_WithResources(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": "1",
+			"name": "Full Stack",
+			"primary": "frontend",
+			"resources": {
+				"requests": {
+					"cpu": "500m",
+					"memory": "768Mi",
+					"ephemeral-storage": "5Gi"
+				},
+				"limits": {
+					"cpu": "1.5",
+					"memory": "1Gi",
+					"ephemeral-storage": "10gb"
+				}
+			},
+			"services": {
+				"frontend": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/"}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept Kubernetes-style preview resources")
+	require.Equal(t, "500m", cfg.Resources.Requests.CPU, "ParseConfig should preserve requested CPU quantity")
+	require.Equal(t, "768Mi", cfg.Resources.Requests.Memory, "ParseConfig should preserve requested memory quantity")
+	require.Equal(t, "5Gi", cfg.Resources.Requests.EphemeralStorage, "ParseConfig should preserve requested storage quantity")
+	require.Equal(t, "1.5", cfg.Resources.Limits.CPU, "ParseConfig should preserve limit CPU quantity")
+	require.Equal(t, "1Gi", cfg.Resources.Limits.Memory, "ParseConfig should preserve limit memory quantity")
+	require.Equal(t, "10gb", cfg.Resources.Limits.EphemeralStorage, "ParseConfig should preserve limit storage quantity")
+}
+
 func TestDogfoodPreviewConfig_ServerUsesRegisteredReadinessPath(t *testing.T) {
 	t.Parallel()
 
@@ -684,6 +726,129 @@ func TestValidateConfig_PreviewInstall(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_Resources(t *testing.T) {
+	t.Parallel()
+
+	base := func(resources models.PreviewResourceRequirements) models.PreviewConfig {
+		return models.PreviewConfig{
+			Primary:        "app",
+			Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+			Infrastructure: map[string]models.InfrastructureConfig{},
+			Resources:      resources,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		resources  models.PreviewResourceRequirements
+		wantErrSub string
+	}{
+		{
+			name: "valid requests and limits",
+			resources: models.PreviewResourceRequirements{
+				Requests: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+				Limits:   models.PreviewResourceList{CPU: "1", Memory: "1Gi", EphemeralStorage: "10Gi"},
+			},
+		},
+		{
+			name:       "invalid memory unit",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "1parsec"}},
+			wantErrSub: "preview.resources.limits.memory",
+		},
+		{
+			name:       "zero cpu",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{CPU: "0"}},
+			wantErrSub: "preview.resources.limits.cpu",
+		},
+		{
+			name:       "negative storage",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{EphemeralStorage: "-1Gi"}},
+			wantErrSub: "preview.resources.limits.ephemeral-storage",
+		},
+		{
+			name:       "memory exceeds cap",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "2Gi"}},
+			wantErrSub: "at most 1Gi",
+		},
+		{
+			name:       "storage exceeds cap",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{EphemeralStorage: "11Gi"}},
+			wantErrSub: "at most 10Gi",
+		},
+		{
+			name: "request exceeds limit",
+			resources: models.PreviewResourceRequirements{
+				Requests: models.PreviewResourceList{CPU: "1500m", Memory: "768Mi", EphemeralStorage: "6Gi"},
+				Limits:   models.PreviewResourceList{CPU: "1", Memory: "512Mi", EphemeralStorage: "5Gi"},
+			},
+			wantErrSub: "must be less than or equal to",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base(tt.resources)
+			errs := ValidateConfig(&cfg)
+			if tt.wantErrSub == "" {
+				require.Empty(t, errs, "valid preview resources should pass validation")
+				return
+			}
+			require.NotEmpty(t, errs, "invalid preview resources should return validation errors")
+			require.Contains(t, strings.Join(errs, "\n"), tt.wantErrSub, "validation errors should identify the invalid preview resource")
+		})
+	}
+}
+
+func TestParseByteQuantityMiB(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		expected int
+	}{
+		{name: "mebibytes", raw: "512Mi", expected: 512},
+		{name: "gibibytes", raw: "1Gi", expected: 1024},
+		{name: "decimal megabytes", raw: "500mb", expected: 477},
+		{name: "decimal gigabytes", raw: "5gb", expected: 4769},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, ok, err := parseByteQuantityMiB("test.quantity", tt.raw)
+			require.NoError(t, err, "byte quantity should parse")
+			require.True(t, ok, "byte quantity should be treated as set")
+			require.Equal(t, tt.expected, actual, "byte quantity should normalize to MiB")
+		})
+	}
+}
+
+func TestParseCPUQuantity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		expected int
+	}{
+		{name: "millicores", raw: "500m", expected: 500},
+		{name: "whole core", raw: "1", expected: 1000},
+		{name: "fractional cores", raw: "1.5", expected: 1500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, ok, err := parseCPUQuantity("test.cpu", tt.raw)
+			require.NoError(t, err, "CPU quantity should parse")
+			require.True(t, ok, "CPU quantity should be treated as set")
+			require.Equal(t, tt.expected, actual, "CPU quantity should normalize to millicores")
+		})
+	}
+}
+
 func TestResolveConfig_NonConnected(t *testing.T) {
 	t.Parallel()
 
@@ -703,6 +868,9 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/base_seed.sql", InjectInto: []string{"backend"}},
 		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+		},
 		Credentials: models.CredentialConfig{Mode: "none"},
 		Network:     models.NetworkConfig{Mode: "managed"},
 	}
@@ -720,6 +888,9 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		},
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/test_seed.sql"},
+		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "1", Memory: "768Mi", EphemeralStorage: "10Gi"},
 		},
 	}
 
@@ -765,6 +936,7 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	require.NotNil(t, resolved.Install, "non-connected preview should allow diff install behavior")
 	require.Equal(t, []string{"pnpm", "install", "--frozen-lockfile"}, resolved.Install.Command, "non-connected preview should use install command from diff")
 	require.Equal(t, []string{"apps/*/node_modules"}, resolved.Install.CleanPaths[1:], "non-connected preview should use install cleanup paths from diff")
+	require.Equal(t, diffCfg.Resources, resolved.Resources, "non-connected preview should use resource requirements from diff")
 }
 
 func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
@@ -784,6 +956,9 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/base_seed.sql"},
 		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+		},
 		Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging"},
 		Network:     models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
 	}
@@ -798,6 +973,9 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 		},
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/malicious.sql"},
+		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "2", Memory: "1Gi", EphemeralStorage: "10Gi"},
 		},
 	}
 
@@ -821,6 +999,7 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 
 	require.NotNil(t, resolved.Install, "connected preview should preserve base install config")
 	require.Equal(t, []string{"npm", "ci"}, resolved.Install.Command, "connected preview should pin install command to base")
+	require.Equal(t, baseCfg.Resources, resolved.Resources, "connected preview should pin resource requirements to base")
 }
 
 func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
@@ -999,14 +1178,14 @@ func TestResolveResourceLimits(t *testing.T) {
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"app": {}},
 			},
-			expected: models.ResourceLimits{MemoryMB: 512, CPUMillis: 500},
+			expected: models.ResourceLimits{MemoryMiB: 384, CPUMillis: 500, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service without managed infrastructure uses standard preview tier",
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
 			},
-			expected: models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000},
+			expected: models.ResourceLimits{MemoryMiB: 768, CPUMillis: 1000, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service with managed infrastructure uses heavy preview tier",
@@ -1016,7 +1195,28 @@ func TestResolveResourceLimits(t *testing.T) {
 					"db": {Template: "postgres-17"},
 				},
 			},
-			expected: models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000},
+			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 2000, DiskMiB: 10 * 1024},
+		},
+		{
+			name: "requests override topology defaults when limits are omitted",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {}},
+				Resources: models.PreviewResourceRequirements{
+					Requests: models.PreviewResourceList{CPU: "750m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+				},
+			},
+			expected: models.ResourceLimits{MemoryMiB: 512, CPUMillis: 750, DiskMiB: 5 * 1024},
+		},
+		{
+			name: "limits override requests",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {}},
+				Resources: models.PreviewResourceRequirements{
+					Requests: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+					Limits:   models.PreviewResourceList{CPU: "1.5", Memory: "1Gi", EphemeralStorage: "10gb"},
+				},
+			},
+			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 1500, DiskMiB: 9537},
 		},
 	}
 
@@ -1044,8 +1244,25 @@ func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
 
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
-	require.Equal(t, 2048, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
+	require.Equal(t, 1024, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
 	require.Equal(t, 2.0, sandboxCfg.CPULimit, "sandbox config should convert preview millicores into CPU cores")
+	require.Equal(t, 10, sandboxCfg.DiskLimitGB, "sandbox config should round preview disk MiB up to whole GiB")
+}
+
+func TestApplyResourceLimitsToSandboxConfig_RoundsDiskUp(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{"app": {}},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{EphemeralStorage: "1537Mi"},
+		},
+	}
+	sandboxCfg := agent.DefaultSandboxConfig()
+
+	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+
+	require.Equal(t, 2, sandboxCfg.DiskLimitGB, "sandbox config should round non-whole GiB disk limits up for Docker quota support")
 }
 
 func TestLookupInfraTemplate(t *testing.T) {

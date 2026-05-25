@@ -36,7 +36,7 @@ func (p *countingProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, 
 // allows overriding the recycle_scheduled_at column.
 func newPreviewInstanceRowWithRecycleSchedule(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time, recycleScheduledAt *time.Time) []any {
 	row := newPreviewInstanceRow(id, sessionID, orgID, userID, status, handle, now)
-	row[29] = recycleScheduledAt
+	row[30] = recycleScheduledAt
 	return row
 }
 

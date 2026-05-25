@@ -305,8 +305,9 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 		BaseCommitSHA:   input.BaseCommitSHA,
 		ExpiresAt:       resolvePreviewExpiresAt(input.ExpiresAt),
 		LastPath:        "/",
-		MemoryLimitMB:   limits.MemoryMB,
+		MemoryLimitMB:   limits.MemoryMiB,
 		CPULimitMillis:  limits.CPUMillis,
+		DiskLimitMB:     limits.DiskMiB,
 	}
 	if err := store.CreateBranchPreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create branch preview instance: %w", err)
@@ -370,8 +371,9 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		BaseCommitSHA:  input.BaseCommitSHA,
 		ExpiresAt:      resolvePreviewExpiresAt(input.ExpiresAt),
 		LastPath:       "/",
-		MemoryLimitMB:  limits.MemoryMB,
+		MemoryLimitMB:  limits.MemoryMiB,
 		CPULimitMillis: limits.CPUMillis,
+		DiskLimitMB:    limits.DiskMiB,
 	}
 	// Only store recycle bytes if we already have a sandbox at reservation
 	// time. The handler flow reserves before hydrate, so Sandbox is typically
@@ -457,7 +459,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		ok, err := m.store.UpdatePreviewReservationConfig(
 			ctx, input.OrgID, instance.ID,
 			input.Config.Name, input.Config.Primary, newDigest,
-			limits.MemoryMB, limits.CPUMillis,
+			limits.MemoryMiB, limits.CPUMillis, limits.DiskMiB,
 			scratch.RecycleConfig, scratch.RecycleSandbox,
 		)
 		if err != nil {
@@ -472,8 +474,9 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		instance.Name = input.Config.Name
 		instance.PrimaryService = input.Config.Primary
 		instance.ConfigDigest = newDigest
-		instance.MemoryLimitMB = limits.MemoryMB
+		instance.MemoryLimitMB = limits.MemoryMiB
 		instance.CPULimitMillis = limits.CPUMillis
+		instance.DiskLimitMB = limits.DiskMiB
 		instance.RecycleConfig = scratch.RecycleConfig
 		instance.RecycleSandbox = scratch.RecycleSandbox
 	}

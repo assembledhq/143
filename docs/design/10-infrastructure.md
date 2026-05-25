@@ -561,7 +561,10 @@ The production frontend image runs Next.js standalone on port 3000 and sets
 `HOSTNAME=0.0.0.0`. Docker injects `HOSTNAME` as the container ID by default;
 overriding it keeps the Next server bound to all interfaces so both Docker
 health checks on `127.0.0.1:3000/healthz` and other compose services can reach
-the process.
+the process. Because the frontend build runs from a monorepo workspace, Next's
+standalone output places the app entrypoint under `frontend/server.js`; the
+runtime image keeps the traced repo-level files under `/app` and starts from
+`/app/frontend` so the server, `.next/static`, and `public` assets line up.
 
 ## Logging: Mezmo
 

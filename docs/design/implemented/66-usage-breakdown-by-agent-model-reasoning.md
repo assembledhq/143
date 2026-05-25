@@ -452,9 +452,9 @@ For each hour and org, the rollup writer should emit:
 
 Examples for a given hour:
 
-- `agent_type='codex', model_used='gpt-5', reasoning_effort='high', capacity_key='2cpu_4096mb'`
-- `agent_type='codex', model_used='gpt-5-mini', reasoning_effort='medium', capacity_key='2cpu_4096mb'`
-- `agent_type='claude_code', model_used='claude-sonnet-4', reasoning_effort='default', capacity_key='4cpu_8192mb'`
+- `agent_type='codex', model_used='gpt-5', reasoning_effort='high', capacity_key='2cpu_4096mb_10240diskmb'`
+- `agent_type='codex', model_used='gpt-5-mini', reasoning_effort='medium', capacity_key='2cpu_4096mb_10240diskmb'`
+- `agent_type='claude_code', model_used='claude-sonnet-4', reasoning_effort='default', capacity_key='4cpu_8192mb_10240diskmb'`
 
 No extra rows are written for:
 

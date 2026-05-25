@@ -34,6 +34,7 @@ type PreviewInstance struct {
 	LastPath           string          `db:"last_path" json:"last_path"`
 	MemoryLimitMB      int             `db:"memory_limit_mb" json:"memory_limit_mb"`
 	CPULimitMillis     int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	DiskLimitMB        int             `db:"disk_limit_mb" json:"disk_limit_mb"`
 	RecycleConfig      json.RawMessage `db:"recycle_config" json:"-"`
 	RecycleSandbox     json.RawMessage `db:"recycle_sandbox" json:"-"`
 	CurrentPhase       string          `db:"current_phase" json:"current_phase,omitempty"`
@@ -228,9 +229,24 @@ type PreviewConfig struct {
 	Install        *PreviewInstallConfig           `json:"install,omitempty"`
 	Services       map[string]ServiceConfig        `json:"services"`
 	Infrastructure map[string]InfrastructureConfig `json:"infrastructure,omitempty"`
+	Resources      PreviewResourceRequirements     `json:"resources,omitempty"`
 	Credentials    CredentialConfig                `json:"credentials"`
 	Network        NetworkConfig                   `json:"network"`
 	Progressive    bool                            `json:"progressive,omitempty"`
+}
+
+// PreviewResourceRequirements follows the Kubernetes resources shape for
+// preview-level resource requests and limits.
+type PreviewResourceRequirements struct {
+	Requests PreviewResourceList `json:"requests,omitempty"`
+	Limits   PreviewResourceList `json:"limits,omitempty"`
+}
+
+// PreviewResourceList defines CPU, memory, and ephemeral storage quantities.
+type PreviewResourceList struct {
+	CPU              string `json:"cpu,omitempty"`
+	Memory           string `json:"memory,omitempty"`
+	EphemeralStorage string `json:"ephemeral-storage,omitempty"`
 }
 
 // PreviewInstallConfig defines an optional platform-managed install phase that
@@ -281,10 +297,11 @@ type ReadinessProbe struct {
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
-// ResourceLimits defines the memory and CPU limits for a preview.
+// ResourceLimits defines the memory, CPU, and disk limits for a preview.
 type ResourceLimits struct {
-	MemoryMB  int `json:"memory_mb"`
+	MemoryMiB int `json:"memory_mib"`
 	CPUMillis int `json:"cpu_millis"`
+	DiskMiB   int `json:"disk_mib"`
 }
 
 // =============================================================================
