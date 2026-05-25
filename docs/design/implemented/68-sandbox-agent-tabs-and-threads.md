@@ -386,7 +386,7 @@ once usage confirms the pattern is common enough to deserve dedicated UI.
 3. The Claude tab opens blank, but attached to the same branch and filesystem.
 4. User asks Claude to inspect the current work, propose an alternative, or
    continue from the visible code state.
-5. User compares summaries, diffs, tests, and confidence.
+5. User compares summaries, diffs, and tests.
 
 The product must make this honest: because the sandbox is shared, this is not a
 clean isolated bakeoff. It is a second tab looking at the same branch. If the

@@ -1747,14 +1747,14 @@ var prHealthSessionThreadColumns = []string{
 	"id", "session_id", "org_id", "agent_type", "model_override",
 	"label", "instructions", "file_scope", "status", "agent_session_id",
 	"current_turn", "last_activity_at",
-	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
 
 var prHealthSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -1774,7 +1774,7 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status mod
 	issueID := uuid.New()
 	return []any{
 		sessionID, &issueID, orgID, models.SessionOriginIssueTrigger, models.SessionInteractionModeSingleRun, models.SessionValidationPolicyOnTurnComplete, "claude_code", status, "semi", "low",
-		nil, nil, nil, nil,
+		nil,
 		nil, nil, false, &now, nil, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
@@ -1799,7 +1799,7 @@ func newPRHealthSessionThreadRow(threadID, sessionID, orgID uuid.UUID, now time.
 		threadID, sessionID, orgID, "claude_code", nil,
 		"Main", nil, nil, models.ThreadStatusIdle, nil,
 		0, nil,
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
 		nil, nil, now,
 		nil, nil, float64(0), 0, nil,
 	}

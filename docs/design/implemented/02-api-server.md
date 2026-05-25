@@ -269,7 +269,7 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 │
 ├── /agent-runs
 │   ├── GET    /                    # list runs (filterable)
-│   ├── GET    /:id                 # get run details (includes confidence_score, complexity_tier)
+│   ├── GET    /:id                 # get run details
 │   ├── GET    /:id/logs            # stream logs (SSE)
 │   ├── GET    /:id/trace           # get structured trace events for a run
 │   ├── GET    /:id/failure         # get failure classification for a run
@@ -322,7 +322,7 @@ Using `chi` for the HTTP router. All API routes are under `/api/v1/`.
 │   └── POST   /:id/test           # test connectivity
 │
 ├── /settings
-│   ├── GET    /                    # get org settings (includes execution_aggressiveness, confidence_thresholds, issue_type_overrides)
+│   ├── GET    /                    # get org settings (includes execution_aggressiveness, issue_type_overrides)
 │   └── PATCH  /                    # update settings (accepts all routing/execution settings)
 │
 ├── /analytics
@@ -457,7 +457,7 @@ CREATE TABLE jobs (
 | `ingest_webhook` | Webhook received | Process a single inbound webhook payload |
 | `prioritize` | After ingestion | Recompute priority scores |
 | `estimate_complexity` | After prioritization for eligible issues | Estimate issue complexity and type via LLM |
-| `run_agent` | Manual or auto after prioritization + complexity estimation | Launch agent in sandbox (with aggressiveness check and confidence gating) |
+| `run_agent` | Manual or auto after prioritization + complexity estimation | Launch agent in sandbox (with aggressiveness checks) |
 | `validate` | After agent completes | Run validation pipeline |
 | `open_pr` | After validation passes | Create GitHub PR |
 | `evaluate_experiment` | Scheduled (after deploy) | Check post-deploy metrics |

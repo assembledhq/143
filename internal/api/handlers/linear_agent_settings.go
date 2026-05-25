@@ -44,6 +44,7 @@ const maxLinearIDLength = 64
 //	GET    /api/v1/integrations/linear/agent/sessions/{id} — debug detail
 type LinearAgentSettingsHandler struct {
 	mappings      *db.LinearTeamRepoMappingStore
+	teamKeys      linearTeamKeyLister
 	credentials   linearAgentCredentialReader
 	settings      linearAgentOrgSettings
 	agentSessions *db.LinearAgentSessionStore
@@ -65,6 +66,12 @@ type linearAgentOrgSettings interface {
 	LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
 }
 
+// linearTeamKeyLister is the cached Linear team directory. It lets the
+// settings UI render team keys like "VIR" from the post-OAuth refresh path.
+type linearTeamKeyLister interface {
+	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]db.LinearTeamKey, error)
+}
+
 // linearAgentOrgWriter is the narrow surface for persisting per-org agent
 // settings (enable toggle). Pulled into an interface so the route handler
 // can be tested without standing up the full OrganizationStore.
@@ -78,6 +85,7 @@ type linearAgentOrgWriter interface {
 // that don't yet have those stores constructed.
 type LinearAgentSettingsConfig struct {
 	Mappings      *db.LinearTeamRepoMappingStore
+	TeamKeys      linearTeamKeyLister
 	Credentials   linearAgentCredentialReader
 	Settings      linearAgentOrgSettings
 	AgentSessions *db.LinearAgentSessionStore
@@ -90,6 +98,7 @@ type LinearAgentSettingsConfig struct {
 func NewLinearAgentSettingsHandler(cfg LinearAgentSettingsConfig) *LinearAgentSettingsHandler {
 	return &LinearAgentSettingsHandler{
 		mappings:      cfg.Mappings,
+		teamKeys:      cfg.TeamKeys,
 		credentials:   cfg.Credentials,
 		settings:      cfg.Settings,
 		agentSessions: cfg.AgentSessions,
@@ -120,6 +129,9 @@ type LinearAgentInstallStatus struct {
 	// DefaultRepoID is the org-wide fallback repository for AgentSessions
 	// whose team/project has no explicit mapping.
 	DefaultRepoID *uuid.UUID `json:"default_repo_id,omitempty"`
+	// AvailableTeams is the cached Linear team directory. Mapping rows store
+	// the team key (e.g. "VIR"), while TeamID is Linear's opaque UUID.
+	AvailableTeams []db.LinearTeamKey `json:"available_teams"`
 }
 
 // requireOrgID is the defense-in-depth gate every settings endpoint runs
@@ -162,6 +174,14 @@ func (h *LinearAgentSettingsHandler) GetStatus(w http.ResponseWriter, r *http.Re
 		} else {
 			status.Enabled = settings.EffectiveEnabled()
 			status.DefaultRepoID = settings.DefaultRepoID
+		}
+	}
+	if h.teamKeys != nil {
+		teams, err := h.teamKeys.ListByOrg(r.Context(), orgID)
+		if err != nil {
+			h.logger.Warn().Err(err).Msg("failed to load linear team keys for agent settings")
+		} else {
+			status.AvailableTeams = teams
 		}
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[LinearAgentInstallStatus]{Data: status})

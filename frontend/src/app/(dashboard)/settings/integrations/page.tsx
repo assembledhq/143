@@ -34,7 +34,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { GitHubRepositoryClaimCandidate, LinearTeamRepoMapping, Repository } from "@/lib/types";
+import type { GitHubRepositoryClaimCandidate, LinearTeamKey, LinearTeamRepoMapping, Repository } from "@/lib/types";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
@@ -283,6 +283,15 @@ function repoName(repositories: Repository[], repoID?: string): string {
   return repositories.find((repo) => repo.id === repoID)?.full_name ?? repoID ?? "Unknown repository";
 }
 
+function linearTeamLabel(team: LinearTeamKey): string {
+  return team.team_name ? `${team.team_name} (${team.team_key})` : team.team_key;
+}
+
+function linearTeamMappingLabel(teams: LinearTeamKey[], teamKey: string): string {
+  const team = teams.find((candidate) => candidate.team_key === teamKey);
+  return team ? linearTeamLabel(team) : teamKey;
+}
+
 function LinearAgentRoutingSettings() {
   const queryClient = useQueryClient();
   const [teamID, setTeamID] = useState("");
@@ -304,6 +313,7 @@ function LinearAgentRoutingSettings() {
 
   const repositories = (repositoriesResp?.data ?? []).filter((repo) => repo.status === "active");
   const status = statusResp?.data;
+  const availableTeams = status?.available_teams ?? [];
   const mappings = mappingsResp?.data ?? [];
 
   const updateSettings = useMutation({
@@ -376,7 +386,7 @@ function LinearAgentRoutingSettings() {
               {mappings.map((mapping: LinearTeamRepoMapping) => (
                 <div key={mapping.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{mapping.linear_team_id}</div>
+                    <div className="truncate text-sm font-medium">{linearTeamMappingLabel(availableTeams, mapping.linear_team_id)}</div>
                     <div className="text-xs text-muted-foreground">
                       {mapping.linear_project_id ? `Project ${mapping.linear_project_id} -> ` : ""}{repoName(repositories, mapping.repository_id)}
                     </div>
@@ -399,12 +409,27 @@ function LinearAgentRoutingSettings() {
 
         <div className="grid gap-2 border-t border-border pt-4">
           <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1.3fr_auto]">
-            <Input
-              aria-label="Linear team ID"
-              placeholder="Linear team ID"
-              value={teamID}
-              onChange={(event) => setTeamID(event.target.value)}
-            />
+            {availableTeams.length > 0 ? (
+              <Select value={teamID} onValueChange={setTeamID}>
+                <SelectTrigger aria-label="Linear team">
+                  <SelectValue placeholder="Linear team" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableTeams.map((team) => (
+                    <SelectItem key={`${team.integration_id}:${team.team_key}`} value={team.team_key}>
+                      {linearTeamLabel(team)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input
+                aria-label="Linear team key"
+                placeholder="Linear team key"
+                value={teamID}
+                onChange={(event) => setTeamID(event.target.value)}
+              />
+            )}
             <Input
               aria-label="Linear project ID"
               placeholder="Project ID (optional)"

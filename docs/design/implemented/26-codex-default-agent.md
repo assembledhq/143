@@ -202,7 +202,6 @@ The adapter parses Codex CLI's JSON output, extracting:
 - Response text (for summary)
 - Token usage (input/output tokens)
 - Error messages
-- Confidence JSON block (same `{"confidence_score": ..., "risk_factors": [...]}` format requested in the system prompt — same as Claude Code adapter)
 
 ### Auth Detection
 
@@ -243,7 +242,7 @@ The injection uses `provider.WriteFile()` (already available in the SandboxProvi
 9.  Clone repo
 10. Execute agent
 11. Collect result
-12. Confidence gating + follow-up jobs
+12. Follow-up jobs
 ```
 
 ### CodexAuthProvider Interface
@@ -322,7 +321,6 @@ Settings
 │   └── Gemini auth (API key)
 ├── Agent Execution (autonomy, aggressiveness, concurrency)
 └── Advanced Settings
-    ├── Confidence Thresholds
     └── Prioritization Weights
 ```
 

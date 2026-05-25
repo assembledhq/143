@@ -677,6 +677,30 @@ func TestRefreshTokenByID_UnauthorizedMarksInvalid(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenByID_InvalidGrantBadRequestMarksInvalid(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}`))
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.Error(t, err, "RefreshTokenByID should fail when Anthropic rejects the refresh grant")
+	require.Contains(t, err.Error(), "refresh token revoked", "RefreshTokenByID should classify invalid_grant as revoked")
+	require.Equal(t, models.CredentialStatusInvalid, store.creds[credID].Status, "RefreshTokenByID should mark invalid_grant credentials invalid")
+}
+
 func TestRefreshTokenByID_NoRefreshToken(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()

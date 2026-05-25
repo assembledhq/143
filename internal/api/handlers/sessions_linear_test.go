@@ -510,7 +510,7 @@ func TestSessionHandler_CreateManual_LinearLinkerError(t *testing.T) {
 	// sessions ... RETURNING via session_store.updateResultRow. Return a
 	// row so the scan succeeds and the cleanup write completes cleanly.
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(sessionAnyArgs(14)...).
+		WithArgs(sessionAnyArgs(11)...).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, uuid.Nil, orgID, "claude_code", "failed", "auto", "standard",

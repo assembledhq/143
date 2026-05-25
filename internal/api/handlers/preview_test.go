@@ -911,7 +911,7 @@ func TestReadWorkspacePreviewConfig_PrefersConfigJSON(t *testing.T) {
 // returning the wrong shape from pgxmock.
 var sessionRowColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -944,7 +944,6 @@ func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *st
 		"status":                         "running",
 		"autonomy_level":                 "supervised",
 		"token_mode":                     "low",
-		"risk_factors":                   []string{},
 		"container_id":                   containerID,
 		"turn_holding_container":         false,
 		"token_usage":                    json.RawMessage(`{}`),

@@ -88,7 +88,7 @@ func (r *workerLinearIntegrationRecorder) UpdateStatusAndConfig(_ context.Contex
 
 var workerSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -109,7 +109,7 @@ var workerSessionColumns = []string{
 var workerSessionThreadColumns = []string{
 	"id", "session_id", "org_id", "agent_type", "model_override",
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
-	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
@@ -127,7 +127,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 	return []any{
 		threadID, sessionID, orgID, agentType, modelOverride,
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
 		nowPtr, nil, now,
 		nil, nil, float64(0), 0, nil,
 	}
@@ -230,6 +230,22 @@ func workerSessionWithPolicyDefaults(values []any) []any {
 	return row
 }
 
+func stripLegacyWorkerSessionResultConfidence(row []any) []any {
+	if len(row) <= 13 {
+		return row
+	}
+	if _, ok := row[13].(bool); ok {
+		return row
+	}
+	if _, ok := row[12].(bool); ok {
+		return row
+	}
+	stripped := make([]any, 0, len(row)-3)
+	stripped = append(stripped, row[:11]...)
+	stripped = append(stripped, row[14:]...)
+	return stripped
+}
+
 func workerSessionLikelyOmitsWorkerNode(values []any) bool {
 	if len(values) <= workerSessionWorkerNodeIndex {
 		return false
@@ -256,7 +272,10 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 // linear_* fields. Test rows authored before that migration produce
 // dispatch output that's exactly 5 short of the
 // current sessionColumns; we pad after dispatch so the shape matches.
-const preLinearWorkerSessionColumnsLen = 76
+const (
+	preLinearWorkerSessionColumnsLen              = 76
+	workerSessionColumnsWithLegacyConfidenceCount = 90
+)
 
 func workerLinearSessionDefaults() []any {
 	return []any{
@@ -273,7 +292,7 @@ func workerLinearSessionDefaults() []any {
 // right before the trailing deleted_at/created_at columns when a row was
 // built without them.
 func padWorkerLinearFields(values []any) []any {
-	if len(values) >= len(workerSessionColumns) {
+	if len(values) >= workerSessionColumnsWithLegacyConfidenceCount-2 {
 		return values
 	}
 	if len(values) < 2 {
@@ -299,7 +318,11 @@ func workerSessionTestRow(values ...any) []any {
 	if len(row) == preLinearWorkerSessionColumnsLen {
 		row = padWorkerLinearFields(row)
 	}
-	return padWorkerIdentityNils(row)
+	row = padWorkerIdentityNils(row)
+	if len(row) == len(workerSessionColumns)+3 {
+		row = stripLegacyWorkerSessionResultConfidence(row)
+	}
+	return row
 }
 
 // padWorkerIdentityNils retrofits a session row built by the legacy
@@ -313,18 +336,18 @@ func workerSessionTestRow(values ...any) []any {
 // pre-identity" row; we pad it to the current layout without touching every
 // call site.
 func padWorkerIdentityNils(row []any) []any {
-	if len(row) >= len(workerSessionColumns) {
+	if len(row) >= workerSessionColumnsWithLegacyConfidenceCount {
 		return row
 	}
-	if len(row) == len(workerSessionColumns)-3 {
+	if len(row) == workerSessionColumnsWithLegacyConfidenceCount-3 {
 		const branchCreationStateIndex = 76
-		padded := make([]any, 0, len(workerSessionColumns))
+		padded := make([]any, 0, workerSessionColumnsWithLegacyConfidenceCount)
 		padded = append(padded, row[:branchCreationStateIndex]...)
 		padded = append(padded, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
 		padded = append(padded, row[branchCreationStateIndex:]...)
 		return padded
 	}
-	if len(row) != len(workerSessionColumns)-9 {
+	if len(row) != workerSessionColumnsWithLegacyConfidenceCount-9 {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
@@ -400,6 +423,8 @@ func workerSessionTestRowDispatch(values ...any) []any {
 			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true))
 		}
 	}
+
+	values = stripLegacyWorkerSessionResultConfidence(values)
 
 	switch len(values) {
 	case preLinearWorkerSessionColumnsLen:
@@ -4772,12 +4797,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	require.Equal(t, 1, orch.recoverSessionCalls, "running sessions should use the recovery path")
 
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
+		WithArgs(workerAnyArgs(11)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
@@ -4788,10 +4808,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 		).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
+		WithArgs(workerAnyArgs(7)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	now := time.Now()
 	mock.ExpectQuery("SELECT [\\s\\S]+ FROM project_tasks WHERE id").
@@ -4951,12 +4968,7 @@ func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(
 
 	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
+		WithArgs(workerAnyArgs(11)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
@@ -4967,10 +4979,7 @@ func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(
 		).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
+		WithArgs(workerAnyArgs(7)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	jobctx.RunDeadLetterHooks(handlerCtx, errors.New(errMsg))
@@ -5299,7 +5308,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	require.ErrorAs(t, err, &retryable, "sandbox capacity should remain retryable before queue exhaustion")
 
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(14)...).
+		WithArgs(workerAnyArgs(11)...).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
@@ -5309,7 +5318,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 		WithArgs(workerAnyArgs(6)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_threads").
-		WithArgs(workerAnyArgs(8)...).
+		WithArgs(workerAnyArgs(7)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(workerAnyArgs(6)...).
