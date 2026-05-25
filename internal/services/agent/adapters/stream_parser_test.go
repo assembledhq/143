@@ -10,7 +10,7 @@ import (
 )
 
 // TestParseAgentStreamLine_NonJSON verifies that a non-JSON line lands in
-// summaryParts as plain output and is scanned for confidence markers.
+// summaryParts as plain output.
 func TestParseAgentStreamLine_NonJSON(t *testing.T) {
 	t.Parallel()
 

@@ -22,8 +22,6 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultWeightRecency, s.PriorityWeights.Recency, "should default recency weight")
 	require.Equal(t, DefaultWeightRevenueRisk, s.PriorityWeights.RevenueRisk, "should default revenue_risk weight")
 	require.Equal(t, DefaultAgentAutonomy, s.AgentAutonomy, "should default agent_autonomy")
-	require.Equal(t, 0.4, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from aggressive autonomy")
-	require.Equal(t, 0.2, s.ConfidenceThresholds.HumanReview, "should derive human_review from aggressive autonomy")
 	require.Empty(t, s.LLMModel, "should default llm_model to empty")
 	require.Empty(t, s.ProductDirection, "should default product_direction to empty")
 	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
@@ -90,8 +88,6 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, []string{"legacy-auth"}, s.ProductContext.AvoidAreas, "should parse product_context.avoid_areas")
 	require.Equal(t, "gpt-5.4-mini", s.LLMModel, "should override llm_model")
 	require.Equal(t, "conservative", s.AgentAutonomy, "should override agent_autonomy")
-	require.Equal(t, 1.0, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from conservative autonomy")
-	require.Equal(t, 0.8, s.ConfidenceThresholds.HumanReview, "should derive human_review from conservative autonomy")
 	require.Equal(t, 0.40, s.PriorityWeights.CustomerImpact, "should override customer_impact")
 	require.Equal(t, 0.30, s.PriorityWeights.Severity, "should override severity")
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
@@ -225,26 +221,6 @@ func TestAgentType_SupportsReasoningEffort(t *testing.T) {
 	require.True(t, AgentTypeCodex.SupportsReasoningEffort(), "Codex should support explicit reasoning overrides")
 	require.True(t, AgentTypeClaudeCode.SupportsReasoningEffort(), "Claude Code should support explicit reasoning overrides")
 	require.False(t, AgentTypeGeminiCLI.SupportsReasoningEffort(), "Gemini CLI should not report reasoning override support")
-}
-
-func TestConfidenceThresholdsForAutonomy(t *testing.T) {
-	t.Parallel()
-
-	conservative := ConfidenceThresholdsForAutonomy(AgentAutonomyConservative)
-	require.Equal(t, 1.0, conservative.AutoProceed)
-	require.Equal(t, 0.8, conservative.HumanReview)
-
-	balanced := ConfidenceThresholdsForAutonomy(AgentAutonomyBalanced)
-	require.Equal(t, 0.85, balanced.AutoProceed)
-	require.Equal(t, 0.5, balanced.HumanReview)
-
-	aggressive := ConfidenceThresholdsForAutonomy(AgentAutonomyAggressive)
-	require.Equal(t, 0.4, aggressive.AutoProceed)
-	require.Equal(t, 0.2, aggressive.HumanReview)
-
-	// unknown defaults to balanced
-	unknown := ConfidenceThresholdsForAutonomy("unknown")
-	require.Equal(t, balanced, unknown)
 }
 
 func TestOrgSize_Validate(t *testing.T) {

@@ -2,11 +2,11 @@
 
 > **Status:** Backlog | **Last reviewed:** 2026-05-06
 
-This document describes how 143.dev estimates issue complexity, routes issues to the right execution strategy, and uses confidence scoring to gate fixes before they proceed.
+This document describes how 143.dev estimates issue complexity and routes issues to the right execution strategy.
 
 ## Problem
 
-Not all issues are the same. A typo in an error message and a race condition in a distributed queue require fundamentally different agent strategies and resource budgets. The system needs to know which issues are worth attempting given the admin's risk tolerance, and the agent needs to signal when it isn't confident in its fix.
+Not all issues are the same. A typo in an error message and a race condition in a distributed queue require fundamentally different agent strategies and resource budgets. The system needs to know which issues are worth attempting given the admin's risk tolerance.
 
 ## Overview
 
@@ -14,9 +14,9 @@ The smart routing system adds three capabilities:
 
 1. **Complexity estimation** — predict issue difficulty before running an agent
 2. **Execution aggressiveness control** — admin-configurable slider that determines how far the system goes (simple fixes only vs. attempt everything)
-3. **Confidence scoring** — the agent outputs a confidence score; low-confidence runs get flagged for human guidance
+3. **Explicit post-run outcomes** — execution status, diff presence, failures, validation, and PR/review state determine what happens after a run
 
-The admin selects their preferred coding agent (Claude Code, Codex, Gemini CLI, etc.) and model separately in the agent settings. Smart routing does not change which agent or model is used — it controls _which issues_ are attempted and _whether_ the result is trusted enough to proceed.
+The admin selects their preferred coding agent (Claude Code, Codex, Gemini CLI, etc.) and model separately in the agent settings. Smart routing does not change which agent or model is used — it controls _which issues_ are attempted.
 
 ## Complexity Estimation
 
@@ -105,42 +105,21 @@ if issue.complexity_tier > aggressiveness_level_max_tier:
         aggressiveness is set to {level}. Run anyway?"
 ```
 
-## Confidence Scoring
+## Post-Run Outcome Routing
 
-Every agent run produces a confidence score alongside its diff. This score indicates how confident the agent is that the fix is correct and complete.
+Agent runs record explicit outcomes instead of an opaque trust score:
 
-### How Confidence Is Captured
-
-The agent's prompt includes an instruction to output a confidence assessment:
-
-```
-After generating your fix, provide a confidence assessment:
-- confidence_score: float 0.0-1.0
-- confidence_reasoning: why you are or aren't confident
-- risk_factors: list of things that could go wrong
-- needs_human_review_for: specific areas where human judgment is needed
-```
-
-The adapter parses this from the agent's output and stores it on the `agent_runs` record.
-
-### Confidence Thresholds
-
-| Score Range | Action |
-|-------------|--------|
-| 0.8 - 1.0 | High confidence — proceed through validation normally |
-| 0.5 - 0.79 | Medium confidence — proceed but flag for human review before PR merge |
-| 0.3 - 0.49 | Low confidence — pause before validation, notify admin for guidance |
-| 0.0 - 0.29 | Very low confidence — do not proceed, mark as `needs_human_guidance` |
-
-Thresholds are configurable per org in settings (`confidence_thresholds` in org settings JSONB).
+- success with a usable diff proceeds to PR creation
+- human-input requests pause the session as `awaiting_input`
+- infrastructure, agent, validation, and no-diff failures are recorded with concrete failure categories and next steps
 
 ### Admin Notification
 
-When a run falls below the "proceed" threshold:
+When a run requires operator action:
 
 - The run is marked `needs_human_guidance`
 - The admin sees a notification in the dashboard
-- The admin can review the agent's reasoning, risk factors, and decide to:
+- The admin can review the result and decide to:
   - Approve and continue to validation
   - Retry with a different agent or model
   - Dismiss and handle manually
@@ -156,7 +135,7 @@ Admins choose their preferred coding agent and model in the existing agent confi
 - **Agent type**: Claude Code, Codex, Gemini CLI, or custom
 - **Model**: whichever model the chosen agent supports (e.g., for Claude Code: Opus, Sonnet, Haiku)
 
-The system always uses the admin's configured agent and model for all runs. Smart routing does not override this — it only controls which issues are attempted and how confidence is handled.
+The system always uses the admin's configured agent and model for all runs. Smart routing does not override this — it only controls which issues are attempted.
 
 ### Aggressiveness Slider
 
@@ -175,22 +154,15 @@ Each position shows:
 - Estimated cost impact (e.g., "~$X/month based on your issue volume")
 - Expected coverage (e.g., "covers ~40% / ~70% / ~90% / ~100% of incoming issues")
 
-### Confidence Threshold Controls
-
-Configurable thresholds for each confidence action:
-
-- **Auto-proceed threshold**: Above this score, the run proceeds without pause (default: 0.8)
-- **Human review threshold**: Below this score, the run is paused for human guidance (default: 0.5)
-
 ### Per-Issue-Type Overrides (Advanced)
 
 An expandable "Advanced" section where admins can override settings per issue type:
 
-| Issue Type | Max Tier | Auto-proceed Threshold |
-|-----------|----------|----------------------|
-| bug_fix | Use default | Use default |
-| performance | Tier 3 max | 0.7 |
-| security | Tier 4 max | 0.9 |
+| Issue Type | Max Tier |
+|-----------|----------|
+| bug_fix | Use default |
+| performance | Tier 3 max |
+| security | Tier 4 max |
 
 ## Database Changes
 
@@ -220,13 +192,10 @@ Stores the pre-run complexity estimation for each issue.
 
 ### Updated: `agent_runs` table
 
-Add columns for routing and confidence:
+Add columns for routing:
 
 | New Column | Type | Notes |
 |-----------|------|-------|
-| confidence_score | float | agent's self-assessed confidence (0-1) |
-| confidence_reasoning | text | agent's explanation |
-| risk_factors | text[] | agent-identified risks |
 | complexity_tier | int | snapshot of the complexity tier at run time |
 
 ### Updated: `organizations.settings` JSONB
@@ -236,14 +205,9 @@ Add new fields to the settings object:
 ```json
 {
   "execution_aggressiveness": 2,
-  "confidence_thresholds": {
-    "auto_proceed": 0.8,
-    "human_review": 0.5
-  },
   "issue_type_overrides": {
     "security": {
-      "max_tier": 4,
-      "auto_proceed_threshold": 0.9
+      "max_tier": 4
     }
   }
 }
@@ -261,7 +225,7 @@ POST /api/v1/issues/:id/estimate      # trigger complexity estimation
 ### Updated Endpoints
 
 ```
-PATCH /api/v1/settings    # now accepts execution_aggressiveness, confidence_thresholds, issue_type_overrides
+PATCH /api/v1/settings    # now accepts execution_aggressiveness, issue_type_overrides
 
 POST /api/v1/issues/:id/run-agent    # now accepts optional overrides:
   {
@@ -281,9 +245,7 @@ The `run_agent` job now:
 1. Fetches the complexity estimate (or computes one if missing)
 2. Checks aggressiveness level — skips if issue is too complex
 3. Runs the agent using the admin's configured agent type and model
-4. Parses confidence score from agent output
-5. If confidence is below threshold, marks `needs_human_guidance` and stops
-6. Otherwise, enqueues `validate` as before
+4. Enqueues follow-up publication work according to the session's validation policy and user action
 
 ### New: `estimate_complexity` job
 
@@ -295,8 +257,6 @@ New Datadog metrics for monitoring:
 
 - `143.complexity.tier` (histogram) — distribution of estimated complexity tiers
 - `143.complexity.estimation_time_ms` (histogram) — time to estimate complexity
-- `143.confidence.score` (histogram) — distribution of agent confidence scores
-- `143.confidence.human_guidance_rate` (gauge) — % of runs that needed human guidance
 - `143.routing.skip_rate` (gauge) — % of issues skipped due to aggressiveness setting, tagged by `tier`
 
 ## Build Order
@@ -304,5 +264,4 @@ New Datadog metrics for monitoring:
 This feature spans multiple phases and should be integrated into the existing build order:
 
 1. **Phase 3 addition**: Add complexity estimation to the prioritization pipeline (after scoring, before agent eligibility)
-2. **Phase 4 addition**: Add confidence scoring to the agent orchestrator
-3. **Phase 4 addition**: Add the execution strategy settings to the agent settings UI
+2. **Phase 4 addition**: Add the execution strategy settings to the agent settings UI

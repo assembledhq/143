@@ -278,9 +278,6 @@ export interface Session {
   autonomy_level: string;
   token_mode: string;
   complexity_tier?: number;
-  confidence_score?: number;
-  confidence_reasoning?: string;
-  risk_factors?: string[];
   started_at?: string;
   completed_at?: string;
   token_usage?: Record<string, unknown>;
@@ -383,7 +380,6 @@ export interface SessionThread {
   agent_session_id?: string;
   current_turn: number;
   last_activity_at?: string;
-  confidence_score?: number;
   result_summary?: string;
   diff?: string;
   failure_explanation?: string;

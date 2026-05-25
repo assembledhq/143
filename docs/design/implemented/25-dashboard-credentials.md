@@ -375,9 +375,6 @@ type OrgSettings struct {
     Aggressiveness    int    `json:"execution_aggressiveness"`
     MaxConcurrentRuns int    `json:"max_concurrent_runs"`
 
-    // Confidence thresholds for auto-proceed vs human review
-    ConfidenceThresholds ConfidenceThresholds `json:"confidence_thresholds"`
-
     // Priority scoring weights (must sum to ~1.0)
     PriorityWeights PriorityWeights `json:"priority_weights"`
 
@@ -386,11 +383,6 @@ type OrgSettings struct {
 
     // LLM model selection (e.g., "claude-sonnet-4-5", "gpt-4o")
     LLMModel string `json:"llm_model"`
-}
-
-type ConfidenceThresholds struct {
-    AutoProceed float64 `json:"auto_proceed"`
-    HumanReview float64 `json:"human_review"`
 }
 
 type PriorityWeights struct {
@@ -411,9 +403,6 @@ const (
     DefaultWeightSeverity       = 0.25
     DefaultWeightRecency        = 0.20
     DefaultWeightRevenueRisk    = 0.20
-
-    DefaultConfidenceAutoProceed = 0.85
-    DefaultConfidenceHumanReview = 0.60
 )
 
 // ParseOrgSettings deserializes the JSONB settings column into OrgSettings,
@@ -442,12 +431,6 @@ func ParseOrgSettings(raw json.RawMessage) OrgSettings {
             Severity:       DefaultWeightSeverity,
             Recency:        DefaultWeightRecency,
             RevenueRisk:    DefaultWeightRevenueRisk,
-        }
-    }
-    if s.ConfidenceThresholds == (ConfidenceThresholds{}) {
-        s.ConfidenceThresholds = ConfidenceThresholds{
-            AutoProceed: DefaultConfidenceAutoProceed,
-            HumanReview: DefaultConfidenceHumanReview,
         }
     }
     return s

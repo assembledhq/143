@@ -159,7 +159,6 @@ func TestBuildSystemPrompt_ManualSessionSkipsBaseTemplate(t *testing.T) {
 	prompt := buildSystemPrompt(input)
 	require.NotContains(t, prompt, "coding agent tasked with fixing a bug", "manual sessions should not include bug-fixing template")
 	require.NotContains(t, prompt, "testing_requirements", "manual sessions should not include testing requirements")
-	require.NotContains(t, prompt, "confidence_score", "manual sessions should not include confidence format")
 	require.Contains(t, prompt, "Repository Conventions", "manual sessions should still include repo conventions")
 	require.Contains(t, prompt, "Use Go 1.22")
 }

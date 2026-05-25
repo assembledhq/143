@@ -51,7 +51,6 @@ func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {
 	streamOutput := `{"type":"assistant","content":"Looking at the bug now."}
 {"type":"tool_use","tool":"read_file","input":{"path":"main.go"}}
 {"type":"tool_result","tool":"read_file","output":"file contents"}
-{"type":"assistant","content":"I fixed the null pointer.\n{\"confidence_score\": 0.85, \"confidence_reasoning\": \"clean fix\", \"risk_factors\": []}"}
 {"type":"result","content":"Done","usage":{"input_tokens":1200,"output_tokens":340},"session_id":"amp-sess-1"}
 `
 
@@ -96,8 +95,6 @@ func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {
 	close(logCh)
 
 	require.Equal(t, 0, result.ExitCode)
-	require.InDelta(t, 0.85, result.ConfidenceScore, 0.001)
-	require.Equal(t, "clean fix", result.ConfidenceReasoning)
 	require.Equal(t, 1200, result.TokenUsage.InputTokens)
 	require.Equal(t, 340, result.TokenUsage.OutputTokens)
 	require.Equal(t, "amp-sess-1", result.AgentSessionID,
@@ -113,7 +110,7 @@ func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {
 		if l.Level == "tool_use" {
 			sawTool = true
 		}
-		if l.Level == "output" && strings.Contains(l.Message, "null pointer") {
+		if l.Level == "output" && strings.Contains(l.Message, "Looking at the bug") {
 			sawAssistant = true
 		}
 	}

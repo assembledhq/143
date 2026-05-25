@@ -72,11 +72,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(11)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
@@ -133,9 +129,7 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -167,9 +161,7 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshotInsertFailure(t *testin
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -230,11 +222,7 @@ func TestSessionStore_UpdateResult_PreservesDiffWhenNil(t *testing.T) {
 	// leaves the existing value intact. Same for diff_stats and
 	// diff_collected_at to keep them consistent with the preserved diff.
 	mock.ExpectQuery(`UPDATE sessions[\s\S]+diff = COALESCE\(@diff, diff\)[\s\S]+diff_collected_at = COALESCE\(@diff_collected_at, diff_collected_at\)[\s\S]+diff_stats = COALESCE\(@diff_stats, diff_stats\)`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(11)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
@@ -263,9 +251,7 @@ func TestSessionStore_UpdateTurnComplete_PreservesDiffWhenNil(t *testing.T) {
 	result := &models.SessionResult{}
 
 	mock.ExpectExec(`UPDATE sessions[\s\S]+SET status = 'idle'[\s\S]+diff = COALESCE\(@diff, diff\)[\s\S]+diff_collected_at = COALESCE\(@diff_collected_at, diff_collected_at\)[\s\S]+diff_stats = COALESCE\(@diff_stats, diff_stats\)`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), orgID, sessionID, 2, result, "agent-123", "snap-key")

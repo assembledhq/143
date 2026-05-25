@@ -15,7 +15,6 @@ These patterns apply across every page. They are not optional — they define th
 - **Cmd+K command palette** — Global fuzzy search across all entities (issues, runs, settings, actions). Single entry point for keyboard-driven navigation. Inspired by Linear's command palette — covers navigation, actions, and search without requiring menu interaction. Detailed design: [45-global-command-palette.md](implemented/45-global-command-palette.md).
 - **Keyboard-first navigation** — J/K keys for list navigation on all table/list pages. Space bar for peek preview (opens a side panel with summary details without full navigation). Single-key shortcuts for common actions. The mouse is secondary for power users.
 - **Consistent `StatusDot` component** — A single status indicator component used on every surface: sidebar badges, run list rows, Fix Queue items, browser tab favicon. Nine states mapping to the full run lifecycle (running / awaiting_input / needs_guidance / resumed_locally / completed / pr_open / in_review / merged / failed) with unambiguous colors. `awaiting_input` and `needs_guidance` use a pulsing amber dot to signal "needs you." `resumed_locally` uses a blue dot to signal "human is driving." Never invent different status representations for different pages.
-- **Confidence as English labels** — Never show raw confidence scores (0.73) to users. Map scores to clear labels: "High confidence — will auto-proceed" / "Medium — needs your review" / "Low — blocked for approval". The score can be available in a tooltip for power users, but the label is the primary display.
 - **Progressive disclosure via drawers** — Deep-dive information (traces, breadcrumbs, detailed metadata) opens in slide-out drawer panels from the right edge, preserving the parent page context. Prefer drawers over inline expand/collapse for complex content. Reserve inline expansion for simple one-level toggles.
 - **Stable layouts** — Page structure (tabs, columns, sections) should be consistent regardless of data state. Unavailable sections are grayed out or show placeholder text, never hidden. Users build muscle memory from predictable layouts.
 
@@ -239,13 +238,13 @@ This section builds trust. Users see the system is doing work, not a black box.
 
 Items requiring human input, sorted by **composite priority** (severity x wait time x item type). A security-critical PR waiting 2 hours ranks above a low-severity run waiting 2 days. Items:
 - **Agent questions** — the agent asked a clarifying question during execution. Shows the question text inline with an answer input. Answering resumes the run immediately.
-- **Runs paused at low confidence** — waiting for approval or guidance. Shows confidence reasoning. Actions: "Approve", "Retry with guidance", "Resume Locally", "Dismiss".
-- **PRs awaiting review** — with confidence label + diff stats summary.
+- **Runs needing guidance** — waiting for approval, direction, or operator intervention. Actions: "Approve", "Retry with guidance", "Resume Locally", "Dismiss".
+- **PRs awaiting review** — with diff stats summary.
 - **Issues manually escalated** for triage.
 
-Each row: `StatusDot`, title (linked), priority reason label (e.g., "Agent question: Which database migration strategy?" or "Low confidence — needs approval"), wait time, and a primary action button ("Answer", "Approve", "Review", "Dismiss").
+Each row: `StatusDot`, title (linked), priority reason label (e.g., "Agent question: Which database migration strategy?" or "Needs approval"), wait time, and a primary action button ("Answer", "Approve", "Review", "Dismiss").
 
-**Click-to-preview side panel** — Clicking a queue item opens a side panel (`queue-item-panel.tsx`) on the right with summary context (run status, diff summary, confidence label, PR status) without navigating away. The side panel provides enough context for simple decisions (approve, dismiss). For deeper review, a "View full detail" link navigates to the full run detail page.
+**Click-to-preview side panel** — Clicking a queue item opens a side panel (`queue-item-panel.tsx`) on the right with summary context (run status, diff summary, PR status) without navigating away. The side panel provides enough context for simple decisions (approve, dismiss). For deeper review, a "View full detail" link navigates to the full run detail page.
 
 **Bulk actions** — Checkboxes allow batch operations: bulk-approve, bulk-assign, bulk-dismiss. Users with 10+ items shouldn't process them one at a time.
 
@@ -300,7 +299,7 @@ Runs and Pull Requests are combined into a single page. A PR is a stage in a run
 ```
 running → completed → pr_open → in_review → merged              (happy path)
        → awaiting_input → running → ...                          (agent asked a question)
-       → needs_human_guidance → running (approved/guided) → ...  (low confidence)
+       → needs_human_guidance → running (approved/guided) → ...  (manual guidance)
                               → resumed_locally → completed → ... (user took over)
                    ↘ failed                                       (at any point)
 ```
@@ -320,7 +319,7 @@ One table with a status column covering the entire lifecycle:
 
 **Bulk actions** — Checkboxes on run rows allow batch operations: bulk-approve (for PRs in review), bulk-retry (for failed runs), bulk-assign. When 5 PRs need review, users should be able to select and batch-approve rather than clicking into each one.
 
-**Peek preview** — Space bar on a selected row opens the `peek-panel` with run summary: status, confidence label, diff stats, PR link. Navigate between rows with J/K while the peek panel stays open (Linear-style).
+**Peek preview** — Space bar on a selected row opens the `peek-panel` with run summary: status, diff stats, PR link. Navigate between rows with J/K while the peek panel stays open (Linear-style).
 
 #### Run detail page — stable tabs
 
@@ -337,9 +336,9 @@ PR exists:             [Overview]  [Logs]  [Diff ←default]  [PR & Validation]
 PR with experiment:    [Overview]  [Logs]  [Diff]  [PR & Validation ←default]
 ```
 
-- **Overview**: status and metadata (complexity tier, **confidence label** — "High / Medium / Low" with English description, raw score in tooltip), **risk factors** (tags/chips), actions (cancel, retry, approve). The overview adapts to run state:
+- **Overview**: status, timestamps, result summary, and actions (cancel, retry, approve). The overview adapts to run state:
   - **For `awaiting_input` runs** — the agent's question is displayed prominently as a card with the question text, context of what the agent was doing, and an answer input (free text or multiple-choice buttons if the agent provided options). Answering resumes the run immediately.
-  - **For `needs_human_guidance` runs** — a guidance panel shows the agent's confidence reasoning and offers four actions: "Approve" (proceed as-is), "Approve with note" (attach guidance for reviewers), "Retry with guidance" (re-run with guidance injected into the prompt — text input expands), and "Dismiss." A **"Resume Locally"** button provides a copyable CLI command (e.g., `143 resume abc123`) for users who want to take over in their terminal.
+  - **For `needs_human_guidance` runs** — a guidance panel explains why operator input is needed and offers four actions: "Approve" (proceed as-is), "Approve with note" (attach guidance for reviewers), "Retry with guidance" (re-run with guidance injected into the prompt — text input expands), and "Dismiss." A **"Resume Locally"** button provides a copyable CLI command (e.g., `143 resume abc123`) for users who want to take over in their terminal.
   - **For `resumed_locally` runs** — shows "Resumed locally by {user}" with a timestamp. The log stream is replaced by a message: "This run is being driven locally. Logs will appear when the session ends."
   - **For failed runs** — failure info is shown inline: failure category and code, LLM reasoning, actionable recommendations, similar runs comparison with side-by-side diff.
 - **Logs**: streams logs via SSE, auto-scrolls, supports log level filtering. Includes a **"Show detailed trace" button** that opens a **slide-out drawer** (`run-trace-drawer.tsx`) from the right edge — structured timeline of agent decision events grouped by phase (context_gathering, analysis, implementation, testing, review), expandable details, context map, token usage breakdown per phase. The drawer preserves the log stream on the left so users can cross-reference. Default tab while running.
@@ -389,7 +388,6 @@ The default settings page. Two sections on one page:
 Everything about how the agent behaves day-to-day:
 - **Agent & model selection** — choose the coding agent (Claude Code, Codex, Gemini CLI, custom) and the model it should use
 - **Aggressiveness slider** — 4-position labeled slider (Conservative / Moderate / Aggressive / Maximum) that controls which complexity tiers the system will attempt. Each position shows a description, estimated cost impact, and expected issue coverage percentage.
-- **Confidence thresholds** — configurable score thresholds for auto-proceed (default 0.8) and human-review-required (default 0.5). Displayed with English labels matching the confidence display elsewhere: "High confidence — auto-proceed" / "Medium — needs review" / "Low — blocked"
 - **Per-issue-type overrides** (advanced, expandable) — override max tier and auto-proceed threshold per issue type (bug_fix, performance, security, etc.)
 
 #### Agent Experiments (`/settings/experiments`)

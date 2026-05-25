@@ -252,8 +252,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		Level:     "info",
 		Message:   "Codex CLI completed",
 		Metadata: map[string]interface{}{
-			"exit_code":        exitCode,
-			"confidence_score": result.ConfidenceScore,
+			"exit_code": exitCode,
 		},
 	}
 
@@ -311,7 +310,6 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 			Message:   text,
 		}
 		*summaryParts = append(*summaryParts, text)
-		tryExtractConfidence(text, result)
 		return
 	}
 
@@ -327,7 +325,6 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 				}
 				*summaryParts = append(*summaryParts, legacy.Response)
 			}
-			tryExtractConfidence(legacy.Response, result)
 			if legacy.Stats != nil {
 				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
 					Reported:     true,
@@ -368,7 +365,6 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		// Individual text blocks are persisted as separate output logs —
 		// don't merge them into the summary. Track as fallback.
 		*lastAssistant = content
-		tryExtractConfidence(content, result)
 
 	case "function_call", "tool_use", "tool_call":
 		toolName := event.Name
@@ -473,7 +469,6 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		}
 		if content != "" {
 			*summaryParts = append(*summaryParts, content)
-			tryExtractConfidence(content, result)
 		}
 		if event.Stats != nil {
 			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
@@ -506,7 +501,6 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 					}
 					// Individual text blocks are persisted as separate output logs.
 					*lastAssistant = text
-					tryExtractConfidence(text, result)
 				}
 			case "command_execution":
 				metadata := map[string]interface{}{
@@ -599,7 +593,6 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 			Message:   codexResp.Response,
 		}
 		result.Summary = codexResp.Response
-		tryExtractConfidence(codexResp.Response, result)
 
 		if codexResp.Stats != nil {
 			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
@@ -626,7 +619,6 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 		Message:   text,
 	}
 	result.Summary = text
-	tryExtractConfidence(text, result)
 }
 
 // codexItem represents a nested item inside a Codex CLI stream event

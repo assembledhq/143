@@ -146,7 +146,7 @@ Org settings already follow the insert-only versioned pattern (deactivate old ro
 
 Key org settings fields that affect agent behavior:
 - `ContextLimits` (token budgets, issue/PR counts for context gathering)
-- `ConfidenceThresholds` (auto-proceed vs. human-review gates)
+- explicit execution and review policies
 - `MaxConcurrentRuns`
 - `LLMModel`, `LLMReasoningEffort`
 - `AgentConfig` (per-agent env var overrides)

@@ -110,7 +110,7 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 	}{
 		{
 			name:           "successful run with JSON output",
-			geminiOutput:   `{"response":"I fixed the null pointer issue.\n{\"confidence_score\": 0.9, \"confidence_reasoning\": \"Simple null check\", \"risk_factors\": [\"edge case\"]}","stats":{"inputTokens":1000,"outputTokens":500}}`,
+			geminiOutput:   `{"response":"I fixed the null pointer issue.","stats":{"inputTokens":1000,"outputTokens":500}}`,
 			geminiExitCode: 0,
 			diffOutput:     "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-bad\n+good\n",
 			diffExitCode:   0,
@@ -119,9 +119,6 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 				require.Equal(t, 0, result.ExitCode)
 				require.Empty(t, result.Error)
 				require.Contains(t, result.Diff, "diff --git")
-				require.InDelta(t, 0.9, result.ConfidenceScore, 0.001)
-				require.Equal(t, "Simple null check", result.ConfidenceReasoning)
-				require.Equal(t, []string{"edge case"}, result.RiskFactors)
 				require.Equal(t, 1000, result.TokenUsage.InputTokens)
 				require.Equal(t, 500, result.TokenUsage.OutputTokens)
 			},
@@ -167,7 +164,6 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 				t.Helper()
 				require.Equal(t, 0, result.ExitCode)
 				require.Empty(t, result.Diff)
-				require.Equal(t, 0.0, result.ConfidenceScore)
 			},
 		},
 		{
@@ -505,16 +501,6 @@ func TestParseGeminiStreamOutput(t *testing.T) {
 					}
 				}
 				require.True(t, hasThinking, "should have thinking debug log")
-			},
-		},
-		{
-			name:   "confidence extraction from stream",
-			output: `{"type":"text","content":"Fixed it.\n{\"confidence_score\": 0.85, \"confidence_reasoning\": \"Simple fix\", \"risk_factors\": [\"edge case\"]}"}`,
-			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
-				t.Helper()
-				require.InDelta(t, 0.85, result.ConfidenceScore, 0.001)
-				require.Equal(t, "Simple fix", result.ConfidenceReasoning)
-				require.Equal(t, []string{"edge case"}, result.RiskFactors)
 			},
 		},
 		{
