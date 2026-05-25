@@ -257,6 +257,23 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	if len(tr.integrations.PullRequestCreators()) > 0 {
+		tools = append(tools,
+			Tool{
+				Name:        "create_pr",
+				Description: "Queue first-class 143 pull request creation for a session. Uses the same PR workflow as the app, including repo templates and session links.",
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"session_id":  {Type: "string", Description: "Session UUID. Defaults to 143_SESSION_ID when omitted."},
+						"draft":       {Type: "boolean", Description: "Whether to create a draft PR. Omit to use the repo default."},
+						"author_mode": {Type: "string", Description: "PR author mode. Omit to use the default (auto).", Enum: []string{"auto", "app", "user"}},
+					},
+				},
+			},
+		)
+	}
+
 	for _, pp := range tr.integrations.ProjectProposers() {
 		prefix := pp.Name()
 		tools = append(tools,
@@ -358,6 +375,14 @@ func (tr *ToolRegistry) ListTools() []Tool {
 
 // CallTool dispatches a tool call to the appropriate integration method.
 func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
+	if name == "create_pr" {
+		creators := tr.integrations.PullRequestCreators()
+		if len(creators) == 0 {
+			return ErrorResult("pull request creator not registered")
+		}
+		return tr.callPullRequestCreator(ctx, creators[0], "create_pr", args)
+	}
+
 	// Try each integration category. The tool name is prefixed with the
 	// provider name (e.g. "sentry_list_errors"), so we match by prefix.
 	for _, et := range tr.integrations.ErrorTrackers() {
@@ -862,6 +887,55 @@ func (tr *ToolRegistry) callIssueCreator(ctx context.Context, ic integration.Iss
 
 	default:
 		return ErrorResult(fmt.Sprintf("unknown issue creator method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Pull request creator dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integration.PullRequestCreator, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "create_pr":
+		var p struct {
+			SessionID  string          `json:"session_id"`
+			Draft      json.RawMessage `json:"draft"`
+			AuthorMode string          `json:"author_mode"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		var draft *bool
+		if len(p.Draft) > 0 && string(p.Draft) != "null" {
+			var b bool
+			if err := json.Unmarshal(p.Draft, &b); err != nil {
+				var s string
+				if strErr := json.Unmarshal(p.Draft, &s); strErr != nil {
+					return ErrorResult("draft must be true or false")
+				}
+				switch strings.ToLower(strings.TrimSpace(s)) {
+				case "true":
+					b = true
+				case "false":
+					b = false
+				default:
+					return ErrorResult("draft must be true or false")
+				}
+			}
+			draft = &b
+		}
+		result, err := pc.CreatePullRequest(ctx, integration.CreatePullRequestParams{
+			SessionID:  p.SessionID,
+			Draft:      draft,
+			AuthorMode: p.AuthorMode,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("create pull request failed: %s", err))
+		}
+		return jsonResult(result)
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown pull request creator method: %s", method))
 	}
 }
 

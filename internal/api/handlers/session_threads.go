@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -31,7 +34,7 @@ type ThreadService interface {
 	EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	GetMessages(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionMessage, error)
 	GetMessageWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (thread.MessageWindowResult, error)
-	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error)
+	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionLogFilterOptions) ([]models.SessionLog, error)
 	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
 	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
@@ -644,7 +647,8 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	logs, err := h.svc.GetLogs(r.Context(), orgID, sessionID, threadID)
+	opts := db.SessionLogFilterOptions{TurnNumbers: parseTurnNumbers(r.URL.Query().Get("turn_numbers"))}
+	logs, err := h.svc.GetLogs(r.Context(), orgID, sessionID, threadID, opts)
 	if err != nil {
 		if errors.Is(err, thread.ErrThreadNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
@@ -658,4 +662,27 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{Data: logs})
+}
+
+func parseTurnNumbers(raw string) []int {
+	if raw == "" {
+		return nil
+	}
+	seen := make(map[int]struct{})
+	for _, part := range strings.Split(raw, ",") {
+		value, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || value < 0 || value > math.MaxInt32 {
+			continue
+		}
+		seen[value] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	turnNumbers := make([]int, 0, len(seen))
+	for value := range seen {
+		turnNumbers = append(turnNumbers, value)
+	}
+	sort.Ints(turnNumbers)
+	return turnNumbers
 }

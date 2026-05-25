@@ -1856,6 +1856,10 @@ export function filterThreadLogsForLoadedMessages(
   return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
 
+function loadedTurnNumbers(messages: SessionMessage[]): number[] {
+  return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
+}
+
 function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
   return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
 }
@@ -1981,11 +1985,17 @@ function ChatPanel({
   const threadMessages = useMemo(() => {
     return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
   }, [threadMessagesQuery.data?.pages]);
+  const loadedThreadTurns = useMemo(() => loadedTurnNumbers(threadMessages), [threadMessages]);
+  const loadedThreadTurnsKey = loadedThreadTurns.join(",");
 
   const threadLogsQuery = useQuery({
-    queryKey: activeThreadId ? queryKeys.sessions.threadLogs(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "logs"],
-    queryFn: () => api.sessions.getThreadLogs(sessionId, activeThreadId!),
-    enabled: !!activeThreadId,
+    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), loadedThreadTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
+    queryFn: () => api.sessions.getThreadLogs(
+      sessionId,
+      activeThreadId!,
+      loadedThreadTurns.length > 0 ? { turnNumbers: loadedThreadTurns } : {},
+    ),
+    enabled: !!activeThreadId && threadMessagesQuery.isFetched,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
   });
 

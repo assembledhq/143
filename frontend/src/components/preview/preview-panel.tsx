@@ -871,12 +871,12 @@ export function PreviewPanel({
               {status === "failed" && (
                 <Button
                   size="sm"
-                  onClick={() => restartMutation.mutate()}
+                  onClick={() => startMutation.mutate()}
                   disabled={isMutating}
-                  loading={restartMutation.isPending}
+                  loading={startMutation.isPending}
                 >
-                  {!restartMutation.isPending && <RotateCw className="size-3.5" />}
-                  Restart Preview
+                  {!startMutation.isPending && <RotateCw className="size-3.5" />}
+                  Retry Preview
                 </Button>
               )}
             </div>

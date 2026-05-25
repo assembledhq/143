@@ -354,6 +354,7 @@ func main() {
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	var jobStore *db.JobStore
+	var workerPreviewStore *db.PreviewStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
 	// in api-only mode where buildServices never runs.
@@ -385,6 +386,7 @@ func main() {
 		automationStore := db.NewAutomationStore(pool)
 		automationRunStore := db.NewAutomationRunStore(pool)
 		previewStore := db.NewPreviewStore(pool)
+		workerPreviewStore = previewStore
 		// Reuse the snapshot store built for the API so both paths agree on
 		// SnapshotStorageDir without duplicating configuration.
 		snapshotStore := apiSnapshotStore
@@ -672,6 +674,7 @@ func main() {
 		time.Sleep(httpDrainPropagationDelay)
 
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), cfg.WorkerDrainTimeout)
+		workerDrainTimedOut := false
 		for {
 			activeJobs := 0
 			for _, w := range processWorkers {
@@ -683,10 +686,12 @@ func main() {
 			select {
 			case <-drainCtx.Done():
 				logger.Warn().Int("active_jobs", activeJobs).Msg("worker drain timed out; continuing shutdown")
-				goto drained
+				workerDrainTimedOut = true
+				goto workerJobsDrained
 			case <-time.After(500 * time.Millisecond):
 			}
 		}
+	workerJobsDrained:
 		// After all jobs have completed, wait for any post-PR snapshot
 		// uploads spawned by CreatePR to finish. These run in detached
 		// goroutines (the worker job has returned) and own a temp file +
@@ -700,12 +705,16 @@ func main() {
 		// goroutines didn't get to (within strandedPendingSnapshotThreshold
 		// = 15m), so the worst-case outcome is a delayed resume rather than
 		// a permanently stuck row.
-		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
-		if jobStore != nil && cfg.NodeID != "" {
-			waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)
+		if !workerDrainTimedOut {
+			drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
+			if jobStore != nil && cfg.NodeID != "" {
+				waitForDBOwnedJobsToDrain(drainCtx, jobStore, cfg.NodeID, logger)
+			}
 		}
-	drained:
 		drainCancel()
+		if !workerDrainTimedOut && workerPreviewStore != nil && cfg.NodeID != "" {
+			waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second)
+		}
 
 		cancel() // stop worker
 		if recycleWorker != nil {
@@ -1060,6 +1069,7 @@ func buildServices(
 		providers.WithResolvConf(cfg.SandboxResolvConf),
 		providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 		providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+		providers.WithAuthSocketPreflightDir(cfg.SandboxAuthSocketDir),
 	)
 	mentionIndexCache := workspace.NewMentionIndexCache(workspace.MentionIndexCacheConfig{
 		Redis:  redisClient,
@@ -1098,6 +1108,7 @@ func buildServices(
 					providers.WithResolvConf(cfg.SandboxResolvConf),
 					providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 					providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
+					providers.WithAuthSocketPreflightDir(cfg.SandboxAuthSocketDir),
 				)
 				healthCtx, healthCancel := context.WithTimeout(context.Background(), 30*time.Second)
 				fallbackErr := sandboxProvider.HealthCheck(healthCtx)
@@ -1224,6 +1235,8 @@ func buildServices(
 		IdentityResolver:   identityResolver,
 		SandboxAuth:        sandboxAuthServer,
 		Users:              userStore,
+		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
+		InternalAPISecret:  cfg.SessionSecret,
 		NodeID:             cfg.NodeID,
 		Logger:             logger,
 	})

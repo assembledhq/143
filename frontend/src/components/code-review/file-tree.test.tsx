@@ -148,4 +148,20 @@ describe("FileTree", () => {
     expect(screen.getByText("README.md")).toBeInTheDocument();
     expect(screen.queryByText("app.ts")).not.toBeInTheDocument();
   });
+
+  it("bounds the initial render for very large file lists", () => {
+    const manyFiles = Array.from({ length: 501 }, (_, index) =>
+      makeDiffFile(`src/file-${String(index).padStart(3, "0")}.ts`)
+    );
+
+    render(
+      <FileTree files={manyFiles} activeFileIndex={0} onFileSelect={vi.fn()} />
+    );
+
+    expect(screen.getByText("501 files changed")).toBeInTheDocument();
+    expect(screen.getByText("file-000.ts")).toBeInTheDocument();
+    expect(screen.getByText("file-024.ts")).toBeInTheDocument();
+    expect(screen.queryByText("file-025.ts")).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 25 of 501 files")).toBeInTheDocument();
+  });
 });

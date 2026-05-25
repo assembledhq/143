@@ -217,6 +217,30 @@ describe('api client', () => {
       expect(url.searchParams.get('limit')).toBe('25');
     });
 
+    it('fetches thread logs only for loaded message turns', async () => {
+      let capturedUrl: string | undefined;
+      const mockLogs = {
+        data: [{ id: 101, level: 'output', message: 'latest turn', turn_number: 7 }],
+        meta: {},
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:threadId/logs', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json(mockLogs);
+        }),
+      );
+
+      const result = await api.sessions.getThreadLogs('session-abc', 'thread-1', {
+        turnNumbers: [7, 6, 7, 5],
+      });
+
+      expect(result).toEqual(mockLogs);
+      expect(capturedUrl).toBeDefined();
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
+    });
+
     it('answers question with backend contract field', async () => {
       let capturedBody: unknown;
 

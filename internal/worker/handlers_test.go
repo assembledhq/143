@@ -1742,6 +1742,32 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 	)
 }
 
+func TestOpenPRHandler_WaitsForRunningSessionSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	row := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumnValue(row, "status", models.SessionStatusRunning)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	handler := newOpenPRHandler(stores, &Services{PR: &stubPRService{}}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "open_pr should requeue while the running session has not published a snapshot")
+	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "open_pr should preserve the snapshot-pending sentinel")
+	require.NoError(t, mock.ExpectationsWereMet(), "open_pr should only read the session while waiting for the snapshot")
+}
+
 func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	t.Parallel()
 
