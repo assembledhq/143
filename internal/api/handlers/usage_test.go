@@ -167,10 +167,10 @@ func TestUsageHandler_GetSummary(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_sessions"}).AddRow(42.5, 5))
 
 	// Capacity breakdown
-	mock.ExpectQuery("SELECT cpu_limit, memory_limit_mb").
+	mock.ExpectQuery("SELECT cpu_limit, memory_limit_mb, disk_limit_mb").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"cpu_limit", "memory_limit_mb", "minutes", "sessions"}).
-			AddRow(2.0, 4096, 42.5, 5))
+		WillReturnRows(pgxmock.NewRows([]string{"cpu_limit", "memory_limit_mb", "disk_limit_mb", "minutes", "sessions"}).
+			AddRow(2.0, 4096, 10240, 42.5, 5))
 
 	// Peak concurrent
 	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(concurrent\\)").
@@ -215,7 +215,7 @@ func TestUsageHandler_ListBySession(t *testing.T) {
 
 	cols := []string{
 		"id", "org_id", "session_id", "container_id", "provider",
-		"cpu_limit", "memory_limit_mb", "image",
+		"cpu_limit", "memory_limit_mb", "disk_limit_mb", "image",
 		"started_at", "stopped_at", "duration_ms", "container_minutes",
 		"exit_reason", "created_at",
 	}
@@ -224,7 +224,7 @@ func TestUsageHandler_ListBySession(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).AddRow(
 				eventID, orgID, sessionID, "ctr-1", "docker",
-				2.0, 4096, "143-sandbox:latest",
+				2.0, 4096, 10240, "143-sandbox:latest",
 				now, &now, &dur, &mins, &reason, now,
 			),
 		)
@@ -805,11 +805,11 @@ func TestUsageHandler_ExportCSV_CapacityDimension(t *testing.T) {
 	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{
 		exportRows: &stubRows{
 			rows: [][]any{
-				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "2cpu_4096mb", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
+				{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "2cpu_4096mb_10240diskmb", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
 			},
 		},
 		dailySessionCounts: []db.ExportDailySessionCountRow{
-			{LocalDate: "2026-04-01", CapacityTier: "2cpu_4096mb", Sessions: 1},
+			{LocalDate: "2026-04-01", CapacityTier: "2cpu_4096mb_10240diskmb", Sessions: 1},
 		},
 	}))
 	orgID := uuid.New()
@@ -940,7 +940,7 @@ func TestUsageHandler_GetTimeseries_WithCapacity(t *testing.T) {
 
 	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&capacity=2cpu_4096mb", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&capacity=2cpu_4096mb_10240diskmb", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 	handler.GetTimeseries(rr, req)
@@ -956,7 +956,7 @@ func TestUsageHandler_GetTimeseries_UserIDAndCapacityMutuallyExclusive(t *testin
 	handler := NewUsageHandler(db.NewContainerUsageStore(mock), WithRollupStore(&stubUsageRollupStore{}))
 	orgID := uuid.New()
 	userID := uuid.New()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id="+userID.String()+"&capacity=2cpu_4096mb", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/timeseries?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&user_id="+userID.String()+"&capacity=2cpu_4096mb_10240diskmb", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	rr := httptest.NewRecorder()
 	handler.GetTimeseries(rr, req)
