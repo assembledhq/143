@@ -101,6 +101,27 @@ func (m *mockIssueCreator) CreateIssue(_ context.Context, params integration.Cre
 }
 
 // --------------------------------------------------------------------------
+// Mock: PullRequestCreator
+// --------------------------------------------------------------------------
+
+type mockPullRequestCreator struct {
+	name string
+}
+
+func (m *mockPullRequestCreator) Name() string { return m.name }
+
+func (m *mockPullRequestCreator) CreatePullRequest(_ context.Context, params integration.CreatePullRequestParams) (*integration.CreatePullRequestResult, error) {
+	sessionID := params.SessionID
+	if sessionID == "" {
+		sessionID = "session-from-env"
+	}
+	return &integration.CreatePullRequestResult{
+		Status:    "queued",
+		SessionID: sessionID,
+	}, nil
+}
+
+// --------------------------------------------------------------------------
 // Mock: CITestInsights
 // --------------------------------------------------------------------------
 
@@ -154,6 +175,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterDocumentStore(&mockDocumentStore{name: "notion"})
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
 	reg.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
+	reg.RegisterPullRequestCreator(&mockPullRequestCreator{name: "session"})
 	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
 	reg.RegisterCITestInsights(&mockCITestInsights{name: "circleci"})
 	return reg
@@ -487,13 +509,13 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 project proposer + 3 ci test insights = 20
-	if len(tools) != 20 {
+	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 1 project proposer + 3 ci test insights = 21
+	if len(tools) != 21 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 20 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 21 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
@@ -504,6 +526,7 @@ func TestListToolsAllIntegrations(t *testing.T) {
 		"slack_search_messages":             false,
 		"slack_get_thread":                  false,
 		"issue_create":                      false,
+		"create_pr":                         false,
 		"project_propose":                   false,
 		"circleci_list_flaky_tests":         false,
 		"circleci_get_job_test_results":     false,
@@ -595,6 +618,76 @@ func TestCallToolIssueCreatorUnknownMethod(t *testing.T) {
 
 	if !result.IsError {
 		t.Fatal("expected error for unknown method")
+	}
+}
+
+func TestCallToolPullRequestCreatorCreate(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	args := `{"session_id":"session-123","draft":true,"author_mode":"app"}`
+	result := tr.CallTool(context.Background(), "create_pr", json.RawMessage(args))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp integration.CreatePullRequestResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if resp.Status != "queued" {
+		t.Errorf("expected queued status, got %s", resp.Status)
+	}
+	if resp.SessionID != "session-123" {
+		t.Errorf("expected session id session-123, got %s", resp.SessionID)
+	}
+}
+
+func TestCallToolPullRequestCreatorCreate_BadJSON(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "create_pr", json.RawMessage(`{bad`))
+
+	if !result.IsError {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestCallToolPullRequestCreatorCreate_DraftAsString(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+
+	for _, tc := range []struct {
+		raw   string
+		draft bool
+	}{
+		{`{"session_id":"s1","draft":"true"}`, true},
+		{`{"session_id":"s1","draft":"false"}`, false},
+	} {
+		result := tr.CallTool(context.Background(), "create_pr", json.RawMessage(tc.raw))
+		if result.IsError {
+			t.Fatalf("draft=%q: unexpected error: %s", tc.raw, result.Content[0].Text)
+		}
+		var resp integration.CreatePullRequestResult
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+			t.Fatalf("draft=%q: failed to parse result: %v", tc.raw, err)
+		}
+		if resp.Status != "queued" {
+			t.Errorf("draft=%q: expected queued, got %s", tc.raw, resp.Status)
+		}
+	}
+}
+
+func TestCallToolPullRequestCreatorCreate_InvalidDraft(t *testing.T) {
+	t.Parallel()
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "create_pr", json.RawMessage(`{"draft":"maybe"}`))
+
+	if !result.IsError {
+		t.Fatal("expected error for invalid draft value")
+	}
+	if !strings.Contains(result.Content[0].Text, "draft must be true or false") {
+		t.Errorf("unexpected error: %s", result.Content[0].Text)
 	}
 }
 

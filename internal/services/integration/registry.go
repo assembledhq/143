@@ -21,6 +21,7 @@ type Registry struct {
 	messageSources    map[string]MessageSource
 	codeReviewSources map[string]CodeReviewSource
 	issueCreators     map[string]IssueCreator
+	prCreators        map[string]PullRequestCreator
 	projectProposers  map[string]ProjectProposer
 	ciTestInsights    map[string]CITestInsights
 }
@@ -34,6 +35,7 @@ func NewRegistry() *Registry {
 		messageSources:    make(map[string]MessageSource),
 		codeReviewSources: make(map[string]CodeReviewSource),
 		issueCreators:     make(map[string]IssueCreator),
+		prCreators:        make(map[string]PullRequestCreator),
 		projectProposers:  make(map[string]ProjectProposer),
 		ciTestInsights:    make(map[string]CITestInsights),
 	}
@@ -213,6 +215,35 @@ func (r *Registry) IssueCreator(name string) (IssueCreator, error) {
 	return ic, nil
 }
 
+// RegisterPullRequestCreator adds a PR creator (e.g. internal 143 API).
+func (r *Registry) RegisterPullRequestCreator(provider PullRequestCreator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prCreators[provider.Name()] = provider
+}
+
+// PullRequestCreators returns all registered PR creators.
+func (r *Registry) PullRequestCreators() []PullRequestCreator {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]PullRequestCreator, 0, len(r.prCreators))
+	for _, pc := range r.prCreators {
+		result = append(result, pc)
+	}
+	return result
+}
+
+// PullRequestCreator returns a specific PR creator by name, or an error if not found.
+func (r *Registry) PullRequestCreator(name string) (PullRequestCreator, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	pc, ok := r.prCreators[name]
+	if !ok {
+		return nil, fmt.Errorf("pull request creator %q not registered", name)
+	}
+	return pc, nil
+}
+
 // RegisterProjectProposer adds a project proposer (e.g. internal 143 API).
 func (r *Registry) RegisterProjectProposer(provider ProjectProposer) {
 	r.mu.Lock()
@@ -281,6 +312,7 @@ func (r *Registry) HasAny() bool {
 		len(r.messageSources) > 0 ||
 		len(r.codeReviewSources) > 0 ||
 		len(r.issueCreators) > 0 ||
+		len(r.prCreators) > 0 ||
 		len(r.projectProposers) > 0 ||
 		len(r.ciTestInsights) > 0
 }
@@ -307,6 +339,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.issueCreators {
 		m["issue_creators"] = append(m["issue_creators"], name)
+	}
+	for name := range r.prCreators {
+		m["pull_request_creators"] = append(m["pull_request_creators"], name)
 	}
 	for name := range r.projectProposers {
 		m["project_proposers"] = append(m["project_proposers"], name)
