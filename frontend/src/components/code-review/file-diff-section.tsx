@@ -4,6 +4,7 @@ import { forwardRef, useMemo, useCallback, useState } from "react";
 import type { DiffFile, DiffLine } from "@/lib/diff-parser";
 import type { SessionReviewComment, FileLine } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
+import { Button } from "@/components/ui/button";
 import { useFileHighlighting } from "@/lib/syntax-highlighter";
 import { FileDiffHeader } from "./file-diff-header";
 import { DiffHunk } from "./diff-hunk";
@@ -51,6 +52,9 @@ interface ContextGapState {
   lines: DiffLine[];
 }
 
+const INITIAL_RENDERED_DIFF_LINES = 800;
+const RENDERED_DIFF_LINE_INCREMENT = 800;
+
 function getFirstVisibleOldLine(hunk: DiffFile["hunks"][number]): number | null {
   for (const line of hunk.lines) {
     if (line.oldLineNumber != null) return line.oldLineNumber;
@@ -90,6 +94,20 @@ function toDiffLines(lines: FileLine[], lineDelta: number): DiffLine[] {
   }));
 }
 
+function countRenderableLines(hunk: DiffFile["hunks"][number]): number {
+  return hunk.lines.length;
+}
+
+function sliceHunk(hunk: DiffFile["hunks"][number], lineLimit: number): DiffFile["hunks"][number] {
+  const lines = hunk.lines.slice(0, lineLimit);
+  return {
+    ...hunk,
+    lines,
+    oldCount: lines.filter((line) => line.type !== "add").length,
+    newCount: lines.filter((line) => line.type !== "remove").length,
+  };
+}
+
 export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
   function FileDiffSection({
     file,
@@ -110,36 +128,16 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     showInlineCommentComposer = true,
     onRequestEditComment,
   }, ref) {
-    // Collect all line contents across hunks for a single batch highlight call
-    const allLineContents = useMemo(() => {
-      const contents: string[] = [];
-      for (const hunk of file.hunks) {
-        for (const line of hunk.lines) {
-          contents.push(line.content);
-        }
-      }
-      return contents;
-    }, [file.hunks]);
-
-    const highlighted = useFileHighlighting(allLineContents, file.language, undefined, isActive);
-
-    // Build per-hunk Maps of line index → highlighted HTML
-    const hunkHighlightMaps = useMemo(() => {
-      if (!highlighted) return null;
-      const maps: Map<number, string>[] = [];
-      let offset = 0;
-      for (const hunk of file.hunks) {
-        const map = new Map<number, string>();
-        for (let i = 0; i < hunk.lines.length; i++) {
-          map.set(i, highlighted[offset + i]);
-        }
-        maps.push(map);
-        offset += hunk.lines.length;
-      }
-      return maps;
-    }, [highlighted, file.hunks]);
-
     const [gapStates, setGapStates] = useState<Map<string, ContextGapState>>(new Map());
+    const [visibleLineState, setVisibleLineState] = useState({
+      file,
+      count: INITIAL_RENDERED_DIFF_LINES,
+    });
+    let visibleLineLimit = visibleLineState.count;
+    if (visibleLineState.file !== file) {
+      visibleLineLimit = INITIAL_RENDERED_DIFF_LINES;
+      setVisibleLineState({ file, count: INITIAL_RENDERED_DIFF_LINES });
+    }
 
     const buildGapState = useCallback((kind: GapKind, key: string, hiddenStart: number, hiddenEnd: number, lineDelta: number) => {
       const existing = gapStates.get(key);
@@ -292,6 +290,75 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       }
       return items;
     }, [buildGapState, file.hunks, file.newPath, fileContextMeta]);
+    const totalRenderableLines = useMemo(
+      () => file.hunks.reduce((sum, hunk) => sum + countRenderableLines(hunk), 0),
+      [file.hunks],
+    );
+    const visibleSections = useMemo(() => {
+      if (totalRenderableLines <= visibleLineLimit) return sections;
+
+      const items: typeof sections = [];
+      let remaining = visibleLineLimit;
+
+      for (const section of sections) {
+        if (section.type === "gap") {
+          if (remaining > 0) items.push(section);
+          continue;
+        }
+
+        const lineCount = countRenderableLines(section.hunk);
+        if (lineCount <= remaining) {
+          items.push(section);
+          remaining -= lineCount;
+          continue;
+        }
+
+        if (remaining > 0) {
+          items.push({
+            ...section,
+            hunk: sliceHunk(section.hunk, remaining),
+          });
+        }
+        break;
+      }
+
+      return items;
+    }, [sections, totalRenderableLines, visibleLineLimit]);
+    const renderedLineCount = Math.min(totalRenderableLines, visibleLineLimit);
+    const hasMoreDiffLines = renderedLineCount < totalRenderableLines;
+    const visibleHunkSections = useMemo(
+      () => visibleSections.filter((section): section is Extract<(typeof visibleSections)[number], { type: "hunk" }> => section.type === "hunk"),
+      [visibleSections],
+    );
+
+    // Collect visible line contents across hunks for a single batch highlight call.
+    const allLineContents = useMemo(() => {
+      const contents: string[] = [];
+      for (const section of visibleHunkSections) {
+        for (const line of section.hunk.lines) {
+          contents.push(line.content);
+        }
+      }
+      return contents;
+    }, [visibleHunkSections]);
+
+    const highlighted = useFileHighlighting(allLineContents, file.language, undefined, isActive);
+
+    // Build per-visible-hunk Maps of line index -> highlighted HTML.
+    const hunkHighlightMaps = useMemo(() => {
+      if (!highlighted) return null;
+      const maps = new Map<number, Map<number, string>>();
+      let offset = 0;
+      for (const section of visibleHunkSections) {
+        const map = new Map<number, string>();
+        for (let i = 0; i < section.hunk.lines.length; i++) {
+          map.set(i, highlighted[offset + i]);
+        }
+        maps.set(section.index, map);
+        offset += section.hunk.lines.length;
+      }
+      return maps;
+    }, [highlighted, visibleHunkSections]);
 
     return (
       <div ref={ref} className="border border-border rounded-lg">
@@ -303,7 +370,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
         />
         <div className="overflow-x-auto [container-type:inline-size]">
         <div className="min-w-fit">
-        {sections.map((section) => {
+        {visibleSections.map((section) => {
           if (section.type === "gap") {
             return renderGap(section.gap);
           }
@@ -313,19 +380,38 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
               <SplitDiffHunk
                 key={section.index}
                 hunk={section.hunk}
-                highlightedLines={hunkHighlightMaps?.[section.index]}
+                highlightedLines={hunkHighlightMaps?.get(section.index)}
                 {...commonHunkProps}
               />
             ) : (
               <DiffHunk
                 key={section.index}
                 hunk={section.hunk}
-                highlightedLines={hunkHighlightMaps?.[section.index]}
+                highlightedLines={hunkHighlightMaps?.get(section.index)}
                 {...commonHunkProps}
               />
             );
           return <div key={section.index}>{hunkEl}</div>;
         })}
+        {hasMoreDiffLines ? (
+          <div className="sticky bottom-0 border-t border-border bg-background/95 px-3 py-3 text-center backdrop-blur">
+            <p className="mb-2 text-xs text-muted-foreground">
+              Showing first {renderedLineCount} of {totalRenderableLines} diff lines in this file
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={() => setVisibleLineState((state) => ({
+                file,
+                count: state.count + RENDERED_DIFF_LINE_INCREMENT,
+              }))}
+            >
+              Show more diff lines
+            </Button>
+          </div>
+        ) : null}
         </div>
         </div>
       </div>
