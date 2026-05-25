@@ -13,6 +13,7 @@ import { PREVIEW_ERROR_CODES, type PreviewStatusResponse } from "@/lib/preview-t
 /* ------------------------------------------------------------------ */
 
 const mockGet = vi.hoisted(() => vi.fn());
+const mockEnsure = vi.hoisted(() => vi.fn());
 const mockStart = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockRestart = vi.hoisted(() => vi.fn());
@@ -26,6 +27,7 @@ vi.mock("@/lib/api", () => ({
     sessions: {
       preview: {
         get: mockGet,
+        ensure: mockEnsure,
         start: mockStart,
         stop: mockStop,
         restart: mockRestart,
@@ -136,6 +138,7 @@ describe("PreviewPanel component", () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockEnsure.mockResolvedValue({});
     mockStart.mockResolvedValue({});
     mockStop.mockResolvedValue({});
     mockRestart.mockResolvedValue({});
@@ -231,7 +234,10 @@ describe("PreviewPanel component", () => {
     mockGet
       .mockResolvedValueOnce(makePreviewStatus({ status: "stopped" }))
       .mockResolvedValueOnce(makePreviewStatus({ status: "starting" }));
-    mockStart.mockResolvedValueOnce(makePreviewStatus({ status: "starting" }).instance);
+    mockEnsure.mockResolvedValueOnce({
+      action: "started",
+      instance: makePreviewStatus({ status: "starting" }).instance,
+    });
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -244,7 +250,7 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
-    expect(mockStart).toHaveBeenCalledTimes(1);
+    expect(mockEnsure).toHaveBeenCalledTimes(1);
     expect(mockGet).toHaveBeenCalledTimes(2);
   });
 
@@ -282,7 +288,7 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("Starting")).toBeInTheDocument();
     expect(screen.getByText("Opening")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restart preview" })).not.toBeInTheDocument();
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
   });
 
@@ -379,7 +385,7 @@ describe("PreviewPanel component", () => {
     });
 
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restart preview" })).not.toBeInTheDocument();
   });
 
   /* ---------- Ready phase ---------- */
@@ -588,8 +594,8 @@ describe("PreviewPanel component", () => {
       screen.getByText("Container crashed unexpectedly"),
     ).toBeInTheDocument();
 
-    // Try Again button
-    expect(screen.getByText("Try Again")).toBeInTheDocument();
+    // Retry Preview button
+    expect(screen.getByText("Retry Preview")).toBeInTheDocument();
   });
 
   it("lets users expand full startup logs for a failed preview", async () => {
@@ -818,14 +824,14 @@ describe("PreviewPanel component", () => {
     await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
-      expect(mockStart).toHaveBeenCalledWith("sess-1");
+      expect(mockEnsure).toHaveBeenCalledWith("sess-1");
     });
   });
 
   it("shows only the loading spinner while starting a preview from idle state", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
-    mockStart.mockReturnValue(
+    mockEnsure.mockReturnValue(
       new Promise<void>(() => {
         // Keep the mutation pending so the loading state remains visible.
       }),
@@ -985,7 +991,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Restart mutation ---------- */
 
-  it("calls restart mutation from the preview actions menu", async () => {
+  it("calls ensure mutation from the preview actions menu", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
 
@@ -999,25 +1005,41 @@ describe("PreviewPanel component", () => {
     await user.click(screen.getByRole("menuitem", { name: "Restart preview" }));
 
     await waitFor(() => {
-      expect(mockRestart).toHaveBeenCalledWith("sess-1");
+      expect(mockEnsure).toHaveBeenCalledWith("sess-1");
     });
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
-  it("calls restart mutation from the starting preview canvas", async () => {
-    const user = userEvent.setup();
+  it("does not render restart controls while preview is starting", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Restart preview" })).toBeInTheDocument();
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Restart preview" }));
+    expect(screen.queryByRole("button", { name: "Restart preview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Preview actions" })).not.toBeInTheDocument();
+  });
+
+  it("treats unhealthy preview as degraded and restarts through ensure", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "unhealthy" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(mockRestart).toHaveBeenCalledWith("sess-1");
+      expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
     });
+
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Restart preview" }));
+
+    await waitFor(() => {
+      expect(mockEnsure).toHaveBeenCalledWith("sess-1");
+    });
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
   /* ---------- Mutation error banner ---------- */
@@ -1025,7 +1047,7 @@ describe("PreviewPanel component", () => {
   it("shows mutation error banner when start fails", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
-    mockStart.mockRejectedValueOnce(new Error("connection refused"));
+    mockEnsure.mockRejectedValueOnce(new Error("connection refused"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1045,7 +1067,7 @@ describe("PreviewPanel component", () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
     const err = new Error("snapshot unavailable");
     (err as Error & { code?: string }).code = "SNAPSHOT_UNAVAILABLE";
-    mockStart.mockRejectedValueOnce(err);
+    mockEnsure.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1071,7 +1093,7 @@ describe("PreviewPanel component", () => {
       "another process attached to this session's sandbox first; please retry"
     );
     (err as Error & { code?: string }).code = PREVIEW_ERROR_CODES.SANDBOX_BUSY;
-    mockStart.mockRejectedValueOnce(err);
+    mockEnsure.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1109,7 +1131,7 @@ describe("PreviewPanel component", () => {
     // which buries the transient/retryable nature of the failure.
     const err = new Error("preview worker request failed");
     (err as Error & { code?: string }).code = PREVIEW_ERROR_CODES.WORKER_REQUEST_FAILED;
-    mockStart.mockRejectedValueOnce(err);
+    mockEnsure.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1138,7 +1160,7 @@ describe("PreviewPanel component", () => {
       "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run.";
     const err = new Error(backendMessage);
     (err as Error & { code?: string }).code = "PREVIEW_NO_CONFIG";
-    mockStart.mockRejectedValueOnce(err);
+    mockEnsure.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1166,7 +1188,7 @@ describe("PreviewPanel component", () => {
       "Invalid .143/config.json preview config: parse preview config: invalid character 'n' looking for beginning of object key string. Fix the committed config and start preview again.";
     const err = new Error(backendMessage);
     (err as Error & { code?: string }).code = "PREVIEW_CONFIG_INVALID";
-    mockStart.mockRejectedValueOnce(err);
+    mockEnsure.mockRejectedValueOnce(err);
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1209,7 +1231,7 @@ describe("PreviewPanel component", () => {
       mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
       const err = new Error(backendMessage);
       (err as Error & { code?: string }).code = code;
-      mockStart.mockRejectedValueOnce(err);
+      mockEnsure.mockRejectedValueOnce(err);
 
       renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1231,7 +1253,7 @@ describe("PreviewPanel component", () => {
   it("dismisses mutation error banner when X is clicked", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
-    mockStart.mockRejectedValueOnce(new Error("connection refused"));
+    mockEnsure.mockRejectedValueOnce(new Error("connection refused"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1278,7 +1300,7 @@ describe("PreviewPanel component", () => {
   it("shows mutation error banner when restart fails", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
-    mockRestart.mockRejectedValueOnce(new Error("server error"));
+    mockEnsure.mockRejectedValueOnce(new Error("server error"));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -1292,6 +1314,7 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByText("Failed to restart preview: server error")).toBeInTheDocument();
     });
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
   /* ---------- Design mode toggle ---------- */
@@ -1346,7 +1369,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Try Again button in failed state ---------- */
 
-  it("calls start mutation when Try Again is clicked in failed state", async () => {
+  it("calls ensure mutation when Retry Preview is clicked in failed state", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus({
@@ -1358,14 +1381,15 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Try Again")).toBeInTheDocument();
+      expect(screen.getByText("Retry Preview")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Try Again"));
+    await user.click(screen.getByText("Retry Preview"));
 
     await waitFor(() => {
-      expect(mockStart).toHaveBeenCalledWith("sess-1");
+      expect(mockEnsure).toHaveBeenCalledWith("sess-1");
     });
+    expect(mockStart).not.toHaveBeenCalled();
     expect(mockRestart).not.toHaveBeenCalled();
   });
 

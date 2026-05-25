@@ -596,6 +596,47 @@ func (s *PreviewStore) UpdatePreviewReservationConfig(
 	return tag.RowsAffected() > 0, nil
 }
 
+// UpdatePreviewRecycleConfig overwrites config-derived fields for an existing
+// active preview before an in-place recycle. Unlike reservation updates, this
+// is allowed outside the initial starting reservation because a user restart
+// should pick up the current workspace preview config.
+func (s *PreviewStore) UpdatePreviewRecycleConfig(
+	ctx context.Context,
+	orgID, id uuid.UUID,
+	name, primaryService, configDigest string,
+	memoryLimitMB, cpuLimitMillis int,
+	recycleConfig []byte,
+) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances
+		SET name = @name,
+		    primary_service = @primary,
+		    config_digest = @digest,
+		    memory_limit_mb = @memory_limit_mb,
+		    cpu_limit_millis = @cpu_limit_millis,
+		    recycle_config = @recycle_config,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`,
+		pgx.NamedArgs{
+			"id":               id,
+			"org_id":           orgID,
+			"name":             name,
+			"primary":          primaryService,
+			"digest":           configDigest,
+			"memory_limit_mb":  memoryLimitMB,
+			"cpu_limit_millis": cpuLimitMillis,
+			"recycle_config":   recycleConfig,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview recycle config: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found or no longer active")
+	}
+	return nil
+}
+
 // UpdatePreviewHandle updates the provider handle and primary port. A new
 // handle implies the preview process restarted successfully, so recycled_at is
 // refreshed to anchor the next recycle window.
