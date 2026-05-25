@@ -62,10 +62,9 @@ func (m *mockAgentAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		return m.executeFn(ctx, sandbox, prompt, logCh)
 	}
 	return &agent.AgentResult{
-		Diff:            "--- a/file.go\n+++ b/file.go",
-		Summary:         "Fixed the bug",
-		ConfidenceScore: 0.9,
-		ExitCode:        0,
+		Diff:     "--- a/file.go\n+++ b/file.go",
+		Summary:  "Fixed the bug",
+		ExitCode: 0,
 	}, nil
 }
 
@@ -89,9 +88,8 @@ func (c *capturingAdapter) PreparePrompt(ctx context.Context, input *agent.Agent
 
 func (c *capturingAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return &agent.AgentResult{
-		Summary:         "ok",
-		ConfidenceScore: 0.9,
-		ExitCode:        0,
+		Summary:  "ok",
+		ExitCode: 0,
 	}, nil
 }
 
@@ -1502,11 +1500,9 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "info", Message: "starting analysis"}
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "tool_use", Message: "reading file"}
 		return &agent.AgentResult{
-			Diff:                "--- a/main.go\n+++ b/main.go",
-			Summary:             "Fixed null pointer",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "Simple fix",
-			ExitCode:            0,
+			Diff:     "--- a/main.go\n+++ b/main.go",
+			Summary:  "Fixed null pointer",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -1519,12 +1515,10 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.Contains(t, statuses, "running")
 	require.Contains(t, d.issues.getStatusUpdates(), "in_progress", "RunAgent should mark the primary issue in progress when execution starts")
 
-	// Result should be "completed" with high confidence.
+	// Result should be "completed".
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, models.SessionStatusCompleted, results[0].status)
-	require.NotNil(t, results[0].result.ConfidenceScore)
-	require.InDelta(t, 0.9, *results[0].result.ConfidenceScore, 0.01)
 
 	// open_pr job should be enqueued.
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
@@ -1585,10 +1579,9 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 			return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
 		}
 		return &agent.AgentResult{
-			Diff:            "--- a/main.go\n+++ b/main.go",
-			Summary:         "completed with fallback",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Diff:     "--- a/main.go\n+++ b/main.go",
+			Summary:  "completed with fallback",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -1691,7 +1684,7 @@ func TestRunAgent_MaterializesUploadedAttachments(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Contains(t, prompt.UserPrompt, "/home/sandbox/.143/attachments/turn-1/attachment-1-screenshot.png", "RunAgent should include sandbox-local attachment paths in the prompt")
-		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
@@ -1842,9 +1835,8 @@ func TestRunAgent_InteractiveSuccessLogIncludesPlatformHealthFields(t *testing.T
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:         "Initial manual turn complete",
-			ConfidenceScore: 0.92,
-			ExitCode:        0,
+			Summary:  "Initial manual turn complete",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2007,10 +1999,8 @@ func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {
 		require.True(t, prompt.Continuation, "recovery should resume in continuation mode")
 		require.Equal(t, "agent-session-1", prompt.ResumeSessionID, "recovery should pass through the committed agent session id")
 		return &agent.AgentResult{
-			Summary:             "Recovered and continued the turn",
-			ConfidenceScore:     0.88,
-			ConfidenceReasoning: "checkpoint restore succeeded",
-			ExitCode:            0,
+			Summary:  "Recovered and continued the turn",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -2039,10 +2029,8 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:             "Restarted cleanly",
-			ConfidenceScore:     0.91,
-			ConfidenceReasoning: "fresh restart",
-			ExitCode:            0,
+			Summary:  "Restarted cleanly",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2104,10 +2092,8 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	d.sessions.countRunning = 1
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:             "Recovered by restarting cleanly",
-			ConfidenceScore:     0.91,
-			ConfidenceReasoning: "fresh restart after pre-checkpoint worker loss",
-			ExitCode:            0,
+			Summary:  "Recovered by restarting cleanly",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2194,10 +2180,8 @@ func TestRunAgent_PreviewHoldsContainerSkipsDestroy(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:             "ok",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2226,10 +2210,8 @@ func TestRunAgent_ReleaseHoldErrorFallsBackToDestroy(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:             "ok",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2440,10 +2422,8 @@ func TestRunAgent_FinalizeDestroyErrorSkipsDestroy(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:             "ok",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2470,10 +2450,8 @@ func TestRunAgent_FinalizeDestroyReturnsFalseSkipsDestroy(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:             "ok",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2688,9 +2666,8 @@ func TestRunAgent_PreviewHeldContainerKeepsSandboxAuthSocketOpen(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:         "ok",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2752,9 +2729,8 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	}`)
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:         "continued",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "continued",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -2928,7 +2904,7 @@ func TestContinueSession_PRRepairStaleHeadDoesNotInvokeAgent(t *testing.T) {
 	agentInvoked := false
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		agentInvoked = true
-		return &agent.AgentResult{Summary: "should not run", ConfidenceScore: 0.1, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
@@ -2990,7 +2966,7 @@ func TestContinueSession_MaterializesUploadedAttachmentInResumeMessage(t *testin
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.True(t, prompt.Continuation, "ContinueSession should use resume mode when an agent session id exists")
 		require.Contains(t, prompt.UserMessage, "/home/sandbox/.143/attachments/turn-2/attachment-1-error.png", "ContinueSession should include sandbox-local attachment paths in the resume message")
-		return &agent.AgentResult{Summary: "continued", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "continued", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
@@ -3047,7 +3023,7 @@ func TestContinueSession_AllowsAttachmentOnlyFollowUp(t *testing.T) {
 		require.True(t, prompt.Continuation, "ContinueSession should use resume mode when an agent session id exists")
 		require.Contains(t, prompt.UserMessage, "## Attached files", "attachment-only follow-up should still include an attachment section")
 		require.Contains(t, prompt.UserMessage, "/home/sandbox/.143/attachments/turn-2/attachment-1-follow-up.png", "attachment-only follow-up should include sandbox-local attachment paths")
-		return &agent.AgentResult{Summary: "continued", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "continued", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
@@ -3102,7 +3078,7 @@ func TestContinueSession_MaterializesAttachmentsFromMultiplePendingMessages(t *t
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Contains(t, prompt.UserMessage, "attachment-1-first.png", "ContinueSession should include the first pending message attachment")
 		require.Contains(t, prompt.UserMessage, "attachment-2-second.png", "ContinueSession should include the second pending message attachment")
-		return &agent.AgentResult{Summary: "continued", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "continued", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
@@ -3175,9 +3151,8 @@ func TestContinueSession_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 			return &agent.AgentResult{ExitCode: 1, Error: "rate limit exceeded retry-after=60"}, errors.New("rate limit exceeded")
 		}
 		return &agent.AgentResult{
-			Summary:         "continued with fallback",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "continued with fallback",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -3295,9 +3270,8 @@ func TestContinueSession_FreshResumeLegacyGitHubAuthStillBootstrapsBranchGuard(t
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Summary:         "continued",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "continued",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -3658,7 +3632,7 @@ func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
 	require.GreaterOrEqual(t, durationMS, float64(0), "failure duration should be non-negative")
 }
 
-func TestRunAgent_LowConfidence(t *testing.T) {
+func TestRunAgent_SuccessEnqueuesOpenPR(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3668,10 +3642,9 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Diff:            "--- a/fix.go\n+++ b/fix.go",
-			Summary:         "Attempted fix but unsure",
-			ConfidenceScore: 0.3,
-			ExitCode:        0,
+			Diff:     "--- a/fix.go\n+++ b/fix.go",
+			Summary:  "Fix applied",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -3679,44 +3652,10 @@ func TestRunAgent_LowConfidence(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	// Result should be "needs_human_guidance".
-	results := d.sessions.getResultUpdates()
-	require.Len(t, results, 1)
-	require.Equal(t, models.SessionStatusNeedsHumanGuidance, results[0].status)
-
-	// No open_pr job should be enqueued.
-	for _, jt := range d.jobs.getEnqueued() {
-		require.NotEqual(t, "open_pr", jt)
-	}
-}
-
-func TestRunAgent_MediumConfidence(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-
-	d := defaultDeps()
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{
-			Diff:            "--- a/fix.go\n+++ b/fix.go",
-			Summary:         "Fix applied",
-			ConfidenceScore: 0.65,
-			ExitCode:        0,
-		}, nil
-	}
-
-	orch := buildOrchestrator(d)
-	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err)
-
-	// Medium confidence (0.65 >= default aggressive auto_proceed 0.4) proceeds as completed.
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1)
 	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
-	// open_pr job should be enqueued.
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
@@ -4248,14 +4187,11 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Equal(t, "Please continue the work.", prompt.UserMessage, "ContinueSession should use the latest user message")
 		return &agent.AgentResult{
-			Summary:             "done",
-			Diff:                "--- a/main.go\n+++ b/main.go\n",
-			ConfidenceScore:     0.8,
-			ConfidenceReasoning: "looks good",
-			RiskFactors:         []string{"low"},
-			TokenUsage:          agent.TokenUsage{InputTokens: 1, OutputTokens: 2, TotalCostUSD: 0.01},
-			AgentSessionID:      "",
-			ExitCode:            0,
+			Summary:        "done",
+			Diff:           "--- a/main.go\n+++ b/main.go\n",
+			TokenUsage:     agent.TokenUsage{InputTokens: 1, OutputTokens: 2, TotalCostUSD: 0.01},
+			AgentSessionID: "",
+			ExitCode:       0,
 		}, nil
 	}
 
@@ -4337,7 +4273,7 @@ func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedS
 	var promptSeen *agent.AgentPrompt
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		promptSeen = prompt
-		return &agent.AgentResult{Summary: "fixed", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "continued", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
@@ -4422,10 +4358,9 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 			}, nil
 		}
 		return &agent.AgentResult{
-			Summary:         "fixed",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
-			AgentSessionID:  "fresh-claude-session",
+			Summary:        "fixed",
+			ExitCode:       0,
+			AgentSessionID: "fresh-claude-session",
 		}, nil
 	}
 
@@ -4508,10 +4443,9 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 			}, nil
 		}
 		return &agent.AgentResult{
-			Summary:         "fixed",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
-			AgentSessionID:  "fresh-claude-session",
+			Summary:        "fixed",
+			ExitCode:       0,
+			AgentSessionID: "fresh-claude-session",
 		}, nil
 	}
 
@@ -4551,11 +4485,10 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 		executeFn: func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 			promptSeen = prompt
 			return &agent.AgentResult{
-				Diff:            "--- a/file.go\n+++ b/file.go",
-				Summary:         "Thread result",
-				ConfidenceScore: 0.9,
-				AgentSessionID:  "thread-gemini-session",
-				ExitCode:        0,
+				Diff:           "--- a/file.go\n+++ b/file.go",
+				Summary:        "Thread result",
+				AgentSessionID: "thread-gemini-session",
+				ExitCode:       0,
 			}, nil
 		},
 	}
@@ -4658,10 +4591,8 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 			"ContinueSession should repair slash commands before executing a reused session",
 		)
 		return &agent.AgentResult{
-			Summary:             "done",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
+			Summary:  "done",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -5112,34 +5043,6 @@ func TestRunAgent_UnknownAgentType(t *testing.T) {
 		}
 	}
 	require.True(t, foundFailed)
-}
-
-func TestRunAgent_ExactConfidenceThreshold(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-
-	d := defaultDeps()
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{
-			Diff:            "--- a/fix.go\n+++ b/fix.go",
-			Summary:         "Fix at exact threshold",
-			ConfidenceScore: 0.4, // Exactly at the default aggressive auto_proceed threshold.
-			ExitCode:        0,
-		}, nil
-	}
-
-	orch := buildOrchestrator(d)
-	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err)
-
-	// Score == 0.4 should proceed (>= aggressive auto_proceed threshold).
-	results := d.sessions.getResultUpdates()
-	require.Len(t, results, 1)
-	require.Equal(t, models.SessionStatusCompleted, results[0].status)
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
 }
 
 func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
@@ -5671,11 +5574,9 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Diff:                "--- a/main.go\n+++ b/main.go",
-			Summary:             "Initial manual turn complete",
-			ConfidenceScore:     0.92,
-			ConfidenceReasoning: "straightforward fix",
-			ExitCode:            0,
+			Diff:     "--- a/main.go\n+++ b/main.go",
+			Summary:  "Initial manual turn complete",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -5746,11 +5647,9 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 		require.Equal(t, models.ReasoningEffortHigh, prompt.ReasoningEffort, "continue_session should preserve the stored reasoning effort on snapshot-backed turns")
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "output", Message: "Added the regression test"}
 		return &agent.AgentResult{
-			Diff:                "--- a/main_test.go\n+++ b/main_test.go",
-			Summary:             "Added the regression test",
-			ConfidenceScore:     0.81,
-			ConfidenceReasoning: "small follow-up",
-			ExitCode:            0,
+			Diff:     "--- a/main_test.go\n+++ b/main_test.go",
+			Summary:  "Added the regression test",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -5919,9 +5818,8 @@ func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T)
 		require.Equal(t, "please fix the tests", prompt.UserMessage,
 			"continue_session for Codex 2 must run with Codex 2's user message, not the higher-turn Main message that sorts last in the (turn_number, id) ordering")
 		return &agent.AgentResult{
-			Summary:         "Codex 2 reply",
-			ConfidenceScore: 0.7,
-			ExitCode:        0,
+			Summary:  "Codex 2 reply",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -5982,9 +5880,8 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 		require.Contains(t, prompt.UserPrompt, "Please keep going without the old snapshot.", "fresh resume should include the latest user message in the rebuilt prompt")
 		require.Equal(t, models.ReasoningEffortMedium, prompt.ReasoningEffort, "fresh resume should preserve the stored reasoning effort when rebuilding the prompt")
 		return &agent.AgentResult{
-			Summary:         "continued from fallback auth",
-			ConfidenceScore: 0.8,
-			ExitCode:        0,
+			Summary:  "continued from fallback auth",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -6008,9 +5905,8 @@ func TestRunAgent_OmitsReasoningEffortWhenUnset(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Equal(t, models.ReasoningEffort(""), prompt.ReasoningEffort, "RunAgent should leave reasoning effort empty when no override is configured")
 		return &agent.AgentResult{
-			Summary:         "ok",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -6052,9 +5948,8 @@ func TestContinueSession_OmitsReasoningEffortWhenUnset(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Equal(t, models.ReasoningEffort(""), prompt.ReasoningEffort, "ContinueSession should leave reasoning effort empty when the stored session has no override")
 		return &agent.AgentResult{
-			Summary:         "continued",
-			ConfidenceScore: 0.81,
-			ExitCode:        0,
+			Summary:  "continued",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -6112,9 +6007,8 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.True(t, prompt.Continuation, "snapshot-backed resume should still use continuation mode")
 		return &agent.AgentResult{
-			Summary:         "continued after deleting stale creds",
-			ConfidenceScore: 0.84,
-			ExitCode:        0,
+			Summary:  "continued after deleting stale creds",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -6167,9 +6061,8 @@ func TestContinueSession_ClaudeSnapshotRestoresTopLevelConfigFromBackup(t *testi
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.True(t, prompt.Continuation, "snapshot-backed Claude resume should use continuation mode when an agent session id exists")
 		return &agent.AgentResult{
-			Summary:         "continued",
-			ConfidenceScore: 0.82,
-			ExitCode:        0,
+			Summary:  "continued",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -6342,10 +6235,8 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Equal(t, existing, sandbox.ID, "adapter must run against the reused container")
 		return &agent.AgentResult{
-			Summary:             "done",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
+			Summary:  "done",
+			ExitCode: 0,
 		}, nil
 	}
 	// Preview still holds the container after this turn ends.
@@ -6418,9 +6309,8 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 		observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
 		observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
 		return &agent.AgentResult{
-			Summary:         "done",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "done",
+			ExitCode: 0,
 		}, nil
 	}
 	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
@@ -6492,9 +6382,8 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Equal(t, existing, sandbox.ID, "adapter must run against the reused container")
 		return &agent.AgentResult{
-			Summary:         "done",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "done",
+			ExitCode: 0,
 		}, nil
 	}
 	d.sessions.releaseHoldFn = func() (bool, string, error) {
@@ -7637,9 +7526,8 @@ func TestRunAgent_InjectsSandboxProviderIntoContext(t *testing.T) {
 		p := agent.SandboxProviderFromContext(ctx)
 		require.NotNil(t, p, "RunAgent must inject the SandboxProvider into the adapter's context")
 		return &agent.AgentResult{
-			Summary:         "ok",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "ok",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -7685,9 +7573,8 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 		p := agent.SandboxProviderFromContext(ctx)
 		require.NotNil(t, p, "ContinueSession must inject the SandboxProvider into the adapter's context")
 		return &agent.AgentResult{
-			Summary:         "continued",
-			ConfidenceScore: 0.85,
-			ExitCode:        0,
+			Summary:  "continued",
+			ExitCode: 0,
 		}, nil
 	}
 	d.snapshots.data = map[string][]byte{
@@ -7769,15 +7656,13 @@ func TestRunAgent_CodexTokenExpiredRetryKeepsTriggeredUserScope(t *testing.T) {
 		executeCalls++
 		if executeCalls == 1 {
 			return &agent.AgentResult{
-				Error:           "codex CLI exited with code 1: auth error code: token_expired",
-				ExitCode:        1,
-				ConfidenceScore: 0.1,
+				Error:    "codex CLI exited with code 1: auth error code: token_expired",
+				ExitCode: 1,
 			}, nil
 		}
 		return &agent.AgentResult{
-			Summary:         "retry succeeded",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Summary:  "retry succeeded",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -7849,10 +7734,9 @@ func TestRunAgent_CodexSubscriptionUsageLimitRetriesWithFallbackCredential(t *te
 			}, errors.New("usage limit")
 		}
 		return &agent.AgentResult{
-			Diff:            "--- a/main.go\n+++ b/main.go",
-			Summary:         "codex fallback succeeded",
-			ConfidenceScore: 0.9,
-			ExitCode:        0,
+			Diff:     "--- a/main.go\n+++ b/main.go",
+			Summary:  "codex fallback succeeded",
+			ExitCode: 0,
 		}, nil
 	}
 
@@ -8305,10 +8189,9 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		<-ctx.Done()
 		return &agent.AgentResult{
-			Summary:         "Interrupted cleanly",
-			ConfidenceScore: 0.4,
-			AgentSessionID:  "agent-checkpoint-1",
-			ExitCode:        1,
+			Summary:        "Interrupted cleanly",
+			AgentSessionID: "agent-checkpoint-1",
+			ExitCode:       1,
 		}, ctx.Err()
 	}
 
@@ -8386,10 +8269,9 @@ func TestRunAgent_PolicyStopPersistsTerminalStateBeforeMentionWarmup(t *testing.
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		<-ctx.Done()
 		return &agent.AgentResult{
-			Summary:         "Interrupted cleanly",
-			ConfidenceScore: 0.4,
-			AgentSessionID:  "agent-checkpoint-before-warm",
-			ExitCode:        1,
+			Summary:        "Interrupted cleanly",
+			AgentSessionID: "agent-checkpoint-before-warm",
+			ExitCode:       1,
 		}, ctx.Err()
 	}
 
@@ -8415,11 +8297,10 @@ func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {
 	d.snapshots = nil
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
-			Diff:            "--- a/main.go\n+++ b/main.go",
-			Summary:         "Fixed null pointer",
-			ConfidenceScore: 0.9,
-			AgentSessionID:  "agent-no-snapshot-store",
-			ExitCode:        0,
+			Diff:           "--- a/main.go\n+++ b/main.go",
+			Summary:        "Fixed null pointer",
+			AgentSessionID: "agent-no-snapshot-store",
+			ExitCode:       0,
 		}, nil
 	}
 
@@ -8478,7 +8359,7 @@ func TestRunAgent_PublishesBootstrapCheckpointAfterSetupSnapshot(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		recordEvent("execute")
-		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
@@ -8509,7 +8390,7 @@ func TestRunAgent_DoesNotPublishBootstrapCheckpointWhenSnapshotPersistenceFails(
 		return nil, errors.New("snapshot failed")
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{Summary: "done", ConfidenceScore: 0.9, ExitCode: 0}, nil
+		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
 	}
 
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
@@ -9117,7 +8998,7 @@ func TestRunAgent_PiMissingCredentialFailsFast(t *testing.T) {
 //
 // We test this behaviorally rather than by counting OrgStore.GetByID calls:
 // the orchestrator hits GetByID from several unrelated paths (context limits,
-// confidence thresholds, session-timeout resolution, …), so a strict
+// session-timeout resolution, etc.), so a strict
 // before/after diff would couple the test to internal call patterns and
 // break any time someone added another GetByID site for an unrelated reason.
 //

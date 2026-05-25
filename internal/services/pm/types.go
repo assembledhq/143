@@ -111,7 +111,6 @@ type OutcomeSummary struct {
 	RunID              uuid.UUID  `json:"run_id"`
 	IssueID            *uuid.UUID `json:"issue_id,omitempty"`
 	Status             string     `json:"status"`
-	ConfidenceScore    *float64   `json:"confidence_score,omitempty"`
 	FailureCategory    *string    `json:"failure_category,omitempty"`
 	FailureExplanation *string    `json:"failure_explanation,omitempty"`
 	CompletedAt        *time.Time `json:"completed_at,omitempty"`

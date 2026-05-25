@@ -141,7 +141,6 @@ func TestServiceGatherContext(t *testing.T) {
 	decisionID := uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
 	desc := "timeout while syncing subscription state"
-	confidence := 0.91
 	failureCategory := "timeout"
 	failureReason := "network flake"
 
@@ -230,7 +229,6 @@ func TestServiceGatherContext(t *testing.T) {
 					ID:                 recentRunID,
 					PrimaryIssueID:     &issueID,
 					Status:             "completed",
-					ConfidenceScore:    &confidence,
 					FailureCategory:    &failureCategory,
 					FailureExplanation: &failureReason,
 					CompletedAt:        &now,

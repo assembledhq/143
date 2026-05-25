@@ -184,21 +184,6 @@ func TestParseCodexOutput_PlainText(t *testing.T) {
 	}
 }
 
-func TestParseCodexOutput_WithConfidence(t *testing.T) {
-	t.Parallel()
-
-	output := []byte(`{"response": "Fixed it.\n\n` + "```json\\n{\\\"confidence_score\\\": 0.85, \\\"confidence_reasoning\\\": \\\"Simple nil check\\\", \\\"risk_factors\\\": [\\\"none\\\"]}\\n```" + `"}`)
-	result := &agent.AgentResult{}
-	logCh := make(chan agent.LogEntry, 100)
-
-	parseCodexOutput(output, result, logCh)
-	close(logCh)
-
-	if result.ConfidenceScore != 0.85 {
-		t.Errorf("expected confidence 0.85, got %f", result.ConfidenceScore)
-	}
-}
-
 func TestParseCodexOutput_Empty(t *testing.T) {
 	t.Parallel()
 
@@ -365,15 +350,6 @@ func TestParseCodexStreamOutput(t *testing.T) {
 					}
 				}
 				require.True(t, hasThinking, "should have thinking debug log")
-			},
-		},
-		{
-			name:   "confidence extraction from stream",
-			output: `{"type":"message","content":"Done.\n{\"confidence_score\": 0.92, \"confidence_reasoning\": \"Straightforward fix\", \"risk_factors\": [\"none\"]}"}`,
-			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
-				t.Helper()
-				require.InDelta(t, 0.92, result.ConfidenceScore, 0.001)
-				require.Equal(t, "Straightforward fix", result.ConfidenceReasoning)
 			},
 		},
 		{

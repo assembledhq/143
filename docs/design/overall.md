@@ -83,7 +83,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
     - Session and project sidebars should feel native on phones: a left swipe reveals an archive action beneath the row, with an iOS-style icon-led affordance, progressive fill/ready-state feedback as the user approaches the auto-archive threshold, tap-to-close behavior when the row is already open, fully opaque resting rows, and a fully collapsed hidden action tray until a deliberate swipe begins so edge-bounce scrolling never flashes the archive affordance. Use a centered single-surface archive tray instead of layered sub-panels.
 - Step 3: Execute a coding agent
-    - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
+    - Auto-attempt decisions are based on explicit policy gates such as priority, complexity, aggressiveness, repository configuration, and available worker capacity.
     - Recurring team automations should start from a **structured template library** rather than bare one-line prompts. The default templates are frontend-defined issue-style prompts with explicit sections for task framing, output requirements, and verification, plus a deeper `/automations/templates` browse page for less common workflows.
     - Automations carry a typed visual identity (`icon_type` + `icon_value`) so list/detail surfaces can show a distinct emoji today while preserving the API shape for future image-backed icons.
     - Automation-triggered coding runs should use a prompt shape that stays **close to regular goal-driven sessions** so behavior is predictable across surfaces. The automation's goal should flow through as the raw task text, repository conventions and integration-tool instructions should match what a comparable session sees, and the system should avoid wrapping that goal in extra PM-analysis framing that changes agent behavior unexpectedly.
@@ -150,7 +150,6 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Coding-agent auth stacks persist temporary rate-limit health in `coding_credentials` and derive `rate_limited` UI/API status without changing the stored credential status. Runtime credential selection skips future-limited auths across workers, preserves the personal-before-org fallback order for Codex, Claude Code, Gemini, Amp, Pi, and future coding agents, and makes continued sessions resolve fresh auth before each turn; see [implemented/78-coding-agent-rate-limit-fallback.md](implemented/78-coding-agent-rate-limit-fallback.md).
     - Token-usage persistence must preserve the difference between **direct provider-reported cost** and **derived estimates**. Claude can report session USD directly, Codex subscription usage is naturally denominated in credits, and some agents expose only tokens. The shared agent token-usage contract therefore stores normalized USD when available, provider-native cost when USD is not the native unit, and provenance (`direct` vs `derived`) so billing surfaces do not treat "not reported" as "zero". Detailed rollout notes live in [implemented/46-billing-usage-dashboard.md](implemented/46-billing-usage-dashboard.md).
     - The usage page now supports **billing rollups plus execution analytics by user, agent, model, and reasoning**. Org totals still read from `usage_hourly`, while a separate `usage_hourly_execution` rollup powers execution filters, breakdown tables, CSV exports, and stacked token-by-model charts without raw-session scans. Capacity-specific execution rows are still stored for backend queries and exports, alongside synthetic all-capacities rows that let agent/model/reasoning views report exact per-hour sessions and concurrency without double-counting capacity changes. See [implemented/66-usage-breakdown-by-agent-model-reasoning.md](implemented/66-usage-breakdown-by-agent-model-reasoning.md).
-    - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to PR creation.
     - If the agent asks a clarifying question or requests an approval/action choice during execution, the run pauses through the shared human-input request contract. The user can answer in the session UI, provide free-form guidance where allowed, or **resume the session locally** via CLI (e.g., `143 resume <run-id>` or `claude --resume <session-id>`) to take over the sandbox interactively.
     - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](implemented/17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
 - Step 4: Open PR and ship
@@ -235,15 +234,11 @@ Note: If a fix causes a regression (outcome = `regression`), the issue transitio
                            └────────────┘               │   passed     │
                                                         └──────┬───────┘
                                                                │
-                                                    ┌──────────┴──────────┐
-                                                    │                     │
-                                              confidence             confidence
-                                              >= threshold           < threshold
-                                                    │                     │
-                                                    ▼                     ▼
-                                             ┌─────────────┐   ┌──────────────────────┐
-                                             │  pr_created  │   │ needs_human_guidance │
-                                             └─────────────┘   └──────────────────────┘
+                                                    │
+                                                    ▼
+                                             ┌─────────────┐
+                                             │  pr_ready   │
+                                             └─────────────┘
                                                                          │
                                                                    admin approves
                                                                          │
@@ -304,15 +299,12 @@ GATE 2: Aggressiveness (pre-run — "is this issue within our complexity toleran
         ▼
 AGENT EXECUTES IN SANDBOX
         │
-        ▼
-GATE 3: Confidence Score (post-run — "do we trust this result?")
-        │
-        ├── score >= 0.8 (auto_proceed)     → proceed to validation
-        ├── score 0.5-0.79 (human_review)   → proceed, flag for review before merge
-        └── score < 0.5                      → pause, mark needs_human_guidance
+        ├── success with diff → enqueue PR creation
+        ├── awaiting input    → pause for user answer
+        └── error/no useful output → mark failed with explicit failure category
 ```
 
-**Key rule**: These gates never interact with each other. A high confidence score cannot bypass the aggressiveness gate (different lifecycle stages). A high priority score cannot bypass a low confidence result.
+**Key rule**: These gates never interact with each other. Priority and complexity decide whether to attempt work; execution status, diff availability, validation, and PR/review state decide what happens after a run.
 
 # Failure Recovery
 
@@ -326,7 +318,6 @@ Every failure type has a defined recovery path. This prevents ambiguity during i
 | **Timeout** | Run marked `failed`, `failure_category = tooling` | No auto-retry. User can retry manually with longer timeout. | Returns to `triaged` |
 | **Agent error** (non-zero exit, no diff) | Run marked `failed`, failure analyzed by LLM | No auto-retry. User sees explanation + next steps. | Returns to `triaged` |
 | **LLM API error** (rate limit, outage) | Run marked `failed`, `failure_category = tooling`, `failure_sub_type = api_error` | Auto-retry with exponential backoff (max 3 attempts). | Stays `in_progress` during retries, returns to `triaged` after exhaustion |
-| **Low confidence** (score < 0.5) | Run marked `needs_human_guidance` | Not a failure — admin reviews and approves/dismisses. | Stays `in_progress` |
 
 ## Validation Failures
 
@@ -432,17 +423,16 @@ The core execution pipeline is fully wired end-to-end. DB schema, stores, API ha
 
 1. **Sandbox container management** — ✅ Docker SDK integration in `providers/docker.go` with full container lifecycle (Create/CloneRepo/Exec/ReadFile/WriteFile/Destroy). gVisor runtime support, security hardening (dropped capabilities, read-only rootfs, non-root user, PID limits, tmpfs with noexec). Configurable CPU/memory/timeout limits.
 2. **Claude Code adapter** — ✅ `adapters/claude_code.go` implements AgentAdapter interface. `PreparePrompt()` builds system+user prompts with stack trace extraction and file hints. `Execute()` runs Claude Code CLI in sandbox, parses streaming JSON output, collects git diff. Prompt injection defense included.
-3. **Agent orchestrator** — ✅ `orchestrator.go` implements full run lifecycle: concurrency check per org → status update → fetch issue/repo → get adapter → prepare prompt → create sandbox → clone repo → execute agent with log streaming → confidence gating → enqueue follow-up jobs (validate or analyze_failure) → cleanup. Worker handlers (`run_agent`, `validate`, `open_pr`, `analyze_failure`) are wired to services.
+3. **Agent orchestrator** — ✅ `orchestrator.go` implements full run lifecycle: concurrency check per org → status update → fetch issue/repo → get adapter → prepare prompt → create sandbox → clone repo → execute agent with log streaming → enqueue follow-up jobs (open_pr or analyze_failure) → cleanup. Worker handlers (`run_agent`, `open_pr`, `analyze_failure`) are wired to services.
 4. **Worker sandbox concurrency model** — ✅ Worker parallelism is configurable per node via `WORKER_PROCESS_COUNT`, which controls how many in-process worker loops can claim jobs. Live container admission is separately capped by `WORKER_MAX_ACTIVE_SANDBOXES`: `0` derives from the node's final `WORKER_PROCESS_COUNT`, while values `>0` are explicit per-host overrides. Worker bucket defaults set both values per machine class so mixed fleets can safely run different caps; explicit env values win on each host. The live gate counts local Docker sandboxes plus in-flight reservations, so preview-held/hydrated containers cannot push a node past its machine-aware cap. Sandbox sizing is configurable via `SANDBOX_CPU_LIMIT`, `SANDBOX_MEMORY_LIMIT_MB`, and `SANDBOX_DISK_LIMIT_GB`; org-level run concurrency remains enforced separately by `max_concurrent_runs` (default 10). Self-hosting sizing guidance lives in `docs/self-hosting/worker-capacity-tuning.md`.
 5. **Basic context injection** — ✅ `PreparePrompt()` injects repository conventions from ContextDocs. `extractFileHints()` pulls file paths from Sentry stack trace frames. `extractStackTrace()` produces human-readable stack traces from Sentry raw data.
-6. **Confidence scoring** — ✅ Claude Code adapter extracts confidence_score, confidence_reasoning, and risk_factors from agent JSON output. Orchestrator applies threshold gating: score < 0.5 → `needs_human_guidance`, score >= 0.5 → proceed to validation.
-7. **Human-in-the-loop** — ✅ Coding agents can emit provider-neutral human-input requests for free text, choices, action choices, and tool approvals. The orchestrator persists `session_human_input_requests`, marks the session/thread `awaiting_input`, checkpoints the sandbox, and resumes through `continue_session` after the answer API records the user's response. Legacy `session_questions` remain as compatibility data.
+6. **Human-in-the-loop** — ✅ Coding agents can emit provider-neutral human-input requests for free text, choices, action choices, and tool approvals. The orchestrator persists `session_human_input_requests`, marks the session/thread `awaiting_input`, checkpoints the sandbox, and resumes through `continue_session` after the answer API records the user's response. Legacy `session_questions` remain as compatibility data.
 8. **Log streaming** — ✅ SSE endpoint (`GET /runs/{id}/logs/stream`) now uses Redis Streams fan-out when Redis is configured, with replay from `Last-Event-ID`, bounded per-client backpressure, and graceful fallback to the legacy 1s Postgres polling path when Redis is unavailable. Frontend `LogViewer` connects via EventSource with auto-reconnection.
 9. **Full validation pipeline** — ✅ `validation/service.go` implements all 6 checks in fail-fast order: (1) **direction_check** — LLM verifies fix aligns with issue and product direction, (2) **correctness_check** — LLM verifies logical correctness, no introduced bugs, (3) **regression_test_check** — LLM verifies regression test is included, (4) **security_scan** — regex-based secret/SQLi detection, (5) **quality_check** — diff size limits (warn >200, fail >500 lines), (6) **ci_check** — detects project type and runs tests. Repositories can opt into pinned sandbox tool installs, bootstrap commands, and extra deterministic CI commands via `.143/config.json` (for example `dependencies: {"golangci-lint": "2.10.1"}`, `bootstrap.commands: ["npm ci"]`, `validation.commands: ["npm run lint:js"]`) without making repo-specific lint tooling part of the global sandbox image. Preview config also lives in this repo-level config file. LLM checks use an injectable `LLMClient` interface for testability. Diffs wrapped in `<code_diff>` tags for prompt injection defense. Graceful fallback to "skipped" when LLM is not configured. Validate method accepts issue context for LLM checks.
 10. **PR creation** — ✅ `github/pr.go` implements full GitHub API flow: get base branch SHA → create branch → parse diff → create blobs/tree/commit → update ref → create PR → add labels → store in DB → update run and issue status. PR body includes agent summary, issue metadata, and validation results.
 11. **PR tracking** — ✅ Full `PullRequestStore` with CRUD operations. Webhook handlers process `pull_request` events (merged/closed tracking, deploy record creation) and `pull_request_review` events (approval/changes_requested tracking).
 12. **Failure communication** (17) — ✅ Rule-based `FailureService` in `failure.go` classifies 9 failure types (timeout, sandbox crash, API error, build failure, empty diff, test regression, security violation, large diff, missing context). Each produces human-readable explanation, category, sub-type, next steps, and retry recommendation. Persisted to DB and displayed in frontend.
-13. **Fix Queue UI** — ✅ Runs list page with grouped tabs (All/Active/Needs Review/Failed/Completed), status badges, confidence scores, duration display. Run detail page with tabs: Overview (status/confidence/timestamps/result), Logs (live streaming LogViewer), Diff (DiffViewer component), Validation (results table for all 6 checks), PR (GitHub link/status/review status/branch/body). Failure details section shows explanation, category, next steps as bulleted list, and retry button.
+13. **Fix Queue UI** — ✅ Runs list page with grouped tabs (All/Active/Needs Review/Failed/Completed), status badges, and duration display. Run detail page with tabs: Overview (status/timestamps/result), Logs (live streaming LogViewer), Diff (DiffViewer component), Validation (results table for all 6 checks), PR (GitHub link/status/review status/branch/body). Failure details section shows explanation, category, next steps as bulleted list, and retry button.
 
 **Milestone**: ✅ The core "Sentry error → Fix This → agent run → validation → PR" pipeline is fully complete including all 6 validation checks.
 
@@ -456,7 +446,7 @@ Now that fixes are flowing, rank issues so the most impactful ones surface first
 4. **DB stores** — ✅ `db/priority_scores.go` with Upsert (ON CONFLICT issue_id DO UPDATE), GetByIssueID, ListByOrg (with eligible_only filter, ORDER BY score DESC), DeleteByIssueID. `db/complexity_estimates.go` with Upsert, GetByIssueID, ListByOrg (with optional maxTier filter).
 5. **API endpoints** — ✅ `handlers/priority.go` exposes: GET `/api/v1/issues/{id}/priority` (viewer+), GET `/api/v1/issues/{id}/complexity` (viewer+), GET `/api/v1/priority-scores` with `eligible_only` filter (viewer+), POST `/api/v1/issues/{id}/reprioritize` (admin-only, enqueues prioritize job with dedup key).
 6. **Worker handler** — ✅ `worker/handlers.go` `prioritize` handler calls `ComputeScore` → `EstimateComplexity` → `CheckAutoTrigger` in sequence. Validate handler updated to fetch issue and pass to validation service for LLM context.
-7. **Settings UI** — ✅ Settings page rewritten with: Agent Execution controls (autonomy level select, aggressiveness select, max concurrent input), Confidence Thresholds (auto-proceed and human review sliders), Prioritization section (product direction textarea, priority weight grid with real-time sum validation, minimum score threshold). Save via PATCH with success/error feedback.
+7. **Settings UI** — ✅ Settings page rewritten with: Agent Execution controls (autonomy level select, aggressiveness select, max concurrent input), Prioritization section (product direction textarea, priority weight grid with real-time sum validation, minimum score threshold). Save via PATCH with success/error feedback.
 8. **Priority display** — ✅ Issues page enhanced with: priority score badge (green ≥70, yellow ≥40, gray <40), complexity tier badge (green trivial/simple, yellow moderate, red complex/very_complex), eligibility indicator dot (green/gray), sort dropdown (Last seen / Priority). Priority sort uses LEFT JOIN with priority_scores, ORDER BY score DESC NULLS LAST.
 9. **Issues sort by priority** — ✅ `db/issues.go` IssueFilters extended with Sort field. When `Sort == "priority"`, query uses LEFT JOIN on priority_scores table. Frontend passes sort param via `useQueryState`.
 

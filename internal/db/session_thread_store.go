@@ -22,7 +22,7 @@ func NewSessionThreadStore(db DBTX) *SessionThreadStore {
 
 const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
-	confidence_score, result_summary, diff, failure_explanation, failure_category,
+	result_summary, diff, failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
 
@@ -31,7 +31,7 @@ const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_ov
 // that need the real patch use GetByID and sessionThreadSelectColumns.
 const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_override,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
-	confidence_score, result_summary,
+	result_summary,
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
 	failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
@@ -207,7 +207,7 @@ func (s *SessionThreadStore) UpdateEditable(ctx context.Context, thread *models.
 
 // CompleteTurn marks the thread idle and advances its current_turn. It is the
 // Phase 1 success path: the shared session UpdateTurnComplete already records
-// confidence_score, result_summary, and diff at the session level, so this
+// result_summary and diff at the session level, so this
 // method intentionally does not duplicate them on the thread row. Phase 2
 // (thread-scoped runtime execution) will need to populate the thread's own
 // result columns — switch to UpdateTurnComplete on the thread store at that
@@ -257,7 +257,6 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		            THEN now()
 		        ELSE completed_at
 		    END,
-		    confidence_score = @confidence_score,
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    failure_explanation = @failure_explanation,
@@ -273,7 +272,6 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		"id":                  threadID,
 		"org_id":              orgID,
 		"status":              status,
-		"confidence_score":    result.ConfidenceScore,
 		"result_summary":      result.ResultSummary,
 		"diff":                result.Diff,
 		"failure_explanation": failureExplanation,
@@ -671,7 +669,6 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 		UPDATE session_threads
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id,
-		    confidence_score = @confidence_score,
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff)
 		WHERE id = @id AND org_id = @org_id`
@@ -681,7 +678,6 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 		"org_id":           orgID,
 		"current_turn":     turn,
 		"agent_session_id": agentSessionID,
-		"confidence_score": result.ConfidenceScore,
 		"result_summary":   result.ResultSummary,
 		"diff":             result.Diff,
 	})

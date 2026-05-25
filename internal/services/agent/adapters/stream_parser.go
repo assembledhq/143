@@ -54,8 +54,7 @@ type streamParseConfig struct {
 
 // parseAgentStreamLine processes a single line of streaming JSON output for an
 // agent that emits Claude Code-compatible events. Unknown event types fall
-// through to a debug log; non-JSON lines are emitted as plain output and
-// scanned for confidence markers.
+// through to a debug log; non-JSON lines are emitted as plain output.
 func parseAgentStreamLine(
 	line []byte,
 	cfg streamParseConfig,
@@ -73,7 +72,6 @@ func parseAgentStreamLine(
 			Message:   text,
 		}
 		*summaryParts = append(*summaryParts, text)
-		tryExtractConfidence(text, result)
 		return
 	}
 
@@ -90,7 +88,6 @@ func parseAgentStreamLine(
 			Message:   content,
 		}
 		*lastAssistant = content
-		tryExtractConfidence(content, result)
 
 	case event.Type == "tool_use" || event.Type == "tool_call":
 		toolName := event.Tool
@@ -188,7 +185,6 @@ func parseAgentStreamLine(
 		}
 		if content != "" {
 			*summaryParts = append(*summaryParts, content)
-			tryExtractConfidence(content, result)
 		}
 		// Both shapes ship in the wild: a dedicated `usage` object, and a
 		// `result` payload that sometimes packs the same counters. Accept
@@ -356,8 +352,7 @@ func runStreamingAgent(
 		Level:     "info",
 		Message:   fmt.Sprintf("%s CLI completed", cfg.DisplayName),
 		Metadata: map[string]interface{}{
-			"exit_code":        exitCode,
-			"confidence_score": result.ConfidenceScore,
+			"exit_code": exitCode,
 		},
 	}
 
