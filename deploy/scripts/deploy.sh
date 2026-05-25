@@ -817,7 +817,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
     echo "Rolling $service: new=${new_container:0:12} old=${old_short:-none}"
 
-    if ! wait_container_healthy "$new_container" 180; then
+    if ! wait_container_healthy "$new_container" 180 "$service"; then
       echo "Rolling back $service — removing failed container..."
       docker stop "$new_container" >/dev/null 2>&1 || true
       docker rm "$new_container" >/dev/null 2>&1 || true
@@ -1011,7 +1011,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       return 1
     fi
 
-    if ! wait_container_healthy "$cid" 180; then
+    if ! wait_container_healthy "$cid" 180 "$HEALTH_SERVICE"; then
       echo "Rolling back failed worker generation ${cid:0:12}..."
       docker stop "$cid" >/dev/null 2>&1 || true
       docker rm "$cid" >/dev/null 2>&1 || true
@@ -1077,9 +1077,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   dump_diagnostics() {
-    local cid="${1:-}"
-    echo "--- Last 50 lines of $HEALTH_SERVICE logs ---"
-    docker compose -f "$COMPOSE_FILE" logs --tail=50 "$HEALTH_SERVICE" 2>&1 || true
+    local cid="${1:-}" service="${2:-$HEALTH_SERVICE}"
+    echo "--- Last 50 lines of $service logs ---"
+    docker compose -f "$COMPOSE_FILE" logs --tail=50 "$service" 2>&1 || true
     if [ -n "$cid" ]; then
       echo "--- Docker health check log ---"
       docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
@@ -1138,7 +1138,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
   # passes its health check, or fail after TIMEOUT seconds.
   wait_container_healthy() {
-    local cid="$1" timeout="${2:-120}"
+    local cid="$1" timeout="${2:-120}" service="${3:-$HEALTH_SERVICE}"
     echo "Waiting for container $cid health check (timeout ${timeout}s)..."
 
     # If the container has no HEALTHCHECK, treat "running" as healthy.
@@ -1152,7 +1152,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         return 0
       else
         echo "ERROR: container is $state (no health check configured)"
-        dump_diagnostics "$cid"
+        dump_diagnostics "$cid" "$service"
         return 1
       fi
     fi
@@ -1166,13 +1166,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
       if [ "$HEALTH_STATUS" = "unhealthy" ] || [ "$HEALTH_STATUS" = "exited" ] || [ "$HEALTH_STATUS" = "dead" ]; then
         echo "ERROR: container entered terminal state: $HEALTH_STATUS"
-        dump_diagnostics "$cid"
+        dump_diagnostics "$cid" "$service"
         return 1
       fi
 
       if [ "$i" -eq $((timeout / 2)) ]; then
         echo "ERROR: Health check timed out after ${timeout}s (last status: $HEALTH_STATUS)"
-        dump_diagnostics "$cid"
+        dump_diagnostics "$cid" "$service"
         return 1
       fi
       sleep 2

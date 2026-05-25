@@ -2153,19 +2153,26 @@ RUN npm run build
 FROM node:22-alpine
 WORKDIR /app
 COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/static ./frontend/.next/static
+COPY --from=builder /app/public ./frontend/public
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
 
+WORKDIR /app/frontend
 CMD ["node", "server.js"]
 ```
 
 This uses Next.js standalone output mode (minimal Node.js server, no dev
-dependencies). The resulting image is ~150 MB. Add the build step to the CI
-workflow alongside the server and agent images.
+dependencies). In the monorepo build, `server.js` is emitted under
+`.next/standalone/frontend`, while traced repo-level content such as docs can
+live alongside it under `.next/standalone`. The runtime image therefore keeps
+the full standalone tree but starts from `/app/frontend`, with static and
+public assets copied into that nested app directory. The resulting image is
+~150 MB. Add the build step to the CI workflow alongside the server and agent
+images.
 
 ---
 
