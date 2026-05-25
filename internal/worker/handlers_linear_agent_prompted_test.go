@@ -646,7 +646,7 @@ func TestPromptedResumedTerminalSessionRestoresOriginalStatusWhenContinueEnqueue
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
 			AddRow(sessionID, orgID, models.SessionStatusCompleted, 7))
-	mock.ExpectQuery("(?s)UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)").
+	mock.ExpectQuery(`(?s)UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+error = NULL,\s+failure_explanation = NULL,\s+failure_category = NULL,\s+failure_next_steps = NULL,\s+failure_retry_advised = false,\s+last_activity_at = now\(\)`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
 			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 7, nil, nil)...))
