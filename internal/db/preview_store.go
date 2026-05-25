@@ -3,11 +3,13 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -97,6 +99,15 @@ const branchPreviewSummaryColumns = `target.id AS target_id, active.id AS previe
 // =============================================================================
 
 // CreatePreviewTarget inserts a branch preview target.
+//
+// On conflict with an existing (branch, commit, config_name) tuple the row is
+// updated in-place, but source_type/source_id are intentionally left unchanged
+// so that the original provenance (e.g. the PR that first created the target)
+// is never silently overwritten by a later manual or API trigger.
+//
+// On a concurrent race where a parallel request has already committed a target
+// for the same source_id (idx_preview_targets_source_unique), we re-fetch that
+// winner and return it, giving the caller an idempotent result.
 func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.PreviewTarget) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_targets (
@@ -108,8 +119,6 @@ func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.P
 		)
 		ON CONFLICT (org_id, repository_id, branch, commit_sha, preview_config_name)
 		DO UPDATE SET
-			source_type = EXCLUDED.source_type,
-			source_id = EXCLUDED.source_id,
 			source_url = EXCLUDED.source_url,
 			request_id = EXCLUDED.request_id
 		RETURNING %s`, previewTargetColumns)
@@ -130,9 +139,21 @@ func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.P
 	if err != nil {
 		return fmt.Errorf("insert preview target: %w", err)
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
-	if err != nil {
-		return fmt.Errorf("scan preview target: %w", err)
+	row, scanErr := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewTarget])
+	if scanErr != nil {
+		// A concurrent request raced us on the source unique index. Re-fetch
+		// the winning row so the caller gets an idempotent result.
+		var pgErr *pgconn.PgError
+		if target.SourceID != "" && errors.As(scanErr, &pgErr) &&
+			pgErr.Code == "23505" && pgErr.ConstraintName == "idx_preview_targets_source_unique" {
+			existing, fetchErr := s.GetPreviewTargetBySource(ctx, target.OrgID, target.SourceType, target.SourceID)
+			if fetchErr != nil {
+				return fmt.Errorf("insert preview target (concurrent source race): %w", fetchErr)
+			}
+			*target = *existing
+			return nil
+		}
+		return fmt.Errorf("scan preview target: %w", scanErr)
 	}
 	*target = row
 	return nil
@@ -925,6 +946,11 @@ func (s *PreviewStore) AcquirePreviewHold(ctx context.Context, orgID, previewID 
 // Packaging these reads in one statement avoids a race where turn_holding_container
 // flips between our release and a follow-up read.
 func (s *PreviewStore) ReleasePreviewHold(ctx context.Context, orgID, previewID uuid.UUID) (destroyNow bool, sessionID uuid.UUID, containerID string, err error) {
+	// LEFT JOIN so that a deleted session (or a standalone preview with no
+	// session_id) does not drop the row and leave us with ErrNoRows: the
+	// UPDATE itself succeeded, and we still need its result to decide cleanup.
+	// COALESCE maps a NULL session_id to the zero UUID — the same pattern used
+	// throughout the preview columns — so we can always scan into uuid.UUID.
 	query := `WITH released AS (
 			UPDATE preview_instances
 			SET preview_holding_container = FALSE, updated_at = now()
@@ -932,11 +958,11 @@ func (s *PreviewStore) ReleasePreviewHold(ctx context.Context, orgID, previewID 
 			RETURNING session_id
 		)
 		SELECT
-			released.session_id,
+			COALESCE(released.session_id, '00000000-0000-0000-0000-000000000000'::uuid) AS session_id,
 			COALESCE(s.container_id, '') AS container_id,
 			COALESCE(s.turn_holding_container, FALSE) AS turn_holds
 		FROM released
-		JOIN sessions s ON s.id = released.session_id AND s.org_id = @org_id`
+		LEFT JOIN sessions s ON s.id = released.session_id AND s.org_id = @org_id`
 
 	var turnHolds bool
 	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
@@ -1120,12 +1146,16 @@ func (s *PreviewStore) CountActivePreviewsByOrg(ctx context.Context, orgID uuid.
 // CountActiveStandalonePreviewsByOrg counts target-owned branch previews for
 // standalone quota enforcement. Session-owned previews are intentionally
 // excluded so API/manual usage cannot starve active agent sessions.
+//
+// Note: preview_target_id IS NOT NULL is the sole criterion. session_id IS NULL
+// would incorrectly exclude hybrid previews — session previews that were later
+// attached to a branch target via AttachPreviewTarget — which do consume
+// branch-preview capacity and must count against the standalone quota.
 func (s *PreviewStore) CountActiveStandalonePreviewsByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
 		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE org_id = @org_id
 		 AND preview_target_id IS NOT NULL
-		 AND session_id IS NULL
 		 AND status IN %s`, activeStatusFilter),
 		pgx.NamedArgs{"org_id": orgID},
 	).Scan(&count)
@@ -1158,7 +1188,6 @@ func (s *PreviewStore) CountActiveStandalonePreviewsByUser(ctx context.Context, 
 		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances
 		 WHERE org_id = @org_id AND user_id = @user_id
 		 AND preview_target_id IS NOT NULL
-		 AND session_id IS NULL
 		 AND status IN %s`, activeStatusFilter),
 		pgx.NamedArgs{"org_id": orgID, "user_id": userID},
 	).Scan(&count)
@@ -1192,7 +1221,6 @@ func (s *PreviewStore) CountActiveStandalonePreviewsByWorker(ctx context.Context
 	err := s.db.QueryRow(ctx,
 		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE worker_node_id = @worker
 		 AND preview_target_id IS NOT NULL
-		 AND session_id IS NULL
 		 AND status IN %s`, activeStatusFilter),
 		pgx.NamedArgs{"worker": workerNodeID},
 	).Scan(&count)
@@ -1200,6 +1228,74 @@ func (s *PreviewStore) CountActiveStandalonePreviewsByWorker(ctx context.Context
 		return 0, fmt.Errorf("count active standalone previews by worker: %w", err)
 	}
 	return count, nil
+}
+
+// CountActivePreviewsByWorkers returns active preview counts keyed by worker
+// node ID for all given worker IDs in a single query. Workers with no active
+// previews are absent from the returned map. This replaces N sequential
+// CountActivePreviewsByWorker calls in the worker selector hot path.
+// lint:allow-no-orgid reason="cross-org worker capacity stats for scheduling"
+func (s *PreviewStore) CountActivePreviewsByWorkers(ctx context.Context, workerIDs []string) (map[string]int, error) {
+	if len(workerIDs) == 0 {
+		return map[string]int{}, nil
+	}
+	query := fmt.Sprintf(`
+		SELECT worker_node_id, COUNT(*) AS count
+		FROM preview_instances
+		WHERE worker_node_id = ANY(@worker_ids)
+		  AND status IN %s
+		GROUP BY worker_node_id`, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_ids": workerIDs})
+	if err != nil {
+		return nil, fmt.Errorf("count active previews by workers: %w", err)
+	}
+	defer rows.Close()
+	counts := make(map[string]int, len(workerIDs))
+	for rows.Next() {
+		var nodeID string
+		var count int
+		if err := rows.Scan(&nodeID, &count); err != nil {
+			return nil, fmt.Errorf("scan active preview count: %w", err)
+		}
+		counts[nodeID] = count
+	}
+	return counts, rows.Err()
+}
+
+// StandaloneCapacityCounts holds the three preview counts needed to enforce
+// branch-preview capacity limits, fetched in a single DB round-trip.
+type StandaloneCapacityCounts struct {
+	UserStandalone int
+	OrgStandalone  int
+	WorkerTotal    int
+}
+
+// CheckStandaloneCapacityCounts returns all three counts needed by
+// checkStandaloneConcurrencyCapsWithStore in a single query, replacing three
+// serial COUNT round-trips with one.
+// lint:allow-no-orgid reason="worker count is cross-org; org scoping applied inside scalar subqueries"
+func (s *PreviewStore) CheckStandaloneCapacityCounts(ctx context.Context, orgID, userID uuid.UUID, workerNodeID string) (StandaloneCapacityCounts, error) {
+	query := fmt.Sprintf(`
+		SELECT
+			(SELECT COUNT(*) FROM preview_instances
+			 WHERE org_id = @org_id AND user_id = @user_id
+			   AND preview_target_id IS NOT NULL AND status IN %s) AS user_standalone,
+			(SELECT COUNT(*) FROM preview_instances
+			 WHERE org_id = @org_id
+			   AND preview_target_id IS NOT NULL AND status IN %s) AS org_standalone,
+			(SELECT COUNT(*) FROM preview_instances
+			 WHERE worker_node_id = @worker_node_id AND status IN %s) AS worker_total`,
+		activeStatusFilter, activeStatusFilter, activeStatusFilter)
+	var counts StandaloneCapacityCounts
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":          orgID,
+		"user_id":         userID,
+		"worker_node_id":  workerNodeID,
+	}).Scan(&counts.UserStandalone, &counts.OrgStandalone, &counts.WorkerTotal)
+	if err != nil {
+		return StandaloneCapacityCounts{}, fmt.Errorf("check standalone capacity counts: %w", err)
+	}
+	return counts, nil
 }
 
 // ListExpiredPreviews returns active previews whose hard TTL has passed.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -385,13 +386,15 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		return nil, fmt.Errorf("create preview instance: %w", err)
 	}
 
-	// Acquire the preview's half of the sandbox refcount. Retry once because
-	// a transient write error here leaves the row without a hold — and
-	// without a hold, a subsequent hydrate's container_id publish is exposed
-	// to concurrent FinalizeContainerDestroy.
+	// Acquire the preview's half of the sandbox refcount. Retry once, but
+	// only for transient I/O errors: a permanent PostgreSQL error or a
+	// not-found response means the row is gone and retrying will not help.
 	var holdErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, holdErr = store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); holdErr == nil {
+			break
+		}
+		if !isTransientPreviewDBError(holdErr) {
 			break
 		}
 		m.logger.Warn().Err(holdErr).
@@ -406,6 +409,10 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		}
 		return nil, fmt.Errorf("acquire preview hold: %w", holdErr)
 	}
+	// Reflect the acquired hold in the in-memory struct so AbortReservation can
+	// use this field as an explicit guard instead of relying on SessionID == Nil
+	// as an indirect proxy for "was the hold acquired?".
+	instance.PreviewHoldingContainer = true
 
 	m.logger.Info().
 		Str("preview_id", instance.ID.String()).
@@ -624,6 +631,8 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 	}
 
 	if instance.SessionID == uuid.Nil {
+		// Standalone branch preview: owns a dedicated sandbox, no session
+		// container lifecycle to coordinate. Destroy the sandbox directly.
 		if hydratedContainerID != "" && m.sandboxProvider != nil {
 			sb := &agent.Sandbox{ID: hydratedContainerID, Provider: ProviderDocker}
 			if err := m.sandboxProvider.Destroy(ctx, sb); err != nil {
@@ -633,6 +642,15 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 					Msg("abort branch reservation: destroy failed; container orphaned on host")
 			}
 		}
+		return
+	}
+
+	// Only release the hold when we know it was acquired. The in-memory struct
+	// field is set to true by reservePreview after AcquirePreviewHold succeeds,
+	// so a false value here means the hold was never taken (e.g. this instance
+	// was fetched from the DB after reservation already aborted, or a code path
+	// called AbortReservation before hold acquisition).
+	if !instance.PreviewHoldingContainer {
 		return
 	}
 
@@ -1517,28 +1535,18 @@ func (m *Manager) checkStandaloneConcurrencyCapsWithStore(ctx context.Context, s
 	if err != nil {
 		return err
 	}
-	userCount, err := store.CountActiveStandalonePreviewsByUser(ctx, orgID, userID)
+	counts, err := store.CheckStandaloneCapacityCounts(ctx, orgID, userID, workerNodeID)
 	if err != nil {
-		return fmt.Errorf("count standalone user previews: %w", err)
+		return fmt.Errorf("check preview capacity: %w", err)
 	}
-	if userCount >= maxPerUser {
-		return fmt.Errorf("%w: you already have %d active branch previews (limit %d) — stop one before starting another", ErrPreviewCapacity, userCount, maxPerUser)
+	if counts.UserStandalone >= maxPerUser {
+		return fmt.Errorf("%w: you already have %d active branch previews (limit %d) — stop one before starting another", ErrPreviewCapacity, counts.UserStandalone, maxPerUser)
 	}
-
-	orgCount, err := store.CountActiveStandalonePreviewsByOrg(ctx, orgID)
-	if err != nil {
-		return fmt.Errorf("count standalone org previews: %w", err)
+	if counts.OrgStandalone >= m.maxPerOrg {
+		return fmt.Errorf("%w: your team has %d active branch previews (limit %d) — ask a teammate to stop one", ErrPreviewCapacity, counts.OrgStandalone, m.maxPerOrg)
 	}
-	if orgCount >= m.maxPerOrg {
-		return fmt.Errorf("%w: your team has %d active branch previews (limit %d) — ask a teammate to stop one", ErrPreviewCapacity, orgCount, m.maxPerOrg)
-	}
-
-	workerCount, err := store.CountActivePreviewsByWorker(ctx, workerNodeID)
-	if err != nil {
-		return fmt.Errorf("count worker previews: %w", err)
-	}
-	if workerCount >= m.maxPerWorker {
-		return fmt.Errorf("%w: all preview slots are in use (%d/%d) — try again in a few minutes", ErrPreviewCapacity, workerCount, m.maxPerWorker)
+	if counts.WorkerTotal >= m.maxPerWorker {
+		return fmt.Errorf("%w: all preview slots are in use (%d/%d) — try again in a few minutes", ErrPreviewCapacity, counts.WorkerTotal, m.maxPerWorker)
 	}
 	return nil
 }
@@ -1779,4 +1787,25 @@ func derefStringPtr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// isTransientPreviewDBError returns true only for errors that are worth
+// retrying: network/connection failures where the operation may not have
+// reached the server. PostgreSQL errors (pgconn.PgError), not-found rows, and
+// cancelled contexts are all permanent and must not be retried.
+func isTransientPreviewDBError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return false
+	}
+	return true
 }

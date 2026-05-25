@@ -1463,9 +1463,11 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 			pgxmock.NewRows(handlerNodeTestCols).
 				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
 		)
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id").
+	// Single batch query replaces N sequential per-worker COUNT queries.
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("worker-a", 0))
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

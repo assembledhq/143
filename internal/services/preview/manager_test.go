@@ -2405,9 +2405,10 @@ func TestAbortReservation_ReleasesHoldAndDestroysHydratedContainer(t *testing.T)
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	instance := &models.PreviewInstance{
-		ID:        uuid.New(),
-		OrgID:     orgID,
-		SessionID: sessionID,
+		ID:                      uuid.New(),
+		OrgID:                   orgID,
+		SessionID:               sessionID,
+		PreviewHoldingContainer: true,
 	}
 
 	// UpdatePreviewStatus(failed).
@@ -2457,9 +2458,10 @@ func TestAbortReservation_LeavesContainerWhenNotHydrated(t *testing.T) {
 	})
 
 	instance := &models.PreviewInstance{
-		ID:        uuid.New(),
-		OrgID:     uuid.New(),
-		SessionID: uuid.New(),
+		ID:                      uuid.New(),
+		OrgID:                   uuid.New(),
+		SessionID:               uuid.New(),
+		PreviewHoldingContainer: true,
 	}
 
 	expectUpdatePreviewStatusFailed(mock)
@@ -2495,9 +2497,10 @@ func TestAbortReservation_LeavesContainerWhenSessionTracksDifferent(t *testing.T
 	})
 
 	instance := &models.PreviewInstance{
-		ID:        uuid.New(),
-		OrgID:     uuid.New(),
-		SessionID: uuid.New(),
+		ID:                      uuid.New(),
+		OrgID:                   uuid.New(),
+		SessionID:               uuid.New(),
+		PreviewHoldingContainer: true,
 	}
 
 	expectUpdatePreviewStatusFailed(mock)
@@ -2533,9 +2536,10 @@ func TestAbortReservation_FinalizeNotClearedSkipsDestroy(t *testing.T) {
 	})
 
 	instance := &models.PreviewInstance{
-		ID:        uuid.New(),
-		OrgID:     uuid.New(),
-		SessionID: uuid.New(),
+		ID:                      uuid.New(),
+		OrgID:                   uuid.New(),
+		SessionID:               uuid.New(),
+		PreviewHoldingContainer: true,
 	}
 
 	expectUpdatePreviewStatusFailed(mock)
@@ -2574,9 +2578,10 @@ func TestAbortReservation_FinalizeErrorSkipsDestroy(t *testing.T) {
 	})
 
 	instance := &models.PreviewInstance{
-		ID:        uuid.New(),
-		OrgID:     uuid.New(),
-		SessionID: uuid.New(),
+		ID:                      uuid.New(),
+		OrgID:                   uuid.New(),
+		SessionID:               uuid.New(),
+		PreviewHoldingContainer: true,
 	}
 
 	expectUpdatePreviewStatusFailed(mock)
@@ -2614,9 +2619,10 @@ func TestAbortReservation_ReleaseHoldErrorLeavesContainer(t *testing.T) {
 	})
 
 	instance := &models.PreviewInstance{
-		ID:        uuid.New(),
-		OrgID:     uuid.New(),
-		SessionID: uuid.New(),
+		ID:                      uuid.New(),
+		OrgID:                   uuid.New(),
+		SessionID:               uuid.New(),
+		PreviewHoldingContainer: true,
 	}
 
 	expectUpdatePreviewStatusFailed(mock)

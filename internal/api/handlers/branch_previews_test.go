@@ -704,12 +704,13 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
 
-	// 6. GetActivePreviewForSession — session preview with matching BaseCommitSHA and status=ready
+	// 6. GetActivePreviewForSession — session preview with matching BaseCommitSHA, status=ready,
+	// and a non-empty PreviewHandle so the liveness check passes.
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
 			instanceID, sessionID, nil, orgID, userID, "", "", models.PreviewStatusReady,
-			"", "", "", "", 0,
+			"", "", "hdl-session-1", "", 0,
 			"", head, now, now, nil,
 			"", 0, 0, nil, nil, "", nil, "", now, now, now, nil,
 			false,

@@ -206,10 +206,12 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	}
 	metrics.RecordBranchPreviewPhaseDuration(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config", time.Since(configStarted))
 	if err := r.previews.UpdatePreviewTargetConfigDigest(ctx, payload.OrgID, payload.PreviewTargetID, computeConfigDigest(cfg)); err != nil {
-		r.logger.Warn().Err(err).
-			Str("preview_id", payload.PreviewID.String()).
-			Str("preview_target_id", payload.PreviewTargetID.String()).
-			Msg("failed to persist resolved preview config digest")
+		// Abort rather than warn: a stale digest on the target causes future
+		// "config changed" comparisons to produce wrong results. If we can't
+		// persist the resolved config digest, don't launch.
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config_digest")
+		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("persist config digest: %v", err))
+		return fmt.Errorf("persist config digest: %w", err)
 	}
 
 	input := StartPreviewInput{

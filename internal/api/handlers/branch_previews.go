@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -21,6 +24,9 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/preview"
 )
+
+// commitSHARe matches a full 40-character Git commit SHA.
+var commitSHARe = regexp.MustCompile(`\A[0-9a-fA-F]{40}\z`)
 
 type branchPreviewGitHub interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
@@ -41,6 +47,14 @@ type BranchPreviewHandler struct {
 	stopper               *preview.WorkerStopper
 	baseURL               string
 	previewOriginTemplate string
+	// configContentCache caches raw .143/config.json content keyed by
+	// "owner/repo@sha" for immutable commit SHAs. Content is content-addressed
+	// so there is no TTL; the cache is only populated for full 40-char SHAs.
+	configContentCache sync.Map
+	// configFetchGroup coalesces concurrent in-flight GitHub fetches for the
+	// same immutable SHA so a burst of requests for an uncached SHA results in
+	// exactly one GitHub API call rather than N.
+	configFetchGroup singleflight.Group
 }
 
 func NewBranchPreviewHandler(previews *db.PreviewStore, repos *db.RepositoryStore, github branchPreviewGitHub, manager *preview.Manager, baseURL, previewOriginTemplate string) *BranchPreviewHandler {
@@ -258,12 +272,26 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.PreviewConfigName != nil {
 		configName = strings.TrimSpace(*req.PreviewConfigName)
 	}
-	configContent, contentErr := h.github.GetFileContent(r.Context(), token, owner, name, req.CommitSHA, ".143/config.json")
-	if contentErr != nil {
-		writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", contentErr)
-		return
+	createCacheKey := owner + "/" + name + "@" + req.CommitSHA
+	isImmutableCommit := commitSHARe.MatchString(req.CommitSHA)
+	var configContent string
+	if isImmutableCommit {
+		if cached, ok := h.configContentCache.Load(createCacheKey); ok {
+			configContent = cached.(string)
+		}
 	}
-	resolvedConfigName, configErr := validatePreviewConfigContent([]byte(configContent), configName)
+	if configContent == "" {
+		fetched, contentErr := h.github.GetFileContent(r.Context(), token, owner, name, req.CommitSHA, ".143/config.json")
+		if contentErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", contentErr)
+			return
+		}
+		configContent = fetched
+		if isImmutableCommit {
+			h.configContentCache.Store(createCacheKey, configContent)
+		}
+	}
+	resolvedConfigName, parsedConfig, configErr := validatePreviewConfigContent([]byte(configContent), configName)
 	if configErr != nil {
 		writeError(w, r, configErr.status, configErr.code, configErr.message, configErr.err)
 		return
@@ -275,7 +303,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		existing, idemErr := h.previews.GetPreviewTargetByIdempotencyKey(r.Context(), orgID, idemKey)
 		if idemErr == nil && existing != nil {
 			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), orgID.String(), "header")
-			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart)
+			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart, nil)
 			if startErr != nil {
 				writePreviewHTTPError(w, r, startErr)
 				return
@@ -293,7 +321,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		existing, sourceErr := h.previews.GetPreviewTargetBySource(r.Context(), orgID, sourceType, sourceID)
 		if sourceErr == nil && existing != nil {
 			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), orgID.String(), "source")
-			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart)
+			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart, nil)
 			if startErr != nil {
 				writePreviewHTTPError(w, r, startErr)
 				return
@@ -327,7 +355,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics.RecordBranchPreviewCreate(r.Context(), orgID.String(), string(sourceType), repo.FullName)
 
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, req.TTLSeconds, restart)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, req.TTLSeconds, restart, parsedConfig)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -345,10 +373,14 @@ type previewConfigHTTPError struct {
 // validatePreviewConfigContent inspects and fully parses a committed
 // .143/config.json payload. It uses the already-fetched bytes so the caller
 // controls the single GitHub content API round-trip.
-func validatePreviewConfigContent(content []byte, requestedName string) (string, *previewConfigHTTPError) {
+// validatePreviewConfigContent parses and validates a committed .143/config.json
+// payload. Returns the resolved config name and the parsed PreviewConfig so
+// callers can include it in the worker job payload — avoiding a second GitHub
+// fetch or sandbox read inside the worker.
+func validatePreviewConfigContent(content []byte, requestedName string) (string, *models.PreviewConfig, *previewConfigHTTPError) {
 	options, err := preview.InspectConfigOptions(content, requestedName)
 	if err != nil {
-		return "", &previewConfigHTTPError{
+		return "", nil, &previewConfigHTTPError{
 			status:  http.StatusBadRequest,
 			code:    "INVALID_PREVIEW_CONFIG",
 			message: "invalid preview configuration",
@@ -356,21 +388,22 @@ func validatePreviewConfigContent(content []byte, requestedName string) (string,
 		}
 	}
 	if options.RequiresSelection {
-		return "", &previewConfigHTTPError{
+		return "", nil, &previewConfigHTTPError{
 			status:  http.StatusBadRequest,
 			code:    "PREVIEW_CONFIG_REQUIRED",
 			message: fmt.Sprintf("preview_config_name is required; available configs: %s", strings.Join(options.Names, ", ")),
 		}
 	}
-	if _, err := preview.ParseNamedConfig(content, options.SelectedName); err != nil {
-		return "", &previewConfigHTTPError{
+	cfg, err := preview.ParseNamedConfig(content, options.SelectedName)
+	if err != nil {
+		return "", nil, &previewConfigHTTPError{
 			status:  http.StatusBadRequest,
 			code:    "INVALID_PREVIEW_CONFIG",
 			message: err.Error(),
 			err:     err,
 		}
 	}
-	return options.SelectedName, nil
+	return options.SelectedName, cfg, nil
 }
 
 func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) {
@@ -495,7 +528,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LINK_CREATE_FAILED", "failed to create PR preview link", err)
 		return
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, nil, false)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, nil, false, nil)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -543,15 +576,42 @@ func (h *BranchPreviewHandler) GetConfigOptions(w http.ResponseWriter, r *http.R
 	if ref == "" {
 		ref = repo.DefaultBranch
 	}
-	token, err := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
-	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", err)
-		return
+	cacheKey := owner + "/" + repoName + "@" + ref
+	isImmutableRef := commitSHARe.MatchString(ref)
+	var content string
+	if isImmutableRef {
+		if cached, ok := h.configContentCache.Load(cacheKey); ok {
+			content = cached.(string)
+		}
 	}
-	content, err := h.github.GetFileContent(r.Context(), token, owner, repoName, ref, ".143/config.json")
-	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", err)
-		return
+	if content == "" {
+		token, tokenErr := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
+		if tokenErr != nil {
+			writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", tokenErr)
+			return
+		}
+		if isImmutableRef {
+			// Coalesce concurrent in-flight fetches for the same immutable SHA so
+			// a burst of requests for the same uncached commit results in exactly
+			// one GitHub API call. The token is already acquired per-request
+			// above; only the file content fetch is shared.
+			result, sfErr, _ := h.configFetchGroup.Do(cacheKey, func() (interface{}, error) {
+				return h.github.GetFileContent(r.Context(), token, owner, repoName, ref, ".143/config.json")
+			})
+			if sfErr != nil {
+				writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", sfErr)
+				return
+			}
+			content = result.(string)
+			h.configContentCache.Store(cacheKey, content)
+		} else {
+			fetched, fetchErr := h.github.GetFileContent(r.Context(), token, owner, repoName, ref, ".143/config.json")
+			if fetchErr != nil {
+				writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", fetchErr)
+				return
+			}
+			content = fetched
+		}
 	}
 	configName := strings.TrimSpace(r.URL.Query().Get("preview_config_name"))
 	options, err := preview.InspectConfigOptions([]byte(content), configName)
@@ -639,7 +699,12 @@ func (h *BranchPreviewHandler) ResolveLink(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 }
 
-func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, target *models.PreviewTarget, ttlSeconds *int64, restart bool) (branchPreviewResponse, *previewHTTPError) {
+// startTargetRuntime launches (or re-uses) a running preview for the given
+// target. cfg is the already-parsed PreviewConfig from the handler validation
+// step; passing it avoids a redundant GitHub fetch or sandbox re-read inside
+// the worker. Pass nil when the config is not available at the call site —
+// the worker will fall back to reading it from the checked-out sandbox.
+func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, target *models.PreviewTarget, ttlSeconds *int64, restart bool, cfg *models.PreviewConfig) (branchPreviewResponse, *previewHTTPError) {
 	link := &models.PreviewLink{
 		OrgID:           orgID,
 		PreviewTargetID: target.ID,
@@ -667,7 +732,14 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 			if reusable, reuseErr := h.previews.GetActivePreviewForSession(ctx, orgID, sessionID); reuseErr == nil &&
 				reusable != nil &&
 				reusable.BaseCommitSHA == target.CommitSHA &&
-				reusable.Status.IsActive() {
+				// Require a ready/partially-ready state AND a non-empty PreviewHandle
+				// so we don't attach to a preview that is still starting (handle
+				// not yet registered) or that may have crashed without the DB
+				// being updated yet. unhealthy is intentionally excluded: the
+				// sandbox may be in a restart loop; let the caller get a fresh
+				// instance instead.
+				(reusable.Status == models.PreviewStatusReady || reusable.Status == models.PreviewStatusPartiallyReady) &&
+				reusable.PreviewHandle != "" {
 				attached, attachErr := h.previews.AttachPreviewTarget(ctx, orgID, reusable.ID, target.ID)
 				if attachErr != nil {
 					return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_REUSE_FAILED", "failed to attach session preview", attachErr)
@@ -739,6 +811,7 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 			Branch:            target.Branch,
 			CommitSHA:         target.CommitSHA,
 			PreviewConfigName: target.PreviewConfigName,
+			Config:            cfg,
 		},
 		Priority:     5,
 		DedupeKey:    &dedupeKey,
@@ -1039,7 +1112,7 @@ func (h *BranchPreviewHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		}
 		target = latest
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, nil, true)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, nil, true, nil)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -1067,7 +1140,7 @@ func (h *BranchPreviewHandler) StartLatest(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadGateway, "BRANCH_HEAD_RESOLVE_FAILED", "failed to resolve latest branch head", err)
 		return
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, latest, nil, false)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, latest, nil, false, nil)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -1471,11 +1544,20 @@ func branchPreviewExpiresAt(ttlSeconds *int64) time.Time {
 	return time.Now().Add(ttl)
 }
 
+// previewInstanceExpired returns true when the preview is no longer accessible.
+// It checks both DB terminal status and wall-clock expiry so that previews
+// which have been stopped or failed server-side — even if the reaper hasn't
+// flushed the status to the caller's context yet — are correctly reported.
 func previewInstanceExpired(instance *models.PreviewInstance) bool {
 	if instance == nil {
 		return true
 	}
-	return instance.Status == models.PreviewStatusExpired || instance.ExpiresAt.Before(time.Now())
+	// Terminal status in the DB is authoritative; include stopped/failed in
+	// addition to expired so that any ended preview is treated as inaccessible.
+	if instance.Status.IsTerminal() {
+		return true
+	}
+	return instance.ExpiresAt.Before(time.Now())
 }
 
 func (h *BranchPreviewHandler) previewURL(id uuid.UUID) string {
