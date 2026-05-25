@@ -16,6 +16,7 @@ type ContainerUsageEvent struct {
 	Provider         string     `db:"provider" json:"provider"`
 	CPULimit         float64    `db:"cpu_limit" json:"cpu_limit"`
 	MemoryLimitMB    int        `db:"memory_limit_mb" json:"memory_limit_mb"`
+	DiskLimitMB      int        `db:"disk_limit_mb" json:"disk_limit_mb"`
 	Image            string     `db:"image" json:"image"`
 	StartedAt        time.Time  `db:"started_at" json:"started_at"`
 	StoppedAt        *time.Time `db:"stopped_at" json:"stopped_at,omitempty"`
@@ -39,10 +40,11 @@ type UsageSummary struct {
 	TotalLLMCostUSD       float64          `json:"total_llm_cost_usd"`
 }
 
-// CapacityBucket groups usage by resource tier (CPU + memory combination).
+// CapacityBucket groups usage by resource tier (CPU + memory + disk).
 type CapacityBucket struct {
 	CPULimit         float64 `json:"cpu_limit"`
 	MemoryLimitMB    int     `json:"memory_limit_mb"`
+	DiskLimitMB      int     `json:"disk_limit_mb"`
 	ContainerMinutes float64 `json:"container_minutes"`
 	SessionCount     int     `json:"session_count"`
 }
