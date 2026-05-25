@@ -3,6 +3,7 @@
 import { memo, useCallback, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Search, FileText } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { DiffFile } from "@/lib/diff-parser";
 
@@ -20,6 +21,9 @@ interface TreeNode {
   fileIndex?: number;
   file?: DiffFile;
 }
+
+const INITIAL_VISIBLE_FILE_COUNT = 25;
+const VISIBLE_FILE_INCREMENT = 250;
 
 function flattenLeafNodes(node: TreeNode): TreeNode[] {
   const leaves: TreeNode[] = [];
@@ -197,12 +201,27 @@ export const FileTree = memo(function FileTree({
   variant = "sidebar",
 }: FileTreeProps) {
   const [filter, setFilter] = useState("");
+  const [visibleState, setVisibleState] = useState({
+    files,
+    filter,
+    count: INITIAL_VISIBLE_FILE_COUNT,
+  });
+  let visibleCount = visibleState.count;
+  if (visibleState.files !== files || visibleState.filter !== filter) {
+    visibleCount = INITIAL_VISIBLE_FILE_COUNT;
+    setVisibleState({ files, filter, count: INITIAL_VISIBLE_FILE_COUNT });
+  }
 
   const filteredFiles = useMemo(() => {
     if (!filter.trim()) return files;
     const q = filter.toLowerCase();
     return files.filter((f) => f.newPath.toLowerCase().includes(q));
   }, [files, filter]);
+  const visibleFiles = useMemo(
+    () => filteredFiles.slice(0, visibleCount),
+    [filteredFiles, visibleCount]
+  );
+  const hasMoreFiles = visibleFiles.length < filteredFiles.length;
 
   // Build a reference-identity map from DiffFile -> original index for O(1) lookups
   const fileToOrigIndex = useMemo(() => {
@@ -211,35 +230,35 @@ export const FileTree = memo(function FileTree({
     return map;
   }, [files]);
 
-  // Map original indices to filtered indices for active file tracking.
-  const filteredIndexMap = useMemo(() => {
+  // Map original indices to visible indices for active file tracking.
+  const visibleIndexMap = useMemo(() => {
     const map = new Map<number, number>();
-    filteredFiles.forEach((file, filteredIdx) => {
+    visibleFiles.forEach((file, visibleIdx) => {
       const origIdx = fileToOrigIndex.get(file) ?? -1;
-      if (origIdx >= 0) map.set(origIdx, filteredIdx);
+      if (origIdx >= 0) map.set(origIdx, visibleIdx);
     });
     return map;
-  }, [fileToOrigIndex, filteredFiles]);
+  }, [fileToOrigIndex, visibleFiles]);
 
   const tree = useMemo(
-    () => flattenSingleChildDirs(buildTree(filteredFiles)),
-    [filteredFiles]
+    () => flattenSingleChildDirs(buildTree(visibleFiles)),
+    [visibleFiles]
   );
   const useFlatFileOrder = useMemo(
-    () => !treePreservesIncomingOrder(tree, filteredFiles),
-    [tree, filteredFiles]
+    () => !treePreservesIncomingOrder(tree, visibleFiles),
+    [tree, visibleFiles]
   );
 
-  // Convert activeFileIndex from original files array to the filtered position.
-  const filteredActiveIndex = filteredIndexMap.get(activeFileIndex) ?? activeFileIndex;
+  // Convert activeFileIndex from original files array to the visible position.
+  const visibleActiveIndex = visibleIndexMap.get(activeFileIndex) ?? activeFileIndex;
 
-  // When a file is selected in the filtered tree, convert back to original index.
-  const handleFileSelect = useCallback((filteredIdx: number) => {
-    const file = filteredFiles[filteredIdx];
+  // When a file is selected in the visible tree, convert back to original index.
+  const handleFileSelect = useCallback((visibleIdx: number) => {
+    const file = visibleFiles[visibleIdx];
     if (!file) return;
     const origIdx = fileToOrigIndex.get(file) ?? -1;
     if (origIdx >= 0) onFileSelect(origIdx);
-  }, [fileToOrigIndex, filteredFiles, onFileSelect]);
+  }, [fileToOrigIndex, visibleFiles, onFileSelect]);
 
   return (
     <div className="flex flex-col h-full">
@@ -264,23 +283,43 @@ export const FileTree = memo(function FileTree({
       </div>
       <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pb-2">
         {useFlatFileOrder ? (
-          filteredFiles.map((file, filteredIdx) => (
+          visibleFiles.map((file, visibleIdx) => (
             <FileRow
-              key={`${file.newPath}:${filteredIdx}`}
+              key={`${file.newPath}:${visibleIdx}`}
               label={file.newPath}
-              fileIndex={filteredIdx}
+              fileIndex={visibleIdx}
               file={file}
-              activeFileIndex={filteredActiveIndex}
+              activeFileIndex={visibleActiveIndex}
               onFileSelect={handleFileSelect}
             />
           ))
         ) : (
           <TreeDirectory
             node={tree}
-            activeFileIndex={filteredActiveIndex}
+            activeFileIndex={visibleActiveIndex}
             onFileSelect={handleFileSelect}
           />
         )}
+        {hasMoreFiles ? (
+          <div className="sticky bottom-0 bg-background/95 py-3 backdrop-blur">
+            <p className="mb-2 text-center text-xs text-muted-foreground">
+              Showing {visibleFiles.length} of {filteredFiles.length} files
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-full text-xs"
+              onClick={() => setVisibleState((state) => ({
+                files,
+                filter,
+                count: state.count + VISIBLE_FILE_INCREMENT,
+              }))}
+            >
+              Show more files
+            </Button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
