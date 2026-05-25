@@ -4986,7 +4986,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+error = NULL,\s+failure_explanation = NULL,\s+failure_category = NULL,\s+failure_next_steps = NULL,\s+failure_retry_advised = false,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5066,7 +5066,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+error = NULL,\s+failure_explanation = NULL,\s+failure_category = NULL,\s+failure_next_steps = NULL,\s+failure_retry_advised = false,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5132,7 +5132,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+error = NULL,\s+failure_explanation = NULL,\s+failure_category = NULL,\s+failure_next_steps = NULL,\s+failure_retry_advised = false,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5198,7 +5198,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+error = NULL,\s+failure_explanation = NULL,\s+failure_category = NULL,\s+failure_next_steps = NULL,\s+failure_retry_advised = false,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),

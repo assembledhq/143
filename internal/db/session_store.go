@@ -1283,11 +1283,6 @@ func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid
 	query := `
 		UPDATE sessions
 		SET status = 'running', completed_at = NULL,
-		    error = NULL,
-		    failure_explanation = NULL,
-		    failure_category = NULL,
-		    failure_next_steps = NULL,
-		    failure_retry_advised = false,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
 		  AND sandbox_state != 'destroyed'
