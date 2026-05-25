@@ -30,8 +30,8 @@ func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
 	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
 	require.NoError(t, err, "test should read the frontend Dockerfile")
 	dockerfileText := string(dockerfile)
-	sourceConfigCopyIndex := strings.Index(dockerfileText, "COPY frontend/source.config.ts ./")
-	publicDocsCopyIndex := strings.Index(dockerfileText, "COPY docs/public /docs/public")
+	sourceConfigCopyIndex := strings.Index(dockerfileText, "COPY frontend/source.config.ts ./frontend/")
+	publicDocsCopyIndex := strings.Index(dockerfileText, "COPY docs/public ./docs/public")
 	npmCIIndex := strings.Index(dockerfileText, "RUN npm ci")
 
 	require.NotEqual(t, -1, sourceConfigCopyIndex, "frontend image should copy the Fumadocs source config before install scripts run")
@@ -47,6 +47,20 @@ func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
 	require.Contains(t, dockerignoreText, "docs/*", "docker build context should continue excluding non-public docs by default")
 	require.Contains(t, dockerignoreText, "!docs/public", "docker build context should include the public docs directory")
 	require.Contains(t, dockerignoreText, "!docs/public/**", "docker build context should include public docs files for Fumadocs generation")
+}
+
+func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
+	t.Parallel()
+
+	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
+	require.NoError(t, err, "test should read the frontend Dockerfile")
+	dockerfileText := string(dockerfile)
+
+	require.Contains(t, dockerfileText, "WORKDIR /app/frontend", "frontend image build should run Next from the repo-shaped frontend directory")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/standalone ./", "frontend runtime image should copy the full repo-scoped standalone tree")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/static ./frontend/.next/static", "frontend runtime image should stage static assets next to the repo-scoped standalone server")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/public ./frontend/public", "frontend runtime image should stage public assets next to the repo-scoped standalone server")
+	require.Contains(t, dockerfileText, `CMD ["node", "frontend/server.js"]`, "frontend runtime image should start the server path emitted by repo-scoped Next standalone output")
 }
 
 func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
