@@ -271,7 +271,7 @@ These are covered in detail in [43-prompt-and-input-versioning.md](43-prompt-and
 |-------|--------------|-----------------|
 | **Prompt templates** (19 templates in `internal/prompts/templates/`) | Embedded in Go binary, identical across all orgs, change only on deploy | `server_deploy_sha` — prompts are code, not config. The deploy SHA pins them all. |
 | **PM documents** (roadmap, philosophy, context) | Overwritten in place, no history | Insert-only versioning on `pm_documents` with `active` flag |
-| **Org settings** (token limits, confidence thresholds, context limits, autonomy) | Already insert-only versioned | Record active version ID in manifest |
+| **Org settings** (token limits, context limits, autonomy) | Already insert-only versioned | Record active version ID in manifest |
 | **Memory context** (learned conventions from review feedback) | Changes over time, not snapshotted | Snapshot selected memory IDs + content in manifest |
 | **Sandbox image version** | Uses mutable `"143-sandbox:latest"` | Pin to image digest, record in manifest |
 | **Integration skills doc** (auto-generated CLI tool docs) | Changes when integrations change | Content hash in manifest |

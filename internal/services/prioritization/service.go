@@ -52,17 +52,13 @@ type jobStore interface {
 // NOTE: This duplicates fields from models.OrgSettings. The two structs use
 // identical JSON tags and must be kept in sync when adding new fields. A full
 // unification is not done because the nested struct shapes differ slightly
-// (e.g. ConfidenceThresholds, PriorityWeights use inline structs here).
+// (e.g. PriorityWeights use inline structs here).
 type OrgSettings struct {
-	AutonomyLevel        string `json:"autonomy_level"`
-	Aggressiveness       int    `json:"execution_aggressiveness"`
-	MaxConcurrentRuns    int    `json:"max_concurrent_runs"`
-	AgentAutonomy        string `json:"agent_autonomy"`
-	ConfidenceThresholds struct {
-		AutoProceed float64 `json:"auto_proceed"`
-		HumanReview float64 `json:"human_review"`
-	} `json:"confidence_thresholds"`
-	PriorityWeights struct {
+	AutonomyLevel     string `json:"autonomy_level"`
+	Aggressiveness    int    `json:"execution_aggressiveness"`
+	MaxConcurrentRuns int    `json:"max_concurrent_runs"`
+	AgentAutonomy     string `json:"agent_autonomy"`
+	PriorityWeights   struct {
 		CustomerImpact float64 `json:"customer_impact"`
 		Severity       float64 `json:"severity"`
 		Recency        float64 `json:"recency"`

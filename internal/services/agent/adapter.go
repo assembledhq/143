@@ -283,16 +283,13 @@ type AgentPrompt struct {
 
 // AgentResult is the outcome of an agent execution.
 type AgentResult struct {
-	Diff                string
-	Summary             string
-	TokenUsage          TokenUsage
-	ExitCode            int
-	Error               string
-	ConfidenceScore     float64 // 0.0-1.0, self-assessed by the agent
-	ConfidenceReasoning string
-	RiskFactors         []string
-	AgentSessionID      string // agent's internal session ID, used for --resume on subsequent turns
-	RequiresHumanInput  bool
+	Diff               string
+	Summary            string
+	TokenUsage         TokenUsage
+	ExitCode           int
+	Error              string
+	AgentSessionID     string // agent's internal session ID, used for --resume on subsequent turns
+	RequiresHumanInput bool
 }
 
 type HumanInputRequest struct {

@@ -18,7 +18,7 @@ var sessionThreadTestColumns = []string{
 	"id", "session_id", "org_id", "agent_type", "model_override",
 	"label", "instructions", "file_scope", "status", "agent_session_id",
 	"current_turn", "last_activity_at",
-	"confidence_score", "result_summary", "diff", "failure_explanation", "failure_category",
+	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 }
@@ -28,7 +28,7 @@ func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now
 		threadID, sessionID, orgID, "claude_code", nil,
 		label, nil, nil, "pending", nil,
 		0, nil,
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
 		nil, nil, now,
 		nil, nil, float64(0), 0, nil,
 	}
@@ -270,7 +270,7 @@ func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
 	row := func(id uuid.UUID) []interface{} {
 		base := newSessionThreadRow(id, sessionID, orgID, "thread", now)
 		base[8] = "running"   // status
-		base[17] = &startedAt // started_at
+		base[16] = &startedAt // started_at
 		return base
 	}
 
@@ -342,19 +342,14 @@ func TestSessionThreadStore_Archive(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	now := time.Now()
+	row := newSessionThreadRow(threadID, sessionID, orgID, "Review", now)
+	row[8] = "completed"
+	row[19] = &now
 
 	mock.ExpectQuery(`WITH visible_threads AS[\s\S]*FOR UPDATE[\s\S]*UPDATE session_threads[\s\S]*SET archived_at = now\(\)[\s\S]*WHERE id = @id[\s\S]*session_id = @session_id[\s\S]*org_id = @org_id[\s\S]*archived_at IS NULL[\s\S]*RETURNING`).
 		WithArgs(anyArgs(3)...).
 		WillReturnRows(
-			pgxmock.NewRows(sessionThreadTestColumns).
-				AddRow(
-					threadID, sessionID, orgID, "claude_code", nil,
-					"Review", nil, nil, "completed", nil,
-					1, nil,
-					nil, nil, nil, nil, nil,
-					nil, nil, now,
-					&now, nil, float64(0), 0, nil,
-				),
+			pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...),
 		)
 
 	thread, err := store.Archive(context.Background(), orgID, sessionID, threadID)
@@ -438,18 +433,15 @@ func TestSessionThreadStore_UpdateEditable(t *testing.T) {
 		{
 			name: "updates blank idle threads",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, now time.Time, model string) {
+				row := newSessionThreadRow(threadID, sessionID, orgID, "Codex 2", now)
+				row[3] = "codex"
+				row[4] = &model
+				row[8] = "idle"
 				mock.ExpectQuery(`UPDATE session_threads[\s\S]*WHERE id = @id[\s\S]*org_id = @org_id[\s\S]*session_id = @session_id[\s\S]*status = 'idle'[\s\S]*current_turn = 0[\s\S]*RETURNING`).
 					WithArgs(anyArgs(6)...).
 					WillReturnRows(
 						pgxmock.NewRows(sessionThreadTestColumns).
-							AddRow(
-								threadID, sessionID, orgID, "codex", &model,
-								"Codex 2", nil, nil, "idle", nil,
-								0, nil,
-								nil, nil, nil, nil, nil,
-								nil, nil, now,
-								nil, nil, float64(0), 0, nil,
-							),
+							AddRow(row...),
 					)
 			},
 		},
@@ -770,20 +762,17 @@ func TestSessionThreadStore_UpdateResult(t *testing.T) {
 
 			summary := "done"
 			diff := "some diff"
-			score := 0.95
 			failErr := "something went wrong"
 			failCat := "runtime"
 			result := &models.SessionResult{
-				ConfidenceScore: &score,
 				ResultSummary:   &summary,
 				Diff:            &diff,
 				Error:           &failErr,
 				FailureCategory: &failCat,
 			}
 
-			// UpdateResult has 8 named args: id, org_id, status, confidence_score, result_summary, diff, failure_explanation, failure_category
 			mock.ExpectExec("UPDATE session_threads").
-				WithArgs(anyArgs(8)...).
+				WithArgs(anyArgs(7)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
 
 			err = store.UpdateResult(context.Background(), orgID, threadID, tt.status, result)
@@ -814,7 +803,7 @@ func TestSessionThreadStore_UpdateResult_NilError(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE session_threads").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(7)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateResult(context.Background(), orgID, threadID, models.ThreadStatusCompleted, result)
@@ -913,16 +902,13 @@ func TestSessionThreadStore_UpdateTurnComplete(t *testing.T) {
 
 			summary := "turn done"
 			diff := "some diff"
-			score := 0.8
 			result := &models.SessionResult{
-				ConfidenceScore: &score,
-				ResultSummary:   &summary,
-				Diff:            &diff,
+				ResultSummary: &summary,
+				Diff:          &diff,
 			}
 
-			// UpdateTurnComplete has 7 named args: id, org_id, current_turn, agent_session_id, confidence_score, result_summary, diff
 			mock.ExpectExec("UPDATE session_threads").
-				WithArgs(anyArgs(7)...).
+				WithArgs(anyArgs(6)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
 
 			err = store.UpdateTurnComplete(context.Background(), orgID, threadID, 2, result, "sess-123")

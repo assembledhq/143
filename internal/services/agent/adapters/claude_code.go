@@ -224,8 +224,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		Level:     "info",
 		Message:   "Claude Code CLI completed",
 		Metadata: map[string]interface{}{
-			"exit_code":        exitCode,
-			"confidence_score": result.ConfidenceScore,
+			"exit_code": exitCode,
 		},
 	}
 
@@ -542,7 +541,6 @@ func parseClaudeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 		}
 		if summary != "" {
 			*summaryParts = append(*summaryParts, summary)
-			tryExtractConfidence(summary, result)
 		}
 		if len(event.Usage) > 0 {
 			mergeTokenUsage(&result.TokenUsage, parseClaudeUsage(event.Usage))
@@ -579,7 +577,6 @@ func emitClaudeAssistantBlocks(event claudeStreamEvent, result *agent.AgentResul
 				Message:   block.Text,
 			}
 			*lastAssistant = block.Text
-			tryExtractConfidence(block.Text, result)
 
 		case "tool_use":
 			logCh <- agent.LogEntry{
@@ -996,39 +993,6 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 		result.Summary = strings.Join(summaryParts, "\n")
 	} else if lastAssistantContent != "" {
 		result.Summary = lastAssistantContent
-	}
-}
-
-// tryExtractConfidence attempts to find and parse a confidence JSON block
-// from agent output text.
-func tryExtractConfidence(text string, result *agent.AgentResult) {
-	// Look for ```json ... ``` blocks containing confidence_score.
-	idx := strings.Index(text, "\"confidence_score\"")
-	if idx == -1 {
-		return
-	}
-
-	// Find the enclosing braces.
-	start := strings.LastIndex(text[:idx], "{")
-	end := strings.Index(text[idx:], "}")
-	if start == -1 || end == -1 {
-		return
-	}
-	jsonStr := text[start : idx+end+1]
-
-	var confidence struct {
-		Score     float64  `json:"confidence_score"`
-		Reasoning string   `json:"confidence_reasoning"`
-		Risks     []string `json:"risk_factors"`
-	}
-	if err := json.Unmarshal([]byte(jsonStr), &confidence); err != nil {
-		return
-	}
-
-	if confidence.Score > 0 {
-		result.ConfidenceScore = confidence.Score
-		result.ConfidenceReasoning = confidence.Reasoning
-		result.RiskFactors = confidence.Risks
 	}
 }
 

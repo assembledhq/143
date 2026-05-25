@@ -18,7 +18,7 @@ Multi-tenancy root. Each self-hosted instance has at least one org.
 |--------|------|-------|
 | id | uuid | PK |
 | name | text | |
-| settings | jsonb | org-wide config (autonomy level, token budget, product direction, execution aggressiveness, confidence thresholds, issue type overrides, etc.) |
+| settings | jsonb | org-wide config (autonomy level, token budget, product direction, execution aggressiveness, issue type overrides, etc.) |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 
@@ -245,9 +245,6 @@ Each attempt to fix an issue via a coding agent.
 | autonomy_level | text | `manual`, `auto_simple`, `auto_all` |
 | token_mode | text | `low`, `high` |
 | complexity_tier | int | snapshot of the complexity tier at run time |
-| confidence_score | float | agent's self-assessed confidence (0-1) |
-| confidence_reasoning | text | agent's explanation of confidence |
-| risk_factors | text[] | agent-identified risks |
 | container_id | text | sandbox container identifier |
 | started_at | timestamptz | |
 | completed_at | timestamptz | |
@@ -308,7 +305,6 @@ Per-thread state for multi-agent sessions. Each thread runs a separate agent pro
 | agent_session_id | text | provider session identifier |
 | current_turn | int | incremented each turn |
 | last_activity_at | timestamptz | |
-| confidence_score | float | thread-level confidence (0-1) |
 | result_summary | text | what this thread accomplished |
 | diff | text | thread's generated diff |
 | failure_explanation | text | |

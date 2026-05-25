@@ -228,7 +228,7 @@ The structured fields (with examples in the UI) make this fast to fill out — 5
 
 The PM agent also receives **raw outcome data** that it can reason over directly — no pre-computed aggregates. Since the PM runs as a full agent with codebase access, it's capable of drawing its own conclusions from raw data:
 
-- **Recent run outcomes** (last ~20): success/failure, failure category, confidence score, which issue. The PM can spot patterns itself ("3 of the last 5 failures were in repo X").
+- **Recent run outcomes** (last ~20): success/failure, failure category, and issue. The PM can spot patterns itself ("3 of the last 5 failures were in repo X").
 - **Recent PR outcomes** (last ~20): merged/rejected/reverted, reviewer comments. The PM can see what reviewers are pushing back on.
 - **In-flight runs**: what's currently being worked on, so the PM doesn't duplicate effort.
 - **Issue timestamps**: `first_seen`, `last_seen`, and `occurrence_count` on each issue let the PM see trends directly.
@@ -985,7 +985,7 @@ The existing `ProductDirection string` field is kept for backward compatibility 
 A page showing the PM agent's latest analysis and work plan:
 
 - **Analysis section** — the PM's 2-3 paragraph situation summary
-- **Task list** — ordered cards showing rank, title, reasoning, approach, confidence badge
+- **Task list** — ordered cards showing rank, title, reasoning, and approach
   - Each card shows which coding agent run it spawned (linked)
   - Status: delegated / skipped (capacity) / completed / failed
 - **Clusters section** — visual grouping of related issues with root cause

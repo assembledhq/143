@@ -17,7 +17,7 @@ import (
 var sessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy",
 	"agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -47,7 +47,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		id, primaryIssueID, orgID, "issue_trigger", "single_run", "on_turn_complete",
 		"claude_code", "pending", "supervised", "low",
-		nil, nil, nil, []string{},
+		nil,
 		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
@@ -280,7 +280,7 @@ func TestSessionStore_GetByID_WithUnpushedChanges(t *testing.T) {
 	issueID := uuid.New()
 	now := time.Now()
 	row := newSessionRow(runID, issueID, orgID, now)
-	row[81] = true // has_unpushed_changes
+	row[78] = true // has_unpushed_changes
 
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -504,7 +504,7 @@ func TestSessionStore_GetByID_PreservesPersistedPolicy(t *testing.T) {
 	row[3] = models.SessionOriginIssueTrigger
 	row[4] = models.SessionInteractionModeSingleRun
 	row[5] = models.SessionValidationPolicyOnTurnComplete
-	row[36] = &userID
+	row[33] = &userID
 
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

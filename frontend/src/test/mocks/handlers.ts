@@ -49,8 +49,6 @@ export const mockSessions: Session[] = [
     status: 'completed',
     autonomy_level: 'full',
     token_mode: 'standard',
-    confidence_score: 0.92,
-    confidence_reasoning: 'High confidence fix',
     started_at: '2026-02-17T07:00:00Z',
     completed_at: '2026-02-17T07:05:30Z',
     result_summary: 'Fixed TypeError by adding null check',

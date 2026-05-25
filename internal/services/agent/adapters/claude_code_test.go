@@ -849,15 +849,6 @@ func TestParseStreamOutput(t *testing.T) {
 			},
 		},
 		{
-			name:   "result event with confidence in summary",
-			output: `{"type":"result","subtype":"success","result":"Fixed.\n{\"confidence_score\": 0.95, \"confidence_reasoning\": \"Straightforward\", \"risk_factors\": [\"none\"]}"}`,
-			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
-				t.Helper()
-				require.InDelta(t, 0.95, result.ConfidenceScore, 0.001)
-				require.Equal(t, "Straightforward", result.ConfidenceReasoning)
-			},
-		},
-		{
 			name:   "unknown event type logged as debug",
 			output: `{"type":"unknown_type","payload":{}}`,
 			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
@@ -909,60 +900,6 @@ func TestParseStreamOutput(t *testing.T) {
 				logs = append(logs, entry)
 			}
 			tt.checkResult(t, result, logs)
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// tryExtractConfidence
-// ---------------------------------------------------------------------------
-
-func TestTryExtractConfidence(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		text          string
-		wantScore     float64
-		wantReasoning string
-		wantRisks     []string
-	}{
-		{
-			name:      "no confidence block",
-			text:      "Just some regular text with no confidence data.",
-			wantScore: 0,
-		},
-		{
-			name:          "valid confidence block",
-			text:          `Here is my fix. {"confidence_score": 0.88, "confidence_reasoning": "Simple fix", "risk_factors": ["edge case"]}`,
-			wantScore:     0.88,
-			wantReasoning: "Simple fix",
-			wantRisks:     []string{"edge case"},
-		},
-		{
-			name:      "malformed JSON around confidence_score",
-			text:      `{"confidence_score": bad_value}`,
-			wantScore: 0,
-		},
-		{
-			name:      "missing braces",
-			text:      `"confidence_score": 0.5`,
-			wantScore: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := &agent.AgentResult{}
-			tryExtractConfidence(tt.text, result)
-			require.InDelta(t, tt.wantScore, result.ConfidenceScore, 0.001)
-			if tt.wantReasoning != "" {
-				require.Equal(t, tt.wantReasoning, result.ConfidenceReasoning)
-			}
-			if tt.wantRisks != nil {
-				require.Equal(t, tt.wantRisks, result.RiskFactors)
-			}
 		})
 	}
 }

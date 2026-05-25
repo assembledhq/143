@@ -6,11 +6,11 @@ This document resolves conflicts, ambiguities, and gaps identified during design
 
 ---
 
-## Resolution 1: Confidence vs. Aggressiveness Decision Flowchart
+## Resolution 1: Aggressiveness Decision Flowchart
 
 **Docs affected**: 05-prioritization.md, 06-agent-orchestrator.md, 12-smart-routing.md
 
-**Resolution**: Aggressiveness and confidence are **sequential gates**, not independent controls. Aggressiveness gates **before** the run (can we attempt it?). Confidence gates **after** the run (what do we do with the result?).
+**Resolution**: Aggressiveness is a pre-run gate that decides whether an issue should be attempted automatically. Post-run confidence gates were removed from the session lifecycle.
 
 ### Decision Flowchart
 
@@ -41,25 +41,16 @@ Issue eligible for agent run
             │
             ▼
 ┌─────────────────────────────────┐
-│  GATE 2: Confidence Check       │
-│  (post-run, doc 12)             │
-│                                 │
-│  score >= auto_proceed (0.8):   │
-│    → proceed to validation      │
-│                                 │
-│  score >= human_review (0.5):   │
-│    → proceed, flag for review   │
-│                                 │
-│  score < human_review (0.5):    │
-│    → pause, needs_human_guidance│
+│  COMPLETE: Persist result       │
+│  and follow validation policy   │
 └─────────────────────────────────┘
 ```
 
-**Key rule**: A high confidence score does NOT let a run bypass the aggressiveness gate. Aggressiveness controls which tiers are *attempted*. Confidence controls what happens with the *result*. They are never in tension — they operate at different lifecycle stages.
+**Key rule**: Aggressiveness controls which tiers are *attempted*. Completed coding-agent runs do not emit or gate on an LLM self-rating.
 
 **Add to doc 12**, section "How Aggressiveness Interacts with Autonomy":
 
-> **Relationship to confidence scoring**: Aggressiveness is a pre-run gate; confidence is a post-run gate. They operate sequentially, never interact. A tier-4 issue blocked by aggressiveness level 2 will never run, regardless of what confidence score it might produce. Conversely, a tier-1 issue that passes the aggressiveness gate can still be paused by a low confidence score after execution.
+> **Relationship to execution**: Aggressiveness is a pre-run gate. A tier-4 issue blocked by aggressiveness level 2 will not run automatically.
 
 ---
 
@@ -493,4 +484,3 @@ func (w *Worker) checkStuckJobs(ctx context.Context) error {
 **Add to doc 10**, section "Job Queue Distribution":
 
 > **Crash recovery**: If a worker crashes, Postgres releases its `FOR UPDATE` locks on connection close. The dead node cleanup routine (runs every 30s on all worker-capable nodes) detects dead nodes after 2 minutes without heartbeat and re-queues their jobs. Additionally, a stuck job detector re-queues jobs that exceed their type-specific timeout.
-
