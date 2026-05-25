@@ -1047,7 +1047,7 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/v1/sessions/{id}/preview/ensure — Ensure a session has a preview
+// EnsurePreview handles POST /api/v1/sessions/{id}/preview/ensure.
 func (h *PreviewHandler) EnsurePreview(w http.ResponseWriter, r *http.Request) {
 	// Keep the org-context access visible to the handler tenancy lint; the
 	// shared implementation below also reads this value.
