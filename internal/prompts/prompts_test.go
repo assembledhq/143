@@ -161,9 +161,6 @@ func TestCodingTaskPreamble(t *testing.T) {
 	result := CodingTaskPreamble()
 	assert.NotEmpty(t, result)
 	assert.Contains(t, result, "untrusted external content")
-	assert.Contains(t, result, "confidence_score")
-	assert.Contains(t, result, "confidence_reasoning")
-	assert.Contains(t, result, "risk_factors")
 }
 
 func TestSessionTitlePrompt(t *testing.T) {

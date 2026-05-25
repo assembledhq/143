@@ -43,7 +43,6 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 	streamOutput := `{"type":"assistant","content":"Reading the file."}
 {"type":"tool_use","name":"read","input":{"path":"x.go"},"model":"anthropic/claude-sonnet-4-6"}
 {"type":"tool_result","name":"read","output":"contents"}
-{"type":"assistant","content":"Patched.\n{\"confidence_score\": 0.7, \"confidence_reasoning\": \"reviewed\", \"risk_factors\": []}"}
 {"type":"done","content":"complete","usage":{"input_tokens":900,"output_tokens":150}}
 `
 
@@ -94,7 +93,6 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 	close(logCh)
 
 	require.Equal(t, 0, result.ExitCode)
-	require.InDelta(t, 0.7, result.ConfidenceScore, 0.001)
 	require.Equal(t, 900, result.TokenUsage.InputTokens)
 	require.Equal(t, 150, result.TokenUsage.OutputTokens)
 	require.Contains(t, result.Diff, "diff --git")
@@ -108,7 +106,7 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 		if l.Level == "tool_use" {
 			sawTool = true
 		}
-		if l.Level == "output" && strings.Contains(l.Message, "Patched") {
+		if l.Level == "output" && strings.Contains(l.Message, "Reading the file") {
 			sawAssistant = true
 		}
 	}

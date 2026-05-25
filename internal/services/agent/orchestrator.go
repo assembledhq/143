@@ -678,7 +678,7 @@ type ContinueSessionOptions struct {
 	// OnTurnComplete fires after a successful turn with the agent's full
 	// result. The thread continuation handler uses this both to emit file-
 	// attribution events (from result.Diff) and to persist per-tab turn
-	// metadata (result.Summary, result.ConfidenceScore, result.Diff) onto
+	// metadata (result.Summary and result.Diff) onto
 	// the thread row so revert and the summary panel have data. Errors are
 	// swallowed by the orchestrator: per-tab bookkeeping is operational,
 	// not critical to the turn itself.
@@ -2563,28 +2563,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.warmMentionIndexFromSandboxAsync(ctx, run, sandbox, snapshotKey, log)
 	}
 
-	// Fetch org settings for confidence thresholds.
-	confidenceThresholds := models.ConfidenceThresholdsForAutonomy(models.DefaultAgentAutonomy)
-	if o.orgs != nil {
-		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
-			orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
-			if parseErr != nil {
-				o.logger.Warn().Err(parseErr).Str("org_id", run.OrgID.String()).Msg("failed to parse org settings, using defaults")
-			} else {
-				confidenceThresholds = orgSettings.ConfidenceThresholds
-			}
-		}
-	}
-
 	// Store the successful result.
 	runResult := o.buildRunResult(ctx, run, sandbox, result)
 	status := models.SessionStatusCompleted
 	isInteractive := run.IsInteractive() && snapshotKey != ""
-
-	// 11. Confidence gating: use org-configured auto-proceed threshold.
-	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
-		status = models.SessionStatusNeedsHumanGuidance
-	}
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
@@ -2610,9 +2592,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Msg("interactive session turn completed and returned to idle")
 		logAgentRunFinished(log, run, "idle", runStartedAt, func(event *zerolog.Event) {
 			event.
-				Str("status", "idle").
-				Float64("confidence", result.ConfidenceScore).
-				Float64("threshold", confidenceThresholds.AutoProceed)
+				Str("status", "idle")
 		})
 		return nil
 	}
@@ -2641,22 +2621,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	logAgentRunFinished(log, run, string(status), runStartedAt, func(event *zerolog.Event) {
 		event.
-			Str("status", string(status)).
-			Float64("confidence", result.ConfidenceScore).
-			Float64("threshold", confidenceThresholds.AutoProceed)
+			Str("status", string(status))
 	})
 
-	// 12. Enqueue follow-up job based on confidence.
-	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
-		payload := map[string]interface{}{
-			"session_id": run.ID.String(),
-			"org_id":     run.OrgID.String(),
-		}
-		if issueSnapshot != nil {
-			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-		}
-		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
+	payload := map[string]interface{}{
+		"session_id": run.ID.String(),
+		"org_id":     run.OrgID.String(),
 	}
+	if issueSnapshot != nil {
+		payload["issue_snapshot_id"] = issueSnapshot.ID.String()
+	}
+	o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
@@ -5116,19 +5091,16 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
 
 	return &models.SessionResult{
-		ConfidenceScore:     &result.ConfidenceScore,
-		ConfidenceReasoning: strPtr(result.ConfidenceReasoning),
-		RiskFactors:         result.RiskFactors,
-		TokenUsage:          tokenUsage,
-		ModelUsed:           modelUsed,
-		ResultSummary:       strPtr(result.Summary),
-		Diff:                strPtr(result.Diff),
-		Error:               strPtr(result.Error),
-		DiffBaseCommitSHA:   run.BaseCommitSHA,
-		DiffHeadCommitSHA:   headSHA,
-		DiffWorkspaceDirty:  workspaceDirty,
-		DiffCollectedAt:     timePtr(time.Now().UTC()),
-		DiffSource:          "turn_complete",
+		TokenUsage:         tokenUsage,
+		ModelUsed:          modelUsed,
+		ResultSummary:      strPtr(result.Summary),
+		Diff:               strPtr(result.Diff),
+		Error:              strPtr(result.Error),
+		DiffBaseCommitSHA:  run.BaseCommitSHA,
+		DiffHeadCommitSHA:  headSHA,
+		DiffWorkspaceDirty: workspaceDirty,
+		DiffCollectedAt:    timePtr(time.Now().UTC()),
+		DiffSource:         "turn_complete",
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 var sessionTestColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy",
 	"agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -38,6 +38,14 @@ var sessionTestColumns = []string{
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+}
+
+func anyDBArgs(count int) []interface{} {
+	args := make([]interface{}, count)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -57,7 +65,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 	return []interface{}{
 		sessionID, primaryIssueID, orgID, "issue_trigger", "single_run", "on_turn_complete",
 		"claude-code", "completed", "supervised", "low",
-		nil, nil, nil, nil,
+		nil,
 		nil, nil, false, &startedAt, &completedAt, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
@@ -934,11 +942,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 
 	now := time.Now()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(11)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -964,11 +968,7 @@ func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
 	now := time.Now()
 
 	mock.ExpectQuery(`UPDATE sessions[\s\S]+model_used = COALESCE\(@model_used, model_used\)`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(11)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -1066,11 +1066,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 
 		store := NewSessionStore(mock)
 		mock.ExpectQuery("UPDATE sessions").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WithArgs(anyDBArgs(11)...).
 			WillReturnError(context.DeadlineExceeded)
 
 		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted, &models.SessionResult{})
@@ -1108,11 +1104,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should tolerate best-effort Redis publish failures")
 
 		mock.ExpectQuery("UPDATE sessions").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WithArgs(anyDBArgs(11)...).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
 		err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{})
@@ -1434,8 +1426,7 @@ func TestSessionStore_SoftDelete_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func stringPtr(s string) *string    { return &s }
-func float64Ptr(f float64) *float64 { return &f }
+func stringPtr(s string) *string { return &s }
 
 // =============================================================================
 // Additional session store tests for coverage
@@ -1567,18 +1558,13 @@ func TestSessionStore_UpdateTurnComplete(t *testing.T) {
 	store := NewSessionStore(mock)
 
 	result := &models.SessionResult{
-		ConfidenceScore:     float64Ptr(0.85),
-		ConfidenceReasoning: stringPtr("good progress"),
-		RiskFactors:         []string{"none"},
-		TokenUsage:          json.RawMessage(`{"input":100,"output":200}`),
-		ResultSummary:       stringPtr("task done"),
-		Diff:                stringPtr("diff content"),
+		TokenUsage:    json.RawMessage(`{"input":100,"output":200}`),
+		ResultSummary: stringPtr("task done"),
+		Diff:          stringPtr("diff content"),
 	}
 
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")

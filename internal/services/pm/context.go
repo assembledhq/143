@@ -98,7 +98,6 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 			RunID:              run.ID,
 			IssueID:            run.PrimaryIssueID,
 			Status:             string(run.Status),
-			ConfidenceScore:    run.ConfidenceScore,
 			FailureCategory:    run.FailureCategory,
 			FailureExplanation: run.FailureExplanation,
 			CompletedAt:        run.CompletedAt,

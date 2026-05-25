@@ -162,7 +162,7 @@ Admins can:
 - **Override priority** — manually boost or suppress specific issues
 - **Set autonomy level** — controls auto-triggering
 - **Set execution aggressiveness** — controls which complexity tiers are attempted (see [12-smart-routing.md](../backlog/12-smart-routing.md))
-- **Set confidence thresholds** — control when runs are auto-approved vs. paused for human review
+- **Set execution policies** — control which complexity tiers can be attempted automatically
 
 ## Score Explainability
 

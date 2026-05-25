@@ -133,7 +133,7 @@ const hasUnpushedChangesColumn = `EXISTS (
 const sessionSelectColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
-	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	complexity_tier,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
@@ -160,7 +160,7 @@ const (
 const sessionListColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
-	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	complexity_tier,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
@@ -183,7 +183,7 @@ const sessionListColumns = `id,
 const sessionAPIDetailColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
-	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	complexity_tier,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
@@ -1157,8 +1157,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		            THEN now()
 		        ELSE completed_at
 		    END,
-		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
-		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
@@ -1170,20 +1169,17 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
-		"id":                   runID,
-		"org_id":               orgID,
-		"status":               string(status),
-		"confidence_score":     result.ConfidenceScore,
-		"confidence_reasoning": result.ConfidenceReasoning,
-		"risk_factors":         result.RiskFactors,
-		"token_usage":          result.TokenUsage,
-		"model_used":           result.ModelUsed,
-		"result_summary":       result.ResultSummary,
-		"diff":                 result.Diff,
-		"error":                result.Error,
-		"base_commit_sha":      result.DiffBaseCommitSHA,
-		"diff_collected_at":    result.DiffCollectedAt,
-		"diff_stats":           diffStats,
+		"id":                runID,
+		"org_id":            orgID,
+		"status":            string(status),
+		"token_usage":       result.TokenUsage,
+		"model_used":        result.ModelUsed,
+		"result_summary":    result.ResultSummary,
+		"diff":              result.Diff,
+		"error":             result.Error,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
+		"diff_stats":        diffStats,
 	})
 	if err != nil {
 		return err
@@ -1388,9 +1384,6 @@ func (s *SessionStore) ResetForRetry(ctx context.Context, orgID, sessionID uuid.
 		    failure_next_steps = NULL,
 		    failure_retry_advised = false,
 		    result_summary = NULL,
-		    confidence_score = NULL,
-		    confidence_reasoning = NULL,
-		    risk_factors = NULL,
 		    token_usage = NULL,
 		    diff = NULL,
 		    diff_stats = NULL,
@@ -1571,8 +1564,7 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
 		    branch_creation_state = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_state ELSE 'idle' END,
 		    branch_creation_error = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_error ELSE NULL END,
-		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
-		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
@@ -1584,22 +1576,19 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := db.Exec(ctx, query, pgx.NamedArgs{
-		"id":                   sessionID,
-		"org_id":               orgID,
-		"current_turn":         turn,
-		"agent_session_id":     agentSessionID,
-		"snapshot_key":         snapshotKey,
-		"confidence_score":     result.ConfidenceScore,
-		"confidence_reasoning": result.ConfidenceReasoning,
-		"risk_factors":         result.RiskFactors,
-		"token_usage":          result.TokenUsage,
-		"model_used":           result.ModelUsed,
-		"result_summary":       result.ResultSummary,
-		"diff":                 result.Diff,
-		"error":                result.Error,
-		"base_commit_sha":      result.DiffBaseCommitSHA,
-		"diff_collected_at":    result.DiffCollectedAt,
-		"diff_stats":           diffStats,
+		"id":                sessionID,
+		"org_id":            orgID,
+		"current_turn":      turn,
+		"agent_session_id":  agentSessionID,
+		"snapshot_key":      snapshotKey,
+		"token_usage":       result.TokenUsage,
+		"model_used":        result.ModelUsed,
+		"result_summary":    result.ResultSummary,
+		"diff":              result.Diff,
+		"error":             result.Error,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
+		"diff_stats":        diffStats,
 	})
 	return err
 }
@@ -1751,7 +1740,7 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 // UpdateWorkspaceSnapshot persists a refreshed snapshot key plus diff metadata
 // for workspace-mutating actions that are not agent turns, such as "revert this
 // tab". Unlike UpdateTurnComplete, this intentionally leaves status, current
-// turn, summary, and confidence untouched.
+// turn and summary untouched.
 func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
 	query := `
 		UPDATE sessions
