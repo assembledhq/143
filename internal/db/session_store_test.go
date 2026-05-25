@@ -1426,8 +1426,7 @@ func TestSessionStore_SoftDelete_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func stringPtr(s string) *string    { return &s }
-func float64Ptr(f float64) *float64 { return &f }
+func stringPtr(s string) *string { return &s }
 
 // =============================================================================
 // Additional session store tests for coverage
