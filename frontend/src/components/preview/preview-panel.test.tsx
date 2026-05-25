@@ -1043,7 +1043,7 @@ describe("PreviewPanel component", () => {
     expect(mockRestart).not.toHaveBeenCalled();
   });
 
-  it("starts a new preview when retrying after a failed preview", async () => {
+  it("ensures a preview when retrying after a failed preview", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "failed" }));
 
@@ -1056,8 +1056,9 @@ describe("PreviewPanel component", () => {
     await user.click(screen.getByRole("button", { name: "Retry Preview" }));
 
     await waitFor(() => {
-      expect(mockStart).toHaveBeenCalledWith("sess-1");
+      expect(mockEnsure).toHaveBeenCalledWith("sess-1");
     });
+    expect(mockStart).not.toHaveBeenCalled();
     expect(mockRestart).not.toHaveBeenCalled();
   });
 
