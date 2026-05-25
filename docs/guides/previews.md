@@ -102,6 +102,7 @@ Services share the sandbox's filesystem and `localhost` network namespace, so th
 | `preview.infrastructure` | no | Map of infra name → [infrastructure config](#infrastructure). Max 2. |
 | `preview.credentials` | yes | [Credential config](#credentials). Use `{"mode": "none"}` if no secrets needed. |
 | `preview.network` | yes | [Network config](#network). Use `{"mode": "managed"}` for the default sandbox egress policy. |
+| `preview.resources` | no | CPU, memory, and ephemeral disk requests/limits. See [Resources](#resources). |
 | `preview.progressive` | no | When `true`, a multi-service preview can become partially ready as soon as the primary service is ready. |
 | `preview.command` | yes for single-service | Single-service shorthand only. |
 | `preview.cwd` | no | Single-service shorthand only. |
@@ -135,6 +136,33 @@ This is valid when your preview is just one service:
 ```
 
 143 normalizes this internally into a single-entry `services` map.
+
+### Resources
+
+Use `preview.resources` when a repo needs more than the topology defaults. The names match Kubernetes resource names:
+
+```json
+{
+  "preview": {
+    "resources": {
+      "requests": {
+        "cpu": "500m",
+        "memory": "768Mi",
+        "ephemeral-storage": "5Gi"
+      },
+      "limits": {
+        "cpu": "1",
+        "memory": "1Gi",
+        "ephemeral-storage": "10Gi"
+      }
+    }
+  }
+}
+```
+
+`limits` win when present. If a limit is omitted, the matching request is used. If both are omitted, 143 uses topology defaults. CPU accepts Kubernetes-style values such as `500m`, `1`, or `1.5`. Memory and `ephemeral-storage` use the same byte-size parser and accept values such as `512Mi`, `1Gi`, `500mb`, or `5gb`.
+
+Hard caps are `2` CPU cores, `1Gi` memory, and `10Gi` ephemeral storage. Requests must be less than or equal to limits.
 
 ### Install
 
@@ -376,6 +404,7 @@ Fields read from the **session diff** (reflect agent changes):
 - Per-service `command`, `cwd`, `port`, `env`, `ready`.
 - `infrastructure.*.init_script` — so seed data can change alongside schema changes.
 - `install` — for non-connected previews, dependency install behavior can change with the app branch.
+- `resources` — for non-connected previews, bounded resource requests and limits can change with the app branch.
 
 For connected previews (anything with `credentials.mode != "none"` or non-empty `network.destinations`), **everything** pins to the base branch. A diff can't change launch behavior when secrets are in scope. This is enforced in code, not by policy.
 
@@ -391,8 +420,9 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 | Hard TTL | 30 min (extendable to 2 hr) |
 | Previews per user | 2 concurrent |
 | Previews per org | 5 concurrent |
-| Memory | 512 MB single-service, 1024 MB multi-service |
-| CPU | 0.5 core single-service, 1 core multi-service |
+| Memory | 384Mi single-service, 768Mi multi-service, 1024Mi multi-service with infrastructure |
+| CPU | 0.5 core single-service, 1 core multi-service, 2 cores multi-service with infrastructure |
+| Ephemeral storage | 10Gi default and max |
 
 ## Troubleshooting
 
@@ -418,6 +448,8 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 **How do I test config changes?** Commit `.143/config.json` and start a new session. There's no dry-run yet — invalid configs surface as a `PREVIEW_START_FAILED` error with the validation message.
 
 **Can I see npm's full debug log?** 143 captures the preview process output tail in `preview_logs`, not package-manager internal files such as `/home/sandbox/.npm/_logs/...`. If you need that file in the preview UI, make the repo's install command print it on failure.
+
+**Will increasing `ephemeral-storage` fix `/var/tmp` build failures?** Not always. The disk limit applies to the container root filesystem. If a tool writes to a tmpfs-backed path, configure it to use rootfs-backed cache paths instead, for example `GOTMPDIR` and `GOCACHE` for Go builds.
 
 **Does the preview use my production secrets?** No. Secrets come from admin-configured credential sets, never from the repo or agent. Without a `credentials` block, the preview has no secrets at all.
 

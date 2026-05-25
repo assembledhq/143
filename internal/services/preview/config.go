@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
@@ -52,6 +54,14 @@ const (
 
 	DefaultInstallTimeoutSeconds = 420
 	MaxInstallTimeoutSeconds     = 1800
+
+	DefaultPreviewDiskMiB      = 10 * 1024
+	DefaultSingleServiceMemory = 384
+	DefaultMultiServiceMemory  = 768
+	DefaultInfraServiceMemory  = 1024
+	MaxPreviewCPUMillis        = 2000
+	MaxPreviewMemoryMiB        = 1024
+	MaxPreviewEphemeralDiskMiB = 10 * 1024
 )
 
 var ErrInvalidConfig = errors.New("invalid preview config")
@@ -103,6 +113,7 @@ type rawPreviewConfig struct {
 	Install        *models.PreviewInstallConfig           `json:"install,omitempty"`
 	Services       map[string]models.ServiceConfig        `json:"services,omitempty"`
 	Infrastructure map[string]models.InfrastructureConfig `json:"infrastructure,omitempty"`
+	Resources      models.PreviewResourceRequirements     `json:"resources,omitempty"`
 	Credentials    models.CredentialConfig                `json:"credentials"`
 	Network        models.NetworkConfig                   `json:"network"`
 	Progressive    bool                                   `json:"progressive,omitempty"`
@@ -152,6 +163,7 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 		Name:           raw.Name,
 		Install:        cloneInstallConfig(raw.Install),
 		Infrastructure: raw.Infrastructure,
+		Resources:      raw.Resources,
 		Credentials:    raw.Credentials,
 		Network:        raw.Network,
 		Progressive:    raw.Progressive,
@@ -274,6 +286,7 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	}
 
 	errs = append(errs, validatePreviewInstallConfig(cfg.Install)...)
+	errs = append(errs, validatePreviewResources(cfg.Resources)...)
 
 	// Per-infrastructure validation.
 	for name, infra := range cfg.Infrastructure {
@@ -392,6 +405,131 @@ func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
 	}
 }
 
+func validatePreviewResources(resources models.PreviewResourceRequirements) []string {
+	var errs []string
+
+	reqCPU, reqCPUSet, err := parseCPUQuantity("preview.resources.requests.cpu", resources.Requests.CPU)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	reqMemory, reqMemorySet, err := parseByteQuantityMiB("preview.resources.requests.memory", resources.Requests.Memory)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	reqDisk, reqDiskSet, err := parseByteQuantityMiB("preview.resources.requests.ephemeral-storage", resources.Requests.EphemeralStorage)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	limitCPU, limitCPUSet, err := parseCPUQuantity("preview.resources.limits.cpu", resources.Limits.CPU)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	limitMemory, limitMemorySet, err := parseByteQuantityMiB("preview.resources.limits.memory", resources.Limits.Memory)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	limitDisk, limitDiskSet, err := parseByteQuantityMiB("preview.resources.limits.ephemeral-storage", resources.Limits.EphemeralStorage)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	if reqCPUSet && reqCPU > MaxPreviewCPUMillis {
+		errs = append(errs, "preview.resources.requests.cpu must be at most 2 cores")
+	}
+	if limitCPUSet && limitCPU > MaxPreviewCPUMillis {
+		errs = append(errs, "preview.resources.limits.cpu must be at most 2 cores")
+	}
+	if reqMemorySet && reqMemory > MaxPreviewMemoryMiB {
+		errs = append(errs, "preview.resources.requests.memory must be at most 1Gi")
+	}
+	if limitMemorySet && limitMemory > MaxPreviewMemoryMiB {
+		errs = append(errs, "preview.resources.limits.memory must be at most 1Gi")
+	}
+	if reqDiskSet && reqDisk > MaxPreviewEphemeralDiskMiB {
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most 10Gi")
+	}
+	if limitDiskSet && limitDisk > MaxPreviewEphemeralDiskMiB {
+		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most 10Gi")
+	}
+
+	if reqCPUSet && limitCPUSet && reqCPU > limitCPU {
+		errs = append(errs, "preview.resources.requests.cpu must be less than or equal to preview.resources.limits.cpu")
+	}
+	if reqMemorySet && limitMemorySet && reqMemory > limitMemory {
+		errs = append(errs, "preview.resources.requests.memory must be less than or equal to preview.resources.limits.memory")
+	}
+	if reqDiskSet && limitDiskSet && reqDisk > limitDisk {
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be less than or equal to preview.resources.limits.ephemeral-storage")
+	}
+
+	return errs
+}
+
+func parseCPUQuantity(field, raw string) (int, bool, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false, nil
+	}
+	if strings.HasSuffix(value, "m") {
+		millisRaw := strings.TrimSuffix(value, "m")
+		millis, err := strconv.Atoi(millisRaw)
+		if err != nil || millis <= 0 {
+			return 0, true, fmt.Errorf("%s must be a positive CPU quantity such as 500m, 1, or 1.5", field)
+		}
+		return millis, true, nil
+	}
+	cores, err := strconv.ParseFloat(value, 64)
+	if err != nil || cores <= 0 {
+		return 0, true, fmt.Errorf("%s must be a positive CPU quantity such as 500m, 1, or 1.5", field)
+	}
+	return int(math.Ceil(cores * 1000)), true, nil
+}
+
+func parseByteQuantityMiB(field, raw string) (int, bool, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false, nil
+	}
+
+	lower := strings.ToLower(value)
+	units := []struct {
+		suffix string
+		mib    float64
+	}{
+		{suffix: "gib", mib: 1024},
+		{suffix: "gi", mib: 1024},
+		{suffix: "gb", mib: 1000000000.0 / 1048576.0},
+		{suffix: "g", mib: 1000000000.0 / 1048576.0},
+		{suffix: "mib", mib: 1},
+		{suffix: "mi", mib: 1},
+		{suffix: "mb", mib: 1000000.0 / 1048576.0},
+		{suffix: "m", mib: 1000000.0 / 1048576.0},
+		{suffix: "kib", mib: 1.0 / 1024.0},
+		{suffix: "ki", mib: 1.0 / 1024.0},
+		{suffix: "kb", mib: 1000.0 / 1048576.0},
+		{suffix: "k", mib: 1000.0 / 1048576.0},
+		{suffix: "b", mib: 1.0 / 1048576.0},
+	}
+	for _, unit := range units {
+		if !strings.HasSuffix(lower, unit.suffix) {
+			continue
+		}
+		numberRaw := strings.TrimSpace(value[:len(value)-len(unit.suffix)])
+		number, err := strconv.ParseFloat(numberRaw, 64)
+		if err != nil || number <= 0 {
+			return 0, true, fmt.Errorf("%s must be a positive byte quantity such as 512Mi, 1Gi, 500mb, or 5gb", field)
+		}
+		return int(math.Ceil(number * unit.mib)), true, nil
+	}
+
+	bytes, err := strconv.ParseFloat(value, 64)
+	if err != nil || bytes <= 0 {
+		return 0, true, fmt.Errorf("%s must be a positive byte quantity such as 512Mi, 1Gi, 500mb, or 5gb", field)
+	}
+	return int(math.Ceil(bytes / 1048576.0)), true, nil
+}
+
 // =============================================================================
 // Trust split resolution
 // =============================================================================
@@ -417,8 +555,10 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 
 	if IsConnected(baseCfg) {
 		resolved.Install = cloneInstallConfig(baseCfg.Install)
+		resolved.Resources = baseCfg.Resources
 	} else {
 		resolved.Install = cloneInstallConfig(diffCfg.Install)
+		resolved.Resources = diffCfg.Resources
 	}
 	defaultPreviewInstallConfig(resolved.Install)
 
@@ -535,13 +675,34 @@ func DetectReadiness(cfg *models.PreviewConfig) models.PreviewDetectionResult {
 
 // ResolveResourceLimits returns the appropriate resource limits based on config.
 func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
+	limits := models.ResourceLimits{
+		MemoryMiB: DefaultSingleServiceMemory,
+		CPUMillis: 500,
+		DiskMiB:   DefaultPreviewDiskMiB,
+	}
 	if len(cfg.Services) > 1 && len(cfg.Infrastructure) > 0 {
-		return models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000}
+		limits.MemoryMiB = DefaultInfraServiceMemory
+		limits.CPUMillis = 2000
+	} else if len(cfg.Services) > 1 {
+		limits.MemoryMiB = DefaultMultiServiceMemory
+		limits.CPUMillis = 1000
 	}
-	if len(cfg.Services) > 1 {
-		return models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000}
+
+	applyResourceList := func(list models.PreviewResourceList) {
+		if parsed, ok, err := parseCPUQuantity("preview.resources.cpu", list.CPU); err == nil && ok {
+			limits.CPUMillis = parsed
+		}
+		if parsed, ok, err := parseByteQuantityMiB("preview.resources.memory", list.Memory); err == nil && ok {
+			limits.MemoryMiB = parsed
+		}
+		if parsed, ok, err := parseByteQuantityMiB("preview.resources.ephemeral-storage", list.EphemeralStorage); err == nil && ok {
+			limits.DiskMiB = parsed
+		}
 	}
-	return models.ResourceLimits{MemoryMB: 512, CPUMillis: 500}
+	applyResourceList(cfg.Resources.Requests)
+	applyResourceList(cfg.Resources.Limits)
+
+	return limits
 }
 
 // ApplyResourceLimitsToSandboxConfig maps preview topology limits onto the
@@ -551,6 +712,7 @@ func ApplyResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, cfg *mo
 		return
 	}
 	limits := ResolveResourceLimits(cfg)
-	sandboxCfg.MemoryLimitMB = limits.MemoryMB
+	sandboxCfg.MemoryLimitMB = limits.MemoryMiB
 	sandboxCfg.CPULimit = float64(limits.CPUMillis) / 1000
+	sandboxCfg.DiskLimitGB = int(math.Ceil(float64(limits.DiskMiB) / 1024.0))
 }

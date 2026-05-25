@@ -24,4 +24,5 @@ ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
 
-CMD ["node", "frontend/server.js"]
+WORKDIR /app/frontend
+CMD ["node", "server.js"]

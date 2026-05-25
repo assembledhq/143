@@ -1388,6 +1388,7 @@ Suggested fields:
 | `last_path` | text | last proxied request path for navigation restore on restart |
 | `memory_limit_mb` | int | resolved memory limit for the preview process |
 | `cpu_limit_millis` | int | resolved CPU limit for the preview process |
+| `disk_limit_mb` | int | resolved ephemeral disk limit for the preview process |
 | `error` | text | startup/runtime failure |
 | `created_at` | timestamptz | |
 
@@ -1886,12 +1887,13 @@ Default limits per preview:
 | CPU | 0.5 cores | 1.0 cores | 2.0 cores |
 | File watchers (`fs.inotify.max_user_watches`) | 65536 | 131072 | 131072 |
 
-The preview manager automatically applies the multi-service defaults when a config contains more than one service. These are enforced via Docker `--memory` and `--cpus` flags (or equivalent cgroup settings for other providers). The `PreviewConfig` should include a `resource_limits` field:
+The preview manager applies topology defaults unless the repo declares bounded `preview.resources.requests` or `preview.resources.limits`. These are enforced via Docker memory, CPU, and disk quota settings (or equivalent cgroup/provider settings). The resolved limits are represented internally as:
 
 ```go
 type ResourceLimits struct {
-    MemoryMB int // default 512 (single) or 1024 (multi), max 2048
-    CPUMillis int // default 500 (single) or 1000 (multi), max 2000
+    MemoryMiB int // default 384, 768, or 1024; max 1024
+    CPUMillis int // default 500, 1000, or 2000; max 2000
+    DiskMiB   int // default and max 10240
 }
 ```
 

@@ -24,6 +24,20 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
 }
 
+func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
+	t.Parallel()
+
+	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
+	require.NoError(t, err, "test should read the frontend Dockerfile")
+	dockerfileText := string(dockerfile)
+
+	require.Contains(t, dockerfileText, "WORKDIR /app/frontend", "frontend image build and runtime should use Next's repo-scoped frontend directory")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/standalone ./", "frontend runtime image should copy the full repo-scoped standalone tree")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/static ./frontend/.next/static", "frontend runtime image should stage static assets next to the repo-scoped standalone server")
+	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/public ./frontend/public", "frontend runtime image should stage public assets next to the repo-scoped standalone server")
+	require.Contains(t, dockerfileText, `CMD ["node", "server.js"]`, "frontend runtime image should start the server.js emitted into the frontend standalone directory")
+}
+
 func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
 	t.Parallel()
 
@@ -47,20 +61,6 @@ func TestFrontendDockerfileCopiesFumadocsInputsBeforeInstall(t *testing.T) {
 	require.Contains(t, dockerignoreText, "docs/*", "docker build context should continue excluding non-public docs by default")
 	require.Contains(t, dockerignoreText, "!docs/public", "docker build context should include the public docs directory")
 	require.Contains(t, dockerignoreText, "!docs/public/**", "docker build context should include public docs files for Fumadocs generation")
-}
-
-func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
-	t.Parallel()
-
-	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
-	require.NoError(t, err, "test should read the frontend Dockerfile")
-	dockerfileText := string(dockerfile)
-
-	require.Contains(t, dockerfileText, "WORKDIR /app/frontend", "frontend image build should run Next from the repo-shaped frontend directory")
-	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/standalone ./", "frontend runtime image should copy the full repo-scoped standalone tree")
-	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/.next/static ./frontend/.next/static", "frontend runtime image should stage static assets next to the repo-scoped standalone server")
-	require.Contains(t, dockerfileText, "COPY --from=builder /app/frontend/public ./frontend/public", "frontend runtime image should stage public assets next to the repo-scoped standalone server")
-	require.Contains(t, dockerfileText, `CMD ["node", "frontend/server.js"]`, "frontend runtime image should start the server path emitted by repo-scoped Next standalone output")
 }
 
 func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
@@ -900,6 +900,19 @@ func TestRollingDeployAllowsCaddyToDiscoverNewUpstreamBeforeDrainingOld(t *testi
 	require.NotEqual(t, -1, waitIndex, "wait call should be present in deploy script")
 	require.NotEqual(t, -1, drainIndex, "old-container drain should be present in deploy script")
 	require.Less(t, waitIndex, drainIndex, "Caddy upstream discovery wait should happen before draining old containers")
+}
+
+func TestRollingDeployDiagnosticsUseFailedServiceLogs(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `wait_container_healthy "$new_container" 180 "$service"`, "rolling app deploys should tell health diagnostics which service failed")
+	require.Contains(t, deployText, `service="${3:-$HEALTH_SERVICE}"`, "health wait should default to the role health service when no service is passed")
+	require.Contains(t, deployText, `echo "--- Last 50 lines of $service logs ---"`, "diagnostics should label logs with the failed service name")
+	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" logs --tail=50 "$service"`, "diagnostics should print logs from the failed service, not always the role health service")
 }
 
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {

@@ -54,7 +54,7 @@ const terminalStatusFilter = `('stopped', 'expired', 'failed')`
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
+	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -89,12 +89,12 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 			session_id, org_id, user_id, profile_name, name, status, provider,
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
-			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox
+			last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox
 		) VALUES (
 			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
-			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox
+			@last_path, @memory_limit_mb, @cpu_limit_millis, @disk_limit_mb, @recycle_config, @recycle_sandbox
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -115,6 +115,7 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 		"last_path":        p.LastPath,
 		"memory_limit_mb":  p.MemoryLimitMB,
 		"cpu_limit_millis": p.CPULimitMillis,
+		"disk_limit_mb":    p.DiskLimitMB,
 		"recycle_config":   p.RecycleConfig,
 		"recycle_sandbox":  p.RecycleSandbox,
 	})
@@ -566,7 +567,7 @@ func (s *PreviewStore) UpdatePreviewReservationConfig(
 	ctx context.Context,
 	orgID, id uuid.UUID,
 	name, primaryService, configDigest string,
-	memoryLimitMB, cpuLimitMillis int,
+	memoryLimitMB, cpuLimitMillis, diskLimitMB int,
 	recycleConfig, recycleSandbox []byte,
 ) (bool, error) {
 	query := `UPDATE preview_instances
@@ -575,6 +576,7 @@ func (s *PreviewStore) UpdatePreviewReservationConfig(
 		    config_digest = @digest,
 		    memory_limit_mb = @memory_limit_mb,
 		    cpu_limit_millis = @cpu_limit_millis,
+		    disk_limit_mb = @disk_limit_mb,
 		    recycle_config = @recycle_config,
 		    recycle_sandbox = @recycle_sandbox,
 		    updated_at = now()
@@ -587,6 +589,7 @@ func (s *PreviewStore) UpdatePreviewReservationConfig(
 		"digest":           configDigest,
 		"memory_limit_mb":  memoryLimitMB,
 		"cpu_limit_millis": cpuLimitMillis,
+		"disk_limit_mb":    diskLimitMB,
 		"recycle_config":   recycleConfig,
 		"recycle_sandbox":  recycleSandbox,
 	})
