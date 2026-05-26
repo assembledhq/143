@@ -1271,6 +1271,26 @@ func TestStartPreview_PreviewInstallFailureStopsBeforeServices(t *testing.T) {
 	}, failures[0].tail, "observer should receive the install output tail")
 }
 
+func TestBuildPreviewInstallCommand_RecreatesMarkerDirAfterCleanup(t *testing.T) {
+	t.Parallel()
+
+	cmd, err := buildPreviewInstallCommand(&models.PreviewInstallConfig{
+		Command:    []string{"bash", ".143/preview-install.sh"},
+		CleanPaths: []string{".143/cache", "node_modules"},
+	}, ".143/cache/preview-install/cache-key.done")
+	require.NoError(t, err, "buildPreviewInstallCommand should accept repo-local clean paths")
+
+	cleanIndex := strings.Index(cmd, "rm -rf -- .143/cache node_modules")
+	mkdirAfterCleanIndex := strings.LastIndex(cmd, "mkdir -p .143/cache/preview-install")
+	markerIndex := strings.Index(cmd, "printf 'ok\\n' > ")
+	require.NotEqual(t, -1, cleanIndex, "install command should clean declared paths")
+	require.NotEqual(t, -1, mkdirAfterCleanIndex, "install command should create the marker directory")
+	require.NotEqual(t, -1, markerIndex, "install command should write the success marker")
+	require.Contains(t, cmd, ".143/cache/preview-install/cache-key.done", "install command should write the expected marker path")
+	require.Greater(t, mkdirAfterCleanIndex, cleanIndex, "install command should recreate the marker directory after cleanup")
+	require.Less(t, mkdirAfterCleanIndex, markerIndex, "install command should recreate the marker directory before writing the marker")
+}
+
 func previewInstallTestConfig() *models.PreviewConfig {
 	return &models.PreviewConfig{
 		Name:    "test-app",
