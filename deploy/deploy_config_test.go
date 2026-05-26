@@ -449,6 +449,13 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
 	require.Contains(t, deployText, "install-static-egress-worker.sh.new", "worker deploys should sync the static egress install helper to existing workers")
+	require.Contains(t, deployText, "STATIC_EGRESS_PROBE_IMAGE:=ghcr.io/assembledhq/143-sandbox:$TAG", "worker deploys should default the static egress verifier to the release sandbox image")
+	require.Contains(t, deployText, "STATIC_EGRESS_PROBE_IMAGE=%s", "worker deploys should write the verifier image into the remote worker env")
+	require.Less(t,
+		strings.Index(deployText, `docker pull \"$STATIC_EGRESS_PROBE_IMAGE\"`),
+		strings.Index(deployText, "if ! run_worker_host_reconcile"),
+		"worker deploys should pull the configured static egress verifier image before root-side static egress verification",
+	)
 	require.NotContains(t, deployText, "STATIC_EGRESS_WORKER_PRIVATE_KEY=%q", "deploy should not place the WireGuard private key in ssh/sudo argv")
 	require.NotContains(t, deployText, "sudo -n env $reconcile_env", "deploy should let root-side reconciliation read static egress config from /opt/143/.env")
 

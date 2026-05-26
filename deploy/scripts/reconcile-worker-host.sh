@@ -40,7 +40,8 @@ load_static_egress_env() {
     STATIC_EGRESS_GATEWAY_PUBLIC_IP \
     STATIC_EGRESS_GATEWAY_PUBLIC_KEY \
     STATIC_EGRESS_WORKER_PRIVATE_KEY \
-    STATIC_EGRESS_WORKER_WG_ADDRESS; do
+    STATIC_EGRESS_WORKER_WG_ADDRESS \
+    STATIC_EGRESS_PROBE_IMAGE; do
     if [ -z "${!key:-}" ]; then
       load_static_egress_env_key "$key"
     fi

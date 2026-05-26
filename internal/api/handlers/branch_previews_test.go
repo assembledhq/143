@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/preview"
 )
@@ -152,6 +153,56 @@ func TestBranchPreviewHandlerWorkerSelectionRequirementsRequireStaticEgress(t *t
 
 	require.NoError(t, err, "branch preview worker selection should read org network settings")
 	require.True(t, reqs.StaticEgressRequired, "branch preview worker selection should require static-egress-capable workers for opted-in orgs")
+}
+
+func TestBranchPreviewRuntimeMatchesWorkerRequirements(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		req      preview.WorkerSelectionRequirements
+		expected bool
+	}{
+		{
+			name:     "static egress required rejects legacy direct runtime",
+			metadata: nil,
+			req:      preview.WorkerSelectionRequirements{StaticEgressRequired: true},
+			expected: false,
+		},
+		{
+			name:     "static egress required accepts static runtime",
+			metadata: map[string]string{agent.SandboxMetadataEgressMode: agent.SandboxEgressModeStatic},
+			req:      preview.WorkerSelectionRequirements{StaticEgressRequired: true},
+			expected: true,
+		},
+		{
+			name:     "direct egress rejects static runtime after setting is disabled",
+			metadata: map[string]string{agent.SandboxMetadataEgressMode: agent.SandboxEgressModeStatic},
+			req:      preview.WorkerSelectionRequirements{},
+			expected: false,
+		},
+		{
+			name:     "direct egress accepts legacy direct runtime",
+			metadata: nil,
+			req:      preview.WorkerSelectionRequirements{},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sandboxBytes, err := json.Marshal(agent.Sandbox{ID: "sandbox-1", Provider: "docker", Metadata: tt.metadata})
+			require.NoError(t, err, "test sandbox should marshal")
+			instance := &models.PreviewInstance{RecycleSandbox: sandboxBytes}
+
+			actual := branchPreviewRuntimeMatchesWorkerRequirements(instance, tt.req)
+
+			require.Equal(t, tt.expected, actual, "preview runtime reuse should match the current network requirement")
+		})
+	}
 }
 
 func TestBranchPreviewHandler_GetPullRequestRejectsPreviewTokenWithoutReadScope(t *testing.T) {
