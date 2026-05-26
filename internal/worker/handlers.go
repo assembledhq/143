@@ -1630,7 +1630,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session claimed on the wrong node; releasing for the correct worker")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{
+					Err:                    err,
+					RetryAfter:             &retryAfter,
+					BypassMaxRetryDuration: true,
+					TargetNodeID:           models.SessionWorkerTarget(&session),
+				}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
 				// A preview hydrate published the live container first. Retry

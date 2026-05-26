@@ -316,7 +316,7 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, timeoutErr.Error())
 			return nil
 		}
-		r.retryJob(writeCtx, executor, job, err.Error(), true, retryable.RetryAfter)
+		r.retryJob(writeCtx, executor, job, err.Error(), true, retryable.RetryAfter, retryable.TargetNodeID)
 		r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusRequeued, 0, err.Error())
 		return nil
 	}
@@ -326,12 +326,12 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 		r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, err.Error())
 		return nil
 	}
-	r.retryJob(writeCtx, executor, job, err.Error(), false, nil)
+	r.retryJob(writeCtx, executor, job, err.Error(), false, nil, nil)
 	r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusRequeued, 0, err.Error())
 	return nil
 }
 
-func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.SessionExecutor, job *models.Job, errMsg string, preserveAttempts bool, override *time.Duration) {
+func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.SessionExecutor, job *models.Job, errMsg string, preserveAttempts bool, override *time.Duration, targetNodeID *string) {
 	backoff := retryBackoff(job.Attempts)
 	if override != nil {
 		backoff = *override
@@ -341,7 +341,19 @@ func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.S
 		ok  bool
 		err error
 	)
-	if preserveAttempts {
+	if targetNodeID != nil {
+		if targetStore, supportsTargetRetry := r.Jobs.(targetRetryLeaseStore); supportsTargetRetry {
+			if preserveAttempts {
+				ok, err = targetStore.RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx, job.ID, executor.LockToken, errMsg, runAt, targetNodeID)
+			} else {
+				ok, err = targetStore.RetryWithLeaseAndTarget(ctx, job.ID, executor.LockToken, errMsg, runAt, targetNodeID)
+			}
+		} else if preserveAttempts {
+			ok, err = r.Jobs.RetryWithoutConsumingAttemptWithLease(ctx, job.ID, executor.LockToken, errMsg, runAt)
+		} else {
+			ok, err = r.Jobs.RetryWithLease(ctx, job.ID, executor.LockToken, errMsg, runAt)
+		}
+	} else if preserveAttempts {
 		ok, err = r.Jobs.RetryWithoutConsumingAttemptWithLease(ctx, job.ID, executor.LockToken, errMsg, runAt)
 	} else {
 		ok, err = r.Jobs.RetryWithLease(ctx, job.ID, executor.LockToken, errMsg, runAt)
