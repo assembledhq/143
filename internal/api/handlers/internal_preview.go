@@ -160,8 +160,15 @@ func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusForbidden, "PREVIEW_MISMATCH", "preview token does not match the requested preview")
 		return
 	}
-	if err := h.manager.RecyclePreview(r.Context(), orgID, previewID); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_RESTART_FAILED", "failed to restart preview", err)
+	var body previewsvc.RemoteRecyclePreviewRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+			return
+		}
+	}
+	if previewErr := h.preview.recyclePreviewByID(r.Context(), orgID, previewID, startPreviewRequest{Config: body.Config}); previewErr != nil {
+		writePreviewHTTPError(w, r, previewErr)
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})

@@ -504,6 +504,9 @@ export const api = {
       start: (sessionId: string, config?: Record<string, unknown>) =>
         post<import('./types').SingleResponse<import('./preview-types').PreviewInstance>>(`/api/v1/sessions/${sessionId}/preview`, config ? { config } : undefined)
           .then(r => r.data),
+      ensure: (sessionId: string, config?: Record<string, unknown>) =>
+        post<import('./types').SingleResponse<import('./preview-types').EnsurePreviewResponse>>(`/api/v1/sessions/${sessionId}/preview/ensure`, config ? { config } : undefined)
+          .then(r => r.data),
       stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
       restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),
       setLifetime: (sessionId: string, body: { duration_seconds: number }) =>

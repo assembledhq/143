@@ -995,11 +995,7 @@ func TestSessionStore_UpdateResultClearsStaleFailureDetails(t *testing.T) {
 	now := time.Now()
 
 	mock.ExpectQuery(`UPDATE sessions[\s\S]+failure_explanation = NULL[\s\S]+failure_category = NULL[\s\S]+failure_next_steps = NULL[\s\S]+failure_retry_advised = false`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(11)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -1613,9 +1609,7 @@ func TestSessionStore_UpdateTurnCompleteClearsStaleFailureDetails(t *testing.T) 
 	store := NewSessionStore(mock)
 
 	mock.ExpectExec(`UPDATE sessions[\s\S]+SET status = 'idle'[\s\S]+failure_explanation = NULL[\s\S]+failure_category = NULL[\s\S]+failure_next_steps = NULL[\s\S]+failure_retry_advised = false`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 3, &models.SessionResult{

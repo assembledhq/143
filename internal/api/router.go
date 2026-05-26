@@ -988,6 +988,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
+				r.Post("/api/v1/sessions/{id}/preview/ensure", previewHandler.EnsurePreview)
 				r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
 				r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
 				r.Patch("/api/v1/sessions/{id}/preview/lifetime", previewHandler.SetLifetime)
