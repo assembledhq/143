@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { createRef, forwardRef } from "react";
 import { DiffPane, type DiffPaneHandle } from "./diff-pane";
 import type { DiffFile, DiffLine, DiffHunk } from "@/lib/diff-parser";
@@ -185,6 +185,89 @@ describe("DiffPane", () => {
   it("reports the topmost visible file when the diff pane scroll position changes", () => {
     const onActiveFileChange = vi.fn();
     const files = [makeDiffFile("a.ts"), makeDiffFile("b.ts")];
+    let rafCallback: FrameRequestCallback | null = null;
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        rafCallback = callback;
+        return 1;
+      });
+    const cancelAnimationFrameSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation(() => {});
+    const { container } = render(
+      <DiffPane
+        files={files}
+        viewMode="unified"
+        onActiveFileChange={onActiveFileChange}
+      />
+    );
+
+    const scrollContainer = container.firstElementChild as HTMLDivElement;
+    const firstFile = screen.getByTestId("file-a.ts");
+    const secondFile = screen.getByTestId("file-b.ts");
+
+    vi.spyOn(scrollContainer, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 600,
+      left: 0,
+      right: 800,
+      width: 800,
+      height: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    vi.spyOn(firstFile, "getBoundingClientRect").mockReturnValue({
+      top: -220,
+      bottom: 80,
+      left: 0,
+      right: 800,
+      width: 800,
+      height: 300,
+      x: 0,
+      y: -220,
+      toJSON: () => ({}),
+    });
+
+    vi.spyOn(secondFile, "getBoundingClientRect").mockReturnValue({
+      top: 24,
+      bottom: 324,
+      left: 0,
+      right: 800,
+      width: 800,
+      height: 300,
+      x: 0,
+      y: 24,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.scroll(scrollContainer);
+    act(() => {
+      rafCallback?.(0);
+    });
+
+    expect(onActiveFileChange).toHaveBeenCalledWith(1);
+
+    requestAnimationFrameSpy.mockRestore();
+    cancelAnimationFrameSpy.mockRestore();
+  });
+
+  it("defers scroll visibility work to animation frames", () => {
+    const onActiveFileChange = vi.fn();
+    const files = [makeDiffFile("a.ts"), makeDiffFile("b.ts")];
+    let rafCallback: FrameRequestCallback | null = null;
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        rafCallback = callback;
+        return 1;
+      });
+    const cancelAnimationFrameSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation(() => {});
+
     const { container } = render(
       <DiffPane
         files={files}
@@ -235,7 +318,17 @@ describe("DiffPane", () => {
 
     fireEvent.scroll(scrollContainer);
 
+    expect(onActiveFileChange).not.toHaveBeenCalled();
+    expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      rafCallback?.(0);
+    });
+
     expect(onActiveFileChange).toHaveBeenCalledWith(1);
+
+    requestAnimationFrameSpy.mockRestore();
+    cancelAnimationFrameSpy.mockRestore();
   });
 
   it("replaces the scroll container when resetScrollKey changes so mobile file switches do not keep a stale offset", () => {
