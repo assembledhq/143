@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -290,7 +291,14 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			return phaseErr
 		}
 
-		// Phase 5: Build service environment with injected credentials.
+		// Phase 5: Write generated runtime secret files after install so install
+		// hooks cannot read preview-runtime app secrets.
+		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
+			phaseErr = fmt.Errorf("write preview secret files: %w", err)
+			return phaseErr
+		}
+
+		// Phase 6: Build service environment with injected credentials.
 		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, extraEnv)
 		return nil
 	}(); err != nil {
@@ -1667,6 +1675,20 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 		}
 	}
 
+	// Inject resolved preview secret env into scoped services. These values are
+	// applied after repo env and generated infrastructure credentials, but
+	// before platform env so PREVIEW_ORIGIN and similar worker-owned values
+	// remain authoritative.
+	for service, secretEnv := range cfg.RuntimeSecretEnv {
+		env, ok := envs[service]
+		if !ok {
+			continue
+		}
+		for key, value := range secretEnv {
+			env[key] = value
+		}
+	}
+
 	// Inject platform-level env vars (e.g. PREVIEW_ORIGIN) into every service,
 	// overriding any user-declared value. Applied last so it wins over both
 	// service.env and infrastructure.inject_env. Mutation in place is fine —
@@ -1678,6 +1700,62 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 	}
 
 	return envs
+}
+
+func (d *DockerPreviewProvider) writeRuntimeSecretFiles(ctx context.Context, sb *agent.Sandbox, files []models.PreviewRuntimeSecretFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	if d.executor == nil {
+		return fmt.Errorf("sandbox executor is not configured")
+	}
+	for _, file := range files {
+		cmd, err := buildWriteRuntimeSecretFileCmd(file)
+		if err != nil {
+			return err
+		}
+		var stderr bytes.Buffer
+		exitCode, err := d.executor.Exec(ctx, sb, cmd, io.Discard, &stderr)
+		if err != nil {
+			return fmt.Errorf("write %s: %w", file.Path, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("write %s exited with code %d: %s", file.Path, exitCode, strings.TrimSpace(stderr.String()))
+		}
+	}
+	return nil
+}
+
+func buildWriteRuntimeSecretFileCmd(file models.PreviewRuntimeSecretFile) (string, error) {
+	cleanPath := path.Clean(file.Path)
+	if file.Path == "" || path.IsAbs(file.Path) || strings.HasPrefix(cleanPath, "../") || cleanPath == ".." {
+		return "", fmt.Errorf("secret file path %q must stay inside the repo", file.Path)
+	}
+	for _, part := range strings.Split(cleanPath, "/") {
+		if part == ".git" {
+			return "", fmt.Errorf("secret file path %q must not target .git", file.Path)
+		}
+	}
+	mode := file.Mode
+	if mode == "" {
+		mode = "0600"
+	}
+	if _, err := strconv.ParseUint(mode, 8, 32); err != nil {
+		return "", fmt.Errorf("secret file mode %q is not octal", mode)
+	}
+	dir := path.Dir(cleanPath)
+	encoded := base64.StdEncoding.EncodeToString(file.Content)
+	return fmt.Sprintf(
+		`set -eu; mkdir -p %s; umask 077; base64 -d > %s <<'__143_SECRET_FILE__'
+%s
+__143_SECRET_FILE__
+chmod %s %s`,
+		shellEscape(dir),
+		shellEscape(cleanPath),
+		encoded,
+		shellEscape(mode),
+		shellEscape(cleanPath),
+	), nil
 }
 
 func resolveCredentialTemplate(template string, cred preview.InfraCredential) string {

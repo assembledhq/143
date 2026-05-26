@@ -96,6 +96,9 @@ type Manager struct {
 	// snapshotCache handles filesystem snapshot caching for fast startup.
 	snapshotCache *SnapshotCache
 
+	secretResolver *PreviewSecretResolver
+	auditEmitter   *db.AuditEmitter
+
 	// pollStopChs tracks stop channels for pollSupportServiceStatus goroutines,
 	// keyed by preview ID. Closing the channel stops the poll goroutine,
 	// preventing it from overwriting a "stopped" status with "ready".
@@ -121,6 +124,8 @@ type ManagerConfig struct {
 	SandboxProvider  agent.SandboxProvider // used for destroy on final hold release
 	Inspector        PreviewInspector
 	SnapshotCache    *SnapshotCache
+	SecretResolver   *PreviewSecretResolver
+	AuditEmitter     *db.AuditEmitter
 	HMRWatcher       *HMRWatcher // optional; enables HMR screenshot capture
 	Logger           zerolog.Logger
 	WorkerNodeID     string
@@ -157,6 +162,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		sandboxProvider:       cfg.SandboxProvider,
 		inspector:             cfg.Inspector,
 		snapshotCache:         cfg.SnapshotCache,
+		secretResolver:        cfg.SecretResolver,
+		auditEmitter:          cfg.AuditEmitter,
 		hmrWatcher:            cfg.HMRWatcher,
 		logger:                cfg.Logger,
 		workerNodeID:          cfg.WorkerNodeID,
@@ -190,6 +197,7 @@ type StartPreviewInput struct {
 	UserID                    uuid.UUID // for per-user concurrency cap
 	Sandbox                   *agent.Sandbox
 	Config                    *models.PreviewConfig
+	RepositoryID              uuid.UUID
 	BaseCommitSHA             string
 	ProfileName               string
 	ExpiresAt                 time.Time
@@ -337,6 +345,9 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
+		return nil, err
+	}
 
 	existing, err := store.GetActivePreviewForSession(ctx, input.OrgID, input.SessionID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -425,6 +436,60 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	return instance, nil
 }
 
+func (m *Manager) resolvePreviewSecrets(ctx context.Context, input StartPreviewInput) error {
+	if input.Config == nil {
+		return nil
+	}
+	refs := SecretBundleRefs(input.Config)
+	if len(refs) == 0 {
+		return nil
+	}
+	if m.secretResolver == nil {
+		err := fmt.Errorf("preview secret resolver is not configured")
+		m.emitPreviewSecretResolveAudit(ctx, input, refs, models.AuditActionPreviewSecretBundleFailed, err)
+		return err
+	}
+	if err := m.secretResolver.Resolve(ctx, input.OrgID, input.RepositoryID, input.Config); err != nil {
+		m.emitPreviewSecretResolveAudit(ctx, input, refs, models.AuditActionPreviewSecretBundleFailed, err)
+		return err
+	}
+	m.emitPreviewSecretResolveAudit(ctx, input, refs, models.AuditActionPreviewSecretBundleResolved, nil)
+	return nil
+}
+
+func (m *Manager) emitPreviewSecretResolveAudit(ctx context.Context, input StartPreviewInput, refs []models.PreviewSecretBundleRef, action models.AuditAction, resolveErr error) {
+	if m.auditEmitter == nil {
+		return
+	}
+	for _, ref := range refs {
+		resourceID := ref.Bundle
+		details := map[string]any{
+			"repository_id": input.RepositoryID.String(),
+			"bundle":        ref.Bundle,
+			"services":      ref.Services,
+			"env":           ref.Env,
+			"files":         ref.Files,
+		}
+		if resolveErr != nil {
+			details["error"] = resolveErr.Error()
+		}
+		rawDetails, err := json.Marshal(details)
+		if err != nil {
+			m.logger.Warn().Err(err).Str("bundle", ref.Bundle).Msg("marshal preview secret resolve audit details")
+			rawDetails = nil
+		}
+		m.auditEmitter.EmitSystemAction(ctx, db.SystemActionParams{
+			OrgID:        input.OrgID,
+			ActorID:      "preview-secret-resolver",
+			Action:       action,
+			ResourceType: models.AuditResourcePreviewSecretBundle,
+			ResourceID:   &resourceID,
+			Details:      rawDetails,
+			SessionID:    &input.SessionID,
+		})
+	}
+}
+
 // LaunchPreview takes a reserved preview and completes startup: it updates
 // the row if the caller resolved a different config after reservation (e.g.
 // workspace autodetect), creates service/infra rows, invokes the provider,
@@ -443,6 +508,9 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	}
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
+	}
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
+		return nil, err
 	}
 
 	// If the caller resolved a different config after reservation (autodetect
@@ -1814,6 +1882,10 @@ func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, erro
 }
 
 func previewTargetIDValue(id *uuid.UUID) uuid.UUID {
+	return uuidPointerValue(id)
+}
+
+func uuidPointerValue(id *uuid.UUID) uuid.UUID {
 	if id == nil {
 		return uuid.Nil
 	}
@@ -1823,6 +1895,7 @@ func previewTargetIDValue(id *uuid.UUID) uuid.UUID {
 func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
 	input, err := loadRecycleInput(instance)
 	if err == nil {
+		input.RepositoryID = m.recycleRepositoryID(ctx, instance)
 		return input, nil
 	}
 	if !errors.Is(err, errMissingRecycleInput) {
@@ -1837,6 +1910,24 @@ func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.Preview
 		Str("preview_id", instance.ID.String()).
 		Msg("recycle input missing; rebuilding preview restart input from persisted session and service state")
 	return rebuilt, nil
+}
+
+func (m *Manager) recycleRepositoryID(ctx context.Context, instance *models.PreviewInstance) uuid.UUID {
+	if instance.PreviewTargetID != nil && *instance.PreviewTargetID != uuid.Nil {
+		target, err := m.store.GetPreviewTarget(ctx, instance.OrgID, *instance.PreviewTargetID)
+		if err == nil {
+			return target.RepositoryID
+		}
+		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to load preview target repository for recycle")
+	}
+	if instance.SessionID != uuid.Nil && m.sessionStore != nil {
+		session, err := m.sessionStore.GetByID(ctx, instance.OrgID, instance.SessionID)
+		if err == nil {
+			return uuidPointerValue(session.RepositoryID)
+		}
+		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to load session repository for recycle")
+	}
+	return uuid.Nil
 }
 
 func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
@@ -1900,6 +1991,7 @@ func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *model
 		UserID:        instance.UserID,
 		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace"},
 		Config:        cfg,
+		RepositoryID:  uuidPointerValue(session.RepositoryID),
 		BaseCommitSHA: instance.BaseCommitSHA,
 		ProfileName:   instance.ProfileName,
 	}, nil

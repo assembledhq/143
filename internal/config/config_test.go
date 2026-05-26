@@ -81,6 +81,15 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 }
 
 //nolint:paralleltest // uses t.Setenv
+func TestLoad_PreviewSecretBundleKEKVersion(t *testing.T) {
+	t.Setenv("PREVIEW_SECRET_BUNDLE_KEK_VERSION", "preview-secrets-2026-05")
+
+	cfg := Load()
+
+	require.Equal(t, "preview-secrets-2026-05", cfg.PreviewSecretBundleKEKVersion, "Load should read PREVIEW_SECRET_BUNDLE_KEK_VERSION from the environment")
+}
+
+//nolint:paralleltest // uses t.Setenv
 func TestLoad_DerivesStandaloneRedisURL(t *testing.T) {
 	t.Setenv("REDIS_URL", "")
 	t.Setenv("REDIS_TOPOLOGY", "standalone")

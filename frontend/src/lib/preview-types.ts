@@ -212,11 +212,19 @@ export interface ElementInfo {
 
 // Preview detection
 
-export type PreviewReadiness = "ready" | "partial" | "not_supported";
+export type PreviewReadiness = "ready" | "admin_setup_required" | "partial" | "not_supported";
 
 export interface MissingCredential {
   credential_set: string;
   env_vars: string[];
+}
+
+export interface MissingSecretBundle {
+  bundle: string;
+  services?: string[];
+  env?: string[];
+  files?: string[];
+  status: string;
 }
 
 export interface PreviewDetectionResult {
@@ -226,6 +234,7 @@ export interface PreviewDetectionResult {
   primary_service?: string;
   infrastructure?: string[];
   missing_credentials?: MissingCredential[];
+  missing_secret_bundles?: MissingSecretBundle[];
   missing_destinations?: string[];
   validation_errors?: string[];
 }

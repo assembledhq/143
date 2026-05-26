@@ -92,6 +92,59 @@ export interface Repository {
   updated_at: string;
 }
 
+export interface PreviewSecretBundleSource {
+  type: "managed";
+  values: Record<string, string>;
+}
+
+export interface PreviewSecretBundleOutput {
+  type: "env" | "file";
+  values?: Record<string, string>;
+  path?: string;
+  format?: "env" | "json" | "raw";
+  mode?: string;
+  content?: unknown;
+  value?: string;
+}
+
+export interface PreviewSecretOutputSummary {
+  type: string;
+  env?: string[];
+  path?: string;
+  format?: string;
+}
+
+export interface PreviewSecretBundleSummary {
+  id: string;
+  repository_id: string;
+  name: string;
+  source_type: string;
+  exposure_policy: string;
+  outputs: PreviewSecretOutputSummary[];
+  created_by_user_id: string;
+  created_at: string;
+}
+
+export interface PreviewSecretBundleUpsertRequest {
+  name: string;
+  source: PreviewSecretBundleSource;
+  outputs: PreviewSecretBundleOutput[];
+  exposure_policy?: "preview_runtime";
+}
+
+export interface PreviewSecretBundlePatchRequest {
+  name?: string;
+  source?: PreviewSecretBundleSource;
+  outputs?: PreviewSecretBundleOutput[];
+  exposure_policy?: "preview_runtime";
+}
+
+export interface PreviewSecretBundleTestResult {
+  status: "ready" | "failed";
+  bundle: PreviewSecretBundleSummary;
+  error?: string;
+}
+
 export interface BranchPreviewCreateRequest {
   repository_id: string;
   branch: string;
