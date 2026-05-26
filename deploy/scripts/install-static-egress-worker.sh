@@ -24,6 +24,8 @@ PROBE_TIMEOUT="${STATIC_EGRESS_PROBE_TIMEOUT_SECONDS:-10}"
 apt-get update >/dev/null
 apt-get install -y --no-install-recommends wireguard iproute2 iptables >/dev/null
 
+rm -f "$CAPABILITY_FILE"
+
 install -d -m 700 /etc/wireguard
 umask 077
 cat > "/etc/wireguard/${WG_INTERFACE}.conf" <<WGCONF
@@ -31,6 +33,8 @@ cat > "/etc/wireguard/${WG_INTERFACE}.conf" <<WGCONF
 PrivateKey = ${WG_PRIVATE_KEY}
 Address = ${WG_ADDRESS}
 Table = off
+PostUp = ip rule replace fwmark ${FWMARK} table ${TABLE_ID}; ip route replace default dev %i table ${TABLE_ID}
+PostDown = ip rule del fwmark ${FWMARK} table ${TABLE_ID} 2>/dev/null || true; ip route flush table ${TABLE_ID} 2>/dev/null || true
 
 [Peer]
 PublicKey = ${WG_PEER_PUBLIC_KEY}
@@ -39,16 +43,14 @@ Endpoint = ${WG_ENDPOINT}
 PersistentKeepalive = 25
 WGCONF
 
-systemctl enable --now "wg-quick@${WG_INTERFACE}"
+systemctl enable "wg-quick@${WG_INTERFACE}" >/dev/null
+systemctl restart "wg-quick@${WG_INTERFACE}"
 
 iptables -t mangle -N STATIC_EGRESS_MARK 2>/dev/null || true
 iptables -t mangle -F STATIC_EGRESS_MARK
 iptables -t mangle -C PREROUTING -s "$STATIC_EGRESS_SUBNET" -j STATIC_EGRESS_MARK 2>/dev/null ||
   iptables -t mangle -A PREROUTING -s "$STATIC_EGRESS_SUBNET" -j STATIC_EGRESS_MARK
 iptables -t mangle -A STATIC_EGRESS_MARK -j MARK --set-mark "$FWMARK"
-
-ip rule replace fwmark "$FWMARK" table "$TABLE_ID"
-ip route replace default dev "$WG_INTERFACE" table "$TABLE_ID"
 
 # Hide bridge subnet reuse from the gateway. Gateway ACLs can still restrict
 # which worker WireGuard peers are accepted.

@@ -424,9 +424,20 @@ provision-worker:
 
 provision-egress:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-egress HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	@test -n "$${STATIC_EGRESS_GATEWAY_PRIVATE_KEY:-}" || { echo "STATIC_EGRESS_GATEWAY_PRIVATE_KEY is required"; exit 1; }
+	@test -n "$${STATIC_EGRESS_WORKER_PEERS:-}" || { echo "STATIC_EGRESS_WORKER_PEERS is required as publicKey@allowedIP,..."; exit 1; }
 	$(check-ssh-key)
 	scp -i $(SSH_KEY) deploy/scripts/provision-egress-gateway.sh root@$(HOST):/tmp/provision-egress-gateway.sh
-	ssh -i $(SSH_KEY) root@$(HOST) 'install -m 755 /tmp/provision-egress-gateway.sh /opt/143/provision-egress-gateway.sh && /opt/143/provision-egress-gateway.sh'
+	@{ \
+	  printf 'STATIC_EGRESS_GATEWAY_PRIVATE_KEY=%s\n' "$$STATIC_EGRESS_GATEWAY_PRIVATE_KEY"; \
+	  printf 'STATIC_EGRESS_WORKER_PEERS=%s\n' "$$STATIC_EGRESS_WORKER_PEERS"; \
+	  printf 'STATIC_EGRESS_WG_INTERFACE=%s\n' "$${STATIC_EGRESS_WG_INTERFACE:-}"; \
+	  printf 'STATIC_EGRESS_GATEWAY_WG_PORT=%s\n' "$${STATIC_EGRESS_GATEWAY_WG_PORT:-}"; \
+	  printf 'STATIC_EGRESS_GATEWAY_WG_ADDRESS=%s\n' "$${STATIC_EGRESS_GATEWAY_WG_ADDRESS:-}"; \
+	  printf 'STATIC_EGRESS_GATEWAY_WG_CIDR=%s\n' "$${STATIC_EGRESS_GATEWAY_WG_CIDR:-}"; \
+	  printf 'STATIC_EGRESS_PUBLIC_INTERFACE=%s\n' "$${STATIC_EGRESS_PUBLIC_INTERFACE:-}"; \
+	} | ssh -i $(SSH_KEY) root@$(HOST) 'install -d -m 700 /opt/143 && cat > /opt/143/static-egress-gateway.env && chmod 600 /opt/143/static-egress-gateway.env'
+	ssh -i $(SSH_KEY) root@$(HOST) 'install -m 755 /tmp/provision-egress-gateway.sh /opt/143/provision-egress-gateway.sh && set -a && . /opt/143/static-egress-gateway.env && set +a && /opt/143/provision-egress-gateway.sh'
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }

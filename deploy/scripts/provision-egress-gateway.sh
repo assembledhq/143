@@ -22,7 +22,7 @@ BLOCKED_DESTS=(
 )
 
 apt-get update >/dev/null
-apt-get install -y --no-install-recommends wireguard iptables iproute2 >/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireguard iptables iproute2 iptables-persistent >/dev/null
 
 install -d -m 700 /etc/wireguard
 umask 077
@@ -73,8 +73,6 @@ iptables -A STATIC_EGRESS_GUARD -j ACCEPT
 iptables -t nat -C POSTROUTING -s "$WG_TUNNEL_CIDR" -o "$PUBLIC_INTERFACE" -j MASQUERADE 2>/dev/null ||
   iptables -t nat -A POSTROUTING -s "$WG_TUNNEL_CIDR" -o "$PUBLIC_INTERFACE" -j MASQUERADE
 
-if command -v netfilter-persistent >/dev/null 2>&1; then
-  netfilter-persistent save >/dev/null
-fi
+netfilter-persistent save >/dev/null
 
 echo "Provisioned static egress gateway on ${WG_INTERFACE}; outbound traffic SNATs through ${PUBLIC_INTERFACE}."

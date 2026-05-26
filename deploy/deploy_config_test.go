@@ -458,6 +458,9 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, workerInstallText, "docker run", "static egress verification should probe from a sandbox-network container")
 	require.Contains(t, workerInstallText, "--network \"$STATIC_EGRESS_NETWORK\"", "static egress verification should exercise the static egress bridge")
 	require.NotContains(t, workerInstallText, "curl --interface", "static egress verification should not use a host-originated WireGuard interface probe")
+	require.Contains(t, workerInstallText, "PostUp = ip rule replace", "worker WireGuard service should restore static egress policy routing after reboot")
+	require.Contains(t, workerInstallText, "PostDown = ip rule del", "worker WireGuard service should clean up static egress policy routing on stop")
+	require.Contains(t, workerInstallText, "rm -f \"$CAPABILITY_FILE\"", "worker install should clear stale capability before re-verifying the gateway path")
 
 	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read worker compose")
@@ -474,7 +477,11 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
-	require.Contains(t, string(makefile), "provision-egress", "Makefile should expose an egress gateway provisioning entrypoint")
+	makefileText := string(makefile)
+	require.Contains(t, makefileText, "provision-egress", "Makefile should expose an egress gateway provisioning entrypoint")
+	require.Contains(t, makefileText, "STATIC_EGRESS_GATEWAY_PRIVATE_KEY", "egress provisioning should require and forward the gateway private key")
+	require.Contains(t, makefileText, "STATIC_EGRESS_WORKER_PEERS", "egress provisioning should require and forward worker peer config")
+	require.Contains(t, makefileText, "/opt/143/static-egress-gateway.env", "egress provisioning should stage remote gateway config instead of assuming remote shell env")
 
 	gatewayScript, err := os.ReadFile("../deploy/scripts/provision-egress-gateway.sh")
 	require.NoError(t, err, "test should read egress gateway provisioning helper")
@@ -484,6 +491,8 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.NotContains(t, gatewayText, "%%=*", "egress gateway should not split WireGuard peer keys on '=' because base64 public keys may be padded")
 	require.NotContains(t, gatewayText, "#*=", "egress gateway should not split WireGuard peer keys on '=' because base64 public keys may be padded")
 	require.Contains(t, gatewayText, "MASQUERADE", "egress gateway should SNAT tunnel traffic to its public IPv4")
+	require.Contains(t, gatewayText, "iptables-persistent", "egress gateway should install persistent iptables support")
+	require.Contains(t, gatewayText, "netfilter-persistent save", "egress gateway should persist NAT and guard rules")
 	require.Contains(t, gatewayText, "169.254.0.0/16", "egress gateway should independently block metadata ranges")
 	require.Contains(t, gatewayText, "10.0.0.0/8", "egress gateway should independently block private ranges")
 	require.Contains(t, gatewayText, "100.64.0.0/10", "egress gateway should block Tailscale CGNAT ranges")
