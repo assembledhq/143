@@ -140,6 +140,10 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	sandboxCfg.OrgID = payload.OrgID.String()
 	sandboxCfg.Purpose = "branch_preview"
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, payload.Config)
+	if err := r.applyBranchPreviewSandboxNetwork(ctx, payload.OrgID, &sandboxCfg); err != nil {
+		r.abort(ctx, reservation, "", fmt.Sprintf("resolve sandbox network: %v", err))
+		return fmt.Errorf("resolve sandbox network: %w", err)
+	}
 
 	var capacityReservation *agent.SandboxCapacityReservation
 	if r.sandboxCapacity != nil {
@@ -427,6 +431,13 @@ func (r *StartRunner) resolveSandboxWorkDir(ctx context.Context, session *models
 		return defaults.WorkDir
 	}
 	return defaults.HomeDir + "/" + slug
+}
+
+func (r *StartRunner) applyBranchPreviewSandboxNetwork(ctx context.Context, orgID uuid.UUID, cfg *agent.SandboxConfig) error {
+	if r == nil {
+		return nil
+	}
+	return agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, cfg)
 }
 
 func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {

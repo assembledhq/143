@@ -649,6 +649,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP))
 	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
+	branchPreviewHandler.SetStaticEgressSettings(orgStore)
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)

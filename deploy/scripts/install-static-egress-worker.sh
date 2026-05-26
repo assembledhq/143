@@ -68,6 +68,9 @@ ip rule show | grep -F "fwmark $FWMARK" | grep -F "lookup $TABLE_ID" >/dev/null
 ip route show table "$TABLE_ID" | grep -F "dev $WG_INTERFACE" >/dev/null
 
 if [ "${STATIC_EGRESS_SKIP_PROBES:-false}" != "true" ]; then
+  if ! docker image inspect "$PROBE_IMAGE" >/dev/null 2>&1; then
+    docker pull "$PROBE_IMAGE" >/dev/null
+  fi
   if ! observed_ip="$(docker run --rm --network "$STATIC_EGRESS_NETWORK" \
     --name "143-static-egress-probe-$$" \
     --pull never \

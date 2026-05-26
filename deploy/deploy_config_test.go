@@ -464,6 +464,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, workerInstallText, "iptables-persistent", "worker install should install persistent iptables support before advertising capability")
 	require.Contains(t, workerInstallText, "command -v netfilter-persistent", "worker install should verify iptables persistence is available")
 	require.Contains(t, workerInstallText, "netfilter-persistent save", "worker install should persist static egress mark and NAT rules")
+	require.Contains(t, workerInstallText, "docker pull \"$PROBE_IMAGE\"", "static egress verification should ensure its probe image exists before running with --pull never")
 
 	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read worker compose")

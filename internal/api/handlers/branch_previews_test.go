@@ -139,6 +139,21 @@ func TestBranchPreviewHandler_CreateResolvesBranchHeadAndCreatesTarget(t *testin
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestBranchPreviewHandlerWorkerSelectionRequirementsRequireStaticEgress(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	handler := NewBranchPreviewHandler(nil, nil, nil, nil, "", "")
+	handler.SetStaticEgressSettings(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	})
+
+	reqs, err := handler.workerSelectionRequirements(context.Background(), orgID)
+
+	require.NoError(t, err, "branch preview worker selection should read org network settings")
+	require.True(t, reqs.StaticEgressRequired, "branch preview worker selection should require static-egress-capable workers for opted-in orgs")
+}
+
 func TestBranchPreviewHandler_GetPullRequestRejectsPreviewTokenWithoutReadScope(t *testing.T) {
 	t.Parallel()
 

@@ -2,6 +2,7 @@ package preview
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -86,6 +88,14 @@ type startRunnerFileReader struct {
 	err     error
 }
 
+type startRunnerOrgStore struct {
+	settings json.RawMessage
+}
+
+func (s startRunnerOrgStore) GetByID(_ context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{ID: orgID, Settings: s.settings}, nil
+}
+
 func (r startRunnerFileReader) ListDir(context.Context, string, string, string) ([]sandbox.FileEntry, error) {
 	panic("not used")
 }
@@ -117,4 +127,28 @@ func TestStartRunnerReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig, "invalid committed preview config should use the shared invalid-config sentinel")
 	require.Contains(t, err.Error(), repoconfig.ConfigPath, "invalid config error should name the repo config path")
 	require.Nil(t, cfg, "invalid committed preview config should not return a fallback config")
+}
+
+func TestStartRunnerApplyBranchPreviewSandboxNetworkUsesStaticEgress(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runner := &StartRunner{
+		orgs: startRunnerOrgStore{settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`)},
+		staticEgress: agent.StaticEgressRuntimeConfig{
+			Enabled:        true,
+			Capable:        true,
+			NetworkName:    "143-sandbox-static-egress",
+			ResolvConfPath: "/etc/143/sandbox-static-egress-resolv.conf",
+			PublicIP:       "203.0.113.10",
+		},
+	}
+	cfg := agent.DefaultSandboxConfig()
+
+	err := runner.applyBranchPreviewSandboxNetwork(context.Background(), orgID, &cfg)
+
+	require.NoError(t, err, "static-egress-capable runners should accept branch previews for opted-in orgs")
+	require.Equal(t, "143-sandbox-static-egress", cfg.NetworkName, "branch preview sandboxes should use the static egress bridge for opted-in orgs")
+	require.Equal(t, "/etc/143/sandbox-static-egress-resolv.conf", cfg.ResolvConfPath, "branch preview sandboxes should use the static egress resolver")
+	require.Equal(t, agent.SandboxEgressModeStatic, cfg.EgressMode, "branch preview metadata should record static egress mode")
 }

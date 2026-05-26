@@ -871,10 +871,17 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PreviewHandler) workerSelectionRequirements(ctx context.Context, orgID uuid.UUID) (preview.WorkerSelectionRequirements, error) {
-	if h == nil || h.orgStore == nil {
+	if h == nil {
 		return preview.WorkerSelectionRequirements{}, nil
 	}
-	org, err := h.orgStore.GetByID(ctx, orgID)
+	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID)
+}
+
+func previewWorkerSelectionRequirements(ctx context.Context, orgStore agent.OrgSettingsReader, orgID uuid.UUID) (preview.WorkerSelectionRequirements, error) {
+	if orgStore == nil {
+		return preview.WorkerSelectionRequirements{}, nil
+	}
+	org, err := orgStore.GetByID(ctx, orgID)
 	if err != nil {
 		return preview.WorkerSelectionRequirements{}, err
 	}
