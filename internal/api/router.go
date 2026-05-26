@@ -206,7 +206,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	settingsHandler.SetStaticEgressStatus(handlers.StaticEgressStatus{
 		Available:         cfg.StaticEgressEnabled && cfg.StaticEgressPublicIP != "",
 		PublicIP:          cfg.StaticEgressPublicIP,
-		UnavailableReason: staticEgressUnavailableReason(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
 	})
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
@@ -643,7 +643,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
-	previewHandler.SetStaticEgressRuntime(orgStore, staticEgressRuntimeConfig(cfg))
+	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP))
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
@@ -1334,25 +1334,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func staticEgressUnavailableReason(enabled bool, publicIP string) string {
-	switch {
-	case enabled && publicIP == "":
-		return "STATIC_EGRESS_PUBLIC_IP is not configured"
-	case !enabled:
-		return "STATIC_EGRESS_ENABLED is false"
-	default:
-		return ""
-	}
-}
-
-func staticEgressRuntimeConfig(cfg *config.Config) agent.StaticEgressRuntimeConfig {
-	if cfg == nil {
-		return agent.StaticEgressRuntimeConfig{}
-	}
-	return agent.ResolveStaticEgressRuntimeConfig(
-		cfg.StaticEgressEnabled,
-		cfg.StaticEgressPublicIP,
-	)
 }

@@ -97,7 +97,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, nil)
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -118,7 +118,7 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true }, nil)
+	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -134,7 +134,7 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	t.Parallel()
 
 	ready := false
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready }, nil)
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
@@ -307,7 +307,7 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 		NodeID:    "worker-1",
 		Logger:    zerolog.Nop(),
 	})
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, gate)
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, gate, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 

@@ -454,7 +454,7 @@ func main() {
 						FileReader:      fileReader,
 						SandboxProvider: apiSandboxProvider,
 						SandboxCapacity: sandboxCapacity,
-						StaticEgress:    staticEgressRuntimeConfig(cfg),
+						StaticEgress:    agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
 						Snapshots:       snapshotStore,
 						NodeID:          cfg.NodeID,
 						Logger:          logger,
@@ -566,7 +566,7 @@ func main() {
 			cfg.PreviewInternalBaseURL,
 			previewRoutingReady.Load,
 			sandboxCapacity,
-			staticEgressRuntimeConfig(cfg),
+			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
@@ -844,18 +844,14 @@ func buildStaticEgressMetadata(runtime agent.StaticEgressRuntimeConfig) map[stri
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress ...agent.StaticEgressRuntimeConfig) func() map[string]any {
-	staticEgressConfig := agent.StaticEgressRuntimeConfig{}
-	if len(staticEgress) > 0 {
-		staticEgressConfig = staticEgress[0]
-	}
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
 			advertisePreview = advertisePreview && previewRoutingReady()
 		}
 		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
-		for k, v := range buildStaticEgressMetadata(staticEgressConfig) {
+		for k, v := range buildStaticEgressMetadata(staticEgress) {
 			metadata[k] = v
 		}
 		metadata["active_job_count"] = totalActiveJobs(workers)
@@ -1237,7 +1233,7 @@ func buildServices(
 		MentionIndexes:     mentionIndexCache,
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
-		StaticEgress:       staticEgressRuntimeConfig(cfg),
+		StaticEgress:       agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
 		Cancels:            cancelRegistry,
 		ThreadCancels:      threadCancelRegistry,
 		OrgSettingsCache:   orgSettingsCache,
@@ -1477,16 +1473,6 @@ func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Lo
 	}
 	logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured for worker attachment reads")
 	return storage.NewS3UploadStore(s3.NewFromConfig(awsCfg), cfg.UploadS3Bucket, cfg.UploadS3Prefix)
-}
-
-func staticEgressRuntimeConfig(cfg *config.Config) agent.StaticEgressRuntimeConfig {
-	if cfg == nil {
-		return agent.StaticEgressRuntimeConfig{}
-	}
-	return agent.ResolveStaticEgressRuntimeConfig(
-		cfg.StaticEgressEnabled,
-		cfg.StaticEgressPublicIP,
-	)
 }
 
 func wireWorkerPRService(

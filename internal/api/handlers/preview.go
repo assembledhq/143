@@ -297,7 +297,7 @@ func (h *PreviewHandler) resolveSandboxWorkDir(ctx context.Context, session *mod
 //     return 410 only when the reaper explicitly expired the snapshot.
 func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := h.resolveSandboxWorkDir(ctx, session)
-	expectedNetwork, expectedErr := h.expectedSandboxNetwork(ctx, orgID)
+	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, h.orgStore, orgID, h.staticEgress)
 	if expectedErr != nil {
 		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
 	}
@@ -495,14 +495,6 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		Msg("preview hydrate: new sandbox container created from snapshot")
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
-}
-
-func (h *PreviewHandler) expectedSandboxNetwork(ctx context.Context, orgID uuid.UUID) (string, error) {
-	cfg := agent.DefaultSandboxConfig()
-	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, h.orgStore, orgID, h.staticEgress, &cfg); err != nil {
-		return "", err
-	}
-	return cfg.NetworkName, nil
 }
 
 // requireInspector returns the PreviewInspector or writes a 501 error response.

@@ -245,7 +245,7 @@ func (r *StartRunner) resolveSandboxWorkDir(ctx context.Context, session *models
 
 func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := r.resolveSandboxWorkDir(ctx, session)
-	expectedNetwork, expectedErr := r.expectedSandboxNetwork(ctx, orgID)
+	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, r.orgs, orgID, r.staticEgress)
 	if expectedErr != nil {
 		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
 	}
@@ -336,14 +336,6 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
-}
-
-func (r *StartRunner) expectedSandboxNetwork(ctx context.Context, orgID uuid.UUID) (string, error) {
-	cfg := agent.DefaultSandboxConfig()
-	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, &cfg); err != nil {
-		return "", err
-	}
-	return cfg.NetworkName, nil
 }
 
 func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, error) {

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -44,12 +43,8 @@ func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP string) StaticEgres
 		ResolvConfPath: DefaultStaticEgressResolvConf,
 		PublicIP:       publicIP,
 	}
-	if !enabled {
-		runtime.UnavailableReason = "STATIC_EGRESS_ENABLED is false"
-		return runtime
-	}
-	if publicIP == "" {
-		runtime.UnavailableReason = "STATIC_EGRESS_PUBLIC_IP is not configured"
+	if reason := StaticEgressUnavailableReason(enabled, publicIP); reason != "" {
+		runtime.UnavailableReason = reason
 		return runtime
 	}
 	verifiedIP, err := readStaticEgressCapabilityPublicIP()
@@ -63,6 +58,19 @@ func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP string) StaticEgres
 	}
 	runtime.Capable = true
 	return runtime
+}
+
+// StaticEgressUnavailableReason returns the platform-level reason static
+// egress is not configured before worker-local capability checks run.
+func StaticEgressUnavailableReason(enabled bool, publicIP string) string {
+	switch {
+	case enabled && publicIP == "":
+		return "STATIC_EGRESS_PUBLIC_IP is not configured"
+	case !enabled:
+		return "STATIC_EGRESS_ENABLED is false"
+	default:
+		return ""
+	}
 }
 
 func readStaticEgressCapabilityPublicIP() (string, error) {
@@ -118,6 +126,16 @@ func ApplyOrgSandboxNetworkSettings(ctx context.Context, orgs OrgSettingsReader,
 	return nil
 }
 
+// ExpectedSandboxNetwork resolves the Docker network new sandboxes should use
+// for the org's current network setting.
+func ExpectedSandboxNetwork(ctx context.Context, orgs OrgSettingsReader, orgID uuid.UUID, runtime StaticEgressRuntimeConfig) (string, error) {
+	cfg := DefaultSandboxConfig()
+	if err := ApplyOrgSandboxNetworkSettings(ctx, orgs, orgID, runtime, &cfg); err != nil {
+		return "", err
+	}
+	return cfg.NetworkName, nil
+}
+
 // ApplyStaticEgressRuntimeConfig mutates cfg to create the sandbox on the
 // worker's static egress bridge.
 func ApplyStaticEgressRuntimeConfig(runtime StaticEgressRuntimeConfig, cfg *SandboxConfig) {
@@ -154,14 +172,4 @@ func SandboxNetworkMatches(ctx context.Context, provider SandboxProvider, sb *Sa
 		return false, nil
 	}
 	return true, nil
-}
-
-// StaticEgressEnabledFromRawSettings is a small helper for API paths that need
-// the org toggle without constructing a sandbox config.
-func StaticEgressEnabledFromRawSettings(raw json.RawMessage) (bool, error) {
-	settings, err := models.ParseOrgSettings(raw)
-	if err != nil {
-		return false, err
-	}
-	return settings.SandboxNetwork.StaticEgressEnabled, nil
 }
