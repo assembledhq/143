@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
+import getStartedMeta from "../../../../docs/public/getting-started/meta.json";
+import guidesMeta from "../../../../docs/public/guides/meta.json";
 import rootDocsMeta from "../../../../docs/public/meta.json";
+import referenceMeta from "../../../../docs/public/reference/meta.json";
+import selfHostingMeta from "../../../../docs/public/self-hosting/meta.json";
 import {
   DOCS_BASE_PATH,
   getAllPublicDocs,
@@ -20,6 +24,17 @@ describe("public docs source", () => {
     expect(pages).not.toContain("---Guides---");
     expect(pages).not.toContain("---Self-hosting---");
     expect(pages).not.toContain("---Reference---");
+  });
+
+  it("keeps section pages in one navigable sidebar tree", () => {
+    const sectionMetas = [
+      getStartedMeta,
+      guidesMeta,
+      selfHostingMeta,
+      referenceMeta,
+    ];
+
+    expect(sectionMetas.every((meta) => !("root" in meta))).toBe(true);
   });
 
   it("lists curated public docs with stable urls and metadata", () => {
