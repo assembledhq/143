@@ -143,7 +143,9 @@ type Config struct {
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
 
 	// Encryption
-	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
+	EncryptionMasterKey      string `env:"ENCRYPTION_MASTER_KEY"`
+	PreviewSecretBundleKEK        string `env:"PREVIEW_SECRET_BUNDLE_KEK"`
+	PreviewSecretBundleKEKVersion string `env:"PREVIEW_SECRET_BUNDLE_KEK_VERSION" envDefault:"preview-secret-bundles-v1"`
 
 	// LLM
 	LLMModel           string `env:"LLM_MODEL"`

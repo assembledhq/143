@@ -259,6 +259,82 @@ func TestParseConfig_WithInfrastructure(t *testing.T) {
 	}
 }
 
+func TestParseConfig_SecretBundle(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"name": "Full Stack",
+			"primary": "webserver",
+			"services": {
+				"webserver": {"command": ["go", "run", "."], "port": 3000, "ready": {"http_path": "/health"}},
+				"frontend": {"command": ["npm", "run", "dev"], "port": 8080, "ready": {"http_path": "/"}}
+			},
+			"secrets": {
+				"bundle": "assembled-dev",
+				"services": ["webserver", "frontend"],
+				"env": ["MSGBROKER_QUEUE_TYPE"],
+				"files": ["development.conf.json"]
+			}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should parse preview.secrets shorthand")
+	require.Equal(t, []models.PreviewSecretBundleRef{{
+		Bundle:   "assembled-dev",
+		Services: []string{"webserver", "frontend"},
+		Env:      []string{"MSGBROKER_QUEUE_TYPE"},
+		Files:    []string{"development.conf.json"},
+	}}, cfg.Secrets, "ParseConfig should preserve the repo-authored secret bundle contract")
+	require.True(t, IsConnected(cfg), "secret bundle refs should make a preview connected")
+
+	readiness := DetectReadiness(cfg)
+	require.Equal(t, models.PreviewReadinessAdminSetupRequired, readiness.Readiness, "missing secret bundles should require admin setup")
+	require.Equal(t, []models.MissingSecretBundle{{
+		Bundle:   "assembled-dev",
+		Services: []string{"webserver", "frontend"},
+		Env:      []string{"MSGBROKER_QUEUE_TYPE"},
+		Files:    []string{"development.conf.json"},
+		Status:   "setup_required",
+	}}, readiness.MissingSecretBundles, "readiness should expose non-secret bundle setup hints")
+}
+
+func TestValidateConfig_SecretBundleConstraints(t *testing.T) {
+	t.Parallel()
+
+	cfg := validPreviewConfig()
+	cfg.Secrets = []models.PreviewSecretBundleRef{{
+		Bundle:   "repo-dev",
+		Services: []string{"missing"},
+		Env:      []string{"1BAD"},
+		Files:    []string{"../development.conf.json", ".git/config"},
+	}}
+
+	errs := ValidateConfig(cfg)
+
+	require.Contains(t, errs, `secrets[0]: services references unknown service "missing"`, "secret bundle services should be constrained to declared services")
+	require.Contains(t, errs, `secrets[0]: env "1BAD" is not a valid environment variable name`, "secret bundle env hints should be valid env names")
+	require.Contains(t, errs, `secrets[0]: files: path "../development.conf.json" escapes the repo root`, "secret bundle file hints should not escape the repo")
+	require.Contains(t, errs, `secrets[0]: files: path ".git/config" must not target .git`, "secret bundle file hints should not target git metadata")
+}
+
+func TestValidateConfig_SecretBundleFileHintsRequireAllServices(t *testing.T) {
+	t.Parallel()
+
+	cfg := validPreviewConfig()
+	cfg.Services["frontend"] = models.ServiceConfig{Command: []string{"npm", "run", "dev"}, Port: 8080, Ready: models.ReadinessProbe{HTTPPath: "/"}}
+	cfg.Secrets = []models.PreviewSecretBundleRef{{
+		Bundle:   "repo-dev",
+		Services: []string{"web"},
+		Files:    []string{"development.conf.json"},
+	}}
+
+	errs := ValidateConfig(cfg)
+
+	require.Contains(t, errs, `secrets[0]: files are workspace-wide, so services must include every preview service`, "file hints should not imply narrower service scoping than the runtime can enforce")
+}
+
 func TestParseConfig_FromRepoConfigPreviewSection(t *testing.T) {
 	t.Parallel()
 
@@ -960,7 +1036,10 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 			Limits: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
 		},
 		Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging"},
-		Network:     models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
+		Secrets: []models.PreviewSecretBundleRef{
+			{Bundle: "base-secrets", Services: []string{"frontend"}, Env: []string{"DATABASE_URL"}, Files: []string{"development.conf.json"}},
+		},
+		Network: models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
 	}
 
 	diffCfg := &models.PreviewConfig{
@@ -976,6 +1055,9 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 		},
 		Resources: models.PreviewResourceRequirements{
 			Limits: models.PreviewResourceList{CPU: "2", Memory: "1Gi", EphemeralStorage: "10Gi"},
+		},
+		Secrets: []models.PreviewSecretBundleRef{
+			{Bundle: "diff-secrets", Services: []string{"frontend"}, Env: []string{"EVIL_DATABASE_URL"}, Files: []string{"config/evil.json"}},
 		},
 	}
 
@@ -1000,6 +1082,7 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	require.NotNil(t, resolved.Install, "connected preview should preserve base install config")
 	require.Equal(t, []string{"npm", "ci"}, resolved.Install.Command, "connected preview should pin install command to base")
 	require.Equal(t, baseCfg.Resources, resolved.Resources, "connected preview should pin resource requirements to base")
+	require.Equal(t, baseCfg.Secrets, resolved.Secrets, "connected preview should pin secret bundle refs to base")
 }
 
 func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
@@ -1091,6 +1174,11 @@ func TestIsConnected(t *testing.T) {
 		{
 			name: "has destinations",
 			cfg:  models.PreviewConfig{Network: models.NetworkConfig{Destinations: []string{"db"}}},
+			want: true,
+		},
+		{
+			name: "has secret bundle",
+			cfg:  models.PreviewConfig{Secrets: []models.PreviewSecretBundleRef{{Bundle: "repo-dev", Services: []string{"app"}}}},
 			want: true,
 		},
 	}

@@ -28,6 +28,7 @@ import (
 type mockProvider struct {
 	startHandle *PreviewHandle
 	startErr    error
+	startConfig *models.PreviewConfig
 	stopErr     error
 	dialErr     error
 	dialStream  PreviewStream
@@ -35,7 +36,8 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
+	m.startConfig = cfg
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -68,6 +70,33 @@ type mockStream struct {
 }
 
 func (m *mockStream) Close() error { return nil }
+
+type fakePreviewSecretBundleReader struct {
+	row     models.PreviewSecretBundle
+	source  models.PreviewSecretBundleSource
+	outputs []models.PreviewSecretBundleOutput
+}
+
+func (f *fakePreviewSecretBundleReader) GetActive(_ context.Context, orgID, repositoryID uuid.UUID, name string) (*models.PreviewSecretBundle, error) {
+	if f.row.OrgID != orgID || f.row.RepositoryID != repositoryID || f.row.Name != name {
+		return nil, pgx.ErrNoRows
+	}
+	return &f.row, nil
+}
+
+func (f *fakePreviewSecretBundleReader) DecryptSource(_ context.Context, orgID uuid.UUID, row models.PreviewSecretBundle) (models.PreviewSecretBundleSource, error) {
+	if row.OrgID != orgID {
+		return models.PreviewSecretBundleSource{}, pgx.ErrNoRows
+	}
+	return f.source, nil
+}
+
+func (f *fakePreviewSecretBundleReader) DecryptOutputs(_ context.Context, orgID uuid.UUID, row models.PreviewSecretBundle) ([]models.PreviewSecretBundleOutput, error) {
+	if row.OrgID != orgID {
+		return nil, pgx.ErrNoRows
+	}
+	return f.outputs, nil
+}
 
 type mockInspector struct {
 	closed bool
@@ -2189,6 +2218,90 @@ func TestLaunchPreview_Success(t *testing.T) {
 	require.Equal(t, models.PreviewStatusReady, launched.Status)
 	require.Equal(t, "handle-new", launched.PreviewHandle)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_ResolvesSecretsForFinalConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{
+			Handle:      "handle-new",
+			PrimaryPort: 3000,
+		},
+		statusSnap: &PreviewStatusSnapshot{},
+	}
+	bundleReader := &fakePreviewSecretBundleReader{
+		row: models.PreviewSecretBundle{
+			ID:           uuid.New(),
+			OrgID:        uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+			RepositoryID: uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+			Name:         "repo-dev",
+			Active:       true,
+			SourceType:   "managed",
+		},
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"database_url": "postgres://dev"}},
+		outputs: []models.PreviewSecretBundleOutput{{
+			Type:   "env",
+			Values: map[string]string{"DATABASE_URL": "secret:database_url"},
+		}},
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:          db.NewPreviewStore(mock),
+		Provider:       provider,
+		SecretResolver: NewPreviewSecretResolver(bundleReader),
+		Logger:         zerolog.Nop(),
+		WorkerNodeID:   "worker-1",
+	})
+
+	orgID := bundleReader.row.OrgID
+	repoID := bundleReader.row.RepositoryID
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	cfg := validPreviewConfig()
+	cfg.Secrets = []models.PreviewSecretBundleRef{{
+		Bundle:   "repo-dev",
+		Services: []string{"web"},
+		Env:      []string{"DATABASE_URL"},
+	}}
+	instance := &models.PreviewInstance{
+		ID:        previewID,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Status:    models.PreviewStatusStarting,
+	}
+
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(10)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), previewID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", time.Now()),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID:    sessionID,
+		OrgID:        orgID,
+		UserID:       uuid.New(),
+		Sandbox:      &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:       cfg,
+		RepositoryID: repoID,
+	})
+
+	require.NoError(t, err, "LaunchPreview should resolve secrets before starting the provider")
+	require.Equal(t, "postgres://dev", provider.startConfig.RuntimeSecretEnv["web"]["DATABASE_URL"], "provider should receive resolved secret env for the final launch config")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestLaunchPreview_ReservationNoLongerPending(t *testing.T) {

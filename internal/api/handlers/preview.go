@@ -576,6 +576,13 @@ func (h *PreviewHandler) decodeStartPreviewBody(r *http.Request) (startPreviewRe
 	return body, nil
 }
 
+func uuidValue(id *uuid.UUID) uuid.UUID {
+	if id == nil {
+		return uuid.Nil
+	}
+	return *id
+}
+
 func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, userID uuid.UUID, session models.Session, worker preview.WorkerNode, body startPreviewRequest) (*models.PreviewInstance, *previewHTTPError) {
 	if h.jobStore == nil {
 		return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_QUEUE_UNAVAILABLE", "preview start queue is not configured", nil)
@@ -589,6 +596,7 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 		OrgID:         orgID,
 		UserID:        userID,
 		Config:        initialConfig,
+		RepositoryID:  uuidValue(session.RepositoryID),
 		BaseCommitSHA: body.BaseCommitSHA,
 		ProfileName:   body.ProfileName,
 	}
@@ -665,6 +673,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 		OrgID:         orgID,
 		UserID:        userID,
 		Config:        initialConfig,
+		RepositoryID:  uuidValue(session.RepositoryID),
 		BaseCommitSHA: body.BaseCommitSHA,
 		ProfileName:   body.ProfileName,
 	}

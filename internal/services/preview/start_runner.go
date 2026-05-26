@@ -221,6 +221,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		UserID:                    payload.UserID,
 		Config:                    cfg,
 		Sandbox:                   sb,
+		RepositoryID:              target.RepositoryID,
 		BaseCommitSHA:             target.CommitSHA,
 		ProfileName:               payload.ProfileName,
 		RequestID:                 derefStringPtr(target.RequestID),
@@ -286,6 +287,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		UserID:        payload.UserID,
 		Config:        payload.Config,
 		Sandbox:       acq.Sandbox,
+		RepositoryID:  uuidPointerValue(session.RepositoryID),
 		BaseCommitSHA: payload.BaseCommitSHA,
 		ProfileName:   payload.ProfileName,
 	}
