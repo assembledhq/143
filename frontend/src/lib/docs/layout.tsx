@@ -1,5 +1,6 @@
 import type { BaseLayoutProps } from "fumadocs-ui/layouts/shared";
 import { BookOpen, Github } from "lucide-react";
+import { DocsThemeSwitch } from "@/components/docs/docs-theme-switch";
 
 export function docsLayoutOptions(): BaseLayoutProps {
   return {
@@ -49,6 +50,9 @@ export function docsLayoutOptions(): BaseLayoutProps {
         icon: <Github className="size-4" aria-hidden="true" />,
       },
     ],
+    slots: {
+      themeSwitch: DocsThemeSwitch,
+    },
     themeSwitch: {
       enabled: true,
     },
