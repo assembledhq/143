@@ -128,7 +128,7 @@ func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T
 	err = client.StopPreview(context.Background(), worker, orgID, previewID)
 	require.NoError(t, err, "StopPreview should succeed")
 
-	err = client.RecyclePreview(context.Background(), worker, orgID, previewID)
+	err = client.RecyclePreview(context.Background(), worker, orgID, previewID, nil)
 	require.NoError(t, err, "RecyclePreview should succeed")
 
 	screenshot, err := client.CaptureScreenshot(context.Background(), worker, orgID, previewID, models.ScreenshotOpts{})
@@ -378,7 +378,7 @@ func TestWorkerPreviewClient_MethodTransportFailures(t *testing.T) {
 		{
 			name: "recycle preview",
 			call: func(client *WorkerPreviewClient) error {
-				return client.RecyclePreview(context.Background(), worker, orgID, previewID)
+				return client.RecyclePreview(context.Background(), worker, orgID, previewID, nil)
 			},
 			wantMessage: "recycle preview",
 		},
