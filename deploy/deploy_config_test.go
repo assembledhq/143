@@ -461,6 +461,9 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, workerInstallText, "PostUp = ip rule replace", "worker WireGuard service should restore static egress policy routing after reboot")
 	require.Contains(t, workerInstallText, "PostDown = ip rule del", "worker WireGuard service should clean up static egress policy routing on stop")
 	require.Contains(t, workerInstallText, "rm -f \"$CAPABILITY_FILE\"", "worker install should clear stale capability before re-verifying the gateway path")
+	require.Contains(t, workerInstallText, "iptables-persistent", "worker install should install persistent iptables support before advertising capability")
+	require.Contains(t, workerInstallText, "command -v netfilter-persistent", "worker install should verify iptables persistence is available")
+	require.Contains(t, workerInstallText, "netfilter-persistent save", "worker install should persist static egress mark and NAT rules")
 
 	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read worker compose")
@@ -493,6 +496,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, gatewayText, "MASQUERADE", "egress gateway should SNAT tunnel traffic to its public IPv4")
 	require.Contains(t, gatewayText, "iptables-persistent", "egress gateway should install persistent iptables support")
 	require.Contains(t, gatewayText, "netfilter-persistent save", "egress gateway should persist NAT and guard rules")
+	require.Contains(t, gatewayText, "systemctl restart \"wg-quick@${WG_INTERFACE}\"", "egress gateway provisioning should reload rewritten WireGuard peer config")
 	require.Contains(t, gatewayText, "169.254.0.0/16", "egress gateway should independently block metadata ranges")
 	require.Contains(t, gatewayText, "10.0.0.0/8", "egress gateway should independently block private ranges")
 	require.Contains(t, gatewayText, "100.64.0.0/10", "egress gateway should block Tailscale CGNAT ranges")

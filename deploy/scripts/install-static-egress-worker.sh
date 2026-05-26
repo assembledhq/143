@@ -22,7 +22,7 @@ PROBE_IMAGE="${STATIC_EGRESS_PROBE_IMAGE:-ghcr.io/assembledhq/143-sandbox:latest
 PROBE_TIMEOUT="${STATIC_EGRESS_PROBE_TIMEOUT_SECONDS:-10}"
 
 apt-get update >/dev/null
-apt-get install -y --no-install-recommends wireguard iproute2 iptables >/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireguard iproute2 iptables iptables-persistent >/dev/null
 
 rm -f "$CAPABILITY_FILE"
 
@@ -57,9 +57,11 @@ iptables -t mangle -A STATIC_EGRESS_MARK -j MARK --set-mark "$FWMARK"
 iptables -t nat -C POSTROUTING -s "$STATIC_EGRESS_SUBNET" -o "$WG_INTERFACE" -j MASQUERADE 2>/dev/null ||
   iptables -t nat -A POSTROUTING -s "$STATIC_EGRESS_SUBNET" -o "$WG_INTERFACE" -j MASQUERADE
 
-if command -v netfilter-persistent >/dev/null 2>&1; then
-  netfilter-persistent save >/dev/null
+if ! command -v netfilter-persistent >/dev/null 2>&1; then
+  echo "ERROR: netfilter-persistent is required to persist static egress firewall rules." >&2
+  exit 1
 fi
+netfilter-persistent save >/dev/null
 
 ip link show "$WG_INTERFACE" >/dev/null
 ip rule show | grep -F "fwmark $FWMARK" | grep -F "lookup $TABLE_ID" >/dev/null

@@ -58,7 +58,8 @@ net.ipv4.ip_forward = 1
 SYSCTL
 sysctl -p /etc/sysctl.d/99-static-egress-gateway.conf
 
-systemctl enable --now "wg-quick@${WG_INTERFACE}"
+systemctl enable "wg-quick@${WG_INTERFACE}" >/dev/null
+systemctl restart "wg-quick@${WG_INTERFACE}"
 
 iptables -N STATIC_EGRESS_GUARD 2>/dev/null || true
 iptables -F STATIC_EGRESS_GUARD
