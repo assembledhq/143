@@ -276,7 +276,7 @@ export function SplitDiffHunk({
 
         return (
           <div key={i}>
-            <div className="flex divide-x divide-border/50">
+            <div className="flex divide-x divide-border/50 [content-visibility:auto] [contain-intrinsic-size:auto_20px]">
               <SplitLineCell
                 line={row.left}
                 highlightedContent={row.leftHighlighted}
