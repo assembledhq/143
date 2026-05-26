@@ -210,6 +210,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if services != nil && services.PreviewStarter != nil {
 		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(services, logger))
+		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -400,6 +401,7 @@ type Services struct {
 
 type previewStarter interface {
 	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
+	StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error
 }
 
 type orchestratorService interface {
@@ -472,6 +474,39 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 					Str("session_id", input.SessionID.String()).
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			return &FatalError{Err: err}
+		}
+		return nil
+	}
+}
+
+func newStartBranchPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.StartBranchPreviewJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal start_branch_preview payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.UserID == uuid.Nil || input.PreviewID == uuid.Nil || input.PreviewTargetID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("start_branch_preview payload missing required ids")}
+		}
+		logger.Info().
+			Str("preview_id", input.PreviewID.String()).
+			Str("preview_target_id", input.PreviewTargetID.String()).
+			Msg("processing start_branch_preview job")
+		if err := services.PreviewStarter.StartReservedBranchPreview(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				retryAfter := previewCapacityRetryDelay
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("preview_target_id", input.PreviewTargetID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview capacity reached; retrying start_branch_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
 			return &FatalError{Err: err}
