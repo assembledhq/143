@@ -463,14 +463,15 @@ export function PreviewPanel({
     status === "stopped" || status === "expired"
       ? instance?.stopped_at || instance?.updated_at
       : undefined;
-  const isActive =
+  const isPreparing = status === "starting";
+  const isManageable =
     status === "ready" ||
     status === "partially_ready" ||
-    status === "starting";
+    status === "unhealthy";
   const isReady = status === "ready" || status === "partially_ready";
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
-    (isActive && !isReady) || (status === "failed" && hasStartupRows);
+    isPreparing || (status === "failed" && hasStartupRows);
   const previewLogsQuery = useQuery({
     queryKey: ["preview-logs", sessionId, instance?.id],
     queryFn: () => api.sessions.preview.logs(sessionId),
@@ -493,9 +494,9 @@ export function PreviewPanel({
         : startupErrorLogs || "No startup logs were captured for this failure."
     : instance?.error || startupErrorLogs;
 
-  // Start preview
+  // Ensure preview
   const startMutation = useMutation({
-    mutationFn: () => api.sessions.preview.start(sessionId),
+    mutationFn: () => api.sessions.preview.ensure(sessionId),
     onSuccess: () => {
       setMutationError(null);
       queryClient.invalidateQueries({
@@ -600,7 +601,7 @@ export function PreviewPanel({
 
   // Restart preview
   const restartMutation = useMutation({
-    mutationFn: () => api.sessions.preview.restart(sessionId),
+    mutationFn: () => api.sessions.preview.ensure(sessionId),
     onSuccess: resetPreviewState,
     onError: (err) => {
       setMutationError(`Failed to restart preview: ${err.message}`);
@@ -751,7 +752,7 @@ export function PreviewPanel({
     stopMutation.isPending ||
     restartMutation.isPending ||
     lifetimeMutation.isPending;
-  const showStartupCanvas = isActive && !isReady;
+  const showStartupCanvas = isPreparing;
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
@@ -845,7 +846,7 @@ export function PreviewPanel({
                 </TooltipProvider>
               )}
 
-              {isActive && (
+              {isManageable && (
                 <PreviewActionsMenu
                   expiresAt={isReady ? instance?.expires_at : undefined}
                   disabled={isMutating}
@@ -949,21 +950,6 @@ export function PreviewPanel({
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Stop preview</TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label="Restart preview"
-                      onClick={() => restartMutation.mutate()}
-                      disabled={isMutating}
-                      loading={restartMutation.isPending}
-                    >
-                      {!restartMutation.isPending && <RotateCw className="size-3.5" />}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Restart preview</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
             </div>
@@ -1073,18 +1059,6 @@ export function PreviewPanel({
             </pre>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setShowFullStartupLogs(false);
-                startMutation.mutate();
-              }}
-              disabled={isMutating}
-            >
-              <RefreshCw className="size-3.5" />
-              Try Again
-            </Button>
             {(startupErrorLogs || previewLogsQuery.isLoading || previewLogsQuery.isError) && (
               <Button
                 variant="ghost"

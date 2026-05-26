@@ -53,9 +53,6 @@ type AgentResult struct {
     TokenUsage          TokenUsage
     ExitCode            int
     Error               string
-    ConfidenceScore     float64  // 0.0-1.0, self-assessed by the agent
-    ConfidenceReasoning string
-    RiskFactors         []string
 }
 ```
 
@@ -337,7 +334,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
 
     result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 
-    // 9. Store result (including confidence score)
+    // 9. Store result
     if err != nil {
         o.db.UpdateAgentRun(ctx, run.ID, "failed", err.Error(), nil)
         // Enqueue failure analysis job — see 18-fix-quality-feedback.md
@@ -346,17 +343,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
     }
     o.db.UpdateAgentRun(ctx, run.ID, "completed", "", result)
 
-    // 10. Check confidence score against thresholds
-    thresholds := settings.ConfidenceThresholds
-    if result.ConfidenceScore < thresholds.HumanReview {
-        // Low confidence — pause for human guidance
-        o.db.UpdateAgentRunStatus(ctx, run.ID, "needs_human_guidance")
-        o.notify.AdminAlert(ctx, run.OrgID, "low_confidence_run", run.ID)
-        return nil
-    }
-
-    // 11. Enqueue validation job
-    o.jobs.Enqueue(ctx, "validate", map[string]interface{}{"agent_run_id": run.ID})
+    // 10. Enqueue PR creation job
+    o.jobs.Enqueue(ctx, "open_pr", map[string]interface{}{"agent_run_id": run.ID})
     return nil
 }
 
@@ -405,7 +393,7 @@ Questions have a **timeout** (default: 24 hours). If unanswered, the agent is to
 
 ### 2. Human Guidance on Paused Runs
 
-When a run is paused at low confidence (`needs_human_guidance`), the user can do more than just approve or reject — they can provide **guidance text** that is injected into the agent's context if the run is resumed:
+When a run is paused for human input (`needs_human_guidance`), the user can do more than just approve or reject — they can provide **guidance text** that is injected into the agent's context if the run is resumed:
 
 ```go
 type GuidanceInput struct {
@@ -490,15 +478,6 @@ running → awaiting_input → running → completed → pr_open → in_review �
 - If the container crashes or times out, the run is marked `failed` with the error.
 - Admins can manually retry from the UI (creates a new agent run, does not modify the failed one).
 - Auto-retry is not enabled by default to avoid wasting tokens, but can be enabled in org settings for up to 1 retry.
-
-### Confidence Gating
-
-After each run, the orchestrator checks the agent's confidence score:
-
-- **Above auto-proceed threshold** (default 0.8): proceed to validation
-- **Between thresholds** (default 0.5-0.8): proceed but flag the PR for mandatory human review
-- **Below human-review threshold** (default 0.5): pause the run, mark as `needs_human_guidance`, notify admin
-- Admin can then approve (continue to validation), retry with different settings, or dismiss
 
 ## Token Usage Tracking
 

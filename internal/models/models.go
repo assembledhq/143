@@ -232,22 +232,19 @@ type Issue struct {
 // primary_issue_id column on sessions. nil means the session has no primary
 // issue linked (zero-issue sessions are a first-class execution path).
 type Session struct {
-	ID                  uuid.UUID               `db:"id" json:"id"`
-	PrimaryThreadID     *uuid.UUID              `db:"-" json:"-"`
-	PrimaryIssueID      *uuid.UUID              `db:"primary_issue_id" json:"primary_issue_id"`
-	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
-	Origin              SessionOrigin           `db:"origin" json:"origin"`
-	InteractionMode     SessionInteractionMode  `db:"interaction_mode" json:"interaction_mode"`
-	ValidationPolicy    SessionValidationPolicy `db:"validation_policy" json:"validation_policy"`
-	LinkedIssues        []SessionIssueLink      `db:"-" json:"linked_issues,omitempty"`
-	AgentType           AgentType               `db:"agent_type" json:"agent_type"`
-	Status              SessionStatus           `db:"status" json:"status"`
-	AutonomyLevel       SessionAutonomy         `db:"autonomy_level" json:"autonomy_level"`
-	TokenMode           SessionTokenMode        `db:"token_mode" json:"token_mode"`
-	ComplexityTier      *int                    `db:"complexity_tier" json:"complexity_tier,omitempty"`
-	ConfidenceScore     *float64                `db:"confidence_score" json:"confidence_score,omitempty"`
-	ConfidenceReasoning *string                 `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
-	RiskFactors         []string                `db:"risk_factors" json:"risk_factors,omitempty"`
+	ID               uuid.UUID               `db:"id" json:"id"`
+	PrimaryThreadID  *uuid.UUID              `db:"-" json:"-"`
+	PrimaryIssueID   *uuid.UUID              `db:"primary_issue_id" json:"primary_issue_id"`
+	OrgID            uuid.UUID               `db:"org_id" json:"org_id"`
+	Origin           SessionOrigin           `db:"origin" json:"origin"`
+	InteractionMode  SessionInteractionMode  `db:"interaction_mode" json:"interaction_mode"`
+	ValidationPolicy SessionValidationPolicy `db:"validation_policy" json:"validation_policy"`
+	LinkedIssues     []SessionIssueLink      `db:"-" json:"linked_issues,omitempty"`
+	AgentType        AgentType               `db:"agent_type" json:"agent_type"`
+	Status           SessionStatus           `db:"status" json:"status"`
+	AutonomyLevel    SessionAutonomy         `db:"autonomy_level" json:"autonomy_level"`
+	TokenMode        SessionTokenMode        `db:"token_mode" json:"token_mode"`
+	ComplexityTier   *int                    `db:"complexity_tier" json:"complexity_tier,omitempty"`
 	// ContainerID is the Docker container hosting the session's sandbox when
 	// one is live. Non-null only while at least one holder
 	// (TurnHoldingContainer or an active preview) is keeping it alive — see
@@ -564,20 +561,17 @@ func (s SessionListItem) MarshalJSON() ([]byte, error) {
 
 // SessionResult holds the result fields to update on an agent run.
 type SessionResult struct {
-	ConfidenceScore     *float64          `json:"confidence_score,omitempty"`
-	ConfidenceReasoning *string           `json:"confidence_reasoning,omitempty"`
-	RiskFactors         []string          `json:"risk_factors,omitempty"`
-	TokenUsage          json.RawMessage   `json:"token_usage,omitempty"`
-	ModelUsed           *string           `json:"model_used,omitempty"`
-	ResultSummary       *string           `json:"result_summary,omitempty"`
-	Diff                *string           `json:"diff,omitempty"`
-	Error               *string           `json:"error,omitempty"`
-	FailureCategory     *string           `json:"failure_category,omitempty"`
-	DiffBaseCommitSHA   *string           `json:"-"`
-	DiffHeadCommitSHA   *string           `json:"-"`
-	DiffWorkspaceDirty  bool              `json:"-"`
-	DiffCollectedAt     *time.Time        `json:"-"`
-	DiffSource          SessionDiffSource `json:"-"`
+	TokenUsage         json.RawMessage   `json:"token_usage,omitempty"`
+	ModelUsed          *string           `json:"model_used,omitempty"`
+	ResultSummary      *string           `json:"result_summary,omitempty"`
+	Diff               *string           `json:"diff,omitempty"`
+	Error              *string           `json:"error,omitempty"`
+	FailureCategory    *string           `json:"failure_category,omitempty"`
+	DiffBaseCommitSHA  *string           `json:"-"`
+	DiffHeadCommitSHA  *string           `json:"-"`
+	DiffWorkspaceDirty bool              `json:"-"`
+	DiffCollectedAt    *time.Time        `json:"-"`
+	DiffSource         SessionDiffSource `json:"-"`
 }
 
 type SessionDiffSnapshot struct {
@@ -758,7 +752,6 @@ type SessionThread struct {
 	AgentSessionID      *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
 	CurrentTurn         int          `db:"current_turn" json:"current_turn"`
 	LastActivityAt      *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ConfidenceScore     *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
 	ResultSummary       *string      `db:"result_summary" json:"result_summary,omitempty"`
 	Diff                *string      `db:"diff" json:"diff,omitempty"`
 	FailureExplanation  *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`

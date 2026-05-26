@@ -390,6 +390,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// and install-status surfaces consumed by the settings UI.
 	linearAgentSettingsHandler := handlers.NewLinearAgentSettingsHandler(handlers.LinearAgentSettingsConfig{
 		Mappings:      db.NewLinearTeamRepoMappingStore(pool),
+		TeamKeys:      db.NewLinearTeamKeyStore(pool),
 		Credentials:   credentialStore,
 		Settings:      linearAgentSettingsView,
 		AgentSessions: linearService.AgentSessionStore(),
@@ -1003,6 +1004,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/previews/{preview_id}/bootstrap", branchPreviewHandler.MintBootstrapToken)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
+				r.Post("/api/v1/sessions/{id}/preview/ensure", previewHandler.EnsurePreview)
 				r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
 				r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
 				r.Patch("/api/v1/sessions/{id}/preview/lifetime", previewHandler.SetLifetime)

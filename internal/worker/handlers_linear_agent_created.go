@@ -130,9 +130,13 @@ func handleLinearAgentCreated(
 	if projectID == "" {
 		projectID = payload.LinearIssueProjectID
 	}
+	linearTeamID := fetched.TeamKey
+	if linearTeamID == "" {
+		linearTeamID = fetched.TeamID
+	}
 	repoResult, err := deps.RepoResolver.Resolve(ctx, linear.AgentRepoResolveInput{
 		OrgID:           orgID,
-		LinearTeamID:    fetched.TeamID,
+		LinearTeamID:    linearTeamID,
 		LinearProjectID: projectID,
 		Labels:          fetched.Labels,
 	})

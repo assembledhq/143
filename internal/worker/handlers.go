@@ -1470,7 +1470,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
-		// confidence) onto the thread row. Stays nil when the orchestrator
+		// etc.) onto the thread row. Stays nil when the orchestrator
 		// short-circuited before completing a turn (cancel, policy stop) so
 		// we fall back to the status-only completion path.
 		var lastTurnResult *agent.AgentResult
@@ -1692,7 +1692,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// tracks the shared sandbox's total turns across all threads.
 			//
 			// When OnTurnComplete fired we have the agent's result in hand,
-			// so persist diff/summary/confidence onto the thread row via
+			// so persist diff/summary onto the thread row via
 			// UpdateTurnComplete — this is the data the revert action and
 			// the per-tab summary panel read. When the turn short-circuited
 			// before producing a result (cancel, policy stop) we fall back
@@ -1706,9 +1706,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					diffPtr = &lastTurnResult.Diff
 				}
 				threadResult := &models.SessionResult{
-					ConfidenceScore: &lastTurnResult.ConfidenceScore,
-					ResultSummary:   summaryPtr,
-					Diff:            diffPtr,
+					ResultSummary: summaryPtr,
+					Diff:          diffPtr,
 				}
 				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
 					logger.Warn().Err(err).

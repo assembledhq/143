@@ -171,8 +171,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		Level:     "info",
 		Message:   "Gemini CLI completed",
 		Metadata: map[string]interface{}{
-			"exit_code":        exitCode,
-			"confidence_score": result.ConfidenceScore,
+			"exit_code": exitCode,
 		},
 	}
 
@@ -192,7 +191,6 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 			Message:   text,
 		}
 		*summaryParts = append(*summaryParts, text)
-		tryExtractConfidence(text, result)
 		return
 	}
 
@@ -217,7 +215,6 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 				Message:   legacy.Response,
 			}
 			*summaryParts = append(*summaryParts, legacy.Response)
-			tryExtractConfidence(legacy.Response, result)
 			if legacy.Stats != nil {
 				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
 					InputTokens:  legacy.Stats.InputTokens,
@@ -249,7 +246,6 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 		// Individual text blocks are persisted as separate output logs —
 		// don't merge them into the summary. Track as fallback.
 		*lastAssistant = content
-		tryExtractConfidence(content, result)
 
 	case "tool_call", "tool_use":
 		toolName := event.Tool
@@ -321,7 +317,6 @@ func parseGeminiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- 
 		}
 		if content != "" {
 			*summaryParts = append(*summaryParts, content)
-			tryExtractConfidence(content, result)
 		}
 		if event.Stats != nil {
 			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
@@ -372,7 +367,6 @@ func parseGeminiOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 			Message:   geminiResp.Response,
 		}
 		result.Summary = geminiResp.Response
-		tryExtractConfidence(geminiResp.Response, result)
 
 		if geminiResp.Stats != nil {
 			mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{
@@ -398,7 +392,6 @@ func parseGeminiOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 		Message:   text,
 	}
 	result.Summary = text
-	tryExtractConfidence(text, result)
 }
 
 // geminiStreamEvent represents a single line of Gemini CLI's stream-json output.
@@ -462,7 +455,6 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 				Message:   text,
 			}
 			summaryParts = append(summaryParts, text)
-			tryExtractConfidence(text, result)
 			continue
 		}
 
@@ -478,7 +470,6 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 				Message:   content,
 			}
 			lastAssistantContent = content
-			tryExtractConfidence(content, result)
 
 		case "tool_call", "tool_use":
 			toolName := event.Tool
@@ -550,7 +541,6 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 			}
 			if content != "" {
 				summaryParts = append(summaryParts, content)
-				tryExtractConfidence(content, result)
 			}
 			if event.Stats != nil {
 				mergeTokenUsage(&result.TokenUsage, agent.TokenUsage{

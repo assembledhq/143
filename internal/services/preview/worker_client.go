@@ -82,6 +82,10 @@ type RemoteStopActivePreviewForSessionRequest struct {
 	SessionID uuid.UUID `json:"session_id"`
 }
 
+type RemoteRecyclePreviewRequest struct {
+	Config *models.PreviewConfig `json:"config,omitempty"`
+}
+
 type RemoteCancelSessionRequest struct {
 	OrgID     uuid.UUID `json:"org_id"`
 	SessionID uuid.UUID `json:"session_id"`
@@ -257,14 +261,14 @@ func (c *WorkerPreviewClient) StopPreview(ctx context.Context, worker WorkerNode
 	return err
 }
 
-func (c *WorkerPreviewClient) RecyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID) error {
+func (c *WorkerPreviewClient) RecyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, cfg *models.PreviewConfig) error {
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/recycle", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
 		PreviewID:    &previewID,
 		Action:       "recycle",
 		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
-	}, nil)
+	}, RemoteRecyclePreviewRequest{Config: cfg})
 	if err != nil {
 		return err
 	}

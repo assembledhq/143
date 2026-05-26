@@ -170,19 +170,6 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       },
     },
     {
-      id: "confidence",
-      accessorKey: "confidence_score",
-      header: ({ column }) => <SortableHeader label="Confidence" column={column} />,
-      size: 100,
-      cell: ({ row }) => {
-        const score = row.original.confidence_score;
-        if (score == null) return <span className="text-xs text-muted-foreground/40">—</span>;
-        const pct = Math.round(score * 100);
-        const color = pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : pct >= 50 ? "text-amber-600 dark:text-amber-400" : "text-destructive";
-        return <span className={`text-xs font-medium tabular-nums ${color}`}>{pct}%</span>;
-      },
-    },
-    {
       id: "last_modified",
       accessorKey: "last_activity_at",
       header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
