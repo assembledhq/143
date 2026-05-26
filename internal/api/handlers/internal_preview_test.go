@@ -108,7 +108,7 @@ type internalPreviewTestProvider struct {
 	dialFn func(context.Context, string) (previewsvc.PreviewStream, error)
 }
 
-func (p internalPreviewTestProvider) StartPreview(context.Context, *agent.Sandbox, *models.PreviewConfig, map[string]string, previewsvc.ServiceObserver) (*previewsvc.PreviewHandle, error) {
+func (p internalPreviewTestProvider) StartPreview(context.Context, *agent.Sandbox, *models.PreviewConfig, previewsvc.RuntimeEnv, previewsvc.ServiceObserver) (*previewsvc.PreviewHandle, error) {
 	return nil, errors.New("not implemented")
 }
 

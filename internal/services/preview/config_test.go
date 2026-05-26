@@ -613,7 +613,7 @@ func TestValidateConfig(t *testing.T) {
 				Primary:        "app",
 				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
-				Credentials:    models.CredentialConfig{Mode: "managed_env", InjectInto: []string{"unknown"}},
+				Credentials:    models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"DB_URL"}, InjectInto: []string{"unknown"}},
 			},
 			wantErr: 1,
 		},
@@ -959,7 +959,7 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 		Resources: models.PreviewResourceRequirements{
 			Limits: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
 		},
-		Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging"},
+		Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"API_TOKEN"}, InjectInto: []string{"frontend"}},
 		Network:     models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
 	}
 
@@ -1129,7 +1129,7 @@ func TestDetectReadiness(t *testing.T) {
 				Primary:        "app",
 				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
-				Credentials:    models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"DB_URL"}},
+				Credentials:    models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"DB_URL"}, InjectInto: []string{"app"}},
 			},
 			wantReady: models.PreviewReadinessAdminSetupRequired,
 		},

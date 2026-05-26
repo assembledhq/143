@@ -148,6 +148,10 @@ func (n *noopSandboxExecutor) ExecStream(_ context.Context, _ *agent.Sandbox, _ 
 	return 0, nil
 }
 
+func (n *noopSandboxExecutor) ExecStreamWithOptions(_ context.Context, _ *agent.Sandbox, _ agent.ExecStreamOptions, _ func(line []byte), _ io.Writer) (int, error) {
+	return 0, nil
+}
+
 func (n *noopSandboxExecutor) Exec(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
 	return 0, nil
 }
@@ -496,7 +500,7 @@ func TestBuildServiceEnvs(t *testing.T) {
 	infraCreds := map[string]preview.InfraCredential{"db": cred}
 	expectedDSN := fmt.Sprintf("postgres://preview_db:%s@preview-db-abc:5432/preview_db", cred.Password)
 
-	envs := d.buildServiceEnvs(cfg, infraCreds, nil)
+	envs := d.buildServiceEnvs(cfg, infraCreds, preview.RuntimeEnv{})
 
 	// web should have NODE_ENV + DATABASE_URL
 	require.Equal(t, "development", envs["web"]["NODE_ENV"])
@@ -523,10 +527,41 @@ func TestBuildServiceEnvs_ExtraEnvOverrides(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{},
 	}
 
-	envs := d.buildServiceEnvs(cfg, nil, map[string]string{"PREVIEW_ORIGIN": "http://abc.preview.localhost:9090"})
+	envs := d.buildServiceEnvs(cfg, nil, preview.RuntimeEnv{Platform: map[string]string{"PREVIEW_ORIGIN": "http://abc.preview.localhost:9090"}})
 
 	require.Equal(t, "http://abc.preview.localhost:9090", envs["web"]["PREVIEW_ORIGIN"], "extraEnv must override user-declared value")
 	require.Equal(t, "http://abc.preview.localhost:9090", envs["worker"]["PREVIEW_ORIGIN"], "extraEnv must reach services with no user env")
+}
+
+func TestBuildServiceEnvs_ManagedSecretEnvIsScopedAndWinsOverInfra(t *testing.T) {
+	t.Parallel()
+	d := &DockerPreviewProvider{}
+
+	cfg := &models.PreviewConfig{
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web":    {Port: 3000, Env: map[string]string{"DATABASE_URL": "service"}},
+			"worker": {Port: 9000},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{
+			"db": {
+				Template:   "postgres-17",
+				InjectEnv:  map[string]string{"DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}"},
+				InjectInto: []string{"web", "worker"},
+			},
+		},
+	}
+	cred, err := buildInfraCredential("db", "preview-db-abc", 5432)
+	require.NoError(t, err, "fixture infra credential should build")
+
+	envs := d.buildServiceEnvs(cfg, map[string]preview.InfraCredential{"db": cred}, preview.RuntimeEnv{
+		Services: map[string]map[string]string{
+			"worker": {"DATABASE_URL": "managed-secret"},
+		},
+	})
+
+	require.NotEqual(t, "managed-secret", envs["web"]["DATABASE_URL"], "managed secrets should not reach services outside their scope")
+	require.Equal(t, "managed-secret", envs["worker"]["DATABASE_URL"], "managed secrets should override generated infra env for scoped services")
 }
 
 func TestBuildServiceEnvs_NoInfra(t *testing.T) {
@@ -544,7 +579,7 @@ func TestBuildServiceEnvs_NoInfra(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{},
 	}
 
-	envs := d.buildServiceEnvs(cfg, nil, nil)
+	envs := d.buildServiceEnvs(cfg, nil, preview.RuntimeEnv{})
 	require.Equal(t, "3000", envs["web"]["PORT"])
 	require.Len(t, envs["web"], 1)
 }
@@ -564,6 +599,10 @@ type hangingSandboxExecutor struct {
 }
 
 func (h *hangingSandboxExecutor) ExecStream(_ context.Context, _ *agent.Sandbox, _ string, _ func(line []byte), _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (h *hangingSandboxExecutor) ExecStreamWithOptions(_ context.Context, _ *agent.Sandbox, _ agent.ExecStreamOptions, _ func(line []byte), _ io.Writer) (int, error) {
 	return 0, nil
 }
 
@@ -685,14 +724,25 @@ func (r *recordingObserver) output() []recordedOutput {
 // (npm run dev / sh script.sh); Exec handles the readiness curl probes
 // and the per-service `lsof` PID detection.
 type fakeServiceExecutor struct {
-	execStreamFn func(ctx context.Context, cmd string, onLine func([]byte)) (int, error)
-	execFn       func(ctx context.Context, cmd string) (int, error)
-	readFileFn   func(ctx context.Context, path string) ([]byte, error)
+	execStreamFn        func(ctx context.Context, cmd string, onLine func([]byte)) (int, error)
+	execStreamOptionsFn func(ctx context.Context, opts agent.ExecStreamOptions, onLine func([]byte)) (int, error)
+	execFn              func(ctx context.Context, cmd string) (int, error)
+	readFileFn          func(ctx context.Context, path string) ([]byte, error)
 }
 
 func (f *fakeServiceExecutor) ExecStream(ctx context.Context, _ *agent.Sandbox, cmd string, onLine func(line []byte), _ io.Writer) (int, error) {
 	if f.execStreamFn != nil {
 		return f.execStreamFn(ctx, cmd, onLine)
+	}
+	return 0, nil
+}
+
+func (f *fakeServiceExecutor) ExecStreamWithOptions(ctx context.Context, _ *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), _ io.Writer) (int, error) {
+	if f.execStreamOptionsFn != nil {
+		return f.execStreamOptionsFn(ctx, opts, onLine)
+	}
+	if f.execStreamFn != nil {
+		return f.execStreamFn(ctx, strings.Join(opts.Cmd, " "), onLine)
 	}
 	return 0, nil
 }
@@ -717,6 +767,11 @@ type recordingStopExecutor struct {
 }
 
 func (r *recordingStopExecutor) ExecStream(ctx context.Context, _ *agent.Sandbox, _ string, _ func(line []byte), _ io.Writer) (int, error) {
+	<-ctx.Done()
+	return -1, ctx.Err()
+}
+
+func (r *recordingStopExecutor) ExecStreamWithOptions(ctx context.Context, _ *agent.Sandbox, _ agent.ExecStreamOptions, _ func(line []byte), _ io.Writer) (int, error) {
 	<-ctx.Done()
 	return -1, ctx.Err()
 }
@@ -821,6 +876,44 @@ func TestStartService_StreamsStartupOutputToObserver(t *testing.T) {
 		{name: "server", line: "running database migrations"},
 		{name: "server", line: "starting http server"},
 	}, obs.output(), "observer should receive the exact startup output lines")
+}
+
+func TestStartService_PassesSecretsAsExecEnv(t *testing.T) {
+	t.Parallel()
+
+	var got agent.ExecStreamOptions
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) {
+			return 1, nil
+		},
+		execStreamOptionsFn: func(_ context.Context, opts agent.ExecStreamOptions, _ func([]byte)) (int, error) {
+			got = opts
+			return 0, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	state := &previewState{
+		sandbox:  &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	err := d.startService(
+		context.Background(),
+		state,
+		"web",
+		models.ServiceConfig{Command: []string{"npm", "run", "dev"}, Cwd: "frontend", Port: 3000},
+		map[string]string{"API_TOKEN": "secret-token"},
+		&recordingObserver{},
+	)
+	require.NoError(t, err, "startService should launch the service goroutine")
+	state.wg.Wait()
+
+	require.Equal(t, []string{"npm", "run", "dev"}, got.Cmd, "service command should stay as argv")
+	require.Equal(t, "/workspace/repo/frontend", got.WorkingDir, "service cwd should be applied as exec working dir")
+	require.Equal(t, "secret-token", got.Env["API_TOKEN"], "managed secret should be passed through exec env")
+	require.Equal(t, "0.0.0.0", got.Env["HOST"], "service host binding env should be included")
+	require.NotContains(t, strings.Join(got.Cmd, " "), "secret-token", "managed secret should not be interpolated into command text")
 }
 
 // TestStartService_FailureCapturesTailAndNotifies exercises the entire
@@ -1096,7 +1189,7 @@ func TestStartPreview_ReadinessTimeoutSurfacesLiveTail(t *testing.T) {
 		},
 	}
 
-	_, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	_, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, obs)
 	close(release)
 
 	require.Error(t, err, "StartPreview should fail when readiness never passes")
@@ -1154,7 +1247,7 @@ func TestStartPreview_StandardMode_NotifiesObserverPerService(t *testing.T) {
 		},
 	}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, obs)
 	require.NoError(t, err)
 	require.NotNil(t, handle)
 	require.Equal(t, 3000, handle.PrimaryPort)
@@ -1213,7 +1306,7 @@ func TestStartPreview_RunsPreviewInstallBeforeServices(t *testing.T) {
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
 	cfg := previewInstallTestConfig()
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, &recordingObserver{})
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, &recordingObserver{})
 	require.NoError(t, err, "StartPreview should succeed after preview.install completes")
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
@@ -1224,7 +1317,7 @@ func TestStartPreview_RunsPreviewInstallBeforeServices(t *testing.T) {
 	require.Contains(t, calls[0], "'npm' 'ci'", "preview.install should run before any service command")
 	require.Contains(t, calls[0], "rm -rf -- node_modules packages/*/node_modules", "preview.install should clean only declared clean paths")
 	require.NotContains(t, calls[0], ".next", "preview.install cleanup should not remove undeclared paths")
-	require.Contains(t, calls[1], "'npm' 'run' 'dev'", "service command should run after preview.install")
+	require.Contains(t, calls[1], "npm run dev", "service command should run after preview.install")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
@@ -1280,7 +1373,7 @@ func TestStartPreview_SkipsPreviewInstallWhenMarkerAndVerifyPathsExist(t *testin
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
 	cfg := previewInstallTestConfig()
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, &recordingObserver{})
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, &recordingObserver{})
 	require.NoError(t, err, "StartPreview should succeed when preview.install cache is valid")
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
@@ -1291,7 +1384,7 @@ func TestStartPreview_SkipsPreviewInstallWhenMarkerAndVerifyPathsExist(t *testin
 	mu.Unlock()
 	require.Len(t, calls, 1, "valid install marker and verify path should skip preview.install command")
 	require.NotContains(t, calls[0], "'npm' 'ci'", "service command should not include skipped install command")
-	require.Contains(t, calls[0], "'npm' 'run' 'dev'", "service command should still start")
+	require.Contains(t, calls[0], "npm run dev", "service command should still start")
 	require.Contains(t, paths, "package-lock.json", "install cache key should read declared lockfile")
 	require.Contains(t, strings.Join(execs, "\n"), "test -e 'node_modules/.bin/next'", "install skip should verify declared verify path")
 
@@ -1326,7 +1419,7 @@ func TestStartPreview_PreviewInstallFailureStopsBeforeServices(t *testing.T) {
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
 	obs := &recordingObserver{}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, previewInstallTestConfig(), nil, obs)
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, previewInstallTestConfig(), preview.RuntimeEnv{}, obs)
 	require.Nil(t, handle, "StartPreview should not return a handle when preview.install fails")
 	require.Error(t, err, "StartPreview should fail when preview.install exits non-zero")
 	require.ErrorIs(t, err, preview.ErrInstallFailed, "StartPreview should classify install failures with ErrInstallFailed")
@@ -1417,7 +1510,7 @@ func TestStartPreview_ProgressiveMode_NotifiesObserver(t *testing.T) {
 		},
 	}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, obs)
 	require.NoError(t, err)
 	require.True(t, handle.PartiallyReady)
 
@@ -1478,7 +1571,7 @@ func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
 		},
 	}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, nil)
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, nil)
 	require.NoError(t, err)
 	require.Equal(t, 3000, handle.PrimaryPort)
 
@@ -1530,7 +1623,7 @@ func TestStartPreview_FailsWhenPrimaryPortNotExternallyReachable(t *testing.T) {
 		},
 	}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, obs)
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.RuntimeEnv{}, obs)
 	close(release)
 
 	require.Error(t, err, "StartPreview should fail when worker cannot dial the sandbox primary port")

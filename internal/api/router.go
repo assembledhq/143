@@ -112,6 +112,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := resolveRouterCodingCredentialStore(pool, cryptoSvc, sharedCodingCredentialStore...)
+	previewSecretBundleStore := db.NewPreviewSecretBundleStore(pool, cryptoSvc)
 	// Mirror legacy writes into the unified `coding_credentials` table during the
 	// migration window. Removed in the cleanup PR. See
 	// docs/design/future/65-unified-coding-credentials.md.
@@ -400,6 +401,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	})
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
+	previewSecretBundleHandler := handlers.NewPreviewSecretBundleHandler(previewSecretBundleStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
 	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)
@@ -574,6 +576,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		Store:                 previewStore,
 		SessionStore:          sessionStore,
 		OrgSettingsStore:      orgStore,
+		PreviewSecretBundles:  previewSecretBundleStore,
 		Provider:              previewProvider,
 		SandboxProvider:       sandboxProvider,
 		Inspector:             previewInspector,
@@ -1115,6 +1118,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
 				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
 				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)
+				r.Get("/api/v1/settings/preview-secret-bundles", previewSecretBundleHandler.List)
+				r.Put("/api/v1/settings/preview-secret-bundles/{name}", previewSecretBundleHandler.Upsert)
+				r.Delete("/api/v1/settings/preview-secret-bundles/{name}", previewSecretBundleHandler.Delete)
 				r.Get("/api/v1/pm/context/pending", pmHandler.ListPendingRefreshes)
 				r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
 				r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)

@@ -438,6 +438,22 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	}
 
 	// Credential inject_into validation.
+	switch cfg.Credentials.Mode {
+	case "", "none":
+		// OK.
+	case "managed_env":
+		if strings.TrimSpace(cfg.Credentials.CredentialSet) == "" {
+			errs = append(errs, "credentials: credential_set is required when mode is managed_env")
+		}
+		if len(cfg.Credentials.Env) == 0 {
+			errs = append(errs, "credentials: env must include at least one variable when mode is managed_env")
+		}
+		if len(cfg.Credentials.InjectInto) == 0 {
+			errs = append(errs, "credentials: inject_into must include at least one service when mode is managed_env")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("credentials.mode %q is not supported (expected \"none\" or \"managed_env\")", cfg.Credentials.Mode))
+	}
 	for _, svcName := range cfg.Credentials.InjectInto {
 		if _, ok := cfg.Services[svcName]; !ok {
 			errs = append(errs, fmt.Sprintf("credentials: inject_into references unknown service %q", svcName))

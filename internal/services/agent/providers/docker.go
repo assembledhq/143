@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,7 +82,13 @@ func envSliceFromMap(env map[string]string) []string {
 		return nil
 	}
 	out := make([]string, 0, len(env))
-	for k, v := range env {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := env[k]
 		out = append(out, k+"="+v)
 	}
 	return out
@@ -1428,11 +1435,40 @@ func (d *DockerProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd 
 		Str("cmd", cmd).
 		Msg("exec-stream command in sandbox")
 
+	return d.ExecStreamWithOptions(ctx, sb, agent.ExecStreamOptions{
+		Cmd:        []string{"sh", "-c", cmd},
+		WorkingDir: sb.WorkDir,
+	}, onLine, stderr)
+}
+
+// ExecStreamWithOptions runs a structured command inside the sandbox and calls
+// onLine for each newline-delimited line of stdout as it arrives.
+func (d *DockerProvider) ExecStreamWithOptions(ctx context.Context, sb *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), stderr io.Writer) (int, error) {
+	if len(opts.Cmd) == 0 {
+		return -1, fmt.Errorf("exec-stream command is required")
+	}
+	workingDir := opts.WorkingDir
+	if workingDir == "" {
+		workingDir = sb.WorkDir
+	}
+	envKeys := make([]string, 0, len(opts.Env))
+	for k := range opts.Env {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	d.logger.Debug().
+		Str("container_id", sb.ID).
+		Str("cmd", strings.Join(opts.Cmd, " ")).
+		Strs("env_keys", envKeys).
+		Str("working_dir", workingDir).
+		Msg("exec-stream command in sandbox")
+
 	execCfg := container.ExecOptions{
-		Cmd:          []string{"sh", "-c", cmd},
+		Cmd:          append([]string(nil), opts.Cmd...),
+		Env:          envSliceFromMap(opts.Env),
 		AttachStdout: true,
 		AttachStderr: true,
-		WorkingDir:   sb.WorkDir,
+		WorkingDir:   workingDir,
 	}
 
 	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)

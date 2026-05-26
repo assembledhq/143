@@ -105,11 +105,13 @@ Supported `inject_env` placeholders are `{{username}}`, `{{password}}`, `{{host}
 ## Credential fields
 
 <ConfigField name="preview.credentials.mode" type="string" required description='Use "none" for no secrets or "managed_env" for a managed credential set.' />
-<ConfigField name="preview.credentials.credential_set" type="string" description="Name of the admin-managed credential set to use." />
-<ConfigField name="preview.credentials.env" type="string[]" description="Allowlist of environment variable names to inject from the credential set." />
-<ConfigField name="preview.credentials.inject_into" type="string[]" description="Service names that receive these credential env vars." />
+<ConfigField name="preview.credentials.credential_set" type="string" description='Required when mode is "managed_env". Name of the admin-managed secret bundle to use.' />
+<ConfigField name="preview.credentials.env" type="string[]" description='Required when mode is "managed_env". Allowlist of environment variable names to inject from the secret bundle.' />
+<ConfigField name="preview.credentials.inject_into" type="string[]" description='Required when mode is "managed_env". Service names that receive these credential env vars.' />
 
 Secret values do not belong in `.143/config.json`. Put public, non-secret values in service `env`; reference secrets with `preview.credentials`.
+
+Admins manage secret bundles in **Settings → Preview API → Secret bundles**. Bundle values are encrypted and never returned by the API; the UI lists only bundle names and env var names. Preview launch fails if the named bundle is missing or does not contain every env var listed in `preview.credentials.env`.
 
 ## Network fields
 

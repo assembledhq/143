@@ -69,6 +69,7 @@ type Manager struct {
 	store        *db.PreviewStore
 	sessionStore *db.SessionStore
 	orgSettings  OrgSettingsStore
+	secrets      PreviewSecretBundleResolver
 	provider     PreviewCapableProvider
 	// sandboxProvider is used to destroy the underlying sandbox container
 	// when the last holder (preview or turn) releases its hold. Optional —
@@ -112,18 +113,23 @@ type OrgSettingsStore interface {
 	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
 }
 
+type PreviewSecretBundleResolver interface {
+	GetEnv(ctx context.Context, orgID uuid.UUID, name string) (map[string]string, error)
+}
+
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
-	Store            *db.PreviewStore
-	SessionStore     *db.SessionStore
-	OrgSettingsStore OrgSettingsStore
-	Provider         PreviewCapableProvider
-	SandboxProvider  agent.SandboxProvider // used for destroy on final hold release
-	Inspector        PreviewInspector
-	SnapshotCache    *SnapshotCache
-	HMRWatcher       *HMRWatcher // optional; enables HMR screenshot capture
-	Logger           zerolog.Logger
-	WorkerNodeID     string
+	Store                *db.PreviewStore
+	SessionStore         *db.SessionStore
+	OrgSettingsStore     OrgSettingsStore
+	PreviewSecretBundles PreviewSecretBundleResolver
+	Provider             PreviewCapableProvider
+	SandboxProvider      agent.SandboxProvider // used for destroy on final hold release
+	Inspector            PreviewInspector
+	SnapshotCache        *SnapshotCache
+	HMRWatcher           *HMRWatcher // optional; enables HMR screenshot capture
+	Logger               zerolog.Logger
+	WorkerNodeID         string
 
 	// MaxPerUser / MaxPerOrg / MaxPerWorker cap concurrent active previews.
 	// Zero (the default) is NOT "unlimited" — it means "fall back to the
@@ -153,6 +159,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		store:                 cfg.Store,
 		sessionStore:          cfg.SessionStore,
 		orgSettings:           cfg.OrgSettingsStore,
+		secrets:               cfg.PreviewSecretBundles,
 		provider:              cfg.Provider,
 		sandboxProvider:       cfg.SandboxProvider,
 		inspector:             cfg.Inspector,
@@ -527,7 +534,14 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// of stdout/stderr when a service fails, so the user sees why.
 	observer := m.newServiceObserver(input.OrgID, instance.ID, input.MetricsSource, input.MetricsRepositoryFullName)
 	defer observer.Close()
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID), observer)
+	credentialEnv, err := m.resolveCredentialRuntimeEnv(ctx, input.OrgID, input.Config)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, RuntimeEnv{
+		Platform: m.platformEnv(instance.ID),
+		Services: credentialEnv,
+	}, observer)
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
@@ -1511,7 +1525,14 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
 	observer := m.newServiceObserver(orgID, previewID, "", "")
 	defer observer.Close()
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
+	credentialEnv, err := m.resolveCredentialRuntimeEnv(ctx, orgID, input.Config)
+	if err != nil {
+		return err
+	}
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, RuntimeEnv{
+		Platform: m.platformEnv(previewID),
+		Services: credentialEnv,
+	}, observer)
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
@@ -1605,6 +1626,41 @@ func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
 	}
 	origin := strings.ReplaceAll(m.previewOriginTemplate, "{id}", previewID.String())
 	return map[string]string{"PREVIEW_ORIGIN": origin}
+}
+
+func (m *Manager) resolveCredentialRuntimeEnv(ctx context.Context, orgID uuid.UUID, cfg *models.PreviewConfig) (map[string]map[string]string, error) {
+	if cfg == nil || cfg.Credentials.Mode == "" || cfg.Credentials.Mode == "none" {
+		return nil, nil
+	}
+	if cfg.Credentials.Mode != "managed_env" {
+		return nil, fmt.Errorf("%w: credentials.mode %q is not supported", ErrInvalidConfig, cfg.Credentials.Mode)
+	}
+	if m.secrets == nil {
+		return nil, fmt.Errorf("preview credential resolver is not configured")
+	}
+	bundle, err := m.secrets.GetEnv(ctx, orgID, cfg.Credentials.CredentialSet)
+	if err != nil {
+		return nil, fmt.Errorf("resolve preview credential set %q: %w", cfg.Credentials.CredentialSet, err)
+	}
+
+	allowlisted := make(map[string]string, len(cfg.Credentials.Env))
+	for _, key := range cfg.Credentials.Env {
+		value, ok := bundle[key]
+		if !ok {
+			return nil, fmt.Errorf("preview credential set %q is missing env var %q", cfg.Credentials.CredentialSet, key)
+		}
+		allowlisted[key] = value
+	}
+
+	envByService := make(map[string]map[string]string, len(cfg.Credentials.InjectInto))
+	for _, serviceName := range cfg.Credentials.InjectInto {
+		env := make(map[string]string, len(allowlisted))
+		for key, value := range allowlisted {
+			env[key] = value
+		}
+		envByService[serviceName] = env
+	}
+	return envByService, nil
 }
 
 func (m *Manager) previewOrigin(previewID uuid.UUID) string {

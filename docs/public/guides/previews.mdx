@@ -189,6 +189,8 @@ Supported placeholders in `inject_env` are `{{username}}`, `{{password}}`, `{{ho
 
 Do not put API keys, database URLs, or tokens in `.143/config.json`. Put non-secret values in `preview.services.<service>.env`; use `preview.credentials` only when the preview needs a managed credential set.
 
+First, an admin creates the secret bundle in **Settings → Preview API → Secret bundles**. Use the same bundle name that the repo config will reference, then add each required environment variable and value. 143 stores the bundle encrypted and list views show only variable names, not values.
+
 ```json
 {
   "preview": {
@@ -206,9 +208,11 @@ Do not put API keys, database URLs, or tokens in `.143/config.json`. Put non-sec
 }
 ```
 
-In this model, an admin creates the managed credential set outside the repo. The config only references the set by name and allowlists which environment variables may be injected. Secret values are not committed to git and are injected at process start.
+The config only references the set by name and allowlists which environment variables may be injected. At preview start, 143 loads that admin-managed bundle for the active organization, copies only the names listed in `env`, and injects them into the services listed in `inject_into`. Secret values are not committed to git and are injected at process start.
 
 Scope secrets to the smallest service list with `inject_into`. A frontend service usually should not receive server-only secrets because public frontend frameworks can expose environment variables in browser bundles.
+
+If the bundle does not exist, or if it is missing one of the allowlisted env vars, preview launch fails before services start. Update the bundle in Settings, then restart the preview.
 
 <Callout type="warning" title="Connected previews">
 Any preview with `preview.credentials.mode` other than `none`, or with `preview.network.destinations`, is treated as connected. Connected previews pin launch behavior to the base branch so a session diff cannot change commands, ports, or env handling while secrets are in scope.

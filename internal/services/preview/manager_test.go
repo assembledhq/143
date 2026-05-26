@@ -35,7 +35,7 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ RuntimeEnv, _ ServiceObserver) (*PreviewHandle, error) {
 	if m.startErr != nil {
 		return nil, m.startErr
 	}

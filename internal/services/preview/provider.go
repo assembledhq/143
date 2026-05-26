@@ -22,10 +22,11 @@ type PreviewCapableProvider interface {
 	//   4. Start application services in dependency order
 	//   5. Wait for all readiness probes to pass
 	//
-	// extraEnv is merged into every service's environment after the user's
-	// declared env and any infrastructure-injected credentials, so it can
-	// carry platform-level values (e.g. PREVIEW_ORIGIN) that must always be
-	// available and should win over user overrides.
+	// runtimeEnv is merged into services after the user's declared env and any
+	// infrastructure-injected credentials. Service-scoped env carries resolved
+	// managed preview credentials; platform env carries values such as
+	// PREVIEW_ORIGIN that must be available to every service and win over user
+	// overrides.
 	//
 	// observer receives per-service Ready/Failed transitions as they happen,
 	// so callers (typically the manager) can persist per-service state to the
@@ -33,7 +34,7 @@ type PreviewCapableProvider interface {
 	// nil; provider implementations must tolerate it.
 	//
 	// The returned PreviewHandle contains connection details for DialPreview.
-	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer ServiceObserver) (*PreviewHandle, error)
+	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, runtimeEnv RuntimeEnv, observer ServiceObserver) (*PreviewHandle, error)
 
 	// StopPreview gracefully stops all preview processes and tears down
 	// infrastructure containers. Safe to call multiple times.
@@ -48,6 +49,14 @@ type PreviewCapableProvider interface {
 	// PreviewStatus returns the current status of all services and
 	// infrastructure in a preview.
 	PreviewStatus(ctx context.Context, handle string) (*PreviewStatusSnapshot, error)
+}
+
+// RuntimeEnv contains environment variables resolved outside the repo config.
+// Values in Services may include secrets and must not be persisted in preview
+// config blobs or interpolated into shell command text.
+type RuntimeEnv struct {
+	Platform map[string]string
+	Services map[string]map[string]string
 }
 
 // PreviewHandle is returned by StartPreview and contains the information

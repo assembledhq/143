@@ -62,6 +62,7 @@ const imagePullTimeout = 5 * time.Minute
 // for running preview service processes inside the sandbox.
 type SandboxExecutor interface {
 	ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
+	ExecStreamWithOptions(ctx context.Context, sb *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), stderr io.Writer) (int, error)
 	Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
 	ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error)
 }
@@ -209,7 +210,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, runtimeEnv preview.RuntimeEnv, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -291,7 +292,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		}
 
 		// Phase 5: Build service environment with injected credentials.
-		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, extraEnv)
+		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, runtimeEnv)
 		return nil
 	}(); err != nil {
 		d.cleanupState(handle)
@@ -1360,35 +1361,20 @@ func (d *DockerPreviewProvider) startService(
 	env map[string]string,
 	observer preview.ServiceObserver,
 ) error {
-	// Build the command with environment variables and working directory.
-	var cmdParts []string
-
-	// Change to working directory if specified.
+	if len(svcCfg.Command) == 0 {
+		return fmt.Errorf("service command is required")
+	}
+	execEnv := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		execEnv[k] = v
+	}
+	// Always inject HOST=0.0.0.0 for framework dev servers that default to
+	// loopback binding.
+	execEnv["HOST"] = "0.0.0.0"
+	workingDir := state.sandbox.WorkDir
 	if svcCfg.Cwd != "" {
-		cmdParts = append(cmdParts, "cd", shellEscape(svcCfg.Cwd), "&&")
+		workingDir = path.Join(state.sandbox.WorkDir, svcCfg.Cwd)
 	}
-
-	// Set environment variables in sorted order for deterministic commands.
-	envKeys := make([]string, 0, len(env))
-	for k := range env {
-		envKeys = append(envKeys, k)
-	}
-	sort.Strings(envKeys)
-	for _, k := range envKeys {
-		cmdParts = append(cmdParts, fmt.Sprintf("%s=%s", k, shellEscape(env[k])))
-	}
-
-	// Always inject HOST=0.0.0.0 for binding.
-	cmdParts = append(cmdParts, "HOST=0.0.0.0")
-
-	// Add the actual command (each element shell-escaped).
-	escapedCmd := make([]string, len(svcCfg.Command))
-	for i, c := range svcCfg.Command {
-		escapedCmd[i] = shellEscape(c)
-	}
-	cmdParts = append(cmdParts, strings.Join(escapedCmd, " "))
-
-	cmd := strings.Join(cmdParts, " ")
 
 	ss := &serviceState{
 		name:   name,
@@ -1445,7 +1431,11 @@ func (d *DockerPreviewProvider) startService(
 		stderrSplitter := &previewLineSplitter{onLine: func(line []byte) {
 			appendTail(string(line))
 		}}
-		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
+		exitCode, err := d.executor.ExecStreamWithOptions(svcCtx, state.sandbox, agent.ExecStreamOptions{
+			Cmd:        append([]string(nil), svcCfg.Command...),
+			Env:        execEnv,
+			WorkingDir: workingDir,
+		}, func(line []byte) {
 			// Copy the bytes because ExecStream reuses the slice across calls.
 			appendTail(string(line))
 		}, stderrSplitter)
@@ -1639,7 +1629,7 @@ func (d *DockerPreviewProvider) resolveSandboxNetwork(ctx context.Context, conta
 // Credential helpers
 // =============================================================================
 
-func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infraCreds map[string]preview.InfraCredential, extraEnv map[string]string) map[string]map[string]string {
+func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infraCreds map[string]preview.InfraCredential, runtimeEnv preview.RuntimeEnv) map[string]map[string]string {
 	envs := make(map[string]map[string]string, len(cfg.Services))
 
 	// Start with service-declared env vars.
@@ -1667,12 +1657,26 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 		}
 	}
 
+	// Inject managed credential bundle env into the services selected by the
+	// repo config. These values intentionally apply after infrastructure
+	// credentials so customer-provided credentials can override local preview
+	// defaults when a config asks for that.
+	for serviceName, managedEnv := range runtimeEnv.Services {
+		env, ok := envs[serviceName]
+		if !ok {
+			continue
+		}
+		for k, v := range managedEnv {
+			env[k] = v
+		}
+	}
+
 	// Inject platform-level env vars (e.g. PREVIEW_ORIGIN) into every service,
 	// overriding any user-declared value. Applied last so it wins over both
 	// service.env and infrastructure.inject_env. Mutation in place is fine —
 	// env is the same map reference stored in envs[svcName].
 	for _, env := range envs {
-		for k, v := range extraEnv {
+		for k, v := range runtimeEnv.Platform {
 			env[k] = v
 		}
 	}

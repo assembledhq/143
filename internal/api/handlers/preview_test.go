@@ -398,7 +398,7 @@ func (p *previewFakeLiveSandboxCounter) CountLiveSandboxes(context.Context) (int
 	return p.count, nil
 }
 
-func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string, _ preview.ServiceObserver) (*preview.PreviewHandle, error) {
+func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ preview.RuntimeEnv, _ preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	m.startConfig = cfg
 	if m.startHandle != nil {
 		return m.startHandle, nil
