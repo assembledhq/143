@@ -573,9 +573,13 @@ export const api = {
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
           .then(r => r.data ?? []),
-      logs: (sessionId: string) =>
-        get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs`)
-          .then(r => r.data ?? []),
+      logs: (sessionId: string, opts?: { tail?: boolean }) => {
+        const searchParams = new URLSearchParams();
+        if (opts?.tail) searchParams.set('tail', 'true');
+        const qs = searchParams.toString();
+        return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
+          .then(r => r.data ?? []);
+      },
       console: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
           .then(r => r.data ?? []),

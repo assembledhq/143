@@ -293,6 +293,68 @@ describe("PreviewPanel component", () => {
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
   });
 
+  it("keeps preview container logs hidden during startup until requested", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({ status: "starting" }, [
+        {
+          id: "svc-1",
+          preview_instance_id: "prev-1",
+          service_name: "server",
+          role: "primary",
+          status: "starting",
+          command: ["go", "run", "."],
+          cwd: "",
+          port: 8080,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ]),
+    );
+    mockLogs.mockResolvedValue([
+      {
+        id: "log-1",
+        preview_instance_id: "prev-1",
+        org_id: "org-1",
+        level: "info",
+        step: "start",
+        message: "[server] running database migrations",
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "log-2",
+        preview_instance_id: "prev-1",
+        org_id: "org-1",
+        level: "info",
+        step: "start",
+        message: "[server] listening on :8080",
+        created_at: "2026-01-01T00:00:01Z",
+      },
+    ]);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByLabelText("Preview container logs")).not.toBeInTheDocument();
+    expect(screen.queryByText("[server] running database migrations")).not.toBeInTheDocument();
+    expect(mockLogs).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Show preview logs" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Preview container logs")).toHaveTextContent(
+        "[server] running database migrations",
+      );
+    });
+    expect(screen.getByLabelText("Preview container logs")).toHaveTextContent(
+      "[server] listening on :8080",
+    );
+    expect(screen.getByRole("button", { name: "Hide preview logs" })).toBeInTheDocument();
+    expect(mockLogs).toHaveBeenCalledWith("sess-1", { tail: true });
+  });
+
   it("stacks startup phase tiles when the panel becomes narrow", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus(

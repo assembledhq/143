@@ -3251,12 +3251,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   // every render.
   const prevPRStateRef = useRef<string | undefined>(undefined);
   const prUrl = prData?.data?.github_pr_url;
-  const prPreviewHref = useMemo(() => {
-    if (!prUrl) return undefined;
-    const match = prUrl.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-    if (!match) return undefined;
-    return `/previews/github/${encodeURIComponent(match[1])}/${encodeURIComponent(match[2])}/pull/${match[3]}`;
-  }, [prUrl]);
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
     localPRState === "queued" &&
@@ -3650,48 +3644,6 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearPRResumeParams();
       }
       toast.error(msg, { duration: PR_ERROR_TOAST_DURATION_MS });
-    },
-  });
-
-  const branchPreviewMutation = useMutation({
-    mutationFn: async () => {
-      if (!session?.repository_id) {
-        throw new Error("Session has no repository");
-      }
-      const branch = session.target_branch || session.working_branch;
-      if (!branch) {
-        throw new Error("Session has no branch");
-      }
-      if (session.has_unpushed_changes && isRunning) {
-        await api.sessions.preview.start(session.id);
-        return { kind: "session" as const };
-      }
-      const response = await api.previews.create({
-        repository_id: session.repository_id,
-        branch,
-        source: {
-          type: "session",
-          external_id: session.id,
-          url: `/sessions/${session.id}`,
-        },
-      });
-      return { kind: "branch" as const, response };
-    },
-    onSuccess: (result) => {
-      if (result.kind === "session") {
-        handleDetailTabClick("preview");
-        return;
-      }
-      const response = result.response;
-      const url = response.data.stable_url;
-      if (url.startsWith("http")) {
-        window.location.href = url;
-      } else {
-        router.push(url);
-      }
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Preview could not be started");
     },
   });
 
@@ -4846,11 +4798,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const branchActionTitle = localBranchActionError?.message ||
     (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
   const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
-  const canStartBranchPreview = Boolean(session.repository_id && (session.target_branch || session.working_branch));
-  const branchPreviewLabel = session.has_unpushed_changes && isRunning ? "Preview current sandbox" : "Open preview";
-  const branchPreviewTitle = session.has_unpushed_changes && isRunning
-    ? "Open a session-backed preview for the current sandbox"
-    : "Open branch preview";
 
   // Push-changes button derived state. Mirrors the PR creation block above
   // but operates on session.pr_push_state and the backend-derived
@@ -4978,14 +4925,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                     View PR
                   </a>
                 </Button>
-                {prPreviewHref ? (
-                  <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="Preview PR">
-                    <a href={prPreviewHref}>
-                      <ExternalLink className="h-3 w-3" />
-                      Preview
-                    </a>
-                  </Button>
-                ) : null}
               </>
             ) : showPRAction && !prErrorNotice ? (
               <>
@@ -5048,23 +4987,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                 </DisabledTooltip>
               </>
-            ) : null}
-            {canStartBranchPreview ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs gap-1.5"
-                disabled={branchPreviewMutation.isPending}
-                title={branchPreviewTitle}
-                onClick={() => branchPreviewMutation.mutate()}
-              >
-                {branchPreviewMutation.isPending ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <ExternalLink className="h-3 w-3" />
-                )}
-                {branchPreviewLabel}
-              </Button>
             ) : null}
             <Button
               variant="ghost"

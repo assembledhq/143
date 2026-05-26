@@ -231,6 +231,34 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "retryable max duration bypass preserves target pin",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				oldCreatedAt := time.Now().Add(-maxRetryableDuration - time.Minute)
+				retryAfter := time.Second
+				targetNodeID := "worker-host-c"
+				handlerErr := &RetryableError{
+					Err:                    errors.New("sandbox on different node"),
+					RetryAfter:             &retryAfter,
+					BypassMaxRetryDuration: true,
+					TargetNodeID:           &targetNodeID,
+				}
+
+				w.Register("targeted_retry_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "targeted_retry_job", json.RawMessage(`{}`), oldCreatedAt, lockToken)
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)[\\s\\S]+target_node_id").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken, &targetNodeID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
 			name: "fatal failure dead-letters immediately",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()

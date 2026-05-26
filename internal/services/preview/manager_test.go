@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -3003,7 +3004,7 @@ func TestManagerServiceObserver_OnServiceReady_WithPID(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3024,7 +3025,7 @@ func TestManagerServiceObserver_OnServiceReady_NoPID(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
 
 	// pid=0 must skip the second exec — the readiness probe runs before the
 	// PID-detection goroutine has had a chance to populate ss.pid for some
@@ -3045,7 +3046,7 @@ func TestManagerServiceObserver_OnServiceReady_DBErrorsLogged(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3068,7 +3069,7 @@ func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3095,7 +3096,7 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3109,6 +3110,96 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "install failure observer should persist an install preview log without touching service rows")
 }
 
+func TestManagerServiceObserver_OnServiceOutput_PersistsStartupLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "start", "[server] running database migrations", json.RawMessage(`{"batched":true}`), time.Now()))
+
+	obs.OnServiceOutput("server", "running database migrations")
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "service output should be persisted as preview startup logs")
+}
+
+type blockingPreviewLogDB struct {
+	queryStarted chan struct{}
+	releaseQuery chan struct{}
+}
+
+func (b *blockingPreviewLogDB) Exec(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (b *blockingPreviewLogDB) Query(ctx context.Context, _ string, _ ...any) (pgx.Rows, error) {
+	close(b.queryStarted)
+	select {
+	case <-b.releaseQuery:
+	case <-ctx.Done():
+	}
+	return nil, fmt.Errorf("blocked test query released")
+}
+
+func (b *blockingPreviewLogDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+	return nil
+}
+
+func (b *blockingPreviewLogDB) SendBatch(_ context.Context, _ *pgx.Batch) pgx.BatchResults {
+	return nil
+}
+
+func (b *blockingPreviewLogDB) Begin(_ context.Context) (pgx.Tx, error) {
+	return nil, fmt.Errorf("transactions are not used in this test")
+}
+
+func TestManagerServiceObserver_OnServiceOutput_DoesNotBlockOnDatabaseWrites(t *testing.T) {
+	t.Parallel()
+
+	blockingDB := &blockingPreviewLogDB{
+		queryStarted: make(chan struct{}),
+		releaseQuery: make(chan struct{}),
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(blockingDB),
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+
+	done := make(chan struct{})
+	go func() {
+		obs.OnServiceOutput("server", "running database migrations")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("OnServiceOutput should not block on preview log database writes")
+	}
+
+	select {
+	case <-blockingDB.queryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background preview log writer should eventually attempt the database write")
+	}
+	close(blockingDB.releaseQuery)
+	obs.Close()
+}
+
 func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
 	t.Parallel()
 
@@ -3119,7 +3210,7 @@ func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3143,7 +3234,7 @@ func TestManagerServiceObserver_OnServiceFailed_DBErrorsLogged(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "").(*managerServiceObserver)
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
 
 	// Both DB writes fail; the observer must log and return without panicking
 	// so a flaky DB doesn't crash the worker mid-launch.

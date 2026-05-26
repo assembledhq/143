@@ -623,6 +623,7 @@ type recordingObserver struct {
 	readyCalls         []recordedReady
 	failedCalls        []recordedFailed
 	installFailedCalls []recordedInstallFailed
+	outputCalls        []recordedOutput
 }
 
 type recordedReady struct {
@@ -640,6 +641,17 @@ type recordedFailed struct {
 type recordedInstallFailed struct {
 	errMsg string
 	tail   []string
+}
+
+type recordedOutput struct {
+	name string
+	line string
+}
+
+func (r *recordingObserver) OnServiceOutput(name, line string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outputCalls = append(r.outputCalls, recordedOutput{name: name, line: line})
 }
 
 func (r *recordingObserver) OnServiceReady(name string, port, pid int) {
@@ -683,6 +695,12 @@ func (r *recordingObserver) installFailed() []recordedInstallFailed {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]recordedInstallFailed(nil), r.installFailedCalls...)
+}
+
+func (r *recordingObserver) output() []recordedOutput {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedOutput(nil), r.outputCalls...)
 }
 
 // fakeServiceExecutor lets a single test customize what each kind of exec
@@ -749,6 +767,7 @@ func (r *recordingStopExecutor) calls() []string {
 // doesn't care about per-service updates.
 func TestNotifyService_NilSafe(t *testing.T) {
 	t.Parallel()
+	require.NotPanics(t, func() { notifyServiceOutput(nil, "web", "booting") })
 	require.NotPanics(t, func() { notifyServiceReady(nil, "web", 3000, 42) })
 	require.NotPanics(t, func() { notifyServiceFailed(nil, "web", "boom", []string{"line"}) })
 }
@@ -758,8 +777,13 @@ func TestNotifyService_NilSafe(t *testing.T) {
 func TestNotifyService_InvokesObserver(t *testing.T) {
 	t.Parallel()
 	obs := &recordingObserver{}
+	notifyServiceOutput(obs, "web", "booting")
 	notifyServiceReady(obs, "web", 3000, 42)
 	notifyServiceFailed(obs, "server", "exited with code 126", []string{"hi", "bye"})
+
+	output := obs.output()
+	require.Len(t, output, 1)
+	require.Equal(t, recordedOutput{name: "web", line: "booting"}, output[0])
 
 	ready := obs.ready()
 	require.Len(t, ready, 1)
@@ -770,6 +794,56 @@ func TestNotifyService_InvokesObserver(t *testing.T) {
 	require.Equal(t, "server", failed[0].name)
 	require.Equal(t, "exited with code 126", failed[0].errMsg)
 	require.Equal(t, []string{"hi", "bye"}, failed[0].tail)
+}
+
+func TestStartService_StreamsStartupOutputToObserver(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execFn: func(_ context.Context, _ string) (int, error) {
+			return 1, nil
+		},
+		execStreamFn: func(ctx context.Context, _ string, onLine func([]byte)) (int, error) {
+			onLine([]byte("running database migrations"))
+			onLine([]byte("starting http server"))
+			select {
+			case <-release:
+				return 0, nil
+			case <-ctx.Done():
+				return -1, ctx.Err()
+			}
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	obs := &recordingObserver{}
+
+	state := &previewState{
+		sandbox:  &agent.Sandbox{ID: "sb"},
+		services: map[string]*serviceState{},
+		cancelFn: func() {},
+	}
+
+	err := d.startService(
+		context.Background(),
+		state,
+		"server",
+		models.ServiceConfig{Command: []string{"go", "run", "."}, Port: 8080},
+		nil,
+		obs,
+	)
+	require.NoError(t, err, "startService should launch the service goroutine")
+
+	require.Eventually(t, func() bool {
+		return len(obs.output()) >= 2
+	}, time.Second, 10*time.Millisecond, "observer should receive service output while the service is still starting")
+	close(release)
+	state.wg.Wait()
+
+	require.Equal(t, []recordedOutput{
+		{name: "server", line: "running database migrations"},
+		{name: "server", line: "starting http server"},
+	}, obs.output(), "observer should receive the exact startup output lines")
 }
 
 // TestStartService_FailureCapturesTailAndNotifies exercises the entire

@@ -1227,6 +1227,14 @@ func notifyInstallFailed(observer preview.ServiceObserver, errMsg string, tail [
 // Service management
 // =============================================================================
 
+// notifyServiceOutput invokes observer.OnServiceOutput when observer is non-nil.
+func notifyServiceOutput(observer preview.ServiceObserver, name, line string) {
+	if observer == nil {
+		return
+	}
+	observer.OnServiceOutput(name, line)
+}
+
 // notifyServiceReady invokes observer.OnServiceReady when observer is non-nil.
 // Centralised so callers can stay nil-safe without scattering checks.
 func notifyServiceReady(observer preview.ServiceObserver, name string, port, pid int) {
@@ -1429,13 +1437,18 @@ func (d *DockerPreviewProvider) startService(
 		// to stderr (every Go binary using log.Print, every `go build` error)
 		// still surfaces a useful tail instead of an empty buffer.
 		appendTail := func(line string) {
+			shouldNotify := false
 			d.mu.Lock()
 			if len(ss.outputTail) >= serviceTailLines {
 				ss.outputTail = ss.outputTail[1:]
 			}
 			ss.outputTail = append(ss.outputTail, line)
+			shouldNotify = ss.status == models.PreviewServiceStatusStarting
 			d.mu.Unlock()
 			d.logger.Debug().Str("service", name).Str("output", line).Msg("service output")
+			if shouldNotify {
+				notifyServiceOutput(observer, name, line)
+			}
 		}
 		stderrSplitter := &previewLineSplitter{onLine: func(line []byte) {
 			appendTail(string(line))
