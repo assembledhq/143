@@ -5250,6 +5250,7 @@ func TestContinueSessionHandler_PinsWrongNodeRetryToSandboxOwner(t *testing.T) {
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "wrong-node sandbox recovery should be retried")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node retry should persist the target even after the generic retry window")
 	require.NotNil(t, retryable.TargetNodeID, "wrong-node retry should carry the recorded sandbox owner")
 	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node retry should pin the job back to the sandbox owner")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once")
