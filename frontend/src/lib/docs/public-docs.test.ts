@@ -57,6 +57,15 @@ describe("public docs source", () => {
     expect(raw.content).not.toContain("Design: Public Docs");
   });
 
+  it("keeps preview setup and secret guidance in the public preview docs", () => {
+    const raw = getRawPublicDocBySlug(["guides", "previews"]);
+
+    expect(raw.content).toContain("## Set up the config");
+    expect(raw.content).toContain("## Secrets and config");
+    expect(raw.content).toContain("`preview.credentials`");
+    expect(raw.content).toContain("managed credential set");
+  });
+
   it("generates llms.txt from the public docs index", () => {
     const pages = getAllPublicDocs() satisfies LlmsPage[];
     const llms = getPublicDocsLlmsText(pages);
