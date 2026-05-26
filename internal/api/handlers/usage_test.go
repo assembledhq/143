@@ -172,10 +172,13 @@ func TestUsageHandler_GetSummary(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"cpu_limit", "memory_limit_mb", "disk_limit_mb", "minutes", "sessions"}).
 			AddRow(2.0, 4096, 10240, 42.5, 5))
 
-	// Peak concurrent
-	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(concurrent\\)").
+	// Peak concurrent intervals
+	mock.ExpectQuery("SELECT started_at, COALESCE\\(stopped_at, now\\(\\)\\) AS stopped_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"peak"}).AddRow(2))
+		WillReturnRows(pgxmock.NewRows([]string{"started_at", "stopped_at"}).
+			AddRow(time.Date(2026, 4, 1, 1, 0, 0, 0, time.UTC), time.Date(2026, 4, 1, 4, 0, 0, 0, time.UTC)).
+			AddRow(time.Date(2026, 4, 1, 2, 0, 0, 0, time.UTC), time.Date(2026, 4, 1, 5, 0, 0, 0, time.UTC)).
+			AddRow(time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC), time.Date(2026, 4, 1, 6, 0, 0, 0, time.UTC)))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage?start=2026-04-01T00:00:00Z&end=2026-05-01T00:00:00Z", nil)
 	ctx := middleware.WithOrgID(req.Context(), orgID)
@@ -184,15 +187,21 @@ func TestUsageHandler_GetSummary(t *testing.T) {
 
 	handler.GetSummary(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code, "GetSummary should return OK for a valid usage request")
 
 	var resp models.SingleResponse[models.UsageSummary]
 	err = json.NewDecoder(rr.Body).Decode(&resp)
-	require.NoError(t, err)
-	require.Equal(t, 42.5, resp.Data.TotalContainerMinutes)
-	require.Equal(t, 5, resp.Data.TotalSessions)
-	require.Equal(t, 3, resp.Data.PeakConcurrent) // 2 peers + 1
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "GetSummary response should decode as a single usage summary")
+	require.Equal(t, 42.5, resp.Data.TotalContainerMinutes, "GetSummary should preserve total container minutes")
+	require.Equal(t, 5, resp.Data.TotalSessions, "GetSummary should preserve total session count")
+	require.Equal(t, 3, resp.Data.PeakConcurrent, "GetSummary should preserve peak concurrent value")
+	require.Len(t, resp.Data.ByCapacity, 1, "GetSummary should preserve capacity buckets")
+	require.Equal(t, 2.0, resp.Data.ByCapacity[0].CPULimit, "GetSummary should preserve capacity CPU limit")
+	require.Equal(t, 4096, resp.Data.ByCapacity[0].MemoryLimitMB, "GetSummary should preserve capacity memory")
+	require.Equal(t, 10240, resp.Data.ByCapacity[0].DiskLimitMB, "GetSummary should preserve capacity disk")
+	require.Equal(t, 42.5, resp.Data.ByCapacity[0].ContainerMinutes, "GetSummary should preserve capacity minutes")
+	require.Equal(t, 5, resp.Data.ByCapacity[0].SessionCount, "GetSummary should preserve capacity sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestUsageHandler_ListBySession(t *testing.T) {
