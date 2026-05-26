@@ -1788,6 +1788,30 @@ func TestDockerProvider_Exec(t *testing.T) {
 		require.Error(t, err, "Exec should return an error")
 		require.Contains(t, err.Error(), "attach exec", "error should contain expected message")
 	})
+
+	t.Run("redacts preview secret file writes from debug logs", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newMockHijackedResponse(""), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		var logs bytes.Buffer
+		logger := zerolog.New(&logs).Level(zerolog.DebugLevel)
+		p := NewDockerProvider(mock, logger)
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+		var stdout, stderr bytes.Buffer
+		code, err := p.Exec(context.Background(), sb, "base64 -d <<'__143_SECRET_FILE__'\nc2VjcmV0\n__143_SECRET_FILE__", &stdout, &stderr)
+
+		require.NoError(t, err, "Exec should not fail for a redacted command")
+		require.Equal(t, 0, code, "redacted command should return the inspect exit code")
+		require.NotContains(t, logs.String(), "c2VjcmV0", "debug logs should not contain encoded secret file content")
+		require.Contains(t, logs.String(), "[redacted preview secret file write]", "debug logs should explain that a secret command was redacted")
+	})
 }
 
 // TestDockerHandle_StartInteractiveCommand_NoTTY_WrapsWithSignalShim verifies

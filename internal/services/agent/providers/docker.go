@@ -960,7 +960,7 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 // empty so the exec runs as the container's default user (sandbox).
 func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	log := d.scopedLogger(sb)
-	log.Debug().Str("cmd", cmd).Msg("executing command in sandbox")
+	log.Debug().Str("cmd", redactSandboxCommandForLog(cmd)).Msg("executing command in sandbox")
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"sh", "-c", cmd},
@@ -992,6 +992,13 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 	}
 
 	return inspectResp.ExitCode, nil
+}
+
+func redactSandboxCommandForLog(cmd string) string {
+	if strings.Contains(cmd, "__143_SECRET_FILE__") {
+		return "[redacted preview secret file write]"
+	}
+	return cmd
 }
 
 // ReadFile reads a file from the sandbox filesystem by exec-ing cat.
