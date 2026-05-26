@@ -54,6 +54,8 @@ Top-level docs groups:
 
 The sidebar should show only public docs pages. Internal design docs should never appear in this tree.
 
+The sidebar should keep the top-level docs groups visible while browsing inside a group. Section folders should stay in a single Fumadocs tree instead of using separate root navigation scopes.
+
 The docs home page should be a functional index, not a marketing page. It should show:
 
 - A short description of what the docs cover.
