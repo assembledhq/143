@@ -223,6 +223,46 @@ export const api = {
     resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
   },
+  previews: {
+    list: (params?: { repository_id?: string; branch?: string; status?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.branch) searchParams.set('branch', params.branch);
+      if (params?.status) searchParams.set('status', params.status);
+      const query = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews${query ? `?${query}` : ''}`);
+    },
+    create: (body: import('./types').BranchPreviewCreateRequest) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>('/api/v1/previews', body),
+    configOptions: (params: { repository_id: string; branch?: string; commit_sha?: string; preview_config_name?: string }) => {
+      const searchParams = new URLSearchParams({ repository_id: params.repository_id });
+      if (params.branch) searchParams.set('branch', params.branch);
+      if (params.commit_sha) searchParams.set('commit_sha', params.commit_sha);
+      if (params.preview_config_name) searchParams.set('preview_config_name', params.preview_config_name);
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewConfigOptions>>(`/api/v1/previews/configs?${searchParams.toString()}`);
+    },
+    resolveLink: (type: 'target' | 'pull_request', slug: string) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
+    get: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
+    getPullRequest: (owner: string, repo: string, number: string | number) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}`),
+    restart: (id: string, body?: { start_latest?: boolean }) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
+    startLatest: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/start-latest`),
+    stop: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/stop`),
+    bootstrap: (id: string) =>
+      post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
+    apiTokens: {
+      list: () => get<import('./types').ListResponse<import('./types').PreviewAPIToken>>('/api/v1/previews/api-tokens'),
+      create: (body: { name: string; scopes: string[]; repository_ids: string[] }) =>
+        post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
+      revoke: (id: string) =>
+        del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
+    },
+  },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
       const searchParams = new URLSearchParams({ repository_id: repositoryId, q: query });
@@ -503,6 +543,9 @@ export const api = {
           .then(r => r.data),
       start: (sessionId: string, config?: Record<string, unknown>) =>
         post<import('./types').SingleResponse<import('./preview-types').PreviewInstance>>(`/api/v1/sessions/${sessionId}/preview`, config ? { config } : undefined)
+          .then(r => r.data),
+      ensure: (sessionId: string, config?: Record<string, unknown>) =>
+        post<import('./types').SingleResponse<import('./preview-types').EnsurePreviewResponse>>(`/api/v1/sessions/${sessionId}/preview/ensure`, config ? { config } : undefined)
           .then(r => r.data),
       stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
       restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),

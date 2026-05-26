@@ -9,6 +9,13 @@ export type PreviewStatus =
   | "failed"
   | "expired";
 
+export const ACTIVE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy", "starting"];
+export const CONTROLLABLE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy"];
+
+export function formatPreviewStatus(status: PreviewStatus | string): string {
+  return status.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 // Preview error codes returned by the StartPreview endpoint. These map
 // verbatim to the backend's writeError code strings in
 // internal/api/handlers/preview.go and are a stable public contract:
@@ -159,6 +166,11 @@ export interface PreviewStatusResponse {
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
   preview_origin?: string;
+}
+
+export interface EnsurePreviewResponse {
+  action: "started" | "restarted" | "already_starting";
+  instance: PreviewInstance;
 }
 
 // Console messages

@@ -2823,14 +2823,22 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 }
 
 type mockPreviewStarter struct {
-	called  bool
-	payload previewsvc.StartPreviewJobPayload
-	err     error
+	called        bool
+	payload       previewsvc.StartPreviewJobPayload
+	branchCalled  bool
+	branchPayload previewsvc.StartBranchPreviewJobPayload
+	err           error
 }
 
 func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error {
 	m.called = true
 	m.payload = payload
+	return m.err
+}
+
+func (m *mockPreviewStarter) StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error {
+	m.branchCalled = true
+	m.branchPayload = payload
 	return m.err
 }
 
@@ -2848,6 +2856,8 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 
 	handler, ok := w.handlers[models.JobTypeStartPreview]
 	require.True(t, ok, "start_preview handler should be registered when preview starter is available")
+	_, ok = w.handlers[models.JobTypeStartBranchPreview]
+	require.True(t, ok, "start_branch_preview handler should be registered when preview starter is available")
 
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -2866,6 +2876,32 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	require.NoError(t, err, "start_preview handler should delegate successfully")
 	require.True(t, starter.called, "start_preview handler should call the preview starter")
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{}
+	handler := newStartBranchPreviewHandler(&Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartBranchPreviewJobPayload{
+		OrgID:           uuid.New(),
+		UserID:          uuid.New(),
+		PreviewID:       uuid.New(),
+		PreviewTargetID: uuid.New(),
+		RepositoryID:    uuid.New(),
+		Branch:          "feature/previews",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_branch_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartBranchPreview, raw)
+
+	require.NoError(t, err, "start_branch_preview handler should delegate successfully")
+	require.True(t, starter.branchCalled, "start_branch_preview handler should call the branch preview starter")
+	require.Equal(t, payload, starter.branchPayload, "start_branch_preview handler should pass the decoded payload")
 }
 
 func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {

@@ -10,7 +10,7 @@ export default function PublicDocsLayout({ children }: { children: ReactNode }) 
       <DocsLayout
         {...docsLayoutOptions()}
         tree={source.getPageTree()}
-        tabMode="top"
+        tabs={false}
         sidebar={{
           defaultOpenLevel: 1,
           prefetch: false,

@@ -102,6 +102,29 @@ func (s *UserStore) GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+// GetByIDGlobalWithMembershipCheck fetches a user and verifies they hold an
+// active membership in orgID in a single round-trip. Returns pgx.ErrNoRows if
+// the user doesn't exist or is not a member of the org. Use this in hot auth
+// paths to replace two sequential queries (user lookup + membership check).
+//
+// lint:allow-no-orgid reason="org_id is validated via the JOIN against organization_memberships"
+func (s *UserStore) GetByIDGlobalWithMembershipCheck(ctx context.Context, userID, orgID uuid.UUID) (models.User, error) {
+	query := fmt.Sprintf(`
+		SELECT u.%s
+		FROM users u
+		JOIN organization_memberships m ON m.user_id = u.id AND m.org_id = @org_id
+		WHERE u.id = @user_id`,
+		userSelectColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"user_id": userID,
+		"org_id":  orgID,
+	})
+	if err != nil {
+		return models.User{}, fmt.Errorf("query user with membership: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
 // GetByIDGlobalWithSettings looks up a user by primary key and includes the
 // settings JSONB column for self-service preference reads.
 //
