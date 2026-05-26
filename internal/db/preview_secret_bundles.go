@@ -290,7 +290,7 @@ func (s *PreviewSecretBundleStore) encryptJSON(v any) (json.RawMessage, error) {
 		return nil, err
 	}
 	alg := "aes-256-gcm-envelope"
-	data := plaintext
+	var data []byte
 	if s.crypto == nil {
 		alg = "dev-plaintext"
 		data = crypto.DevEncrypt(plaintext)
