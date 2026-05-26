@@ -83,7 +83,7 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
       onClick={onAddComment}
       onKeyDown={handleKeyDown}
       className={cn(
-        "flex text-xs font-mono leading-[20px] group relative",
+        "flex text-xs font-mono leading-[20px] group relative [content-visibility:auto] [contain-intrinsic-size:auto_20px]",
         lineTypeStyles[line.type],
         onAddComment && "cursor-pointer"
       )}

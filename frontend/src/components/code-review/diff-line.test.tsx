@@ -59,6 +59,13 @@ describe("DiffLineRow", () => {
     expect(content).toHaveClass("break-words");
   });
 
+  it("contains row layout and paint work so wrapped offscreen lines stay cheap to scroll", () => {
+    const { container } = render(<DiffLineRow line={makeLine()} />);
+    const row = container.firstElementChild;
+    expect(row).toHaveClass("[content-visibility:auto]");
+    expect(row).toHaveClass("[contain-intrinsic-size:auto_20px]");
+  });
+
   it("renders non-breaking space for empty content", () => {
     const { container } = render(
       <DiffLineRow line={makeLine({ content: "" })} />
