@@ -2557,11 +2557,11 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 	return err
 }
 
-// ListStalePendingSessions returns pending sessions created before the given
-// cutoff. These sessions have been stuck in pending for too long and should be
-// failed with an explanatory error.
+// ListStalePendingSessions returns pending sessions whose latest pending-state
+// activity is before the given cutoff. These sessions have been stuck in
+// pending for too long and should be failed with an explanatory error.
 // lint:allow-no-orgid reason="cross-org reaper scan for stuck pending sessions"
-func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error) {
+func (s *SessionStore) ListStalePendingSessions(ctx context.Context, activityBefore time.Time) ([]models.Session, error) {
 	// No alias on `sessions`: sessionPrimaryIssueIDColumn references
 	// sessions.org_id / sessions.id literally, and a table alias would shadow
 	// the original name (Postgres 42P01).
@@ -2570,12 +2570,12 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 		FROM sessions
 		WHERE status = 'pending'
 		  AND deleted_at IS NULL
-		  AND created_at < @created_before
-		ORDER BY created_at ASC
+		  AND last_activity_at < @activity_before
+		ORDER BY last_activity_at ASC
 		LIMIT 100`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"created_before": createdBefore,
+		"activity_before": activityBefore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query stale pending sessions: %w", err)
