@@ -1527,6 +1527,9 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	defer observer.Close()
 	credentialEnv, err := m.resolveCredentialRuntimeEnv(ctx, orgID, input.Config)
 	if err != nil {
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after credential resolution error")
+		}
 		return err
 	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, RuntimeEnv{
