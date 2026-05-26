@@ -161,6 +161,11 @@ export interface PreviewStatusResponse {
   preview_origin?: string;
 }
 
+export interface EnsurePreviewResponse {
+  action: "started" | "restarted" | "already_starting";
+  instance: PreviewInstance;
+}
+
 // Console messages
 
 export interface ConsoleMessage {
