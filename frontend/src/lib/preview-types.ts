@@ -9,6 +9,13 @@ export type PreviewStatus =
   | "failed"
   | "expired";
 
+export const ACTIVE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy", "starting"];
+export const CONTROLLABLE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy"];
+
+export function formatPreviewStatus(status: PreviewStatus | string): string {
+  return status.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 // Preview error codes returned by the StartPreview endpoint. These map
 // verbatim to the backend's writeError code strings in
 // internal/api/handlers/preview.go and are a stable public contract:
@@ -46,6 +53,10 @@ export const PREVIEW_ERROR_CODES = {
   // didn't supply an explicit config, so the backend has nothing to launch.
   // User fix is to commit the config file (see docs/guides/previews.md).
   NO_CONFIG: "PREVIEW_NO_CONFIG",
+  // 422 — .143/config.json exists, but the preview section cannot be parsed or
+  // fails structural validation. Backend message includes the specific config
+  // error and the recovery action.
+  CONFIG_INVALID: "PREVIEW_CONFIG_INVALID",
   // 422 — a preview infrastructure container's image is not on the worker
   // and the on-demand pull failed (registry unreachable, image renamed,
   // rate-limit, no egress). The user-visible message names the image so an
@@ -60,6 +71,8 @@ export const PREVIEW_ERROR_CODES = {
   // 422 — a user-supplied init script (seed SQL etc.) returned a non-zero
   // exit code or could not be read from the workspace.
   INIT_SCRIPT_FAILED: "PREVIEW_INIT_SCRIPT_FAILED",
+  // 422 — preview.install failed before any services were started.
+  INSTALL_FAILED: "PREVIEW_INSTALL_FAILED",
   // 422 — an application service was launched but its readiness probe
   // never passed within the configured timeout. The service likely
   // crashed at boot or is bound to a different port than it declares in
@@ -91,6 +104,7 @@ export interface PreviewInstance {
   last_path: string;
   memory_limit_mb: number;
   cpu_limit_millis: number;
+  disk_limit_mb: number;
   error?: string;
   created_at: string;
   updated_at: string;
@@ -152,6 +166,11 @@ export interface PreviewStatusResponse {
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
   preview_origin?: string;
+}
+
+export interface EnsurePreviewResponse {
+  action: "started" | "restarted" | "already_starting";
+  instance: PreviewInstance;
 }
 
 // Console messages

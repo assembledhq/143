@@ -69,6 +69,37 @@ func TestValidateInternalToken_InvalidBase64(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestGenerateSessionToken_IncludesSessionID(t *testing.T) {
+	t.Parallel()
+
+	secret := "test-secret-key-for-hmac-signing"
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+
+	token, err := GenerateSessionToken(secret, orgID, repoID, sessionID, 5*time.Minute)
+	require.NoError(t, err)
+	require.NotEmpty(t, token)
+
+	claims, err := ValidateInternalToken(secret, token)
+	require.NoError(t, err)
+	require.Equal(t, orgID, claims.OrgID)
+	require.Equal(t, repoID, claims.RepoID)
+	require.NotNil(t, claims.SessionID, "session-scoped token must include session ID")
+	require.Equal(t, sessionID, *claims.SessionID)
+}
+
+func TestGenerateInternalToken_HasNoSessionID(t *testing.T) {
+	t.Parallel()
+
+	token, err := GenerateInternalToken("secret", uuid.New(), uuid.New(), 5*time.Minute)
+	require.NoError(t, err)
+
+	claims, err := ValidateInternalToken("secret", token)
+	require.NoError(t, err)
+	require.Nil(t, claims.SessionID, "repo-scoped token must not include session ID")
+}
+
 func TestGenerateInternalToken_DifferentOrgs(t *testing.T) {
 	t.Parallel()
 

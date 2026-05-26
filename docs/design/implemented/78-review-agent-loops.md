@@ -18,7 +18,10 @@ also releasing the thread. The session overview must therefore render the
 review as failed instead of continuing to show a stale loading/running state.
 
 Manual session detail now exposes a `Review` action that starts a two-pass loop
-in the current sandbox. Automations persist `pre_pr_review_loops`; new
+in the current sandbox. Manual setup includes a fix-mode choice: the default
+`minimal` mode preserves the original behavior by fixing only the minimum
+needed to clear the review, while `exhaustive` instructs fix turns to address
+every finding from the previous review pass before the next pass. Automations persist `pre_pr_review_loops`; new
 automations default to one pass, existing rows backfill to zero, and the
 `open_pr` worker gate starts or waits for the automation review loop before
 publication. Clean automation loops enqueue PR creation again; loops that hit
@@ -107,10 +110,12 @@ rather than in the persistent header action cluster. Before a PR exists, the
 action appears in a compact review card. After a PR exists, it moves into the PR
 health action row next to `Merge`, `Fix tests`, and related PR actions.
 
-Clicking `Review` opens a focused setup dialog with two decisions:
-which native-review-capable coding agent should review, and how many
-back-and-forth passes to allow. The dialog is used on mobile and desktop so the
-setup controls do not depend on a popover inside the mobile details sheet.
+Clicking `Review` opens a focused setup dialog with three decisions:
+which native-review-capable coding agent should review, whether fix turns
+should make minimal review-clearing changes or fix every review finding, and
+how many back-and-forth passes to allow. The dialog is used on mobile and
+desktop so the setup controls do not depend on a popover inside the mobile
+details sheet.
 
 ```text
 Review
@@ -122,6 +127,10 @@ Runs /review and fixes issues in this session's sandbox.
 Review passes
 [ - ] 2 [ + ]
 1 quick pass · 2 standard · 3+ deeper polish
+
+Fix mode
+(*) Minimal fixes
+( ) Fix every finding
 
 [ Start review ]
 ```
@@ -137,6 +146,9 @@ Design choices:
   pass without creating a separate session. The selector falls back to the main
   session agent when no supported alternative exists.
 - The setup dialog must clearly state that the loop runs in the current sandbox.
+- Minimal fixes is the default fix mode to preserve existing review-loop
+  behavior; Fix every finding is explicit because it can increase scope,
+  latency, and token cost.
 
 ### Manual session timeline
 
@@ -184,8 +196,7 @@ The first review message includes the native command:
 
 ```text
 /review the current workspace diff. If you find issues, report them in your
-normal review format. Then, when asked to fix, address the issues you found and
-run relevant verification.
+normal review format.
 ```
 
 The command token is persisted through the existing structured slash-command
@@ -196,12 +207,22 @@ model. The adapter decides how to serialize it for the selected agent.
 The fix pass always runs in the same review-loop tab as the review pass. There
 is no product option to choose another fixer.
 
-The fix instruction should reference the agent's own previous review output:
+The fix instruction should reference the agent's own previous review output.
+In minimal mode:
 
 ```text
-Fix the issues you identified in the previous review pass. Preserve the scope
-of the current change. Add or update tests when appropriate. Run relevant
-verification and report anything you could not verify.
+Fix the issues you identified in the previous review pass using the minimal
+necessary changes. Preserve the scope of the current change. Add or update
+tests when appropriate. Run relevant verification and report anything you could
+not verify.
+```
+
+In exhaustive mode:
+
+```text
+Fix every issue you identified in the previous review pass. Do not defer any
+review finding to a later turn unless it is impossible or unsafe to fix in this
+sandbox.
 ```
 
 The product does not need to parse every finding into a platform-owned schema
@@ -276,13 +297,15 @@ and other supported agents have their own review language and may change their
 finding formats over time. The product should preserve and display the native
 review output.
 
-### Nits and polish policy
+### Review and fix modes
 
 Even though the product should not normalize findings into platform severities,
-the loop must still be explicit about how to handle nits. The product rule is:
-**fix low-risk local nits only**.
+the loop must still be explicit about how to handle nits and deferred findings.
+The selected fix mode applies to both the initial review prompt and the
+follow-up fix prompt.
 
-The review-loop prompt tells the agent:
+In minimal mode, the product rule is: **fix low-risk local nits only**. The
+review-loop prompt tells the agent:
 
 ```text
 Fix nits when they are local, low-risk, and relevant to the current change. Use
@@ -294,29 +317,39 @@ leave it for later and mention it in your summary.
 ```
 
 This keeps the default loop useful for polish and stale-code cleanup without
-turning every review into an unbounded cleanup pass. It is not exposed as a
-setup option in v1.
+turning every review into an unbounded cleanup pass.
+
+In exhaustive mode, the product rule is: **report every relevant review finding
+so the next fix pass can address it**. The review-loop prompt tells the agent:
+
+```text
+Report every issue you find. Do not defer findings as later work.
+```
 
 The only structured decision the platform needs is whether the loop should
 continue. That decision should come from the coding agent, not from a generic
 finding parser.
 
 After each review pass, the loop asks the same agent for a bounded continuation
-decision:
+turn:
 
 ```text
-Based on your latest review, are there remaining issues you should fix in this
-sandbox before this work is considered clean? Apply the nit policy above and use
-your coding judgment when deciding whether remaining nits require another fix
-pass. Answer with one of:
+Based on your latest review, decide whether this sandbox is clean. Apply the nit
+policy above and use your coding judgment when deciding whether remaining nits
+require action.
 
-- REVIEW_CLEAN
-- NEEDS_FIX_PASS
+If the review found no remaining issues that should be fixed, answer with
+exactly:
+
+REVIEW_CLEAN
+
+If the review found remaining issues that should be fixed, fix the issues now in
+this sandbox, run relevant verification, and summarize what changed.
 ```
 
-The UI can display the raw review output, the raw fix summary, and this compact
-decision. It should not reclassify findings into `blocking`, `major`, `minor`,
-or any other platform-wide severity scheme.
+The UI can display the raw review output, the raw fix summary, and the clean
+sentinel when present. It should not reclassify findings into `blocking`,
+`major`, `minor`, or any other platform-wide severity scheme.
 
 ## Execution Model
 
@@ -326,12 +359,11 @@ For `passIndex` from `1..max_review_passes`:
 2. Capture a loop checkpoint before the first review pass.
 3. Create or reuse the review-loop thread.
 4. Run the selected agent's native review command in that thread.
-5. Ask the same agent whether the latest review is clean or needs a fix pass.
+5. Ask the same agent whether the latest review is clean; if it is not clean,
+   the agent fixes the issues in that turn.
 6. If the agent reports `REVIEW_CLEAN`, mark the loop `clean` and stop.
-7. If the agent reports `NEEDS_FIX_PASS`, send the fix instruction in the same
-   thread.
-8. Wait for the fix pass to complete.
-9. Capture a checkpoint and continue to the next review pass.
+7. If the agent made fixes, capture the fix summary and continue to the next
+   review pass.
 
 After the final allowed pass:
 
@@ -660,7 +692,7 @@ for both review and fixes.
 - **Prefill then user sends:** rejected for the implemented loop because it
   leaves automation runs without a durable continuation point.
 
-Implemented behavior: auto-send the native review, decision, fix, and
+Implemented behavior: auto-send the native review, clean-or-fix, and
 confirmation prompts through the durable thread/message path.
 
 ## Rollout Status
@@ -676,8 +708,8 @@ confirmation prompts through the durable thread/message path.
 
 ### Phase 2: Sequential fix and confirmation
 
-- Add the agent decision step: `REVIEW_CLEAN` or `NEEDS_FIX_PASS`.
-- Send fix instructions in the same review-loop tab.
+- Add the agent clean-or-fix step: return `REVIEW_CLEAN` when clean, otherwise
+  fix the review findings in the same review-loop tab.
 - Run a second review pass after fixes.
 - Stop early when clean.
 - Support `max_passes` from `1..5`.

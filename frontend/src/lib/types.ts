@@ -92,6 +92,74 @@ export interface Repository {
   updated_at: string;
 }
 
+export interface BranchPreviewCreateRequest {
+  repository_id: string;
+  branch: string;
+  commit_sha?: string;
+  preview_config_name?: string | null;
+  source?: {
+    type: "api" | "manual" | "session" | "pull_request" | "automation";
+    external_id?: string;
+    url?: string;
+  };
+  ttl_seconds?: number;
+}
+
+export interface BranchPreviewResponse {
+  target_id: string;
+  preview_id?: string;
+  repository_id?: string;
+  repository_full_name?: string;
+  branch?: string;
+  commit_sha?: string;
+  preview_config_name?: string;
+  source_type?: "api" | "manual" | "session" | "pull_request" | "automation";
+  source_url?: string;
+  status: string;
+  error?: string;
+  current_phase?: string;
+  phase_steps?: { name: string; status: string }[];
+  created_by_user_id?: string;
+  created_at?: string;
+  source_id?: string;
+  request_id?: string;
+  new_commits_available?: boolean;
+  latest_commit_sha?: string;
+  github_branch_url?: string;
+  pull_request_url?: string;
+  stable_url: string;
+  preview_url?: string;
+  expires_at?: string;
+  services?: import('./preview-types').PreviewService[];
+  infrastructure?: import('./preview-types').PreviewInfrastructure[];
+  logs?: import('./preview-types').PreviewLog[];
+}
+
+export interface BranchPreviewConfigOptions {
+  repository_id: string;
+  repository_full_name: string;
+  ref: string;
+  preview_config_name?: string;
+  names: string[];
+  default_name?: string;
+  selected_name?: string;
+  requires_selection: boolean;
+  readiness: string;
+  validation_errors?: string[];
+}
+
+export interface PreviewAPIToken {
+  id: string;
+  org_id: string;
+  name: string;
+  scopes: string[];
+  repository_ids: string[];
+  created_by_user_id: string;
+  last_used_at?: string;
+  revoked_at?: string;
+  created_at: string;
+}
+
 export interface Integration {
   id: string;
   org_id: string;
@@ -143,6 +211,17 @@ export interface LinearAgentStatus {
   app_user_name?: string;
   has_linear_integration: boolean;
   default_repo_id?: string;
+  available_teams?: LinearTeamKey[];
+}
+
+export interface LinearTeamKey {
+  org_id: string;
+  integration_id: string;
+  workspace_id: string;
+  team_id: string;
+  team_key: string;
+  team_name: string;
+  refreshed_at: string;
 }
 
 export interface LinearTeamRepoMapping {
@@ -267,9 +346,6 @@ export interface Session {
   autonomy_level: string;
   token_mode: string;
   complexity_tier?: number;
-  confidence_score?: number;
-  confidence_reasoning?: string;
-  risk_factors?: string[];
   started_at?: string;
   completed_at?: string;
   token_usage?: Record<string, unknown>;
@@ -372,7 +448,6 @@ export interface SessionThread {
   agent_session_id?: string;
   current_turn: number;
   last_activity_at?: string;
-  confidence_score?: number;
   result_summary?: string;
   diff?: string;
   failure_explanation?: string;
@@ -402,6 +477,7 @@ export interface SessionThreadFileEvent {
 
 export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
 export type ReviewLoopSource = 'manual' | 'automation';
+export type ReviewLoopFixMode = 'minimal' | 'exhaustive';
 export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
 export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
 
@@ -415,6 +491,7 @@ export interface SessionReviewLoop {
   source: ReviewLoopSource;
   agent_type: string;
   max_passes: number;
+  fix_mode: ReviewLoopFixMode;
   completed_passes: number;
   review_required: boolean;
   bypassed_by_user_id?: string;
@@ -753,6 +830,7 @@ export interface OrgSettings {
   execution_aggressiveness?: number;
   max_concurrent_runs?: number;
   max_session_duration_seconds?: number;
+  preview_max_previews_per_user?: number;
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {
@@ -1585,6 +1663,7 @@ export interface UsageSummary {
 export interface CapacityBucket {
   cpu_limit: number;
   memory_limit_mb: number;
+  disk_limit_mb: number;
   container_minutes: number;
   session_count: number;
 }

@@ -17,6 +17,7 @@ import {
   RefreshCw,
   X,
   ChevronDown,
+  MoreHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -324,57 +325,85 @@ function formatPreviewRemaining(expiresAt: string): string {
   return minutes > 0 ? `${hours} hr ${minutes} min left` : `${hours} hr left`;
 }
 
-interface PreviewLifetimeMenuProps {
-  expiresAt: string;
+interface PreviewActionsMenuProps {
+  expiresAt?: string;
   disabled: boolean;
+  onStop: () => void;
+  onRestart: () => void;
   onSetLifetime: (durationSeconds: number) => void;
-  onStopNow: () => void;
 }
 
-function PreviewLifetimeMenu({
+function PreviewActionsMenu({
   expiresAt,
   disabled,
+  onStop,
+  onRestart,
   onSetLifetime,
-  onStopNow,
-}: PreviewLifetimeMenuProps) {
+}: PreviewActionsMenuProps) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          size="icon-xs"
+          size="icon-sm"
           variant="outline"
-          aria-label="Preview lifetime"
-          title="Preview lifetime"
+          aria-label="Preview actions"
+          title="Preview actions"
           disabled={disabled}
         >
-          <Clock className="size-3.5" />
+          <MoreHorizontal className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel className="space-y-0.5">
-          <span className="block">Preview lifetime</span>
-          <span className="block text-xs font-normal text-muted-foreground">
-            Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
-          </span>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {PREVIEW_LIFETIME_OPTIONS.map((option) => (
-          <DropdownMenuItem
-            key={option.durationSeconds}
-            onSelect={() => onSetLifetime(option.durationSeconds)}
-          >
-            {option.label}
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onStopNow}>
-          <Square className="size-3.5" />
-          Stop now
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>Preview actions</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={onRestart}>
+          <RotateCw className="size-3.5" />
+          Restart preview
         </DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onSelect={onStop}>
+          <Square className="size-3.5" />
+          Stop preview
+        </DropdownMenuItem>
+        {expiresAt && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="space-y-0.5">
+              <span className="flex items-center gap-1.5">
+                <Clock className="size-3.5" />
+                Preview lifetime
+              </span>
+              <span className="block text-xs font-normal text-muted-foreground">
+                Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
+              </span>
+            </DropdownMenuLabel>
+            {PREVIEW_LIFETIME_OPTIONS.map((option) => (
+              <DropdownMenuItem
+                key={option.durationSeconds}
+                onSelect={() => onSetLifetime(option.durationSeconds)}
+              >
+                {option.label}
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+function previewStatusMetadata(status?: PreviewStatus): string | undefined {
+  switch (status) {
+    case "ready":
+      return "Running";
+    case "partially_ready":
+      return "Partially ready";
+    case "unhealthy":
+      return "Unhealthy";
+    case "failed":
+      return undefined;
+    default:
+      return status ? STATUS_LABELS[status] : undefined;
+  }
 }
 
 export function PreviewPanel({
@@ -388,8 +417,10 @@ export function PreviewPanel({
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
+  const [showPreviewRuntimeLogs, setShowPreviewRuntimeLogs] = useState(false);
   const [startupPhaseRailLayout, setStartupPhaseRailLayout] = useState<StartupPhaseRailLayout>("default");
   const startupErrorLogsId = useId();
+  const previewRuntimeLogsId = useId();
 
   // Poll preview status every 3s when active
   const {
@@ -434,18 +465,26 @@ export function PreviewPanel({
     status === "stopped" || status === "expired"
       ? instance?.stopped_at || instance?.updated_at
       : undefined;
-  const isActive =
+  const isPreparing = status === "starting";
+  const isManageable =
     status === "ready" ||
     status === "partially_ready" ||
-    status === "starting";
+    status === "unhealthy";
   const isReady = status === "ready" || status === "partially_ready";
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
-    (isActive && !isReady) || (status === "failed" && hasStartupRows);
+    isPreparing || (status === "failed" && hasStartupRows);
+  const previewLogsTail = showPreviewRuntimeLogs && isPreparing;
+  const shouldLoadPreviewLogs =
+    status === "failed" || previewLogsTail;
   const previewLogsQuery = useQuery({
-    queryKey: ["preview-logs", sessionId, instance?.id],
-    queryFn: () => api.sessions.preview.logs(sessionId),
-    enabled: status === "failed" && Boolean(instance),
+    queryKey: ["preview-logs", sessionId, instance?.id, previewLogsTail ? "tail" : "default"],
+    queryFn: () =>
+      previewLogsTail
+        ? api.sessions.preview.logs(sessionId, { tail: true })
+        : api.sessions.preview.logs(sessionId),
+    enabled: Boolean(instance) && shouldLoadPreviewLogs,
+    refetchInterval: previewLogsTail ? 2000 : false,
     retry: 1,
   });
   const startupErrorLogs = useMemo(() => {
@@ -463,10 +502,22 @@ export function PreviewPanel({
         ? "Could not load persisted preview logs. The startup summary is still available."
         : startupErrorLogs || "No startup logs were captured for this failure."
     : instance?.error || startupErrorLogs;
+  const visiblePreviewRuntimeLogs = useMemo(() => {
+    if (previewLogsQuery.isLoading) return "Loading preview logs...";
+    if (previewLogsQuery.isError) {
+      return "Could not load preview logs. Try closing and reopening this log view.";
+    }
+    const logs = previewLogsQuery.data
+      ?.filter((log) => log.step !== "design_feedback")
+      .map((log) => log.message.trim())
+      .filter(Boolean)
+      .join("\n");
+    return logs || "No preview logs have been captured yet.";
+  }, [previewLogsQuery.data, previewLogsQuery.isError, previewLogsQuery.isLoading]);
 
-  // Start preview
+  // Ensure preview
   const startMutation = useMutation({
-    mutationFn: () => api.sessions.preview.start(sessionId),
+    mutationFn: () => api.sessions.preview.ensure(sessionId),
     onSuccess: () => {
       setMutationError(null);
       queryClient.invalidateQueries({
@@ -526,6 +577,12 @@ export function PreviewPanel({
         setMutationError(err.message);
         return;
       }
+      if (code === PREVIEW_ERROR_CODES.CONFIG_INVALID) {
+        // Backend message includes the exact parse/validation failure and the
+        // committed file that needs to be fixed.
+        setMutationError(err.message);
+        return;
+      }
       // Provider-side launch failures (image pull, infra health, init
       // script, readiness probe). The backend builds a message that
       // names the failing image / service and includes the underlying
@@ -536,6 +593,7 @@ export function PreviewPanel({
         code === PREVIEW_ERROR_CODES.INFRA_START_FAILED ||
         code === PREVIEW_ERROR_CODES.INFRA_UNHEALTHY ||
         code === PREVIEW_ERROR_CODES.INIT_SCRIPT_FAILED ||
+        code === PREVIEW_ERROR_CODES.INSTALL_FAILED ||
         code === PREVIEW_ERROR_CODES.SERVICE_NOT_READY
       ) {
         setMutationError(err.message);
@@ -564,7 +622,7 @@ export function PreviewPanel({
 
   // Restart preview
   const restartMutation = useMutation({
-    mutationFn: () => api.sessions.preview.restart(sessionId),
+    mutationFn: () => api.sessions.preview.ensure(sessionId),
     onSuccess: resetPreviewState,
     onError: (err) => {
       setMutationError(`Failed to restart preview: ${err.message}`);
@@ -715,7 +773,7 @@ export function PreviewPanel({
     stopMutation.isPending ||
     restartMutation.isPending ||
     lifetimeMutation.isPending;
-  const showStartupCanvas = isActive && !isReady;
+  const showStartupCanvas = isPreparing;
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
@@ -724,7 +782,9 @@ export function PreviewPanel({
     [showStartupProgress, status, services, infrastructure],
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
-  const showTopControls = status !== "starting";
+  const showTopControls =
+    status !== "starting" && status !== "stopped" && status !== "expired";
+  const statusMetadata = previewStatusMetadata(status);
   const visibleStartupPhases = STARTUP_PHASES.filter(
     (phase) => phase !== "Provisioning" || infrastructure.length > 0,
   );
@@ -771,111 +831,87 @@ export function PreviewPanel({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Controls bar */}
+      {/* Command header */}
       {showTopControls && (
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* Open preview */}
-        {isReady && previewOrigin && (
-          <Button
-            size="sm"
-            asChild
-          >
-            <a
-              href={previewOrigin}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <ExternalLink className="size-3.5" />
-              Open Preview
-            </a>
-          </Button>
-        )}
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0 space-y-1">
+              <div className="text-sm font-medium text-foreground">Preview</div>
+              <div className="flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                {statusMetadata && <span>{statusMetadata}</span>}
+                {isReady && (
+                  <ErrorBoundary fallback={null}>
+                    <ConsoleBadge sessionId={sessionId} />
+                  </ErrorBoundary>
+                )}
+              </div>
+            </div>
 
-        {/* Start / Stop / Restart */}
-        <div className="flex items-center gap-1">
-          {isActive ? (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => stopMutation.mutate()}
-                disabled={isMutating}
-                loading={stopMutation.isPending}
-              >
-                <Square className="size-3.5" />
-                Stop
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => restartMutation.mutate()}
-                disabled={isMutating}
-                loading={restartMutation.isPending}
-              >
-                <RotateCw className="size-3.5" />
-                Restart
-              </Button>
-            </>
-          ) : null}
-        </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {isReady && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size="icon-sm"
+                        variant={designMode ? "default" : "outline"}
+                        onClick={() => setDesignMode(!designMode)}
+                      >
+                        <Palette className="size-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {designMode ? "Exit Design Mode" : "Design Mode"}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
 
-        {/* Status badge */}
-        {status && status !== "failed" && status !== "stopped" && status !== "expired" && (
-          <Badge variant="secondary" className={cn(statusColor(status))}>
-            {status === "ready" && <CheckCircle2 className="size-3" />}
-            {status === "unhealthy" && <AlertTriangle className="size-3" />}
-            {STATUS_LABELS[status]}
-          </Badge>
-        )}
+              {isManageable && (
+                <PreviewActionsMenu
+                  expiresAt={isReady ? instance?.expires_at : undefined}
+                  disabled={isMutating}
+                  onStop={() => stopMutation.mutate()}
+                  onRestart={() => restartMutation.mutate()}
+                  onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
+                />
+              )}
 
-        {/* Console errors badge */}
-        {isReady && (
-          <ErrorBoundary fallback={null}>
-            <ConsoleBadge sessionId={sessionId} />
-          </ErrorBoundary>
-        )}
-
-        {isReady && instance?.expires_at && (
-          <PreviewLifetimeMenu
-            expiresAt={instance.expires_at}
-            disabled={isMutating}
-            onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
-            onStopNow={() => stopMutation.mutate()}
-          />
-        )}
-
-        {/* TTL Warning */}
-        {instance?.expires_at && isReady && (
-          <TTLWarning
-            expiresAt={instance.expires_at}
-            sessionId={sessionId}
-            recycleScheduledAt={instance.recycle_scheduled_at}
-          />
-        )}
-
-        <div className="flex-1" />
-
-        {/* Design mode toggle */}
-        {isReady && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon-sm"
-                  variant={designMode ? "default" : "outline"}
-                  onClick={() => setDesignMode(!designMode)}
-                >
-                  <Palette className="size-3.5" />
+              {isReady && previewOrigin && (
+                <Button size="sm" asChild>
+                  <a
+                    href={previewOrigin}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    Open Preview
+                  </a>
                 </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {designMode ? "Exit Design Mode" : "Design Mode"}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
+              )}
 
-      </div>
+              {status === "failed" && (
+                <Button
+                  size="sm"
+                  onClick={() => startMutation.mutate()}
+                  disabled={isMutating}
+                  loading={startMutation.isPending}
+                >
+                  {!startMutation.isPending && <RotateCw className="size-3.5" />}
+                  Retry Preview
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {instance?.expires_at && isReady && (
+            <TTLWarning
+              expiresAt={instance.expires_at}
+              sessionId={sessionId}
+              recycleScheduledAt={instance.recycle_scheduled_at}
+            />
+          )}
+        </div>
       )}
 
       {/* Mutation error banner */}
@@ -936,21 +972,6 @@ export function PreviewPanel({
                   </TooltipTrigger>
                   <TooltipContent>Stop preview</TooltipContent>
                 </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label="Restart preview"
-                      onClick={() => restartMutation.mutate()}
-                      disabled={isMutating}
-                      loading={restartMutation.isPending}
-                    >
-                      {!restartMutation.isPending && <RotateCw className="size-3.5" />}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Restart preview</TooltipContent>
-                </Tooltip>
               </TooltipProvider>
             </div>
             <div className="flex min-h-[360px] flex-col items-center justify-center px-6 py-14 text-center">
@@ -1005,16 +1026,34 @@ export function PreviewPanel({
           </div>
           <Collapsible>
             <div className="border-t bg-card/60 px-3 py-2">
-              <CollapsibleTrigger asChild>
+              <div className="flex flex-wrap items-center gap-2">
+                <CollapsibleTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="group h-7 px-2 text-xs text-muted-foreground"
+                  >
+                    Details
+                    <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                  </Button>
+                </CollapsibleTrigger>
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="group h-7 px-2 text-xs text-muted-foreground"
+                  className="h-7 px-2 text-xs text-muted-foreground"
+                  aria-expanded={showPreviewRuntimeLogs}
+                  aria-controls={previewRuntimeLogsId}
+                  onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
                 >
-                  Details
-                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                  {showPreviewRuntimeLogs ? "Hide preview logs" : "Show preview logs"}
+                  <ChevronDown
+                    className={cn(
+                      "size-3.5 transition-transform duration-200",
+                      showPreviewRuntimeLogs && "rotate-180",
+                    )}
+                  />
                 </Button>
-              </CollapsibleTrigger>
+              </div>
               <CollapsibleContent className="pt-2 pb-1">
                 <div className="space-y-1.5">
                   {startupChecklist.map((step) => (
@@ -1031,6 +1070,18 @@ export function PreviewPanel({
                   ))}
                 </div>
               </CollapsibleContent>
+              {showPreviewRuntimeLogs && (
+                <pre
+                  id={previewRuntimeLogsId}
+                  aria-label="Preview container logs"
+                  className={cn(
+                    "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
+                    previewLogsQuery.isError && "text-muted-foreground",
+                  )}
+                >
+                  {visiblePreviewRuntimeLogs}
+                </pre>
+              )}
             </div>
           </Collapsible>
         </div>
@@ -1050,7 +1101,7 @@ export function PreviewPanel({
               className={cn(
                 "overflow-y-hidden whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
                 showFullStartupLogs
-                  ? "sm:max-h-[min(56vh,28rem)] text-foreground"
+                  ? "max-h-[min(56vh,28rem)] overflow-y-auto text-foreground"
                   : "line-clamp-6",
                 previewLogsQuery.isError && showFullStartupLogs && "text-muted-foreground",
               )}
@@ -1059,18 +1110,6 @@ export function PreviewPanel({
             </pre>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setShowFullStartupLogs(false);
-                restartMutation.mutate();
-              }}
-              disabled={isMutating}
-            >
-              <RefreshCw className="size-3.5" />
-              Try Again
-            </Button>
             {(startupErrorLogs || previewLogsQuery.isLoading || previewLogsQuery.isError) && (
               <Button
                 variant="ghost"

@@ -1,0 +1,44 @@
+---
+title: Review and ship
+description: Review agent output, run validation, inspect previews, and open a pull request.
+section: Get started
+order: 4
+status: beta
+audience: engineer
+tags:
+  - review
+  - pull-requests
+  - validation
+  - previews
+llm_summary: Review a completed 143 session by inspecting the transcript, diff, validation output, preview, and PR state before shipping.
+---
+
+# Review and ship
+
+143 should make the agent's work easy to inspect before it reaches production. Treat the session page as the review surface and your repository CI/CD as the final validation boundary.
+
+## Review checklist
+
+- Read the final summary and any warnings.
+- Inspect the diff by file.
+- Check validation output and test commands.
+- Open the preview when one is configured.
+- Use follow-up messages to fix issues before opening a PR.
+- Open a PR only when the change is coherent and reviewable.
+
+## Use previews for UI changes
+
+Previews let you click through the app inside the session instead of pulling the branch locally. They are most useful for:
+
+- Layout fixes.
+- Form and settings flows.
+- Regression checks that are easier to see than infer from code.
+- Product review before PR creation.
+
+## After the PR opens
+
+Repository-native CI remains the source of truth. 143 can help repair failures, resolve conflicts, or continue the session, but branch protection and required checks should still live in GitHub.
+
+<Callout type="info" title="Shipping boundary">
+143 creates and updates branches. Your repository's review, CI, merge, and deploy rules still decide what ships.
+</Callout>

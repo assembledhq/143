@@ -221,6 +221,7 @@ func LinkedIssuesContext(data LinkedIssueContextData) string {
 
 type ReviewLoopReviewPromptData struct {
 	AgentType any
+	FixMode   any
 }
 
 func ReviewLoopReviewPrompt(data ReviewLoopReviewPromptData) string {
@@ -231,8 +232,12 @@ func ReviewLoopDecisionPrompt() string {
 	return render("review_loop_decision.template", nil)
 }
 
-func ReviewLoopFixPrompt() string {
-	return render("review_loop_fix.template", nil)
+type ReviewLoopFixPromptData struct {
+	FixMode any
+}
+
+func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
+	return render("review_loop_fix.template", data)
 }
 
 // ─── Slack ────────────────────────────────────────────────────────────────────

@@ -133,7 +133,7 @@ const hasUnpushedChangesColumn = `EXISTS (
 const sessionSelectColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
-	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	complexity_tier,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
@@ -160,7 +160,7 @@ const (
 const sessionListColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
-	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	complexity_tier,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
@@ -183,7 +183,7 @@ const sessionListColumns = `id,
 const sessionAPIDetailColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
-	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
+	complexity_tier,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
@@ -1076,7 +1076,7 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
-		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusCompleted || status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
@@ -1157,12 +1157,15 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		            THEN now()
 		        ELSE completed_at
 		    END,
-		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
-		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
@@ -1170,20 +1173,17 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
-		"id":                   runID,
-		"org_id":               orgID,
-		"status":               string(status),
-		"confidence_score":     result.ConfidenceScore,
-		"confidence_reasoning": result.ConfidenceReasoning,
-		"risk_factors":         result.RiskFactors,
-		"token_usage":          result.TokenUsage,
-		"model_used":           result.ModelUsed,
-		"result_summary":       result.ResultSummary,
-		"diff":                 result.Diff,
-		"error":                result.Error,
-		"base_commit_sha":      result.DiffBaseCommitSHA,
-		"diff_collected_at":    result.DiffCollectedAt,
-		"diff_stats":           diffStats,
+		"id":                runID,
+		"org_id":            orgID,
+		"status":            string(status),
+		"token_usage":       result.TokenUsage,
+		"model_used":        result.ModelUsed,
+		"result_summary":    result.ResultSummary,
+		"diff":              result.Diff,
+		"error":             result.Error,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
+		"diff_stats":        diffStats,
 	})
 	if err != nil {
 		return err
@@ -1242,7 +1242,13 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running', started_at = now(), completed_at = NULL, last_activity_at = now()
+		SET status = 'running', started_at = now(), completed_at = NULL,
+		    error = NULL,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
@@ -1272,7 +1278,8 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running', completed_at = NULL, last_activity_at = now()
+		SET status = 'running', completed_at = NULL,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
@@ -1388,9 +1395,6 @@ func (s *SessionStore) ResetForRetry(ctx context.Context, orgID, sessionID uuid.
 		    failure_next_steps = NULL,
 		    failure_retry_advised = false,
 		    result_summary = NULL,
-		    confidence_score = NULL,
-		    confidence_reasoning = NULL,
-		    risk_factors = NULL,
 		    token_usage = NULL,
 		    diff = NULL,
 		    diff_stats = NULL,
@@ -1571,12 +1575,15 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
 		    branch_creation_state = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_state ELSE 'idle' END,
 		    branch_creation_error = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_error ELSE NULL END,
-		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
-		    risk_factors = @risk_factors, token_usage = @token_usage,
+		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
@@ -1584,22 +1591,19 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := db.Exec(ctx, query, pgx.NamedArgs{
-		"id":                   sessionID,
-		"org_id":               orgID,
-		"current_turn":         turn,
-		"agent_session_id":     agentSessionID,
-		"snapshot_key":         snapshotKey,
-		"confidence_score":     result.ConfidenceScore,
-		"confidence_reasoning": result.ConfidenceReasoning,
-		"risk_factors":         result.RiskFactors,
-		"token_usage":          result.TokenUsage,
-		"model_used":           result.ModelUsed,
-		"result_summary":       result.ResultSummary,
-		"diff":                 result.Diff,
-		"error":                result.Error,
-		"base_commit_sha":      result.DiffBaseCommitSHA,
-		"diff_collected_at":    result.DiffCollectedAt,
-		"diff_stats":           diffStats,
+		"id":                sessionID,
+		"org_id":            orgID,
+		"current_turn":      turn,
+		"agent_session_id":  agentSessionID,
+		"snapshot_key":      snapshotKey,
+		"token_usage":       result.TokenUsage,
+		"model_used":        result.ModelUsed,
+		"result_summary":    result.ResultSummary,
+		"diff":              result.Diff,
+		"error":             result.Error,
+		"base_commit_sha":   result.DiffBaseCommitSHA,
+		"diff_collected_at": result.DiffCollectedAt,
+		"diff_stats":        diffStats,
 	})
 	return err
 }
@@ -1751,7 +1755,7 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 // UpdateWorkspaceSnapshot persists a refreshed snapshot key plus diff metadata
 // for workspace-mutating actions that are not agent turns, such as "revert this
 // tab". Unlike UpdateTurnComplete, this intentionally leaves status, current
-// turn, summary, and confidence untouched.
+// turn and summary untouched.
 func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
 	query := `
 		UPDATE sessions
@@ -2553,11 +2557,11 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 	return err
 }
 
-// ListStalePendingSessions returns pending sessions created before the given
-// cutoff. These sessions have been stuck in pending for too long and should be
-// failed with an explanatory error.
+// ListStalePendingSessions returns pending sessions whose latest pending-state
+// activity is before the given cutoff. These sessions have been stuck in
+// pending for too long and should be failed with an explanatory error.
 // lint:allow-no-orgid reason="cross-org reaper scan for stuck pending sessions"
-func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error) {
+func (s *SessionStore) ListStalePendingSessions(ctx context.Context, activityBefore time.Time) ([]models.Session, error) {
 	// No alias on `sessions`: sessionPrimaryIssueIDColumn references
 	// sessions.org_id / sessions.id literally, and a table alias would shadow
 	// the original name (Postgres 42P01).
@@ -2566,12 +2570,12 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 		FROM sessions
 		WHERE status = 'pending'
 		  AND deleted_at IS NULL
-		  AND created_at < @created_before
-		ORDER BY created_at ASC
+		  AND last_activity_at < @activity_before
+		ORDER BY last_activity_at ASC
 		LIMIT 100`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"created_before": createdBefore,
+		"activity_before": activityBefore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query stale pending sessions: %w", err)

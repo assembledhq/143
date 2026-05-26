@@ -71,15 +71,21 @@ type Config struct {
 	// rows when partial DB state lands.
 	//
 	// Outer caps (must be ≥ this value):
-	//   - docker-compose.worker.yml stop_grace_period (50m) — binding
+	//   - docker-compose.worker.yml stop_grace_period (3h) — binding
 	//     SIGKILL deadline once Docker issues `docker stop`; this is the
 	//     real ceiling on a deploy.
 	//   - deploy/scripts/deploy.sh drain_worker_service polls for up to
-	//     WORKER_DRAIN_TIMEOUT seconds (default 7200s) waiting for the
-	//     SIGTERM'd container to exit, but `--force-recreate` afterwards
-	//     hits stop_grace_period anyway, so the polling ceiling is only a
-	//     safety upper bound, not the effective drain duration.
+	//     WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS seconds (default 14400s)
+	//     waiting for the SIGTERM'd container to exit, but `--force-recreate`
+	//     afterwards hits stop_grace_period anyway, so the polling ceiling
+	//     must cover both job drain and preview drain.
 	WorkerDrainTimeout time.Duration `env:"WORKER_DRAIN_TIMEOUT" envDefault:"45m"`
+	// WorkerPreviewDrainTimeout is how long a draining worker keeps its HTTP
+	// listener and preview proxy alive after worker jobs have drained so
+	// existing previews survive routine worker deploys. During this window the
+	// node is marked draining, so new preview cold starts avoid it, but
+	// already-owned preview traffic remains routable.
+	WorkerPreviewDrainTimeout time.Duration `env:"WORKER_PREVIEW_DRAIN_TIMEOUT" envDefault:"2h"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
@@ -254,7 +260,7 @@ type Config struct {
 	// and org, then a per-worker safety net).
 	//
 	// Semantics of 0: fall back to the compile-time default in
-	// internal/services/preview/manager.go (currently 2 per user, 5 per
+	// internal/services/preview/manager.go (currently 4 per user, 5 per
 	// org, 3 per worker). 0 does NOT mean "unlimited" — if you genuinely
 	// want to disable a cap, raise it to a large sentinel like 1_000_000.
 	// Any value > 0 is used verbatim.

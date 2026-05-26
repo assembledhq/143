@@ -236,6 +236,7 @@ Fleet deploys attempt to keep host hardening in place as they roll services:
 
 - Docker `json-file` log rotation is installed through `deploy/scripts/install-log-rotation.sh`, which merges the desired `log-driver` and `log-opts` into `/etc/docker/daemon.json` and restarts Docker only when the file changes.
 - App-role deploys skip Docker-daemon-mutating hardening checks by default because a Docker restart recycles Caddy and briefly unbinds ports `80`/`443`, which Cloudflare surfaces as origin downtime. Operators can opt in for explicit maintenance with `ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1`.
+- Routine app-role deploys also leave the running Caddy container untouched unless `Dockerfile.caddy`, the Caddyfile, or Caddy-specific env changes. Caddyfile-only changes use in-place `caddy reload`; image/env changes still reconcile the container because the running process cannot absorb them safely.
 - The deploy user receives a narrow `NOPASSWD` sudoers grant during provisioning so routine deploys can run the log-rotation helper and worker firewall helper without broad root access. Worker cloud-init installs the same grant on first boot, because those hosts can start successfully from user-data before any operator runs SSH provisioning.
 - Existing hosts that predate a sudoers entry are repaired through `deploy/scripts/repair-deploy-sudoers.sh` when root SSH is available.
 - If a routine deploy cannot repair sudoers from CI, Docker log-rotation update failure is warning-only. The service rollout continues, and operators can run `make repair-deploy-sudoers ROLE=<role> HOST=<host>` later from a machine with root SSH access.
@@ -560,7 +561,10 @@ The production frontend image runs Next.js standalone on port 3000 and sets
 `HOSTNAME=0.0.0.0`. Docker injects `HOSTNAME` as the container ID by default;
 overriding it keeps the Next server bound to all interfaces so both Docker
 health checks on `127.0.0.1:3000/healthz` and other compose services can reach
-the process.
+the process. Because the frontend build runs from a monorepo workspace, Next's
+standalone output places the app entrypoint under `frontend/server.js`; the
+runtime image keeps the traced repo-level files under `/app` and starts from
+`/app/frontend` so the server, `.next/static`, and `public` assets line up.
 
 ## Logging: Mezmo
 

@@ -154,9 +154,9 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     # compose can still interpolate them when it parses the compose file.
     # .env.local is owned by provisioning and we abort if it's missing instead
     # of silently coming up with empty/unsafe defaults.
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_ENABLED=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_KEY=%s\nSTATIC_EGRESS_WORKER_PRIVATE_KEY=%s\nSTATIC_EGRESS_WORKER_WG_ADDRESS=%s\n' \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nWORKER_PREVIEW_DRAIN_TIMEOUT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_ENABLED=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_KEY=%s\nSTATIC_EGRESS_WORKER_PRIVATE_KEY=%s\nSTATIC_EGRESS_WORKER_WG_ADDRESS=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
-      "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
+      "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${WORKER_PREVIEW_DRAIN_TIMEOUT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
       "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
       "$STATIC_EGRESS_ENABLED" "${STATIC_EGRESS_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:-}" "${STATIC_EGRESS_WORKER_PRIVATE_KEY:-}" "${STATIC_EGRESS_WORKER_WG_ADDRESS:-}" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" '
@@ -189,9 +189,10 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DB_HOST:?DB_HOST is required for app role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for app role (set it or add to .env.production.enc)}"
     : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required for app role (set it or add to .env.production.enc)}"
+    : "${DOMAIN:=143.dev}"
     : "${PREVIEW_ORIGIN_TEMPLATE:=https://{id}.preview.143.dev}"
     : "${NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:=$PREVIEW_ORIGIN_TEMPLATE}"
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nDOMAIN=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "$DOMAIN" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
@@ -241,12 +242,10 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/Caddyfile" deploy@"$HOST":/opt/143/deploy/Caddyfile.new
   # The app host builds a custom Caddy image locally so wildcard preview certs
   # can use the Cloudflare DNS challenge. Stage the Dockerfile next to the
-  # compose file before `docker compose up` runs.
+  # compose file; the remote deploy compares it with the active copy before
+  # deciding whether to rebuild/recreate the Cloudflare-facing Caddy origin.
   scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" \
     deploy@"$HOST":/opt/143/Dockerfile.caddy.new
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/Dockerfile.caddy.new /opt/143/Dockerfile.caddy \
-     || { rm -f /opt/143/Dockerfile.caddy.new; exit 1; }"
 fi
 if [ "$ROLE" = "worker" ]; then
   # Keep the sandbox firewall script in sync so every deploy can re-apply
@@ -481,6 +480,11 @@ fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
+  "WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS=${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}" \
+  "WORKER_BLUE_GREEN_PORT_START=${WORKER_BLUE_GREEN_PORT_START:-}" \
+  "WORKER_BLUE_GREEN_PORT_END=${WORKER_BLUE_GREEN_PORT_END:-}" \
+  "WORKER_BASE_NODE_ID=${WORKER_BASE_NODE_ID:-}" \
+  "WORKER_DRAIN_TIMEOUT=${WORKER_DRAIN_TIMEOUT:-}" \
   "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
   "SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}" \
   "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
@@ -490,10 +494,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   set -euo pipefail
   cd /opt/143
 
-  # Clean up the staged Caddyfile on any exit path.
-  # stage_caddy_config_if_changed normally consumes it (mv or rm), but this
+  # Clean up staged Caddy inputs on any exit path.
+  # stage_caddy_*_if_changed normally consumes them (mv or rm), but this
   # guards against a failure between the scp and that call leaving it on disk.
-  trap 'rm -f /opt/143/deploy/Caddyfile.new' EXIT
+  trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new' EXIT
 
   # recreate_other_services SKIP_SVCS — force-recreate every compose service
   # except the space-separated list in SKIP_SVCS. Used to update out-of-band
@@ -537,50 +541,147 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  # stage_caddy_dockerfile_if_changed — returns 0 only when Dockerfile.caddy
+  # changed and promotes the staged copy. Routine code-only deploys must not
+  # rebuild Caddy because compose may replace the public 80/443 listener.
+  stage_caddy_dockerfile_if_changed() {
+    local new_file="/opt/143/Dockerfile.caddy.new"
+    local cur_file="/opt/143/Dockerfile.caddy"
+    [ -f "$new_file" ] || return 1
+    if [ ! -f "$cur_file" ]; then
+      mv "$new_file" "$cur_file"
+      return 0
+    fi
+    if ! cmp -s "$new_file" "$cur_file"; then
+      mv "$new_file" "$cur_file"
+      return 0
+    fi
+    rm -f "$new_file"
+    return 1
+  }
+
+  caddy_env_from_env_file() {
+    local env_file="/opt/143/.env"
+    awk -F= '
+      BEGIN { domain = "143.dev"; token = "" }
+      $1 == "DOMAIN" { domain = substr($0, index($0, "=") + 1) }
+      $1 == "CLOUDFLARE_API_TOKEN" { token = substr($0, index($0, "=") + 1) }
+      END {
+        printf "DOMAIN=%s\n", domain
+        printf "CLOUDFLARE_API_TOKEN=%s\n", token
+      }
+    ' "$env_file"
+  }
+
+  caddy_env_from_container() {
+    local caddy_id="$1"
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$caddy_id" | awk -F= '
+      BEGIN { domain = "143.dev"; token = "" }
+      $1 == "DOMAIN" { domain = substr($0, index($0, "=") + 1) }
+      $1 == "CLOUDFLARE_API_TOKEN" { token = substr($0, index($0, "=") + 1) }
+      END {
+        printf "DOMAIN=%s\n", domain
+        printf "CLOUDFLARE_API_TOKEN=%s\n", token
+      }
+    '
+  }
+
+  caddy_env_fingerprint() {
+    caddy_env_from_env_file | sha256sum | awk '{print $1}'
+  }
+
+  caddy_container_env_fingerprint() {
+    local caddy_id="$1"
+    caddy_env_from_container "$caddy_id" | sha256sum | awk '{print $1}'
+  }
+
+  caddy_env_fingerprint_changed() {
+    local caddy_id="${1:-}"
+    local fp_file="/opt/143/.caddy-env.fingerprint"
+    local next current
+    next="$(caddy_env_fingerprint)"
+
+    if [ -f "$fp_file" ]; then
+      current="$(cat "$fp_file")"
+    elif [ -n "$caddy_id" ]; then
+      current="$(caddy_container_env_fingerprint "$caddy_id")"
+      if [ "$current" = "$next" ]; then
+        printf '%s\n' "$next" > "$fp_file"
+        return 1
+      fi
+    else
+      current=""
+    fi
+
+    if [ "$current" != "$next" ]; then
+      printf '%s\n' "$next" > "$fp_file.new"
+      return 0
+    fi
+    rm -f "$fp_file.new"
+    return 1
+  }
+
+  commit_caddy_env_fingerprint() {
+    local fp_file="/opt/143/.caddy-env.fingerprint"
+    if [ -f "$fp_file.new" ]; then
+      mv "$fp_file.new" "$fp_file"
+    fi
+  }
+
   # reconcile_caddy_service — applies app-edge Caddy changes with the least
   # disruptive path available:
-  #   1. `docker compose up -d --no-deps caddy` so compose can recreate the
-  #      container when the built image or env/config changed.
-  #   2. If the container did NOT need recreation but deploy/Caddyfile did
-  #      change, run `caddy reload` in place so ports 80/443 stay bound.
-  # This closes the gap where Dockerfile.caddy / compose env changes could be
-  # deployed without ever replacing the running Caddy container.
+  #   1. Leave Caddy untouched for routine code-only deploys.
+  #   2. Recreate Caddy only when Dockerfile.caddy changed, Caddy-specific env
+  #      changed, or the container is missing.
+  #   3. If only deploy/Caddyfile changed, run `caddy reload` in place so ports
+  #      80/443 stay bound.
   reconcile_caddy_service() {
     local caddy_config_changed=0
     if stage_caddy_config_if_changed; then
       caddy_config_changed=1
     fi
 
-    local old_caddy_id new_caddy_id
+    local old_caddy_id new_caddy_id caddy_env_changed=0 caddy_dockerfile_changed="${CADDY_DOCKERFILE_CHANGED:-0}"
     old_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
 
-    echo "Reconciling Caddy service..."
-    docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
-
-    new_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
-    if [ -z "$new_caddy_id" ]; then
-      echo "ERROR: caddy container not found after docker compose up"
-      return 1
+    if caddy_env_fingerprint_changed "$old_caddy_id"; then
+      caddy_env_changed=1
     fi
 
-    if [ -z "$old_caddy_id" ]; then
-      echo "Caddy started successfully."
-      return 0
-    fi
+    if [ -z "$old_caddy_id" ] || [ "$caddy_dockerfile_changed" -eq 1 ] || [ "$caddy_env_changed" -eq 1 ]; then
+      echo "Reconciling Caddy service..."
+      docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
 
-    if [ "$old_caddy_id" != "$new_caddy_id" ]; then
-      echo "Caddy container recreated to pick up image/env changes."
+      new_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
+      if [ -z "$new_caddy_id" ]; then
+        echo "ERROR: caddy container not found after docker compose up"
+        return 1
+      fi
+
+      commit_caddy_env_fingerprint
+
+      if [ -z "$old_caddy_id" ]; then
+        echo "Caddy started successfully."
+        return 0
+      fi
+
+      if [ "$old_caddy_id" != "$new_caddy_id" ]; then
+        echo "Caddy container recreated to pick up image/env changes."
+        return 0
+      fi
+
+      echo "Caddy service reconciled without container replacement."
       return 0
     fi
 
     if [ "$caddy_config_changed" -eq 1 ]; then
       echo "Caddyfile changed without container recreate — reloading caddy in place..."
-      if ! docker exec "$new_caddy_id" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+      if ! docker exec "$old_caddy_id" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
         echo "In-place reload failed — forcing container recreate."
         docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate caddy
       fi
     else
-      echo "Caddy image/env/config unchanged — leaving caddy running."
+      echo "Caddy inputs unchanged — leaving caddy running."
     fi
   }
 
@@ -729,7 +830,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
     echo "Rolling $service: new=${new_container:0:12} old=${old_short:-none}"
 
-    if ! wait_container_healthy "$new_container" 180; then
+    if ! wait_container_healthy "$new_container" 180 "$service"; then
       echo "Rolling back $service — removing failed container..."
       docker stop "$new_container" >/dev/null 2>&1 || true
       docker rm "$new_container" >/dev/null 2>&1 || true
@@ -763,13 +864,25 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "$service rolled over successfully."
   }
 
-  # drain_worker_service SERVICE — send SIGTERM to the current worker and wait
-  # for it to exit after draining its active jobs. The worker process handles
-  # SIGTERM by marking itself draining, stopping new claims, and waiting for
-  # in-flight work to finish before exiting.
+  resolve_worker_drain_timeout_seconds() {
+    local timeout="${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}"
+    if [ -z "$timeout" ]; then
+      case "${WORKER_DRAIN_TIMEOUT:-}" in
+        ''|*[!0-9]*) timeout="14400" ;;
+        *) timeout="$WORKER_DRAIN_TIMEOUT" ;;
+      esac
+    fi
+    echo "$timeout"
+  }
+
+  # drain_worker_service SERVICE — legacy blocking worker drain helper. Kept
+  # for manual recovery paths; routine worker deploys use blue/green
+  # generations below so the deploy completes after the new generation is
+  # healthy while old preview owners drain in the background.
   drain_worker_service() {
     local service="$1"
-    local timeout="${WORKER_DRAIN_TIMEOUT:-7200}"
+    local timeout
+    timeout="$(resolve_worker_drain_timeout_seconds)"
     local waited=0
     local cid
 
@@ -794,10 +907,192 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "$service drained successfully."
   }
 
+  drain_worker_containers_blocking() {
+    local containers="${1:-}"
+    local timeout waited cid running_count
+    timeout="$(resolve_worker_drain_timeout_seconds)"
+    waited=0
+
+    if [ -z "$containers" ]; then
+      echo "ERROR: no worker containers available to drain." >&2
+      return 1
+    fi
+
+    echo "Requesting blocking drain for existing worker containers (timeout ${timeout}s)..."
+    for cid in $containers; do
+      if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+        docker kill --signal=TERM "$cid" >/dev/null
+      fi
+    done
+
+    while true; do
+      running_count=0
+      for cid in $containers; do
+        if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+          running_count=$((running_count + 1))
+        fi
+      done
+      if [ "$running_count" -eq 0 ]; then
+        echo "Existing worker containers drained successfully."
+        return 0
+      fi
+      if [ "$waited" -ge "$timeout" ]; then
+        echo "ERROR: worker container drain timed out after ${timeout}s (${running_count} still running)" >&2
+        return 1
+      fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+  }
+
+  read_worker_env_value() {
+    local key="$1"
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' /opt/143/.env
+  }
+
+  sanitize_compose_project() {
+    local raw="$1" sanitized
+    sanitized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+    if [ -z "$sanitized" ]; then
+      sanitized="worker"
+    fi
+    printf '%.63s' "$sanitized"
+  }
+
+  list_running_worker_containers() {
+    docker ps --filter "label=com.docker.compose.service=worker" --format '{{.ID}}'
+  }
+
+  worker_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+      if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+        return 0
+      fi
+    fi
+    docker ps --format '{{.Ports}}' | grep -Eq "(^|, |:)${port}->8080/tcp"
+  }
+
+  worker_blue_green_extra_ports_configured() {
+    local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
+    local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
+
+    [ "$start" != "8080" ] || [ "$end" != "$start" ]
+  }
+
+  find_free_worker_port() {
+    local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
+    local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
+    local port
+
+    if [[ "$start" == *[!0-9]* ]] || [[ "$end" == *[!0-9]* ]]; then
+      echo "ERROR: WORKER_BLUE_GREEN_PORT_START and WORKER_BLUE_GREEN_PORT_END must be numeric." >&2
+      return 1
+    fi
+    if [ "$start" -gt "$end" ]; then
+      echo "ERROR: WORKER_BLUE_GREEN_PORT_START ($start) must be <= WORKER_BLUE_GREEN_PORT_END ($end)." >&2
+      return 1
+    fi
+    if [ "$start" != "$end" ]; then
+      echo "Worker blue/green port range ${start}-${end} is enabled; app-to-worker network must allow every configured worker blue/green port." >&2
+    fi
+
+    for port in $(seq "$start" "$end"); do
+      if ! worker_port_in_use "$port"; then
+        echo "$port"
+        return 0
+      fi
+    done
+    echo "ERROR: no free worker host port in ${start}-${end}" >&2
+    return 1
+  }
+
+  start_worker_generation() {
+    local node_id="$1" host_port="$2" base_url="$3" project="$4"
+    local cid
+
+    echo "Starting worker generation node_id=$node_id port=$host_port project=$project..."
+    NODE_ID="$node_id" \
+      WORKER_HOST_PORT="$host_port" \
+      PREVIEW_INTERNAL_BASE_URL="$base_url" \
+      IMAGE_TAG="$IMAGE_TAG" \
+      docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
+
+    cid="$(NODE_ID="$node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" docker compose -p "$project" -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+    if [ -z "$cid" ]; then
+      echo "ERROR: could not find new worker generation container"
+      return 1
+    fi
+
+    if ! wait_container_healthy "$cid" 180 "$HEALTH_SERVICE"; then
+      echo "Rolling back failed worker generation ${cid:0:12}..."
+      docker stop "$cid" >/dev/null 2>&1 || true
+      docker rm "$cid" >/dev/null 2>&1 || true
+      return 1
+    fi
+    STARTED_WORKER_CID="$cid"
+  }
+
+  drain_old_worker_containers() {
+    local new_cid="$1"
+    local old_containers="${2:-}"
+    local timeout
+    timeout="$(resolve_worker_drain_timeout_seconds)"
+    if [ -z "$old_containers" ]; then
+      echo "No old worker containers to drain."
+      return 0
+    fi
+
+    mkdir -p /var/log/143
+    for cid in $old_containers; do
+      if [ "$cid" = "$new_cid" ]; then
+        continue
+      fi
+      if ! docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+        continue
+      fi
+      echo "Requesting background drain for old worker container ${cid:0:12} (timeout ${timeout}s)..."
+      nohup docker stop -t "$timeout" "$cid" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
+    done
+  }
+
+  deploy_worker_blue_green() {
+    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid
+
+    old_containers="$(list_running_worker_containers || true)"
+    base_node_id="${WORKER_BASE_NODE_ID:-$(read_worker_env_value NODE_ID)}"
+    worker_private_ip="$(read_worker_env_value WORKER_PRIVATE_IP)"
+    if [ -z "$base_node_id" ] || [ -z "$worker_private_ip" ]; then
+      echo "ERROR: NODE_ID and WORKER_PRIVATE_IP must be present in /opt/143/.env for worker blue/green deploy." >&2
+      return 1
+    fi
+
+    generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
+    node_id="${base_node_id}-g${generation}"
+    if ! host_port="$(find_free_worker_port)"; then
+      if [ -n "$old_containers" ] && ! worker_blue_green_extra_ports_configured; then
+        echo "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain."
+        drain_worker_containers_blocking "$old_containers"
+        old_containers=""
+        host_port="$(find_free_worker_port)" || return 1
+      else
+        return 1
+      fi
+    fi
+    base_url="http://${worker_private_ip}:${host_port}"
+    project="$(sanitize_compose_project "143-${node_id}")"
+
+    STARTED_WORKER_CID=""
+    start_worker_generation "$node_id" "$host_port" "$base_url" "$project"
+    new_cid="$STARTED_WORKER_CID"
+    drain_old_worker_containers "$new_cid" "$old_containers"
+    echo "Worker generation ${new_cid:0:12} is healthy; old workers are draining in the background."
+  }
+
   dump_diagnostics() {
-    local cid="${1:-}"
-    echo "--- Last 50 lines of $HEALTH_SERVICE logs ---"
-    docker compose -f "$COMPOSE_FILE" logs --tail=50 "$HEALTH_SERVICE" 2>&1 || true
+    local cid="${1:-}" service="${2:-$HEALTH_SERVICE}"
+    echo "--- Last 50 lines of $service logs ---"
+    docker compose -f "$COMPOSE_FILE" logs --tail=50 "$service" 2>&1 || true
     if [ -n "$cid" ]; then
       echo "--- Docker health check log ---"
       docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
@@ -856,7 +1151,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
   # passes its health check, or fail after TIMEOUT seconds.
   wait_container_healthy() {
-    local cid="$1" timeout="${2:-120}"
+    local cid="$1" timeout="${2:-120}" service="${3:-$HEALTH_SERVICE}"
     echo "Waiting for container $cid health check (timeout ${timeout}s)..."
 
     # If the container has no HEALTHCHECK, treat "running" as healthy.
@@ -870,7 +1165,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         return 0
       else
         echo "ERROR: container is $state (no health check configured)"
-        dump_diagnostics "$cid"
+        dump_diagnostics "$cid" "$service"
         return 1
       fi
     fi
@@ -884,13 +1179,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
       if [ "$HEALTH_STATUS" = "unhealthy" ] || [ "$HEALTH_STATUS" = "exited" ] || [ "$HEALTH_STATUS" = "dead" ]; then
         echo "ERROR: container entered terminal state: $HEALTH_STATUS"
-        dump_diagnostics "$cid"
+        dump_diagnostics "$cid" "$service"
         return 1
       fi
 
       if [ "$i" -eq $((timeout / 2)) ]; then
         echo "ERROR: Health check timed out after ${timeout}s (last status: $HEALTH_STATUS)"
-        dump_diagnostics "$cid"
+        dump_diagnostics "$cid" "$service"
         return 1
       fi
       sleep 2
@@ -953,7 +1248,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # get patched on the next deploy.
   if [ "$ROLE" = "worker" ] && command -v runsc &>/dev/null; then
     DAEMON_JSON="/etc/docker/daemon.json"
-    if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -q "host-uds" "$DAEMON_JSON"; then
+    if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -Eq -- '--host-uds(=|[[:space:]]+)open' "$DAEMON_JSON"; then
       echo "Patching runsc runtime with --ignore-cgroups --host-uds=open..."
       sudo runsc install -- --ignore-cgroups --host-uds=open
       sudo systemctl restart docker
@@ -976,12 +1271,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
     docker compose -f "$COMPOSE_FILE" build sandbox-dns
   elif [ "$ROLE" = "app" ]; then
-    # Caddy is built locally (Dockerfile.caddy), so neither `docker compose pull`
-    # nor an in-place `caddy reload` would pick up Dockerfile/base-image changes.
-    # Build it before the rolling app/frontend work so a broken edge image fails
-    # the deploy before we rotate user-facing services.
-    echo "Building custom Caddy image..."
-    docker compose -f "$COMPOSE_FILE" build caddy
+    CADDY_DOCKERFILE_CHANGED=0
+    if stage_caddy_dockerfile_if_changed; then
+      CADDY_DOCKERFILE_CHANGED=1
+      # Caddy is built locally (Dockerfile.caddy), so neither `docker compose
+      # pull` nor an in-place `caddy reload` would pick up Dockerfile/base-image
+      # changes. Build only when the Dockerfile changed; rebuilding on every
+      # app deploy can make compose replace the single Cloudflare-facing origin.
+      echo "Dockerfile.caddy changed — building custom Caddy image..."
+      docker compose -f "$COMPOSE_FILE" build caddy
+    else
+      echo "Dockerfile.caddy unchanged — skipping Caddy image build."
+    fi
   fi
 
   # Run migrations BEFORE restarting the app so the DB schema is ready when
@@ -1022,15 +1323,17 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   elif [ "$ROLE" = "worker" ]; then
     run_worker_session_deploy_guardrail
 
-    # Workers remain single-replica, but we drain the old replica before
-    # replacement so accepted long-running sessions are not interrupted.
+    # Worker deploys use per-generation node IDs and host ports. The new
+    # generation becomes active first; old generations are marked draining by
+    # their own SIGTERM handlers and keep serving owned previews until they
+    # stop naturally or hit the preview drain timeout.
     #
-    # Worker drain can take up to WORKER_DRAIN_TIMEOUT (default 45m in the
-    # process, capped by docker stop_grace_period). Holding an SSH session
-    # — and therefore a CI runner minute — open that long is wasteful, so
-    # CI sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
-    # host-side process and return immediately. Manual deploys leave it
-    # unset to keep the synchronous "did it work?" feedback loop.
+    # Worker drain can take up to the in-process job drain plus preview drain
+    # budget, capped by docker stop_grace_period. Holding an SSH session —
+    # and therefore a CI runner minute — open that long is wasteful, so CI
+    # sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
+    # host-side process and return immediately. Manual deploys leave it unset
+    # to keep the synchronous "did it work?" feedback loop.
     if [ -n "${WORKER_DEPLOY_DETACH:-}" ]; then
       mkdir -p /var/log/143
       sha_short="${IMAGE_TAG:0:7}"
@@ -1047,7 +1350,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f drain_worker_service wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_port_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
@@ -1055,6 +1358,11 @@ IMAGE_TAG='$IMAGE_TAG'
 DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'
 DOCKER_PRUNE_UNTIL='${DOCKER_PRUNE_UNTIL:-24h}'
 DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
+WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS='${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}'
+WORKER_BLUE_GREEN_PORT_START='${WORKER_BLUE_GREEN_PORT_START:-}'
+WORKER_BLUE_GREEN_PORT_END='${WORKER_BLUE_GREEN_PORT_END:-}'
+WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
+WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
 
 # Always write a status file so the verify step has a deterministic signal.
 # If we exit before the success line writes "ok", the trap leaves "fail".
@@ -1072,15 +1380,10 @@ trap on_exit EXIT
 rm -f "\$STATUS_FILE"
 
 cd /opt/143
-echo "[\$(date -u -Iseconds)] starting detached worker rollover (tag=$IMAGE_TAG)"
-drain_worker_service "\$HEALTH_SERVICE"
-docker compose -f "\$COMPOSE_FILE" up -d --no-deps --force-recreate "\$HEALTH_SERVICE"
-cid="\$(docker compose -f "\$COMPOSE_FILE" ps -q "\$HEALTH_SERVICE" | head -1)"
-if [ -n "\$cid" ]; then
-  wait_container_healthy "\$cid" 120 || { echo "[\$(date -u -Iseconds)] HEALTH CHECK FAILED"; exit 1; }
-fi
+echo "[\$(date -u -Iseconds)] starting detached worker blue/green deploy (tag=$IMAGE_TAG)"
+deploy_worker_blue_green
 prune_docker_deploy_artifacts worker
-echo "[\$(date -u -Iseconds)] rollover succeeded"
+echo "[\$(date -u -Iseconds)] blue/green deploy succeeded"
 echo "ok" > "\$STATUS_FILE"
 EOS
       chmod 700 "$rollover_script"
@@ -1101,17 +1404,7 @@ EOS
       echo "  status: $status_file (poll for 'ok' / 'fail')"
       echo "  follow: ssh deploy@<host> tail -f $log_file"
     else
-      drain_worker_service "$HEALTH_SERVICE"
-      docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
-
-      CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
-      if [ -n "$CONTAINER_ID" ]; then
-        if ! wait_container_healthy "$CONTAINER_ID" 120; then
-          echo "ERROR: new worker failed health check"
-          exit 1
-        fi
-      fi
-      echo "$HEALTH_SERVICE restarted successfully."
+      deploy_worker_blue_green
     fi
 
   else

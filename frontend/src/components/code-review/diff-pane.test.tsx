@@ -61,6 +61,14 @@ describe("DiffPane", () => {
     expect(screen.getByText("src/b.ts")).toBeInTheDocument();
   });
 
+  it("keeps the first file header flush with the toolbar by removing top padding from the scroll pane", () => {
+    const { container } = render(<DiffPane files={[makeDiffFile("src/a.ts")]} viewMode="unified" />);
+    const scrollContainer = container.firstElementChild;
+
+    expect(scrollContainer).toHaveClass("pt-0");
+    expect(scrollContainer).not.toHaveClass("p-3");
+  });
+
   it("renders a single file", () => {
     render(<DiffPane files={[makeDiffFile("index.ts")]} viewMode="split" />);
     expect(screen.getByTestId("file-index.ts")).toBeInTheDocument();

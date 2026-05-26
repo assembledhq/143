@@ -22,14 +22,13 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultWeightRecency, s.PriorityWeights.Recency, "should default recency weight")
 	require.Equal(t, DefaultWeightRevenueRisk, s.PriorityWeights.RevenueRisk, "should default revenue_risk weight")
 	require.Equal(t, DefaultAgentAutonomy, s.AgentAutonomy, "should default agent_autonomy")
-	require.Equal(t, 0.4, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from aggressive autonomy")
-	require.Equal(t, 0.2, s.ConfidenceThresholds.HumanReview, "should derive human_review from aggressive autonomy")
 	require.Empty(t, s.LLMModel, "should default llm_model to empty")
 	require.Empty(t, s.ProductDirection, "should default product_direction to empty")
 	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
+	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
 	require.False(t, s.SandboxNetwork.StaticEgressEnabled, "static egress should be disabled by default")
 }
 
@@ -93,8 +92,6 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, []string{"legacy-auth"}, s.ProductContext.AvoidAreas, "should parse product_context.avoid_areas")
 	require.Equal(t, "gpt-5.4-mini", s.LLMModel, "should override llm_model")
 	require.Equal(t, "conservative", s.AgentAutonomy, "should override agent_autonomy")
-	require.Equal(t, 1.0, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from conservative autonomy")
-	require.Equal(t, 0.8, s.ConfidenceThresholds.HumanReview, "should derive human_review from conservative autonomy")
 	require.Equal(t, 0.40, s.PriorityWeights.CustomerImpact, "should override customer_impact")
 	require.Equal(t, 0.30, s.PriorityWeights.Severity, "should override severity")
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
@@ -229,26 +226,6 @@ func TestAgentType_SupportsReasoningEffort(t *testing.T) {
 	require.True(t, AgentTypeCodex.SupportsReasoningEffort(), "Codex should support explicit reasoning overrides")
 	require.True(t, AgentTypeClaudeCode.SupportsReasoningEffort(), "Claude Code should support explicit reasoning overrides")
 	require.False(t, AgentTypeGeminiCLI.SupportsReasoningEffort(), "Gemini CLI should not report reasoning override support")
-}
-
-func TestConfidenceThresholdsForAutonomy(t *testing.T) {
-	t.Parallel()
-
-	conservative := ConfidenceThresholdsForAutonomy(AgentAutonomyConservative)
-	require.Equal(t, 1.0, conservative.AutoProceed)
-	require.Equal(t, 0.8, conservative.HumanReview)
-
-	balanced := ConfidenceThresholdsForAutonomy(AgentAutonomyBalanced)
-	require.Equal(t, 0.85, balanced.AutoProceed)
-	require.Equal(t, 0.5, balanced.HumanReview)
-
-	aggressive := ConfidenceThresholdsForAutonomy(AgentAutonomyAggressive)
-	require.Equal(t, 0.4, aggressive.AutoProceed)
-	require.Equal(t, 0.2, aggressive.HumanReview)
-
-	// unknown defaults to balanced
-	unknown := ConfidenceThresholdsForAutonomy("unknown")
-	require.Equal(t, balanced, unknown)
 }
 
 func TestOrgSize_Validate(t *testing.T) {
@@ -461,6 +438,47 @@ func TestParseOrgSettings_MaxSessionDuration_InRange(t *testing.T) {
 	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":600}`))
 	require.NoError(t, err)
 	require.Equal(t, 600, s.MaxSessionDurationSeconds, "in-range value should pass through")
+}
+
+func TestParseOrgSettings_PreviewMaxPreviewsPerUser(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected int
+	}{
+		{
+			name:     "zero defaults",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":0}`),
+			expected: DefaultPreviewMaxPreviewsPerUser,
+		},
+		{
+			name:     "custom value passes through",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":7}`),
+			expected: 7,
+		},
+		{
+			name:     "below minimum clamps up",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":-1}`),
+			expected: MinPreviewMaxPreviewsPerUser,
+		},
+		{
+			name:     "above maximum clamps down",
+			raw:      json.RawMessage(`{"preview_max_previews_per_user":999}`),
+			expected: MaxPreviewMaxPreviewsPerUser,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept preview capacity settings")
+			require.Equal(t, tt.expected, s.PreviewMaxPreviewsPerUser, "preview capacity should be normalized")
+		})
+	}
 }
 
 func TestParseOrgSettings_RuntimeBudgets_Defaults(t *testing.T) {

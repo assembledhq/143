@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
@@ -507,6 +508,8 @@ type Orchestrator struct {
 	identityResolver   *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth        SandboxAuthServer  // can be nil — paired with identityResolver
 	users              UserLookup         // can be nil — needed for App-token Co-authored-by trailer
+	internalAPIURL     string
+	internalAPISecret  string
 	logger             zerolog.Logger
 	maxConcurrent      int
 	cancels            *CancelRegistry
@@ -679,7 +682,7 @@ type ContinueSessionOptions struct {
 	// OnTurnComplete fires after a successful turn with the agent's full
 	// result. The thread continuation handler uses this both to emit file-
 	// attribution events (from result.Diff) and to persist per-tab turn
-	// metadata (result.Summary, result.ConfidenceScore, result.Diff) onto
+	// metadata (result.Summary and result.Diff) onto
 	// the thread row so revert and the summary panel have data. Errors are
 	// swallowed by the orchestrator: per-tab bookkeeping is operational,
 	// not critical to the turn itself.
@@ -749,11 +752,13 @@ type OrchestratorConfig struct {
 	// Users looks up the triggering user record for the App-token
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
-	Users         UserLookup
-	NodeID        string
-	IsDraining    func() bool
-	Logger        zerolog.Logger
-	MaxConcurrent int
+	Users             UserLookup
+	InternalAPIURL    string
+	InternalAPISecret string
+	NodeID            string
+	IsDraining        func() bool
+	Logger            zerolog.Logger
+	MaxConcurrent     int
 }
 
 type sandboxGitHubAuthState struct {
@@ -819,6 +824,8 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		identityResolver:   cfg.IdentityResolver,
 		sandboxAuth:        cfg.SandboxAuth,
 		users:              cfg.Users,
+		internalAPIURL:     cfg.InternalAPIURL,
+		internalAPISecret:  cfg.InternalAPISecret,
 		cancels:            cfg.Cancels,
 		threadCancels:      cfg.ThreadCancels,
 		logger:             cfg.Logger,
@@ -1020,6 +1027,24 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 		authState.userID = run.TriggeredByUserID
 	}
 	return authState, nil
+}
+
+func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
+	if o.internalAPIURL == "" || o.internalAPISecret == "" || session == nil || repoID == nil || sandboxCfg == nil {
+		return
+	}
+	if sandboxCfg.Env == nil {
+		sandboxCfg.Env = make(map[string]string)
+	}
+	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
+	internalToken, err := auth.GenerateSessionToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, tokenTTL)
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
+		return
+	}
+	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
+	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
+	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
 }
 
 func (o *Orchestrator) closeSandboxAuth(sessionID uuid.UUID, log zerolog.Logger) {
@@ -2125,6 +2150,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
+	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, &sandboxCfg, log)
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -2547,28 +2573,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.warmMentionIndexFromSandboxAsync(ctx, run, sandbox, snapshotKey, log)
 	}
 
-	// Fetch org settings for confidence thresholds.
-	confidenceThresholds := models.ConfidenceThresholdsForAutonomy(models.DefaultAgentAutonomy)
-	if o.orgs != nil {
-		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
-			orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
-			if parseErr != nil {
-				o.logger.Warn().Err(parseErr).Str("org_id", run.OrgID.String()).Msg("failed to parse org settings, using defaults")
-			} else {
-				confidenceThresholds = orgSettings.ConfidenceThresholds
-			}
-		}
-	}
-
 	// Store the successful result.
 	runResult := o.buildRunResult(ctx, run, sandbox, result)
 	status := models.SessionStatusCompleted
 	isInteractive := run.IsInteractive() && snapshotKey != ""
-
-	// 11. Confidence gating: use org-configured auto-proceed threshold.
-	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
-		status = models.SessionStatusNeedsHumanGuidance
-	}
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
@@ -2594,9 +2602,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Msg("interactive session turn completed and returned to idle")
 		logAgentRunFinished(log, run, "idle", runStartedAt, func(event *zerolog.Event) {
 			event.
-				Str("status", "idle").
-				Float64("confidence", result.ConfidenceScore).
-				Float64("threshold", confidenceThresholds.AutoProceed)
+				Str("status", "idle")
 		})
 		return nil
 	}
@@ -2625,22 +2631,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	logAgentRunFinished(log, run, string(status), runStartedAt, func(event *zerolog.Event) {
 		event.
-			Str("status", string(status)).
-			Float64("confidence", result.ConfidenceScore).
-			Float64("threshold", confidenceThresholds.AutoProceed)
+			Str("status", string(status))
 	})
 
-	// 12. Enqueue follow-up job based on confidence.
-	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
-		payload := map[string]interface{}{
-			"session_id": run.ID.String(),
-			"org_id":     run.OrgID.String(),
-		}
-		if issueSnapshot != nil {
-			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-		}
-		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
+	payload := map[string]interface{}{
+		"session_id": run.ID.String(),
+		"org_id":     run.OrgID.String(),
 	}
+	if issueSnapshot != nil {
+		payload["issue_snapshot_id"] = issueSnapshot.ID.String()
+	}
+	o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
@@ -2918,6 +2919,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
+	resolvedRepoID := session.RepositoryID
+	if resolvedRepoID == nil && promptIssue != nil {
+		resolvedRepoID = promptIssue.RepositoryID
+	}
+	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, &sandboxCfg, log)
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network failure")
@@ -5127,19 +5133,16 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
 
 	return &models.SessionResult{
-		ConfidenceScore:     &result.ConfidenceScore,
-		ConfidenceReasoning: strPtr(result.ConfidenceReasoning),
-		RiskFactors:         result.RiskFactors,
-		TokenUsage:          tokenUsage,
-		ModelUsed:           modelUsed,
-		ResultSummary:       strPtr(result.Summary),
-		Diff:                strPtr(result.Diff),
-		Error:               strPtr(result.Error),
-		DiffBaseCommitSHA:   run.BaseCommitSHA,
-		DiffHeadCommitSHA:   headSHA,
-		DiffWorkspaceDirty:  workspaceDirty,
-		DiffCollectedAt:     timePtr(time.Now().UTC()),
-		DiffSource:          "turn_complete",
+		TokenUsage:         tokenUsage,
+		ModelUsed:          modelUsed,
+		ResultSummary:      strPtr(result.Summary),
+		Diff:               strPtr(result.Diff),
+		Error:              strPtr(result.Error),
+		DiffBaseCommitSHA:  run.BaseCommitSHA,
+		DiffHeadCommitSHA:  headSHA,
+		DiffWorkspaceDirty: workspaceDirty,
+		DiffCollectedAt:    timePtr(time.Now().UTC()),
+		DiffSource:         "turn_complete",
 	}
 }
 
@@ -5610,6 +5613,9 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	// injected via sandbox env vars. The stub never makes HTTP requests.
 	if o.github != nil {
 		reg.RegisterCodeReviewSource(&integration.StubCodeReviewSource{ProviderName: "github"})
+	}
+	if o.internalAPIURL != "" && o.internalAPISecret != "" {
+		reg.RegisterPullRequestCreator(&integration.StubPullRequestCreator{ProviderName: "session"})
 	}
 
 	if !reg.HasAny() {

@@ -202,6 +202,29 @@ func TestJobStore_EnqueueWithOpts_PinsTargetNode(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestJobStore_RetryWithoutConsumingAttemptWithLeaseAndTarget_PinsRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	runAt := time.Now()
+	target := "worker-host-c"
+
+	mock.ExpectExec("UPDATE jobs[\\s\\S]+attempts = GREATEST[\\s\\S]+target_node_id = \\$[0-9]+").
+		WithArgs("retry", runAt, jobID, lockToken, &target).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	ok, err := store.RetryWithoutConsumingAttemptWithLeaseAndTarget(context.Background(), jobID, lockToken, "retry", runAt, &target)
+	require.NoError(t, err, "targeted retry should not return an error")
+	require.True(t, ok, "targeted retry should report that the fenced row was updated")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_GetLatestFailedByType(t *testing.T) {
 	t.Parallel()
 

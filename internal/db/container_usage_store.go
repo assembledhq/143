@@ -24,8 +24,8 @@ func NewContainerUsageStore(db DBTX) *ContainerUsageStore {
 // RecordStart inserts a new container usage event when a sandbox is created.
 func (s *ContainerUsageStore) RecordStart(ctx context.Context, event *models.ContainerUsageEvent) error {
 	_, err := s.db.Exec(ctx, `
-		INSERT INTO container_usage_events (id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, image, started_at)
-		VALUES (@id, @org_id, @session_id, @container_id, @provider, @cpu_limit, @memory_limit_mb, @image, @started_at)`,
+		INSERT INTO container_usage_events (id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, disk_limit_mb, image, started_at)
+		VALUES (@id, @org_id, @session_id, @container_id, @provider, @cpu_limit, @memory_limit_mb, @disk_limit_mb, @image, @started_at)`,
 		pgx.NamedArgs{
 			"id":              event.ID,
 			"org_id":          event.OrgID,
@@ -34,6 +34,7 @@ func (s *ContainerUsageStore) RecordStart(ctx context.Context, event *models.Con
 			"provider":        event.Provider,
 			"cpu_limit":       event.CPULimit,
 			"memory_limit_mb": event.MemoryLimitMB,
+			"disk_limit_mb":   event.DiskLimitMB,
 			"image":           event.Image,
 			"started_at":      event.StartedAt,
 		})
@@ -90,15 +91,15 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 
 	// Capacity breakdown.
 	rows, err := s.db.Query(ctx, `
-		SELECT cpu_limit, memory_limit_mb,
+		SELECT cpu_limit, memory_limit_mb, disk_limit_mb,
 		       COALESCE(SUM(
 		           COALESCE(container_minutes, EXTRACT(EPOCH FROM (now() - started_at)) / 60.0)
 		       ), 0) AS minutes,
 		       COUNT(DISTINCT session_id) AS sessions
 		FROM container_usage_events
 		WHERE org_id = @org_id AND started_at >= @start AND started_at < @end
-		GROUP BY cpu_limit, memory_limit_mb
-		ORDER BY cpu_limit, memory_limit_mb`,
+		GROUP BY cpu_limit, memory_limit_mb, disk_limit_mb
+		ORDER BY cpu_limit, memory_limit_mb, disk_limit_mb`,
 		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
 	)
 	if err != nil {
@@ -109,7 +110,7 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 	buckets := make([]models.CapacityBucket, 0)
 	for rows.Next() {
 		var b models.CapacityBucket
-		if err := rows.Scan(&b.CPULimit, &b.MemoryLimitMB, &b.ContainerMinutes, &b.SessionCount); err != nil {
+		if err := rows.Scan(&b.CPULimit, &b.MemoryLimitMB, &b.DiskLimitMB, &b.ContainerMinutes, &b.SessionCount); err != nil {
 			return nil, fmt.Errorf("scan capacity bucket: %w", err)
 		}
 		buckets = append(buckets, b)
@@ -118,35 +119,34 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 		return nil, fmt.Errorf("iterate capacity buckets: %w", err)
 	}
 
-	// Peak concurrent containers (sampled by overlapping time ranges).
-	// NOTE: This self-join is O(n^2) in the number of events per org per period.
-	// Acceptable for <10K events/period; replace with a rollup table at higher scale.
-	var peakConcurrent int
-	err = s.db.QueryRow(ctx, `
-		SELECT COALESCE(MAX(concurrent), 0)
-		FROM (
-			SELECT COUNT(*) AS concurrent
-			FROM container_usage_events e1
-			JOIN container_usage_events e2
-			  ON e2.org_id = e1.org_id
-			 AND e2.started_at <= COALESCE(e1.stopped_at, now())
-			 AND COALESCE(e2.stopped_at, now()) >= e1.started_at
-			 AND e2.started_at < @end
-			 AND e2.id != e1.id
-			WHERE e1.org_id = @org_id AND e1.started_at >= @start AND e1.started_at < @end
-			GROUP BY e1.id
-		) sub`,
+	// Peak concurrent containers. Fetch only intervals that overlap the period,
+	// then compute the peak with a sweep-line pass instead of an O(n^2) self-join.
+	peakRows, err := s.db.Query(ctx, `
+		SELECT started_at, COALESCE(stopped_at, now()) AS stopped_at
+		FROM container_usage_events
+		WHERE org_id = @org_id
+		  AND COALESCE(stopped_at, now()) >= @start
+		  AND started_at < @end
+		ORDER BY started_at, stopped_at`,
 		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
-	).Scan(&peakConcurrent)
+	)
 	if err != nil {
-		return nil, fmt.Errorf("query peak concurrent: %w", err)
+		return nil, fmt.Errorf("query peak intervals: %w", err)
 	}
-	// The self-join counts overlapping peers; add 1 for the container itself.
-	// Use totalSessions > 0 (not peakConcurrent > 0) so that a single
-	// non-overlapping container correctly reports peak = 1.
-	if totalSessions > 0 {
-		peakConcurrent++
+	defer peakRows.Close()
+
+	intervals := make([]timeInterval, 0)
+	for peakRows.Next() {
+		var startedAt, stoppedAt time.Time
+		if err := peakRows.Scan(&startedAt, &stoppedAt); err != nil {
+			return nil, fmt.Errorf("scan peak interval: %w", err)
+		}
+		intervals = append(intervals, timeInterval{start: startedAt, stop: stoppedAt})
 	}
+	if err := peakRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate peak intervals: %w", err)
+	}
+	peakConcurrent := computePeakConcurrent(intervals)
 
 	return &models.UsageSummary{
 		OrgID:                 orgID,
@@ -219,7 +219,7 @@ func (s *ContainerUsageStore) CountActive(ctx context.Context) (int64, error) {
 func (s *ContainerUsageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ContainerUsageEvent, error) {
 	const maxResults = 500
 	rows, err := s.db.Query(ctx, `
-		SELECT id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, image,
+		SELECT id, org_id, session_id, container_id, provider, cpu_limit, memory_limit_mb, disk_limit_mb, image,
 		       started_at, stopped_at, duration_ms, container_minutes, exit_reason, created_at
 		FROM container_usage_events
 		WHERE org_id = @org_id AND session_id = @session_id
@@ -237,7 +237,7 @@ func (s *ContainerUsageStore) ListBySession(ctx context.Context, orgID, sessionI
 		var e models.ContainerUsageEvent
 		if err := rows.Scan(
 			&e.ID, &e.OrgID, &e.SessionID, &e.ContainerID, &e.Provider,
-			&e.CPULimit, &e.MemoryLimitMB, &e.Image,
+			&e.CPULimit, &e.MemoryLimitMB, &e.DiskLimitMB, &e.Image,
 			&e.StartedAt, &e.StoppedAt, &e.DurationMs, &e.ContainerMinutes,
 			&e.ExitReason, &e.CreatedAt,
 		); err != nil {

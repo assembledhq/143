@@ -85,4 +85,18 @@ describe("frontend CI guardrails", () => {
     expect(config).toContain("name: 'jsdom'");
     expect(config).toContain("environment: 'jsdom'");
   });
+
+  it("imports precompiled Tailwind CSS before app Tailwind utilities", () => {
+    const globals = fs.readFileSync(
+      path.join(frontendDir, "src", "app", "globals.css"),
+      "utf8"
+    );
+
+    const fumadocsStyleImport = globals.indexOf('@import "fumadocs-ui/style.css";');
+    const tailwindImport = globals.indexOf('@import "tailwindcss";');
+
+    expect(fumadocsStyleImport).toBeGreaterThanOrEqual(0);
+    expect(tailwindImport).toBeGreaterThanOrEqual(0);
+    expect(fumadocsStyleImport).toBeLessThan(tailwindImport);
+  });
 });

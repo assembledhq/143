@@ -233,7 +233,6 @@ type OrgSettings struct {
 	Aggressiveness             int                    `json:"execution_aggressiveness"`
 	MaxConcurrentRuns          int                    `json:"max_concurrent_runs"`
 	AgentAutonomy              string                 `json:"agent_autonomy"`
-	ConfidenceThresholds       ConfidenceThresholds   `json:"confidence_thresholds"`
 	PriorityWeights            PriorityWeights        `json:"priority_weights"`
 	MinPriorityThreshold       float64                `json:"min_priority_threshold"`
 	ProductDirection           string                 `json:"product_direction"`
@@ -258,6 +257,11 @@ type OrgSettings struct {
 	// as the soft runtime budget for run_agent and continue_session jobs.
 	// Zero falls back to DefaultMaxSessionDurationSeconds.
 	MaxSessionDurationSeconds int `json:"max_session_duration_seconds,omitempty"`
+
+	// PreviewMaxPreviewsPerUser limits how many active previews one user can
+	// keep running in this organization. Zero falls back to
+	// DefaultPreviewMaxPreviewsPerUser.
+	PreviewMaxPreviewsPerUser int `json:"preview_max_previews_per_user,omitempty"`
 
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
 
@@ -499,25 +503,6 @@ const (
 	AgentAutonomyAggressive   = "aggressive"
 )
 
-// ConfidenceThresholdsForAutonomy returns the confidence thresholds that
-// correspond to the given agent autonomy mode.
-func ConfidenceThresholdsForAutonomy(mode string) ConfidenceThresholds {
-	switch mode {
-	case AgentAutonomyConservative:
-		return ConfidenceThresholds{AutoProceed: 1.0, HumanReview: 0.8}
-	case AgentAutonomyAggressive:
-		return ConfidenceThresholds{AutoProceed: 0.4, HumanReview: 0.2}
-	default: // balanced
-		return ConfidenceThresholds{AutoProceed: 0.85, HumanReview: 0.5}
-	}
-}
-
-// ConfidenceThresholds controls when to auto-proceed vs request human review.
-type ConfidenceThresholds struct {
-	AutoProceed float64 `json:"auto_proceed"`
-	HumanReview float64 `json:"human_review"`
-}
-
 // PriorityWeights controls how priority scores are computed.
 type PriorityWeights struct {
 	CustomerImpact float64 `json:"customer_impact"`
@@ -544,9 +529,6 @@ const (
 	DefaultWeightSeverity       = 0.25
 	DefaultWeightRecency        = 0.20
 	DefaultWeightRevenueRisk    = 0.20
-
-	DefaultConfidenceAutoProceed = 0.85
-	DefaultConfidenceHumanReview = 0.60
 
 	// DefaultMaxSessionDurationSeconds is the default per-session wall-clock
 	// timeout (25 minutes). Long enough for non-trivial agent runs, short
@@ -581,6 +563,10 @@ const (
 	DefaultAutomaticExtensionSeconds       = 10 * 60
 	DefaultMaxAutomaticExtensionSeconds    = 30 * 60
 	DefaultAbsoluteRuntimeCeilingSeconds   = 90 * 60
+
+	DefaultPreviewMaxPreviewsPerUser = 4
+	MinPreviewMaxPreviewsPerUser     = 1
+	MaxPreviewMaxPreviewsPerUser     = 20
 )
 
 // ContextLimits returns the default context limits for this org size.
@@ -711,8 +697,6 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	if s.AgentAutonomy == "" {
 		s.AgentAutonomy = DefaultAgentAutonomy
 	}
-	// Derive confidence thresholds from autonomy mode.
-	s.ConfidenceThresholds = ConfidenceThresholdsForAutonomy(s.AgentAutonomy)
 	if s.MinPriorityThreshold == 0 {
 		s.MinPriorityThreshold = DefaultMinPriorityThreshold
 	}
@@ -760,6 +744,13 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.MaxSessionDurationSeconds = MinMaxSessionDurationSeconds
 	} else if s.MaxSessionDurationSeconds > MaxMaxSessionDurationSeconds {
 		s.MaxSessionDurationSeconds = MaxMaxSessionDurationSeconds
+	}
+	if s.PreviewMaxPreviewsPerUser == 0 {
+		s.PreviewMaxPreviewsPerUser = DefaultPreviewMaxPreviewsPerUser
+	} else if s.PreviewMaxPreviewsPerUser < MinPreviewMaxPreviewsPerUser {
+		s.PreviewMaxPreviewsPerUser = MinPreviewMaxPreviewsPerUser
+	} else if s.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser {
+		s.PreviewMaxPreviewsPerUser = MaxPreviewMaxPreviewsPerUser
 	}
 
 	if s.RuntimeBudgets.NoProgressTimeoutSeconds <= 0 {

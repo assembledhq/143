@@ -17,6 +17,7 @@ import (
 
 var (
 	ErrInvalidPassCount         = errors.New("max_passes must be between 1 and 5")
+	ErrInvalidFixMode           = errors.New("fix_mode must be minimal or exhaustive")
 	ErrUnsupportedReviewAgent   = errors.New("agent does not support native review")
 	ErrSessionSnapshotExpired   = errors.New("session sandbox snapshot has expired")
 	ErrNoRunningReviewLoop      = errors.New("no running review loop for thread")
@@ -91,6 +92,7 @@ type StartReviewLoopRequest struct {
 	AgentType       models.AgentType
 	Model           string
 	MaxPasses       int
+	FixMode         models.ReviewLoopFixMode
 	Source          models.ReviewLoopSource
 	AutomationRunID *uuid.UUID
 	StartedByUserID *uuid.UUID
@@ -107,6 +109,13 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 	if err := source.Validate(); err != nil {
 		return nil, err
+	}
+	fixMode := req.FixMode
+	if fixMode == "" {
+		fixMode = models.ReviewLoopFixModeMinimal
+	}
+	if err := fixMode.Validate(); err != nil {
+		return nil, ErrInvalidFixMode
 	}
 	session, err := s.runtime.GetSession(ctx, orgID, sessionID)
 	if err != nil {
@@ -159,6 +168,7 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 		Source:          source,
 		AgentType:       agentType,
 		MaxPasses:       req.MaxPasses,
+		FixMode:         fixMode,
 		ReviewRequired:  req.ReviewRequired,
 		StartedByUserID: req.StartedByUserID,
 	}
@@ -219,11 +229,8 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		return s.store.MarkPassDeciding(ctx, orgID, pass.ID, summary, msg.ID)
 	case models.ReviewLoopPassStatusDeciding:
 		decision, err := parseDecision(summary)
-		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, err.Error())
-			return err
-		}
-		if decision == models.ReviewLoopDecisionClean {
+		switch {
+		case err == nil && decision == models.ReviewLoopDecisionClean:
 			if loop.AutomationRunID != nil {
 				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
 			}
@@ -231,45 +238,72 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 				return err
 			}
 			return nil
+		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
+			return s.startLegacyFixPass(ctx, orgID, loop, pass, decision)
+		case summary == "":
+			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
+			return ErrUnrecognizedDecision
+		case isMalformedDecision(summary):
+			_ = s.failLoop(ctx, orgID, loop, ErrUnrecognizedDecision.Error())
+			return ErrUnrecognizedDecision
+		default:
+			return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
 		}
-		if pass.PassIndex >= loop.MaxPasses {
-			if loop.AutomationRunID != nil {
-				return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
-			}
-			if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues."); err != nil {
-				return err
-			}
-			return nil
-		}
-		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
-		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
-			return err
-		}
-		return s.store.MarkPassFixing(ctx, orgID, pass.ID, decision, msg.ID)
 	case models.ReviewLoopPassStatusFixing:
-		if err := s.store.MarkPassFixComplete(ctx, orgID, pass.ID, summary); err != nil {
-			return err
-		}
-		next := &models.SessionReviewLoopPass{
-			OrgID:     orgID,
-			LoopID:    loop.ID,
-			SessionID: loop.SessionID,
-			PassIndex: pass.PassIndex + 1,
-			Status:    models.ReviewLoopPassStatusReviewing,
-		}
-		if err := s.store.CreatePass(ctx, next); err != nil {
-			return err
-		}
-		msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
-		if err != nil {
-			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start confirmation review: %s", err))
-			return err
-		}
-		return s.store.SetPassReviewMessage(ctx, orgID, next.ID, msg.ID)
+		return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
 	default:
 		return nil
 	}
+}
+
+func (s *Service) startLegacyFixPass(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision) error {
+	if pass.PassIndex >= loop.MaxPasses {
+		if loop.AutomationRunID != nil {
+			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+		}
+		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues."); err != nil {
+			return err
+		}
+		return nil
+	}
+	msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopFixPrompt(prompts.ReviewLoopFixPromptData{FixMode: loop.FixMode}), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "fix")))
+	if err != nil {
+		_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start fix pass: %s", err))
+		return err
+	}
+	return s.store.MarkPassFixing(ctx, orgID, pass.ID, decision, msg.ID)
+}
+
+func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, summary string) error {
+	if err := s.store.MarkPassFixComplete(ctx, orgID, pass.ID, summary); err != nil {
+		return err
+	}
+	if pass.PassIndex >= loop.MaxPasses {
+		terminalSummary := "Review pass limit reached after fixes; confirmation review is still needed."
+		if loop.AutomationRunID != nil {
+			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+		}
+		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary); err != nil {
+			return err
+		}
+		return nil
+	}
+	next := &models.SessionReviewLoopPass{
+		OrgID:     orgID,
+		LoopID:    loop.ID,
+		SessionID: loop.SessionID,
+		PassIndex: pass.PassIndex + 1,
+		Status:    models.ReviewLoopPassStatusReviewing,
+	}
+	if err := s.store.CreatePass(ctx, next); err != nil {
+		return err
+	}
+	msg, err := s.sendReview(ctx, &loop, next, nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, next.ID, "review")))
+	if err != nil {
+		_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to start confirmation review: %s", err))
+		return err
+	}
+	return s.store.SetPassReviewMessage(ctx, orgID, next.ID, msg.ID)
 }
 
 func (s *Service) OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.UUID, summary string) error {
@@ -314,7 +348,11 @@ func reviewLoopContinuationDedupeKey(loopID, passID uuid.UUID, phase string) str
 }
 
 func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass, userID *uuid.UUID, opts ...sendOption) (*models.SessionMessage, error) {
-	arguments := strings.TrimPrefix(prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), "/review")
+	reviewPrompt := prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{
+		AgentType: loop.AgentType,
+		FixMode:   loop.FixMode,
+	})
+	arguments := strings.TrimPrefix(reviewPrompt, "/review")
 	arguments = strings.TrimSpace(arguments)
 	command := models.SessionInputCommand{
 		Kind:      "command",
@@ -325,7 +363,7 @@ func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop
 		Arguments: arguments,
 		Source:    models.SessionInputCommandSourceBuiltin,
 	}
-	return s.sendPlain(ctx, *loop, prompts.ReviewLoopReviewPrompt(prompts.ReviewLoopReviewPromptData{AgentType: loop.AgentType}), userID, append(opts, withCommands(command))...)
+	return s.sendPlain(ctx, *loop, reviewPrompt, userID, append(opts, withCommands(command))...)
 }
 
 func withCommands(commands ...models.SessionInputCommand) sendOption {
@@ -367,6 +405,12 @@ func parseDecision(summary string) (models.ReviewLoopDecision, error) {
 	default:
 		return "", ErrUnrecognizedDecision
 	}
+}
+
+func isMalformedDecision(summary string) bool {
+	trimmed := strings.TrimSpace(summary)
+	return strings.HasPrefix(trimmed, string(models.ReviewLoopDecisionClean)) ||
+		strings.HasPrefix(trimmed, string(models.ReviewLoopDecisionNeedsFix))
 }
 
 func reviewThreadLabel(agentType models.AgentType) string {

@@ -121,6 +121,7 @@ type MessageStore interface {
 // LogStore defines the log DB operations needed by the thread service.
 type LogStore interface {
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
 }
 
 // JobStore defines the job DB operations needed by the thread service.
@@ -1143,7 +1144,7 @@ func (s *Service) GetMessageWindow(ctx context.Context, orgID, sessionID, thread
 }
 
 // GetLogs returns logs for a thread, validating it belongs to the given session.
-func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.SessionLog, error) {
+func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionLogFilterOptions) ([]models.SessionLog, error) {
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
@@ -1152,7 +1153,12 @@ func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.U
 		return nil, err
 	}
 
-	logs, err := s.logStore.ListByThread(ctx, orgID, threadID)
+	var logs []models.SessionLog
+	if len(opts.TurnNumbers) > 0 {
+		logs, err = s.logStore.ListByThreadTurns(ctx, orgID, threadID, opts.TurnNumbers)
+	} else {
+		logs, err = s.logStore.ListByThread(ctx, orgID, threadID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list logs: %w", err)
 	}

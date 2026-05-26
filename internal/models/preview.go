@@ -15,6 +15,7 @@ import (
 type PreviewInstance struct {
 	ID                 uuid.UUID       `db:"id" json:"id"`
 	SessionID          uuid.UUID       `db:"session_id" json:"session_id"`
+	PreviewTargetID    *uuid.UUID      `db:"preview_target_id" json:"preview_target_id,omitempty"`
 	OrgID              uuid.UUID       `db:"org_id" json:"org_id"`
 	UserID             uuid.UUID       `db:"user_id" json:"user_id"`
 	ProfileName        string          `db:"profile_name" json:"profile_name"`
@@ -33,8 +34,11 @@ type PreviewInstance struct {
 	LastPath           string          `db:"last_path" json:"last_path"`
 	MemoryLimitMB      int             `db:"memory_limit_mb" json:"memory_limit_mb"`
 	CPULimitMillis     int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	DiskLimitMB        int             `db:"disk_limit_mb" json:"disk_limit_mb"`
 	RecycleConfig      json.RawMessage `db:"recycle_config" json:"-"`
 	RecycleSandbox     json.RawMessage `db:"recycle_sandbox" json:"-"`
+	CurrentPhase       string          `db:"current_phase" json:"current_phase,omitempty"`
+	RequestID          *string         `db:"request_id" json:"request_id,omitempty"`
 	Error              string          `db:"error" json:"error,omitempty"`
 	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time       `db:"updated_at" json:"updated_at"`
@@ -44,6 +48,71 @@ type PreviewInstance struct {
 	// sandbox container. It pairs with Session.TurnHoldingContainer as the
 	// durable refcount that keeps the container alive between turns.
 	PreviewHoldingContainer bool `db:"preview_holding_container" json:"preview_holding_container"`
+}
+
+// PreviewTarget is the branch/commit/config tuple a preview runtime attempts
+// to render. Runtime attempts live in preview_instances.
+type PreviewTarget struct {
+	ID                   uuid.UUID         `db:"id" json:"id"`
+	OrgID                uuid.UUID         `db:"org_id" json:"org_id"`
+	RepositoryID         uuid.UUID         `db:"repository_id" json:"repository_id"`
+	Branch               string            `db:"branch" json:"branch"`
+	CommitSHA            string            `db:"commit_sha" json:"commit_sha"`
+	PreviewConfigName    string            `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	ResolvedConfigDigest string            `db:"resolved_config_digest" json:"resolved_config_digest,omitempty"`
+	SourceType           PreviewSourceType `db:"source_type" json:"source_type"`
+	SourceID             string            `db:"source_id" json:"source_id,omitempty"`
+	SourceURL            string            `db:"source_url" json:"source_url,omitempty"`
+	CreatedByUserID      uuid.UUID         `db:"created_by_user_id" json:"created_by_user_id"`
+	RequestID            *string           `db:"request_id" json:"request_id,omitempty"`
+	CreatedAt            time.Time         `db:"created_at" json:"created_at"`
+}
+
+// PreviewLink is a stable app-owned URL mapping to a branch preview target.
+type PreviewLink struct {
+	ID              uuid.UUID       `db:"id" json:"id"`
+	OrgID           uuid.UUID       `db:"org_id" json:"org_id"`
+	PreviewTargetID uuid.UUID       `db:"preview_target_id" json:"preview_target_id"`
+	LinkType        PreviewLinkType `db:"link_type" json:"link_type"`
+	Slug            string          `db:"slug" json:"slug"`
+	RepositoryID    *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
+	PRNumber        *int            `db:"pr_number" json:"pr_number,omitempty"`
+	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
+}
+
+// PreviewAPIToken is an org-scoped bearer credential for external preview API
+// callers. The plaintext token is only returned at creation time; the DB stores
+// a SHA-256 hash.
+type PreviewAPIToken struct {
+	ID              uuid.UUID   `db:"id" json:"id"`
+	OrgID           uuid.UUID   `db:"org_id" json:"org_id"`
+	Name            string      `db:"name" json:"name"`
+	TokenHash       string      `db:"token_hash" json:"-"`
+	Scopes          []string    `db:"scopes" json:"scopes"`
+	RepositoryIDs   []uuid.UUID `db:"repository_ids" json:"repository_ids"`
+	CreatedByUserID uuid.UUID   `db:"created_by_user_id" json:"created_by_user_id"`
+	LastUsedAt      *time.Time  `db:"last_used_at" json:"last_used_at,omitempty"`
+	RevokedAt       *time.Time  `db:"revoked_at" json:"revoked_at,omitempty"`
+	CreatedAt       time.Time   `db:"created_at" json:"created_at"`
+}
+
+// BranchPreviewSummary is the list/get shape for stable branch-preview targets
+// plus their latest active runtime, when one exists.
+type BranchPreviewSummary struct {
+	TargetID           uuid.UUID         `db:"target_id" json:"target_id"`
+	PreviewID          *uuid.UUID        `db:"preview_id" json:"preview_id,omitempty"`
+	RepositoryID       uuid.UUID         `db:"repository_id" json:"repository_id"`
+	RepositoryFullName string            `db:"repository_full_name" json:"repository_full_name,omitempty"`
+	Branch             string            `db:"branch" json:"branch"`
+	CommitSHA          string            `db:"commit_sha" json:"commit_sha"`
+	PreviewConfigName  string            `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	SourceType         PreviewSourceType `db:"source_type" json:"source_type"`
+	SourceID           string            `db:"source_id" json:"source_id,omitempty"`
+	SourceURL          string            `db:"source_url" json:"source_url,omitempty"`
+	Status             string            `db:"status" json:"status"`
+	CreatedAt          time.Time         `db:"created_at" json:"created_at"`
+	ExpiresAt          *time.Time        `db:"expires_at" json:"expires_at,omitempty"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.
@@ -157,11 +226,38 @@ type PreviewConfig struct {
 	Version        string                          `json:"version"`
 	Name           string                          `json:"name"`
 	Primary        string                          `json:"primary"`
+	Install        *PreviewInstallConfig           `json:"install,omitempty"`
 	Services       map[string]ServiceConfig        `json:"services"`
 	Infrastructure map[string]InfrastructureConfig `json:"infrastructure,omitempty"`
+	Resources      PreviewResourceRequirements     `json:"resources,omitempty"`
 	Credentials    CredentialConfig                `json:"credentials"`
 	Network        NetworkConfig                   `json:"network"`
 	Progressive    bool                            `json:"progressive,omitempty"`
+}
+
+// PreviewResourceRequirements follows the Kubernetes resources shape for
+// preview-level resource requests and limits.
+type PreviewResourceRequirements struct {
+	Requests PreviewResourceList `json:"requests,omitempty"`
+	Limits   PreviewResourceList `json:"limits,omitempty"`
+}
+
+// PreviewResourceList defines CPU, memory, and ephemeral storage quantities.
+type PreviewResourceList struct {
+	CPU              string `json:"cpu,omitempty"`
+	Memory           string `json:"memory,omitempty"`
+	EphemeralStorage string `json:"ephemeral-storage,omitempty"`
+}
+
+// PreviewInstallConfig defines an optional platform-managed install phase that
+// runs before preview services start.
+type PreviewInstallConfig struct {
+	Command        []string `json:"command"`
+	Cwd            string   `json:"cwd,omitempty"`
+	Lockfiles      []string `json:"lockfiles,omitempty"`
+	CleanPaths     []string `json:"clean_paths,omitempty"`
+	VerifyPaths    []string `json:"verify_paths,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 }
 
 // ServiceConfig defines a single service within a preview.
@@ -201,10 +297,11 @@ type ReadinessProbe struct {
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
-// ResourceLimits defines the memory and CPU limits for a preview.
+// ResourceLimits defines the memory, CPU, and disk limits for a preview.
 type ResourceLimits struct {
-	MemoryMB  int `json:"memory_mb"`
+	MemoryMiB int `json:"memory_mib"`
 	CPUMillis int `json:"cpu_millis"`
+	DiskMiB   int `json:"disk_mib"`
 }
 
 // =============================================================================

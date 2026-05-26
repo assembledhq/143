@@ -27,6 +27,16 @@ type linearAgentCreatedDeadLetterClient struct {
 	lastUpdate    linear.AgentSessionUpdateInput
 }
 
+type linearAgentCreatedFetchClient struct {
+	linear.Client
+
+	issue *linear.FetchedIssue
+}
+
+func (c *linearAgentCreatedFetchClient) FetchIssue(_ context.Context, _ string) (*linear.FetchedIssue, error) {
+	return c.issue, nil
+}
+
 func (c *linearAgentCreatedDeadLetterClient) AgentActivityCreate(_ context.Context, in linear.AgentActivityInput) (linear.AgentActivityResult, error) {
 	c.activityCalls++
 	c.lastActivity = in
@@ -357,6 +367,84 @@ func TestReconcileLinearAgentCreatedRejectsZeroValueSession(t *testing.T) {
 	require.Error(t, err, "zero-value session scan must surface as an error, not silently fall through to the no-primary-issue branch")
 	require.Contains(t, err.Error(), "zero-value", "error should identify the zero-value guardrail")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestHandleLinearAgentCreatedResolvesRepoByTeamKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	integrationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now().UTC()
+	stopErr := errors.New("stop after repo resolution")
+	client := &linearAgentCreatedFetchClient{issue: &linear.FetchedIssue{
+		ID:          "875be557-a8c3-487a-99aa-7da091e427f2",
+		Identifier:  "VIR-116",
+		Title:       "Add the ability to set a per-user default model",
+		TeamID:      "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+		TeamKey:     "VIR",
+		TeamName:    "Virtuous Cycle",
+		ProjectID:   "9df3176d-eba4-484b-9022-84633d529358",
+		Description: "E.g. being able to use Claude Code 4.7",
+	}}
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, linear_agent_session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_1",
+			"875be557-a8c3-487a-99aa-7da091e427f2", "VIR-116",
+			"", "",
+			nil, "pending", &now,
+			now, now,
+		))
+	mock.ExpectQuery("(?s)SELECT.*FROM linear_team_repo_mappings.*ORDER BY").
+		WithArgs(orgID, "VIR", "9df3176d-eba4-484b-9022-84633d529358").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "linear_team_id", "linear_project_id",
+			"repository_id", "default_branch", "priority",
+			"created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, "VIR", nil,
+			repoID, "", 0, now, now,
+		))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(stopErr)
+
+	err = handleLinearAgentCreated(context.Background(), LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Issues: db.NewIssueStore(mock),
+		},
+		RepoResolver: linear.NewAgentRepoResolver(db.NewLinearTeamRepoMappingStore(mock), nil, nil),
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			return client, nil
+		},
+	}, db.NewLinearAgentSessionStore(mock), nil, linearAgentEventPayload{
+		OrgID:                orgID.String(),
+		AgentSessionRowID:    rowID.String(),
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "875be557-a8c3-487a-99aa-7da091e427f2",
+	}, zerolog.Nop())
+	require.Error(t, err, "test should stop after proving repo resolution used the team key")
+	require.Contains(t, err.Error(), "upsert linear issue", "handler should reach issue upsert after resolving the VIR mapping")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"created handler should resolve linear_team_repo_mappings using the Linear team key, not the opaque team id")
 }
 
 func TestHandleLinearAgentCreatedReemitsBootstrapBeforeIssueFetch(t *testing.T) {

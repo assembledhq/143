@@ -5,10 +5,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -233,74 +235,100 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	d.previews[handle] = state
 	d.mu.Unlock()
 
-	// Phase 1: Provision infrastructure containers.
 	infraCreds := make(map[string]preview.InfraCredential)
-	for name, infraCfg := range cfg.Infrastructure {
-		tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
-		if !ok {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
+	var svcEnvs map[string]map[string]string
+	if err := func() (phaseErr error) {
+		notifyPhaseStart(observer, "install_build")
+		defer func() { notifyPhaseEnd(observer, "install_build", phaseErr) }()
+
+		// Phase 1: Provision infrastructure containers.
+		for name, infraCfg := range cfg.Infrastructure {
+			tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
+			if !ok {
+				phaseErr = fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
+				return phaseErr
+			}
+
+			ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
+			if err != nil {
+				phaseErr = fmt.Errorf("provision infrastructure %q: %w", name, err)
+				return phaseErr
+			}
+			d.mu.Lock()
+			state.infra[name] = ih
+			d.mu.Unlock()
+			infraCreds[name] = ih.Credential
 		}
 
-		ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
-		if err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("provision infrastructure %q: %w", name, err)
+		// Phase 2: Wait for infrastructure health.
+		for name, ih := range state.infra {
+			infraCfg := cfg.Infrastructure[name]
+			tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
+			if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
+				phaseErr = fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
+				return phaseErr
+			}
+			d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
 		}
-		state.infra[name] = ih
-		infraCreds[name] = ih.Credential
+
+		// Phase 3: Run init scripts.
+		for name, infraCfg := range cfg.Infrastructure {
+			if infraCfg.InitScript == "" {
+				continue
+			}
+			ih := state.infra[name]
+			if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
+				phaseErr = fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
+				return phaseErr
+			}
+			d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
+		}
+
+		// Phase 4: Run the platform-managed install phase before services start.
+		if err := d.runPreviewInstall(ctx, state, cfg.Install, observer); err != nil {
+			phaseErr = fmt.Errorf("%w: %v", preview.ErrInstallFailed, err)
+			return phaseErr
+		}
+
+		// Phase 5: Build service environment with injected credentials.
+		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, extraEnv)
+		return nil
+	}(); err != nil {
+		d.cleanupState(handle)
+		return nil, err
 	}
 
-	// Phase 2: Wait for infrastructure health.
-	for name, ih := range state.infra {
-		infraCfg := cfg.Infrastructure[name]
-		tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
-		if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
-		}
-		d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
-	}
-
-	// Phase 3: Run init scripts.
-	for name, infraCfg := range cfg.Infrastructure {
-		if infraCfg.InitScript == "" {
-			continue
-		}
-		ih := state.infra[name]
-		if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
-		}
-		d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
-	}
-
-	// Phase 4: Build service environment with injected credentials.
-	svcEnvs := d.buildServiceEnvs(cfg, infraCreds, extraEnv)
-
-	// Phase 5: Start application services in dependency order
+	// Phase 6: Start application services in dependency order
 	// (support services first, then primary).
 	primaryPort := 0
-	for name, svcCfg := range cfg.Services {
-		if name == cfg.Primary {
-			continue // primary starts last
+	if err := func() (phaseErr error) {
+		notifyPhaseStart(observer, "start_services")
+		defer func() { notifyPhaseEnd(observer, "start_services", phaseErr) }()
+		for name, svcCfg := range cfg.Services {
+			if name == cfg.Primary {
+				continue // primary starts last
+			}
+			if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
+				phaseErr = fmt.Errorf("start service %q: %w", name, err)
+				return phaseErr
+			}
 		}
-		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("start service %q: %w", name, err)
+		// Start primary service.
+		if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+			primaryPort = primaryCfg.Port
+			if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
+				phaseErr = fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
+				return phaseErr
+			}
 		}
-	}
-	// Start primary service.
-	if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
-		primaryPort = primaryCfg.Port
-		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
-		}
+		return nil
+	}(); err != nil {
+		d.cleanupState(handle)
+		return nil, err
 	}
 	state.primaryPort = primaryPort
 
-	// Phase 6: Wait for readiness probes.
+	// Phase 7: Wait for readiness probes.
 	//
 	// Progressive preview: when cfg.Progressive is true and this is a
 	// multi-service config, report readiness as soon as the primary service
@@ -308,66 +336,72 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	// The caller receives a PartiallyReady flag on the handle so the manager
 	// can set the correct status.
 	partiallyReady := false
-	if cfg.Progressive && len(cfg.Services) > 1 {
-		// Wait for primary first.
-		if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
-			timeout := 90 * time.Second
-			if primaryCfg.Ready.TimeoutSeconds > 0 {
-				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+	if err := func() (phaseErr error) {
+		notifyPhaseStart(observer, "readiness")
+		defer func() { notifyPhaseEnd(observer, "readiness", phaseErr) }()
+
+		if cfg.Progressive && len(cfg.Services) > 1 {
+			// Wait for primary first.
+			if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+				timeout := 90 * time.Second
+				if primaryCfg.Ready.TimeoutSeconds > 0 {
+					timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+				}
+				if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+					errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+					notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+					phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+					return phaseErr
+				}
+				if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
+					errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+					notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+					phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+					return phaseErr
+				}
+				d.mu.Lock()
+				state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+				pid := state.services[cfg.Primary].pid
+				d.mu.Unlock()
+				d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
+				notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
+				partiallyReady = true
 			}
-			if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
-				errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
-				notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
-				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
-			}
-			if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
-				errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
-				notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
-				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
-			}
-			d.mu.Lock()
-			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
-			pid := state.services[cfg.Primary].pid
-			d.mu.Unlock()
-			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
-			notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
-			partiallyReady = true
+
+			// Wait for support services in the background.
+			state.wg.Add(1)
+			go func() {
+				defer state.wg.Done()
+				for name, svcCfg := range cfg.Services {
+					if name == cfg.Primary {
+						continue
+					}
+					timeout := 90 * time.Second
+					if svcCfg.Ready.TimeoutSeconds > 0 {
+						timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+					}
+					bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
+					if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+						errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+						d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed (progressive)")
+						notifyServiceFailed(observer, name, errMsg, tail)
+					} else {
+						d.mu.Lock()
+						var pid int
+						if ss, ok := state.services[name]; ok {
+							ss.status = models.PreviewServiceStatusReady
+							pid = ss.pid
+						}
+						d.mu.Unlock()
+						d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
+						notifyServiceReady(observer, name, svcCfg.Port, pid)
+					}
+					cancel()
+				}
+			}()
+			return nil
 		}
 
-		// Wait for support services in the background.
-		state.wg.Add(1)
-		go func() {
-			defer state.wg.Done()
-			for name, svcCfg := range cfg.Services {
-				if name == cfg.Primary {
-					continue
-				}
-				timeout := 90 * time.Second
-				if svcCfg.Ready.TimeoutSeconds > 0 {
-					timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
-				}
-				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
-				if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
-					errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
-					d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed (progressive)")
-					notifyServiceFailed(observer, name, errMsg, tail)
-				} else {
-					d.mu.Lock()
-					var pid int
-					if ss, ok := state.services[name]; ok {
-						ss.status = models.PreviewServiceStatusReady
-						pid = ss.pid
-					}
-					d.mu.Unlock()
-					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
-					notifyServiceReady(observer, name, svcCfg.Port, pid)
-				}
-				cancel()
-			}
-		}()
-	} else {
 		// Standard: wait for all services before reporting ready.
 		for name, svcCfg := range cfg.Services {
 			timeout := 90 * time.Second
@@ -377,15 +411,15 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 				errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
 				notifyServiceFailed(observer, name, errMsg, tail)
-				d.cleanupState(handle)
-				return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				return phaseErr
 			}
 			if name == cfg.Primary {
 				if err := d.verifyPrimaryReachable(ctx, state, name, svcCfg.Port); err != nil {
 					errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
 					notifyServiceFailed(observer, name, errMsg, tail)
-					d.cleanupState(handle)
-					return nil, fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+					phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+					return phaseErr
 				}
 			}
 			d.mu.Lock()
@@ -395,6 +429,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 			notifyServiceReady(observer, name, svcCfg.Port, pid)
 		}
+		return nil
+	}(); err != nil {
+		d.cleanupState(handle)
+		return nil, err
 	}
 
 	return &preview.PreviewHandle{
@@ -951,8 +989,243 @@ func (d *DockerPreviewProvider) runInitScript(
 }
 
 // =============================================================================
+// Preview install management
+// =============================================================================
+
+const previewInstallRuntimeVersion = "docker-preview-install-v1"
+
+type previewInstallCacheKey struct {
+	RuntimeVersion  string                      `json:"runtime_version"`
+	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
+	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	Command         []string                    `json:"command"`
+	Cwd             string                      `json:"cwd"`
+	Lockfiles       []previewInstallLockfileKey `json:"lockfiles"`
+	CleanPaths      []string                    `json:"clean_paths"`
+	VerifyPaths     []string                    `json:"verify_paths"`
+	TimeoutSeconds  int                         `json:"timeout_seconds"`
+}
+
+type previewInstallLockfileKey struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, observer preview.ServiceObserver) error {
+	if install == nil {
+		return nil
+	}
+	timeout := time.Duration(install.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Duration(preview.DefaultInstallTimeoutSeconds) * time.Second
+	}
+
+	cacheKey, err := d.computePreviewInstallCacheKey(ctx, state.sandbox, install)
+	if err != nil {
+		notifyInstallFailed(observer, err.Error(), nil)
+		return err
+	}
+	markerPath := fmt.Sprintf(".143/cache/preview-install/%s.done", cacheKey)
+	if d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
+		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
+		return nil
+	}
+
+	cmd, err := buildPreviewInstallCommand(install, markerPath)
+	if err != nil {
+		notifyInstallFailed(observer, err.Error(), nil)
+		return err
+	}
+	outputTail := make([]string, 0, serviceTailLines)
+	appendTail := func(line []byte) {
+		text := string(line)
+		if len(outputTail) >= serviceTailLines {
+			outputTail = outputTail[1:]
+		}
+		outputTail = append(outputTail, text)
+		d.logger.Debug().Str("output", text).Msg("preview install output")
+	}
+	installCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	stderrSplitter := &previewLineSplitter{onLine: appendTail}
+	exitCode, err := d.executor.ExecStream(installCtx, state.sandbox, cmd, appendTail, stderrSplitter)
+	stderrSplitter.flush()
+	if err != nil || exitCode != 0 {
+		errMsg := formatPreviewInstallError(exitCode, err, timeout, installCtx.Err())
+		notifyInstallFailed(observer, errMsg, outputTail)
+		return fmt.Errorf("%s", errMsg)
+	}
+	d.logger.Info().Str("marker", markerPath).Msg("preview install completed")
+	return nil
+}
+
+func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Context, sb *agent.Sandbox, install *models.PreviewInstallConfig) (string, error) {
+	lockfiles := make([]previewInstallLockfileKey, 0, len(install.Lockfiles))
+	for _, lockfile := range install.Lockfiles {
+		cleanPath, err := cleanPreviewInstallRepoPath(lockfile, false)
+		if err != nil {
+			return "", fmt.Errorf("preview.install.lockfiles path %q: %w", lockfile, err)
+		}
+		body, err := d.executor.ReadFile(ctx, sb, cleanPath)
+		if err != nil {
+			return "", fmt.Errorf("read preview.install lockfile %q: %w", cleanPath, err)
+		}
+		sum := sha256.Sum256(body)
+		lockfiles = append(lockfiles, previewInstallLockfileKey{Path: cleanPath, SHA256: fmt.Sprintf("%x", sum[:])})
+	}
+	sort.Slice(lockfiles, func(i, j int) bool { return lockfiles[i].Path < lockfiles[j].Path })
+
+	cwd := install.Cwd
+	if cwd == "" {
+		cwd = "."
+	}
+	if _, err := cleanPreviewInstallRepoPath(cwd, false); err != nil {
+		return "", fmt.Errorf("preview.install.cwd %q: %w", cwd, err)
+	}
+	key := previewInstallCacheKey{
+		RuntimeVersion: previewInstallRuntimeVersion,
+		Command:        append([]string(nil), install.Command...),
+		Cwd:            cwd,
+		Lockfiles:      lockfiles,
+		CleanPaths:     sortedStringCopy(install.CleanPaths),
+		VerifyPaths:    sortedStringCopy(install.VerifyPaths),
+		TimeoutSeconds: install.TimeoutSeconds,
+	}
+	if sb != nil {
+		key.SandboxProvider = sb.Provider
+		if sb.Metadata != nil {
+			key.SandboxImage = sb.Metadata["image"]
+		}
+	}
+	payload, err := json.Marshal(key)
+	if err != nil {
+		return "", fmt.Errorf("marshal preview install cache key: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func (d *DockerPreviewProvider) previewInstallCacheValid(ctx context.Context, sb *agent.Sandbox, markerPath string, verifyPaths []string) bool {
+	if _, err := d.executor.ReadFile(ctx, sb, markerPath); err != nil {
+		return false
+	}
+	for _, verifyPath := range verifyPaths {
+		cleanPath, err := cleanPreviewInstallRepoPath(verifyPath, false)
+		if err != nil {
+			return false
+		}
+		if !d.previewInstallPathExists(ctx, sb, cleanPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *DockerPreviewProvider) previewInstallPathExists(ctx context.Context, sb *agent.Sandbox, repoPath string) bool {
+	exitCode, err := d.executor.Exec(ctx, sb, "test -e "+shellEscape(repoPath), io.Discard, io.Discard)
+	return err == nil && exitCode == 0
+}
+
+func buildPreviewInstallCommand(install *models.PreviewInstallConfig, markerPath string) (string, error) {
+	var parts []string
+	if len(install.CleanPaths) > 0 {
+		cleanArgs := make([]string, 0, len(install.CleanPaths))
+		for _, cleanPath := range install.CleanPaths {
+			arg, err := cleanPreviewInstallRepoPath(cleanPath, true)
+			if err != nil {
+				return "", fmt.Errorf("preview.install.clean_paths path %q: %w", cleanPath, err)
+			}
+			cleanArgs = append(cleanArgs, arg)
+		}
+		parts = append(parts, "rm -rf -- "+strings.Join(cleanArgs, " "))
+	}
+	parts = append(parts, "mkdir -p .143/cache/preview-install")
+
+	escapedCmd := make([]string, 0, len(install.Command))
+	for _, arg := range install.Command {
+		escapedCmd = append(escapedCmd, shellEscape(arg))
+	}
+	installCmd := strings.Join(escapedCmd, " ")
+	cwd := install.Cwd
+	if cwd == "" {
+		cwd = "."
+	}
+	if cwd != "." {
+		cleanCwd, err := cleanPreviewInstallRepoPath(cwd, false)
+		if err != nil {
+			return "", fmt.Errorf("preview.install.cwd %q: %w", cwd, err)
+		}
+		installCmd = fmt.Sprintf("(cd %s && %s)", shellEscape(cleanCwd), installCmd)
+	}
+	parts = append(parts, installCmd)
+	parts = append(parts, fmt.Sprintf("printf 'ok\\n' > %s", shellEscape(markerPath)))
+	return strings.Join(parts, " && "), nil
+}
+
+func cleanPreviewInstallRepoPath(raw string, allowGlob bool) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	if strings.HasPrefix(raw, "/") {
+		return "", fmt.Errorf("absolute paths are not allowed")
+	}
+	if strings.ContainsAny(raw, " \t\r\n;&|`$(){}[]<>!?\\\"'") {
+		return "", fmt.Errorf("unsupported shell metacharacter")
+	}
+	if !allowGlob && strings.Contains(raw, "*") {
+		return "", fmt.Errorf("glob paths are not allowed here")
+	}
+	clean := path.Clean(raw)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path escapes the repo root")
+	}
+	if allowGlob {
+		for _, part := range strings.Split(clean, "/") {
+			if part == ".." {
+				return "", fmt.Errorf("path escapes the repo root")
+			}
+		}
+	}
+	if allowGlob && clean == "." {
+		return "", fmt.Errorf("path is too broad to clean")
+	}
+	return clean, nil
+}
+
+func sortedStringCopy(values []string) []string {
+	copied := append([]string(nil), values...)
+	sort.Strings(copied)
+	return copied
+}
+
+func formatPreviewInstallError(exitCode int, err error, timeout time.Duration, ctxErr error) string {
+	if ctxErr != nil {
+		return fmt.Sprintf("timed out after %s", timeout)
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("exited with code %d", exitCode)
+}
+
+func notifyInstallFailed(observer preview.ServiceObserver, errMsg string, tail []string) {
+	if observer == nil {
+		return
+	}
+	observer.OnInstallFailed(errMsg, tail)
+}
+
+// =============================================================================
 // Service management
 // =============================================================================
+
+// notifyServiceOutput invokes observer.OnServiceOutput when observer is non-nil.
+func notifyServiceOutput(observer preview.ServiceObserver, name, line string) {
+	if observer == nil {
+		return
+	}
+	observer.OnServiceOutput(name, line)
+}
 
 // notifyServiceReady invokes observer.OnServiceReady when observer is non-nil.
 // Centralised so callers can stay nil-safe without scattering checks.
@@ -969,6 +1242,29 @@ func notifyServiceFailed(observer preview.ServiceObserver, name, errMsg string, 
 		return
 	}
 	observer.OnServiceFailed(name, errMsg, tail)
+}
+
+type phaseObserver interface {
+	OnPhaseStart(name string)
+	OnPhaseEnd(name string, err error)
+}
+
+func notifyPhaseStart(observer preview.ServiceObserver, name string) {
+	if observer == nil {
+		return
+	}
+	if phaseObserver, ok := observer.(phaseObserver); ok {
+		phaseObserver.OnPhaseStart(name)
+	}
+}
+
+func notifyPhaseEnd(observer preview.ServiceObserver, name string, err error) {
+	if observer == nil {
+		return
+	}
+	if phaseObserver, ok := observer.(phaseObserver); ok {
+		phaseObserver.OnPhaseEnd(name, err)
+	}
 }
 
 // recordServiceReadinessFailure snapshots the live service output before
@@ -1133,13 +1429,18 @@ func (d *DockerPreviewProvider) startService(
 		// to stderr (every Go binary using log.Print, every `go build` error)
 		// still surfaces a useful tail instead of an empty buffer.
 		appendTail := func(line string) {
+			shouldNotify := false
 			d.mu.Lock()
 			if len(ss.outputTail) >= serviceTailLines {
 				ss.outputTail = ss.outputTail[1:]
 			}
 			ss.outputTail = append(ss.outputTail, line)
+			shouldNotify = ss.status == models.PreviewServiceStatusStarting
 			d.mu.Unlock()
 			d.logger.Debug().Str("service", name).Str("output", line).Msg("service output")
+			if shouldNotify {
+				notifyServiceOutput(observer, name, line)
+			}
 		}
 		stderrSplitter := &previewLineSplitter{onLine: func(line []byte) {
 			appendTail(string(line))

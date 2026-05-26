@@ -1,5 +1,6 @@
 import { Copy, Check, ExternalLink } from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { DiffStatsBadge } from "./diff-stats-badge";
 
@@ -31,7 +32,7 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
   return (
     <div
       className={cn(
-        "sticky top-0 z-10 flex items-center justify-between px-3 py-2 bg-muted/60 backdrop-blur-sm border-b border-border",
+        "sticky top-0 z-10 flex items-center justify-between rounded-t-lg border-b border-border/70 bg-card/95 px-3 py-1.5 shadow-none backdrop-blur supports-[backdrop-filter]:bg-card/85",
         className
       )}
     >
@@ -43,17 +44,23 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
       </div>
       <div className="flex items-center gap-0.5 shrink-0">
         {onBrowseFile && (
-          <button
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
             onClick={() => onBrowseFile(filePath)}
-            className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+            className="h-7 w-7 text-muted-foreground hover:text-foreground"
             title="Browse in repository explorer"
           >
             <ExternalLink className="h-3.5 w-3.5" />
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
           onClick={copyPath}
-          className="p-1 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
           title="Copy file path"
         >
           {copied ? (
@@ -61,7 +68,7 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
           ) : (
             <Copy className="h-3.5 w-3.5" />
           )}
-        </button>
+        </Button>
       </div>
     </div>
   );

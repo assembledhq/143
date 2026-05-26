@@ -148,101 +148,93 @@ export function MobileSessionTopBar({
           <SheetHeader className="px-4 text-left">
             <SheetTitle>Session actions</SheetTitle>
             <SheetDescription>
-              Switch tabs and manage this session without taking permanent space away from the conversation.
+              Tabs, session settings, and current-tab actions.
             </SheetDescription>
           </SheetHeader>
 
           <div className="mt-4 border-t border-border">
-            {threads.length > 1 ? (
-              <section className="px-4 py-4">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">Tabs</p>
-                    <p className="text-xs text-muted-foreground">Switch the active conversation lane.</p>
-                  </div>
-                  <Badge variant="secondary" className="text-xs">
-                    {threads.length}
-                  </Badge>
+            <section aria-label="Tabs" className="px-4 py-4">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Tabs</p>
+                  <p className="text-xs text-muted-foreground">Switch or add a conversation lane.</p>
                 </div>
-                <div className="space-y-2">
-                  {threads.map((thread) => {
-                    const agent = AGENTS_BY_KEY[thread.agent_type];
-                    const statusLabel = threadStatusLabel(thread.status);
-                    const isActive = thread.id === activeThreadId;
-                    const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
-                    const showArchiveButton = canArchiveThread(thread, threads.length);
-                    const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
-                    const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
-                    return (
-                      <div key={thread.id} className="flex items-center gap-2">
+                <Badge variant="secondary" className="text-xs">
+                  {threads.length}
+                </Badge>
+              </div>
+              <div className="space-y-2">
+                {threads.map((thread) => {
+                  const agent = AGENTS_BY_KEY[thread.agent_type];
+                  const statusLabel = threadStatusLabel(thread.status);
+                  const isActive = thread.id === activeThreadId;
+                  const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
+                  const showArchiveButton = canArchiveThread(thread, threads.length);
+                  const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
+                  const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
+                  return (
+                    <div key={thread.id} className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className={cn(
+                          "h-auto flex-1 justify-start rounded-xl border px-3 py-3 text-left",
+                          isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
+                        )}
+                        aria-label={`Switch to ${thread.label}`}
+                        disabled={isNonInteractive}
+                        onClick={() => {
+                          if (isNonInteractive) return;
+                          onActiveThreadChange(thread.id);
+                          setActionsOpen(false);
+                        }}
+                      >
+                        <div className="flex w-full items-start gap-3">
+                          {showUnreadDot ? (
+                            <span
+                              className={cn(
+                                "mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary",
+                                thread.status === "running" && "animate-pulse",
+                              )}
+                              aria-hidden
+                            />
+                          ) : (
+                            <span className="mt-1.5 h-2 w-2 shrink-0" aria-hidden />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate text-sm font-medium text-foreground">{thread.label}</span>
+                              {isActive ? <Badge variant="secondary" className="text-xs">Active</Badge> : null}
+                            </div>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {(agent?.label ?? thread.agent_type)} · {statusLabel}
+                            </p>
+                          </div>
+                        </div>
+                      </Button>
+                      {showArchiveButton ? (
                         <Button
                           type="button"
+                          size="icon"
                           variant="ghost"
-                          className={cn(
-                            "h-auto flex-1 justify-start rounded-xl border px-3 py-3 text-left",
-                            isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
-                          )}
-                          aria-label={`Switch to ${thread.label}`}
-                          disabled={isNonInteractive}
+                          className="h-10 w-10 rounded-xl border border-border bg-background"
+                          aria-label={closeLabel}
+                          disabled={archivePendingThreadId === thread.id}
                           onClick={() => {
-                            if (isNonInteractive) return;
-                            onActiveThreadChange(thread.id);
+                            onArchiveThread(thread.id);
                             setActionsOpen(false);
                           }}
                         >
-                          <div className="flex w-full items-start gap-3">
-                            {showUnreadDot ? (
-                              <span
-                                className={cn(
-                                  "mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary",
-                                  thread.status === "running" && "animate-pulse",
-                                )}
-                                aria-hidden
-                              />
-                            ) : (
-                              <span className="mt-1.5 h-2 w-2 shrink-0" aria-hidden />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="truncate text-sm font-medium text-foreground">{thread.label}</span>
-                                {isActive ? <Badge variant="secondary" className="text-xs">Active</Badge> : null}
-                              </div>
-                              <p className="truncate text-xs text-muted-foreground">
-                                {(agent?.label ?? thread.agent_type)} · {statusLabel}
-                              </p>
-                            </div>
-                          </div>
+                          {archivePendingThreadId === thread.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
                         </Button>
-                        {showArchiveButton ? (
-                          <Button
-                            type="button"
-                            size="icon"
-                            variant="ghost"
-                            className="h-10 w-10 rounded-xl border border-border bg-background"
-                            aria-label={closeLabel}
-                            disabled={archivePendingThreadId === thread.id}
-                            onClick={() => {
-                              onArchiveThread(thread.id);
-                              setActionsOpen(false);
-                            }}
-                          >
-                            {archivePendingThreadId === thread.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
-                          </Button>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              </section>
-            ) : null}
-
-            <section className="border-t border-border px-4 py-4">
-              <p className="mb-3 text-sm font-medium text-foreground">Session</p>
-              <div className="space-y-2">
+                      ) : null}
+                    </div>
+                  );
+                })}
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-11 w-full justify-start rounded-xl border border-border bg-background px-3"
+                  className="h-11 w-full justify-start rounded-xl border border-dashed border-border bg-background px-3"
                   aria-label="Add agent tab"
                   onClick={() => {
                     onAddThread();
@@ -252,6 +244,12 @@ export function MobileSessionTopBar({
                   <Plus className="mr-2 h-4 w-4" />
                   Add agent tab
                 </Button>
+              </div>
+            </section>
+
+            <section aria-label="Session" className="border-t border-border px-4 py-4">
+              <p className="mb-3 text-sm font-medium text-foreground">Session</p>
+              <div className="space-y-2">
                 <Button
                   type="button"
                   variant="ghost"
@@ -269,7 +267,7 @@ export function MobileSessionTopBar({
             </section>
 
             {activeThread ? (
-              <section className="border-t border-border px-4 py-4">
+              <section aria-label="Active tab" className="border-t border-border px-4 py-4">
                 <div className="mb-3">
                   <p className="text-sm font-medium text-foreground">Active tab</p>
                   <p className="text-xs text-muted-foreground">

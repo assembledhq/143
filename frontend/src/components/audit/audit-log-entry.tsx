@@ -100,13 +100,13 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
             setExpanded(!expanded);
           }
         }}
-        className="flex w-full items-start gap-2 px-6 py-3.5 text-left text-sm hover:bg-muted/30 transition-all duration-150 h-auto rounded-none"
+        className="flex w-full items-start gap-2 whitespace-normal px-6 py-3.5 text-left text-sm hover:bg-muted/30 transition-all duration-150 h-auto rounded-none"
         disabled={!onSelect && !hasDetails}
       >
         <span className="shrink-0 w-14 text-xs text-muted-foreground/70 pt-0.5 tabular-nums">
           {formatTimeAgo(entry.created_at)}
         </span>
-        <span className="flex-1 min-w-0">
+        <span className="flex-1 min-w-0 whitespace-normal break-words">
           <span className="font-medium text-foreground">{actorName}</span>
           {" "}
           <span className="text-muted-foreground">{actionLabel}</span>
@@ -128,7 +128,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
               {Object.entries(entry.details!).map(([key, value]) => (
                 <div key={key} className="flex gap-2">
                   <span className="font-medium text-muted-foreground min-w-[80px]">{key}:</span>
-                  <span className="text-foreground break-all">
+                  <span className="min-w-0 text-foreground break-words">
                     {formatAuditDetailValue(key, value)}
                   </span>
                 </div>

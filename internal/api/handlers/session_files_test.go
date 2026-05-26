@@ -103,7 +103,7 @@ func withSessionRoute(handler http.HandlerFunc) http.Handler {
 // We redefine the full set here to avoid coupling.
 var sessionColumnsForFiles = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -168,7 +168,7 @@ func setupSessionMockFull(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID,
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumnsForFiles).AddRow(sessionFileTestRow(
 				sessionID, &issueID, orgID, "claude_code", "running", "supervised", "standard",
-				nil, nil, nil, nil, // complexity_tier through risk_factors
+				nil,
 				containerID, nil, false, &now, nil, nil, // container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage
 				nil, nil, nil, false, // failure fields
 				nil, nil, nil, nil, nil, // parent_session_id through diff

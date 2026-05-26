@@ -289,12 +289,12 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 					AddRow("worker-1", "worker", "worker-1.internal", "active", workerOneMeta, now, now).
 					AddRow("worker-2", "worker", "worker-2.internal", "active", workerTwoMeta, now, now),
 			)
-		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id = @worker").
+		// Single batch query replaces the previous N sequential COUNT queries.
+		mock.ExpectQuery("SELECT worker_node_id, COUNT").
 			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
-		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id = @worker").
-			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+			WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+				AddRow("worker-1", 3).
+				AddRow("worker-2", 1))
 
 		selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
 		worker, err := selector.SelectLeastLoadedNodeExcept(context.Background(), map[string]struct{}{"api-1": {}})
@@ -355,9 +355,9 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 					AddRow("worker-1", "worker", "worker-1.internal", "active", directOnlyMeta, now, now).
 					AddRow("worker-2", "worker", "worker-2.internal", "active", staticMeta, now, now),
 			)
-		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id = @worker").
+		mock.ExpectQuery("SELECT worker_node_id, COUNT").
 			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+			WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}))
 
 		selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
 		worker, err := selector.SelectLeastLoadedNodeWithRequirements(context.Background(), WorkerSelectionRequirements{StaticEgressRequired: true})
@@ -385,7 +385,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 				pgxmock.NewRows(workerNodeTestCols).
 					AddRow("worker-1", "worker", "worker-1.internal", "active", workerMeta, now, now),
 			)
-		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id = @worker").
+		mock.ExpectQuery("SELECT worker_node_id, COUNT").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnError(errors.New("db unavailable"))
 

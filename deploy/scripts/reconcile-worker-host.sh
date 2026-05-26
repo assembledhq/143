@@ -14,6 +14,7 @@ STATIC_EGRESS_DNS_IP="172.31.0.2"
 STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-}"
 STATIC_EGRESS_CAPABILITY_FILE="/etc/143/static-egress-capable"
 STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
+DEFAULT_NETWORK="${2:-143_default}"
 
 load_static_egress_env_key() {
   local key="$1"
@@ -86,6 +87,14 @@ ensure_bridge "$STATIC_EGRESS_NETWORK" "$STATIC_EGRESS_SUBNET"
 
 load_static_egress_env
 STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-false}"
+
+# Worker blue/green generations run as separate compose projects but must share
+# the same default bridge so the worker can resolve support services such as
+# chrome by container DNS name. Compose treats this network as external.
+if ! docker network inspect "$DEFAULT_NETWORK" >/dev/null 2>&1; then
+  docker network create --driver bridge \
+    --label managed-by=143 "$DEFAULT_NETWORK"
+fi
 
 # Install iptables-persistent so the egress block survives reboots. This is
 # best-effort because some minimal images prompt or temporarily lack apt locks;

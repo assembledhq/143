@@ -22,7 +22,6 @@ CREATE TABLE session_threads (
     last_activity_at    timestamptz,
 
     -- Results
-    confidence_score    double precision,
     result_summary      text,
     diff                text,
     failure_explanation text,

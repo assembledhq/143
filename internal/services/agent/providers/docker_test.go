@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -384,6 +385,66 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 		require.True(t, createCalled, "ContainerCreate should have been called")
 		require.True(t, startCalled, "ContainerStart should have been called")
 		require.True(t, removeCalled, "ContainerRemove should have been called for cleanup")
+	})
+
+	t.Run("auth socket preflight mounts socket directory and uses sandbox helper", func(t *testing.T) {
+		t.Parallel()
+
+		socketDir, err := os.MkdirTemp("/tmp", "143a-docker-preflight-*")
+		require.NoError(t, err, "test should create a short socket dir")
+		t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+		var createCalls int
+		var authMountSource string
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createCalls++
+			require.Equal(t, "runsc", hostConfig.Runtime, "health check containers should use configured runtime")
+			switch createCalls {
+			case 1:
+				require.Equal(t, "busybox:1.36.1", config.Image, "runtime probe should use the small health image")
+				require.Equal(t, []string{"echo", "runtime-ok"}, []string(config.Cmd), "runtime probe should stay cheap")
+				return container.CreateResponse{ID: "runtime-check"}, nil
+			case 2:
+				require.Equal(t, "143-sandbox:latest", config.Image, "auth socket probe should use the real sandbox image because 143-tools lives there")
+				require.Equal(t, []string{"sh", "-c", "143-tools auth-token --action=api >/dev/null"}, []string(config.Cmd), "auth socket probe should verify the real helper can connect")
+				require.Contains(t, config.Env, sandboxauth.SocketEnvVar+"="+sandboxauth.SandboxSocketPath, "auth socket probe should expose the canonical in-sandbox socket env var")
+				require.Len(t, hostConfig.Mounts, 1, "auth socket probe should only mount the per-preflight socket directory")
+				require.Equal(t, mount.TypeBind, hostConfig.Mounts[0].Type, "auth socket probe should bind-mount the socket directory")
+				require.Equal(t, sandboxauth.SandboxSocketDir, hostConfig.Mounts[0].Target, "auth socket probe should mount onto the canonical sandbox auth directory")
+				require.True(t, strings.HasPrefix(hostConfig.Mounts[0].Source, socketDir), "auth socket probe should create its socket under the configured socket dir")
+				authMountSource = hostConfig.Mounts[0].Source
+				return container.CreateResponse{ID: "auth-socket-check"}, nil
+			default:
+				t.Fatalf("unexpected health check container create call %d", createCalls)
+				return container.CreateResponse{}, nil
+			}
+		}
+		mock.containerStartFn = func(ctx context.Context, containerID string, options container.StartOptions) error {
+			if containerID != "auth-socket-check" {
+				return nil
+			}
+			resp, err := sandboxauth.NewClient(filepath.Join(authMountSource, sandboxauth.SocketFileName)).Get(ctx, sandboxauth.ActionAPI)
+			require.NoError(t, err, "auth socket probe test should simulate the in-sandbox helper connecting to the mounted socket")
+			require.Equal(t, "preflight-token", resp.Token, "auth socket probe should receive the host-side preflight token")
+			return nil
+		}
+		mock.containerInspectFn = func(ctx context.Context, containerID string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				ContainerJSONBase: &container.ContainerJSONBase{
+					State: &container.State{Running: false, ExitCode: 0},
+					HostConfig: &container.HostConfig{
+						NetworkMode: "143-sandbox",
+					},
+				},
+			}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runsc"), WithAuthSocketPreflightDir(socketDir))
+
+		healthErr := p.HealthCheck(context.Background())
+		require.NoError(t, healthErr, "HealthCheck should pass when runtime and auth socket probes pass")
+		require.Equal(t, 2, createCalls, "HealthCheck should run the normal runtime probe plus the auth socket preflight")
+		require.NotEmpty(t, authMountSource, "auth socket probe should capture the bind source")
 	})
 
 	t.Run("pulls missing health check image before container create", func(t *testing.T) {

@@ -39,6 +39,7 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	require.NoError(t, err, "Start should create the review loop")
 	require.Equal(t, threadID, *loop.ThreadID, "Start should bind the loop to the review thread")
 	require.Equal(t, models.AgentTypeClaudeCode, loop.AgentType, "Start should default to the session agent")
+	require.Equal(t, models.ReviewLoopFixModeMinimal, loop.FixMode, "Start should default to minimal fix mode")
 	require.Equal(t, &snapshotKey, loop.LoopStartCheckpointKey, "Start should record the snapshot checkpoint for the review loop")
 	require.Len(t, store.createdPasses, 1, "Start should create the first pass")
 	require.Equal(t, models.ReviewLoopPassStatusReviewing, store.createdPasses[0].Status, "first pass should start in reviewing state")
@@ -46,6 +47,32 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	require.Contains(t, threads.sent[0].Message, "/review", "Start should send the native review command")
 	require.Len(t, threads.sent[0].Commands, 1, "Start should persist a structured slash command")
 	require.Equal(t, "review", threads.sent[0].Commands[0].Name, "structured command should be /review")
+}
+
+func TestService_StartStoresRequestedFixMode(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/review-loop-fix-mode.tar.zst"
+	store := &fakeReviewLoopStore{}
+	threads := &fakeThreadService{
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
+		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex, Label: "Codex Review"},
+		message: models.SessionMessage{ID: 77, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+	}
+	svc := NewService(store, threads)
+
+	loop, err := svc.Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
+		MaxPasses: 2,
+		Source:    models.ReviewLoopSourceManual,
+		FixMode:   models.ReviewLoopFixModeExhaustive,
+	})
+
+	require.NoError(t, err, "Start should create the review loop with a requested fix mode")
+	require.Equal(t, models.ReviewLoopFixModeExhaustive, loop.FixMode, "Start should return the requested fix mode")
+	require.Equal(t, models.ReviewLoopFixModeExhaustive, store.createdLoops[0].FixMode, "Start should persist the requested fix mode")
 }
 
 func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
@@ -150,6 +177,7 @@ func TestService_OnThreadTurnCompleteDirtyThenClean(t *testing.T) {
 			Status:    models.ReviewLoopStatusRunning,
 			AgentType: models.AgentTypeCodex,
 			MaxPasses: 2,
+			FixMode:   models.ReviewLoopFixModeExhaustive,
 		},
 		latestPass: models.SessionReviewLoopPass{ID: passID, OrgID: orgID, LoopID: loopID, SessionID: sessionID, PassIndex: 1, Status: models.ReviewLoopPassStatusReviewing},
 	}
@@ -164,22 +192,14 @@ func TestService_OnThreadTurnCompleteDirtyThenClean(t *testing.T) {
 	require.Equal(t, reviewLoopContinuationDedupeKey(loopID, passID, "decision"), *threads.sent[0].ContinuationDedupeKeyOverride, "review decision prompt should not collide with the currently running review job")
 
 	store.latestPass.Status = models.ReviewLoopPassStatusDeciding
-	err = svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "NEEDS_FIX_PASS")
-	require.NoError(t, err, "dirty decision should enqueue a fix pass")
-	require.Equal(t, models.ReviewLoopDecisionNeedsFix, store.fixDecision, "dirty decision should be persisted")
-	require.Contains(t, threads.sent[1].Message, "Fix the issues you identified", "fix prompt should reference the previous review")
-	require.NotNil(t, threads.sent[1].ContinuationDedupeKeyOverride, "review fix prompt should use a dedicated continuation dedupe key")
-	require.Equal(t, reviewLoopContinuationDedupeKey(loopID, passID, "fix"), *threads.sent[1].ContinuationDedupeKeyOverride, "review fix prompt should not collide with the decision job")
-
-	store.latestPass.Status = models.ReviewLoopPassStatusFixing
 	err = svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "Added the regression test")
-	require.NoError(t, err, "fix completion should enqueue the next review pass")
+	require.NoError(t, err, "dirty decision turn should record fixes and enqueue the next review pass")
 	require.Equal(t, "Added the regression test", store.fixSummary, "fix summary should be stored")
 	require.Len(t, store.createdPasses, 1, "fix completion should create the confirmation pass")
 	require.Equal(t, 2, store.createdPasses[0].PassIndex, "confirmation pass should increment pass_index")
-	require.Contains(t, threads.sent[2].Message, "/review", "confirmation pass should run /review again")
-	require.NotNil(t, threads.sent[2].ContinuationDedupeKeyOverride, "confirmation review prompt should use a dedicated continuation dedupe key")
-	require.Equal(t, reviewLoopContinuationDedupeKey(loopID, store.createdPasses[0].ID, "review"), *threads.sent[2].ContinuationDedupeKeyOverride, "confirmation review prompt should not collide with the fix job")
+	require.Contains(t, threads.sent[1].Message, "/review", "confirmation pass should run /review again")
+	require.NotNil(t, threads.sent[1].ContinuationDedupeKeyOverride, "confirmation review prompt should use a dedicated continuation dedupe key")
+	require.Equal(t, reviewLoopContinuationDedupeKey(loopID, store.createdPasses[0].ID, "review"), *threads.sent[1].ContinuationDedupeKeyOverride, "confirmation review prompt should not collide with the decision job")
 
 	store.latestPass = store.createdPasses[0]
 	store.latestPass.Status = models.ReviewLoopPassStatusDeciding
@@ -340,6 +360,43 @@ func TestService_OnThreadTurnCompleteAutomationDecisionFailureEnqueuesOpenPRGate
 	require.ErrorIs(t, err, ErrUnrecognizedDecision, "invalid automation review decision should still return the decision error")
 	require.Equal(t, loopID, store.failedLoopID, "invalid automation review decision should mark the loop failed")
 	require.Equal(t, []string{"failed_open_pr"}, store.events, "invalid automation review decision should durably queue the PR gate")
+}
+
+func TestService_OnThreadTurnCompleteEmptyDecisionFailsLoop(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID:        loopID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			ThreadID:  &threadID,
+			Status:    models.ReviewLoopStatusRunning,
+			AgentType: models.AgentTypeCodex,
+			MaxPasses: 2,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID:        passID,
+			OrgID:     orgID,
+			LoopID:    loopID,
+			SessionID: sessionID,
+			PassIndex: 1,
+			Status:    models.ReviewLoopPassStatusDeciding,
+		},
+	}
+	svc := NewService(store, &fakeThreadService{})
+
+	err := svc.OnThreadTurnComplete(context.Background(), orgID, threadID, " \n\t ")
+
+	require.ErrorIs(t, err, ErrUnrecognizedDecision, "empty review decision should fail instead of consuming another review pass")
+	require.Equal(t, loopID, store.failedLoopID, "empty review decision should mark the loop failed")
+	require.Empty(t, store.fixSummary, "empty review decision should not be recorded as a fix summary")
+	require.Empty(t, store.createdPasses, "empty review decision should not create a confirmation review pass")
 }
 
 func TestService_OnThreadTurnFailedMarksRunningLoopFailed(t *testing.T) {

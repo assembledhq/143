@@ -114,6 +114,13 @@ type ServiceSnapshot struct {
 // safe for concurrent use and should return promptly. A nil observer is
 // allowed and is treated as a no-op.
 type ServiceObserver interface {
+	// OnServiceOutput is invoked for each stdout/stderr line emitted while a
+	// service is still starting. Implementations should keep this lightweight:
+	// providers call it from the process output path.
+	OnServiceOutput(name, line string)
+	// OnInstallFailed is invoked when preview.install fails before any
+	// application service is started. tail holds the captured install output.
+	OnInstallFailed(errMsg string, tail []string)
 	// OnServiceReady is invoked once a service has passed its readiness probe.
 	OnServiceReady(name string, port, pid int)
 	// OnServiceFailed is invoked when a service has crashed at boot, exited

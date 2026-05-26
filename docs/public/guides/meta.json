@@ -1,0 +1,5 @@
+{
+  "title": "Guides",
+  "description": "Task-based guides for configuring and using 143.",
+  "pages": ["index", "repo-config", "previews", "linear-agent", "autopilot", "coding-agent-auth"]
+}

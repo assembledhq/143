@@ -329,6 +329,32 @@ func TestSessionLogStore_ListByThread(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionLogStore_ListByThreadTurns(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.thread_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(logColumns).
+				AddRow(newLogRow(1, sessionID, now)...),
+		)
+
+	logs, err := store.ListByThreadTurns(context.Background(), orgID, threadID, []int{7, 5, 7})
+	require.NoError(t, err, "ListByThreadTurns should not return an error")
+	require.Len(t, logs, 1, "ListByThreadTurns should return matching log entries")
+	require.Equal(t, int64(1), logs[0].ID, "ListByThreadTurns should scan the returned log")
+	require.NoError(t, mock.ExpectationsWereMet(), "ListByThreadTurns should apply the expected SQL filter")
+}
+
 func TestSessionLogStore_DeleteExpired(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

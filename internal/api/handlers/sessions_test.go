@@ -147,7 +147,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 // AddRow calls in this file when adding/removing/reordering columns.
 var sessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"complexity_tier",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
@@ -166,7 +166,7 @@ var sessionColumns = []string{
 
 var reviewLoopColumns = []string{
 	"id", "org_id", "session_id", "automation_run_id", "thread_id",
-	"status", "source", "agent_type", "max_passes", "completed_passes", "review_required",
+	"status", "source", "agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 	"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
 	"latest_summary", "started_by_user_id", "started_at", "completed_at",
 }
@@ -175,7 +175,7 @@ func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, sour
 	now := time.Now()
 	return []any{
 		loopID, uuid.New(), sessionID, nil, nil,
-		status, source, "claude_code", 2, 1, false,
+		status, source, "claude_code", 2, "minimal", 1, false,
 		nil, nil, nil, latestCheckpointKey,
 		nil, nil, now, &now,
 	}
@@ -206,6 +206,22 @@ func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
 	)
 	row = append(row, values[3:]...)
 	return normalizeSessionRowPrimaryIssueID(row)
+}
+
+func stripLegacySessionResultConfidence(row []interface{}) []interface{} {
+	if len(row) <= 13 {
+		return row
+	}
+	if _, ok := row[13].(bool); ok {
+		return row
+	}
+	if _, ok := row[12].(bool); ok {
+		return row
+	}
+	stripped := make([]interface{}, 0, len(row)-3)
+	stripped = append(stripped, row[:11]...)
+	stripped = append(stripped, row[14:]...)
+	return stripped
 }
 
 // normalizeSessionRowPrimaryIssueID converts a legacy uuid.UUID issue_id
@@ -249,7 +265,8 @@ const (
 	// rows of this length (or shorter); the dispatch routes them to the
 	// right pad helper, then sessionTestRow pads the four trailing linear
 	// columns and the two trailing identity nils at the end.
-	preLinearSessionColumnsLen = 76
+	preLinearSessionColumnsLen                  = 76
+	sessionColumnsWithLegacyResultConfidenceLen = 90
 )
 
 // TestPreLinearSessionColumnsLenStaysInSync trips when a future migration
@@ -264,9 +281,10 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const identityFieldsAdded = 2
 	const prPushFieldsAdded = 2
 	const branchCreationFieldsAdded = 3
-	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, len(sessionColumns),
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
 			"unpushedChangesFieldAdded, linearFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
+	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen, "legacy confidence columns should stay isolated to test fixtures")
 }
 
 // linearSessionDefaults returns the placeholder values for the derived
@@ -289,7 +307,7 @@ func linearSessionDefaults() []interface{} {
 // branch that resolved its prior shape. Runs before padSessionIdentityColumns,
 // so the input still has only deleted_at + created_at at the tail.
 func padLinearFields(values []interface{}) []interface{} {
-	if len(values) >= len(sessionColumns)-2 {
+	if len(values) >= sessionColumnsWithLegacyResultConfidenceLen-2 {
 		return values
 	}
 	if len(values) < 2 {
@@ -472,7 +490,11 @@ func sessionTestRow(values ...interface{}) []interface{} {
 	if len(row) == preLinearSessionColumnsLen {
 		row = padLinearFields(row)
 	}
-	return padSessionIdentityColumns(row)
+	row = padSessionIdentityColumns(row)
+	if len(row) == len(sessionColumns)+3 {
+		row = stripLegacySessionResultConfidence(row)
+	}
+	return row
 }
 
 func sessionTestRowDispatch(values ...interface{}) []interface{} {
@@ -517,6 +539,7 @@ func sessionTestRowDispatch(values ...interface{}) []interface{} {
 			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, true))
 		}
 	}
+	values = stripLegacySessionResultConfidence(values)
 	values = normalizeSessionRowAgentType(values, 6)
 
 	switch len(values) {
@@ -577,7 +600,11 @@ func sessionTestRowDispatch(values ...interface{}) []interface{} {
 }
 
 func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
-	return rows.AddRow(sessionTestRow(values...)...)
+	row := sessionTestRow(values...)
+	if len(row) != len(sessionColumns) {
+		panic(fmt.Sprintf("addSessionRow produced %d values for %d session columns", len(row), len(sessionColumns)))
+	}
+	return rows.AddRow(row...)
 }
 
 // padSessionIdentityColumns retrofits rows produced by the legacy
@@ -588,18 +615,18 @@ func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
 // git_identity_user_id pair (immediately before created_at). Callers don't
 // have to update their fixtures one-by-one.
 func padSessionIdentityColumns(row []interface{}) []interface{} {
-	if len(row) >= len(sessionColumns) {
+	if len(row) >= sessionColumnsWithLegacyResultConfidenceLen {
 		return row
 	}
-	if len(row) == len(sessionColumns)-3 {
+	if len(row) == sessionColumnsWithLegacyResultConfidenceLen-3 {
 		const branchCreationStateIndex = 76
-		padded := make([]interface{}, 0, len(sessionColumns))
+		padded := make([]interface{}, 0, sessionColumnsWithLegacyResultConfidenceLen)
 		padded = append(padded, row[:branchCreationStateIndex]...)
 		padded = append(padded, "idle", (*string)(nil), (*string)(nil))
 		padded = append(padded, row[branchCreationStateIndex:]...)
 		return padded
 	}
-	if len(row) != len(sessionColumns)-9 {
+	if len(row) != sessionColumnsWithLegacyResultConfidenceLen-9 {
 		// Some other length we don't recognize — let the row through
 		// unchanged so the AddRow call surfaces the real mismatch.
 		return row
@@ -4986,7 +5013,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5066,7 +5093,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5132,7 +5159,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5198,7 +5225,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status = ANY\\(@statuses\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -7567,9 +7594,6 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"autonomy_level":                 "semi",
 		"token_mode":                     "low",
 		"complexity_tier":                nil,
-		"confidence_score":               nil,
-		"confidence_reasoning":           nil,
-		"risk_factors":                   nil,
 		"container_id":                   nil,
 		"worker_node_id":                 nil,
 		"turn_holding_container":         false,
@@ -8314,8 +8338,8 @@ func TestSessionHandler_CancelSession_RoutesDirectWorkerCancelWhenLocalRegistryM
 		nil,            // deleted_at
 		now,
 	)
-	row[14] = &containerID
-	row[15] = &workerNodeID
+	row[11] = &containerID
+	row[12] = &workerNodeID
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -8377,8 +8401,8 @@ func TestSessionHandler_CancelSession_EnqueuesTargetedWorkerCancelWhenLocalRegis
 		nil,            // deleted_at
 		now,
 	)
-	row[14] = &containerID
-	row[15] = &workerNodeID
+	row[11] = &containerID
+	row[12] = &workerNodeID
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

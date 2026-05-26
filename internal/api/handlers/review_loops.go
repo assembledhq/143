@@ -52,6 +52,7 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 		AgentType string `json:"agent_type"`
 		Model     string `json:"model"`
 		MaxPasses int    `json:"max_passes"`
+		FixMode   string `json:"fix_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -66,6 +67,7 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 		AgentType:       models.AgentType(strings.TrimSpace(body.AgentType)),
 		Model:           strings.TrimSpace(body.Model),
 		MaxPasses:       body.MaxPasses,
+		FixMode:         models.ReviewLoopFixMode(strings.TrimSpace(body.FixMode)),
 		Source:          models.ReviewLoopSourceManual,
 		StartedByUserID: userID,
 	})
@@ -73,6 +75,8 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, reviewloopsvc.ErrInvalidPassCount):
 			writeError(w, r, http.StatusBadRequest, "INVALID_PASS_COUNT", err.Error())
+		case errors.Is(err, reviewloopsvc.ErrInvalidFixMode):
+			writeError(w, r, http.StatusBadRequest, "INVALID_FIX_MODE", err.Error())
 		case errors.Is(err, reviewloopsvc.ErrUnsupportedReviewAgent):
 			writeError(w, r, http.StatusBadRequest, "UNSUPPORTED_AGENT", err.Error())
 		case errors.Is(err, reviewloopsvc.ErrSessionSnapshotExpired):

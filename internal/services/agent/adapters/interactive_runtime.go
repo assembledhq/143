@@ -8,7 +8,7 @@
 //   - prompt construction
 //   - CLI argv assembly
 //   - per-line parsing
-//   - agent-specific result shaping (Diff, Summary, ConfidenceScore, ...)
+//   - agent-specific result shaping (Diff, Summary, ...)
 //
 // Everything below — transport selection, cancellation registration, stream
 // fanout, exit waiting, resource cleanup — is in this file so adapters never

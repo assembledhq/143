@@ -2145,27 +2145,39 @@ work.
 ```dockerfile
 FROM node:22-alpine AS builder
 WORKDIR /app
-COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+COPY frontend/source.config.ts ./frontend/
+COPY docs/public ./docs/public
+WORKDIR /app/frontend
 RUN npm ci
-COPY frontend/ .
+COPY frontend/ ./
+ARG BUILD_SHA=dev
+ENV NEXT_PUBLIC_BUILD_SHA=$BUILD_SHA
 RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+COPY --from=builder /app/frontend/.next/standalone ./
+COPY --from=builder /app/frontend/.next/static ./frontend/.next/static
+COPY --from=builder /app/frontend/public ./frontend/public
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
 
+WORKDIR /app/frontend
 CMD ["node", "server.js"]
 ```
 
 This uses Next.js standalone output mode (minimal Node.js server, no dev
-dependencies). The resulting image is ~150 MB. Add the build step to the CI
-workflow alongside the server and agent images.
+dependencies). In the monorepo build, `server.js` is emitted under
+`.next/standalone/frontend`, while traced repo-level content such as docs can
+live alongside it under `.next/standalone`. The runtime image therefore keeps
+the full standalone tree but starts from `/app/frontend`, with static and
+public assets copied into that nested app directory. The resulting image is
+~150 MB. Add the build step to the CI workflow alongside the server and agent
+images.
 
 ---
 

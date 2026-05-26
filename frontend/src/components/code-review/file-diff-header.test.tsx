@@ -10,6 +10,15 @@ describe("FileDiffHeader", () => {
     expect(screen.getByText("src/app.ts")).toBeInTheDocument();
   });
 
+  it("uses attached diff-surface styling without an independent sticky shadow", () => {
+    const { container } = render(<FileDiffHeader filePath="src/app.ts" added={3} removed={1} />);
+    const header = container.firstElementChild;
+
+    expect(header).toHaveClass("bg-card/95");
+    expect(header).toHaveClass("border-b");
+    expect(header).toHaveClass("shadow-none");
+  });
+
   it("renders diff stats badge", () => {
     render(<FileDiffHeader filePath="src/app.ts" added={5} removed={2} />);
     expect(screen.getByText("+5")).toBeInTheDocument();

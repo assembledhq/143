@@ -1,0 +1,48 @@
+---
+title: Connect GitHub
+description: Install the 143 GitHub App and import repositories for coding-agent work.
+section: Get started
+order: 2
+status: beta
+audience: engineer
+tags:
+  - github
+  - repositories
+  - onboarding
+llm_summary: Install the 143 GitHub App, choose repositories, and confirm the org can create branches and PRs for sessions.
+---
+
+# Connect GitHub
+
+143 uses a GitHub App installation to read repositories, create branches, push changes, and open pull requests. This avoids long-lived personal access tokens and lets admins scope repository access from GitHub.
+
+## Setup
+
+<Steps>
+  <Step>Open 143 and go to the GitHub connection step.</Step>
+  <Step>Install the 143 GitHub App into the GitHub organization that owns the repositories.</Step>
+  <Step>Select all repositories that 143 should be allowed to work in.</Step>
+  <Step>Return to 143 and import the repositories.</Step>
+</Steps>
+
+## Repository ownership
+
+A GitHub repository should have one active owning 143 organization at a time. If the same GitHub App installation is visible to multiple 143 organizations, only the active owner should be connected for new sessions.
+
+## Verify setup
+
+After connecting GitHub, start a small session against a low-risk repo. A successful setup can:
+
+- Clone the repository into a sandbox.
+- Resolve the requested base branch.
+- Create a working branch.
+- Collect a diff.
+- Open a PR when requested.
+
+## Common blockers
+
+| Symptom | What to check |
+| --- | --- |
+| Repo does not appear in 143 | Confirm the GitHub App has access to the repo. |
+| Session cannot clone | Confirm the installation is still active and repository ownership is connected. |
+| PR creation fails | Confirm the branch exists, GitHub auth is valid, and the repo permits app-created branches. |

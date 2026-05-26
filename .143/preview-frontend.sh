@@ -21,13 +21,20 @@ set -eu
 
 cd frontend
 
-# Skip the install on a hot restart inside the same sandbox: once the deps
-# are present, `npm ci` would still wipe and reinstall (~30s) for nothing.
-# A full sandbox recycle re-enters this branch and pays the cold-install
-# cost once, the same way preview-start.sh's gocache works.
-if [ ! -d node_modules ]; then
+# Skip the install on a hot restart only after a previous npm ci completed
+# against this exact lockfile. A killed npm ci can leave a partial
+# node_modules tree behind; treating node_modules itself as the success signal
+# lets that corrupted install poison later preview starts.
+LOCK_HASH="$(sha256sum package-lock.json | awk '{print $1}')"
+INSTALL_MARKER="node_modules/.143-npm-ci-lock"
+
+if [ ! -f "$INSTALL_MARKER" ] || [ "$(cat "$INSTALL_MARKER")" != "$LOCK_HASH" ] || [ ! -x node_modules/.bin/next ]; then
     echo '[143-preview] installing frontend deps (npm ci)...'
+    rm -rf node_modules
     npm ci --no-audit --no-fund
+    printf '%s\n' "$LOCK_HASH" > "$INSTALL_MARKER"
+else
+    echo '[143-preview] frontend deps already installed for current lockfile'
 fi
 
 echo '[143-preview] building next production bundle...'

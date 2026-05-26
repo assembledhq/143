@@ -1,0 +1,5 @@
+{
+  "title": "Get started",
+  "description": "First successful workflow with 143.",
+  "pages": ["index", "connect-github", "start-a-session", "review-and-ship"]
+}

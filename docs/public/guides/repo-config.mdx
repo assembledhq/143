@@ -1,0 +1,88 @@
+---
+title: Repo config
+description: Configure `.143/config.json` so 143 can prepare workspaces, validate changes, and run previews.
+section: Guides
+order: 11
+status: stable
+audience: engineer
+tags:
+  - repo-config
+  - validation
+  - previews
+llm_summary: Configure `.143/config.json` with dependencies, bootstrap commands, validation commands, and preview settings for a repository.
+---
+
+# Repo config
+
+`.143/config.json` is the repository contract 143 reads before agent work. It tells 143 how to prepare a sandbox, which deterministic checks matter, and how to start a live preview.
+
+Place it at the repo root:
+
+```text
+your-repo/
+  .143/
+    config.json
+```
+
+## Quickstart
+
+If you only need setup and validation, start here:
+
+```json
+{
+  "dependencies": {
+    "golangci-lint": "2.10.1"
+  },
+  "bootstrap": {
+    "commands": ["npm ci"]
+  },
+  "validation": {
+    "commands": ["npm run lint", "npm test"]
+  }
+}
+```
+
+If you also need a preview:
+
+```json
+{
+  "preview": {
+    "name": "web",
+    "primary": "web",
+    "services": {
+      "web": {
+        "command": ["npm", "run", "dev"],
+        "port": 3000,
+        "ready": { "http_path": "/" }
+      }
+    },
+    "credentials": { "mode": "none" },
+    "network": { "mode": "managed" }
+  },
+  "bootstrap": {
+    "commands": ["npm ci"]
+  },
+  "validation": {
+    "commands": ["npm run lint"]
+  }
+}
+```
+
+## Sections
+
+<ConfigField name="dependencies" type="object" description="Supported tools to install before bootstrap or validation commands run." />
+<ConfigField name="bootstrap.commands" type="string[]" description="Deterministic setup commands, such as package installs." />
+<ConfigField name="validation.commands" type="string[]" description="Extra deterministic checks 143 should run during validation." />
+<ConfigField name="preview" type="object" description="Preview service configuration for live app review inside a session." />
+
+## Good defaults
+
+- Commit the file to the repo.
+- Keep commands deterministic.
+- Do not put secrets in the file.
+- Use managed preview credentials for secrets.
+- Put exhaustive preview fields in [Preview config reference](/docs/reference/preview-config) instead of overloading this guide.
+
+<Callout type="warning" title="No secrets">
+Never commit API keys, database URLs, or tokens into `.143/config.json`.
+</Callout>

@@ -210,6 +210,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if services != nil && services.PreviewStarter != nil {
 		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(services, logger))
+		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -400,6 +401,7 @@ type Services struct {
 
 type previewStarter interface {
 	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
+	StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error
 }
 
 type orchestratorService interface {
@@ -472,6 +474,39 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 					Str("session_id", input.SessionID.String()).
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			return &FatalError{Err: err}
+		}
+		return nil
+	}
+}
+
+func newStartBranchPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.StartBranchPreviewJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal start_branch_preview payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.UserID == uuid.Nil || input.PreviewID == uuid.Nil || input.PreviewTargetID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("start_branch_preview payload missing required ids")}
+		}
+		logger.Info().
+			Str("preview_id", input.PreviewID.String()).
+			Str("preview_target_id", input.PreviewTargetID.String()).
+			Msg("processing start_branch_preview job")
+		if err := services.PreviewStarter.StartReservedBranchPreview(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				retryAfter := previewCapacityRetryDelay
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("preview_target_id", input.PreviewTargetID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview capacity reached; retrying start_branch_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
 			return &FatalError{Err: err}
@@ -1435,7 +1470,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
-		// confidence) onto the thread row. Stays nil when the orchestrator
+		// etc.) onto the thread row. Stays nil when the orchestrator
 		// short-circuited before completing a turn (cancel, policy stop) so
 		// we fall back to the status-only completion path.
 		var lastTurnResult *agent.AgentResult
@@ -1595,7 +1630,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session claimed on the wrong node; releasing for the correct worker")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{
+					Err:                    err,
+					RetryAfter:             &retryAfter,
+					BypassMaxRetryDuration: true,
+					TargetNodeID:           models.SessionWorkerTarget(&session),
+				}
 			}
 			if errors.Is(err, agent.ErrSandboxPreviewRace) {
 				// A preview hydrate published the live container first. Retry
@@ -1657,7 +1697,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// tracks the shared sandbox's total turns across all threads.
 			//
 			// When OnTurnComplete fired we have the agent's result in hand,
-			// so persist diff/summary/confidence onto the thread row via
+			// so persist diff/summary onto the thread row via
 			// UpdateTurnComplete — this is the data the revert action and
 			// the per-tab summary panel read. When the turn short-circuited
 			// before producing a result (cancel, policy stop) we fall back
@@ -1671,9 +1711,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					diffPtr = &lastTurnResult.Diff
 				}
 				threadResult := &models.SessionResult{
-					ConfidenceScore: &lastTurnResult.ConfidenceScore,
-					ResultSummary:   summaryPtr,
-					Diff:            diffPtr,
+					ResultSummary: summaryPtr,
+					Diff:          diffPtr,
 				}
 				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
 					logger.Warn().Err(err).
@@ -1821,6 +1860,15 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
+		}
+		if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+			if run.Status == models.SessionStatusRunning {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Msg("open_pr waiting for running session snapshot")
+				return &RetryableError{Err: agent.ErrSnapshotPending}
+			}
+			return fmt.Errorf("session %s has no snapshot (status: %s)", runID, run.Status)
 		}
 
 		if stores.SessionIssueLinks != nil {

@@ -675,7 +675,7 @@ When an agent run completes (success or failure), the existing post-run handler 
 
 ```go
 func (s *Service) onAgentRunComplete(ctx context.Context, run *AgentRun) error {
-    // Existing: update agent_run status, diff, confidence, etc.
+    // Existing: update agent_run status, diff, etc.
 
     // If this run is linked to a project task, update the task
     if run.ProjectTaskID != nil {
@@ -855,7 +855,7 @@ PM-proposed projects appear with a "Proposed" badge and a prominent "Approve" / 
 ### Project detail page (`/projects/{id}`)
 
 #### Board view (default)
-Kanban-style board with task cards in columns: Pending | Running | Completed | Failed. Each card shows title, complexity badge, confidence badge, and links to agent run / PR.
+Kanban-style board with task cards in columns: Pending | Running | Completed | Failed. Each card shows title, complexity badge, and links to agent run / PR.
 
 #### Timeline view
 Cycle-by-cycle history showing what the PM decided each cycle, tasks created, and outcomes. Useful for understanding how the project evolved.
@@ -1185,6 +1185,6 @@ The key philosophical difference: Symphony trusts the human to manage the projec
 
 3. **How do projects interact with Linear/Sentry sync?** If a project task maps to a Linear issue, should task completion update Linear? Probably yes — bidirectional sync. Separate integration concern.
 
-4. **Should project tasks have their own confidence gating?** Today, reactive tasks respect the org's confidence threshold. Should project tasks use a different threshold? (e.g., "I trust the PM more for project work because it has better context")
+4. **Should project tasks have their own review gates?** Today, project tasks follow the same execution and PR policies as reactive tasks. Should project tasks use different review requirements because they have richer PM context?
 
-5. **Auto-merge for project PRs?** The `auto_merge` flag exists in the schema. When should this be safe to enable? Proposed: only when all validation checks pass AND confidence score > org threshold AND the task is `complexity: trivial|simple`.
+5. **Auto-merge for project PRs?** The `auto_merge` flag exists in the schema. When should this be safe to enable? Proposed: only when all validation checks pass AND the task is `complexity: trivial|simple`.

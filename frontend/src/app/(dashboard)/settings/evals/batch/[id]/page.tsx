@@ -14,6 +14,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
+import { usePageTitle } from "@/hooks/use-page-title";
 import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse, SingleResponse } from "@/lib/types";
 import { evalRunStatusConfig } from "@/lib/types";
 
@@ -64,6 +65,7 @@ export default function BatchDetailPage() {
   });
 
   const batch = batchResponse?.data;
+  usePageTitle(batch?.name, "Eval batch");
 
   // Fetch task details so we can show real names in the matrix
   const { data: tasksResponse } = useQuery<ListResponse<EvalTask>>({

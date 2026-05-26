@@ -89,14 +89,13 @@ services:
       # working DNS and fail their first preview-infra lookup.
       sandbox-dns:
         condition: service_healthy
-    # NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, and DOCKER_GID
-    # are per-host identity/runtime values. They live in /opt/143/.env.local
-    # and are concatenated into
-    # /opt/143/.env by provision.sh / deploy.sh so docker compose can
-    # interpolate them below. The :? syntax fails the deploy loudly if any
-    # value is missing — without it, port 8080 would bind to 0.0.0.0 (exposes
-    # the internal preview API publicly) and the node would heartbeat without
-    # a preview_internal_base_url (StartPreview returns PREVIEW_NO_WORKERS).
+    # NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, WORKER_HOST_PORT,
+    # and DOCKER_GID are runtime identity values. The stable host defaults live
+    # in /opt/143/.env.local and deploy.sh overrides NODE_ID/HOST_PORT/BASE_URL
+    # per blue/green generation so old and new worker containers can overlap.
+    # The :? syntax fails the deploy loudly if required host values are missing
+    # — without it, the internal preview API could bind to the public interface
+    # or the node could heartbeat without a preview_internal_base_url.
     # If any error below fires, run: make provision-worker HOST=<this-host>
     environment:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
@@ -105,6 +104,7 @@ services:
       CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
       NODE_ID: ${NODE_ID:?missing in /opt/143/.env.local}
+      WORKER_PREVIEW_DRAIN_TIMEOUT: ${WORKER_PREVIEW_DRAIN_TIMEOUT:-2h}
       PREVIEW_INTERNAL_BASE_URL: ${PREVIEW_INTERNAL_BASE_URL:?missing in /opt/143/.env.local}
       PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:-https://{id}.preview.143.dev}
       SESSION_EXECUTOR_IMAGE: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
@@ -121,13 +121,13 @@ services:
       STATIC_EGRESS_PUBLIC_IP: ${STATIC_EGRESS_PUBLIC_IP:-}
     env_file:
       - .env
-    # App nodes reach this worker at http://${WORKER_PRIVATE_IP}:8080 over the
-    # private fleet network to drive preview start/stop and proxy browser
-    # HTTP/WebSocket traffic. Binding to the private IP (not 0.0.0.0) keeps
-    # the internal API off the public interface — many providers already
-    # expose 8080 on the public IP for monitoring.
+    # App nodes reach this worker at http://${WORKER_PRIVATE_IP}:${WORKER_HOST_PORT}
+    # over the private fleet network to drive preview start/stop and proxy
+    # browser HTTP/WebSocket traffic. Binding to the private IP (not 0.0.0.0)
+    # keeps the internal API off the public interface. WORKER_HOST_PORT defaults
+    # to 8080 for first boot and is varied by deploy.sh for blue/green overlap.
     ports:
-      - "${WORKER_PRIVATE_IP:?missing in /opt/143/.env.local}:8080:8080"
+      - "${WORKER_PRIVATE_IP:?missing in /opt/143/.env.local}:${WORKER_HOST_PORT:-8080}:8080"
     networks:
       # The worker must join 143-sandbox to dial preview/sandbox container IPs,
       # but DB/private-fleet traffic must keep using the normal compose bridge
@@ -162,15 +162,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
-    # Must be ≥ in-process WORKER_DRAIN_TIMEOUT (internal/config/config.go,
-    # default 45m) so Docker doesn't SIGKILL the process while it's still
-    # draining in-flight coding turns. This is the binding outer cap — both
-    # the rolling-deploy path's `--force-recreate` and any plain `docker
-    # stop` / `docker compose restart` go through stop_grace_period.
-    # deploy/scripts/deploy.sh's WORKER_DRAIN_TIMEOUT (default 7200s) is a
-    # polling ceiling for the SIGTERM-then-wait loop, not a separate drain
-    # budget — once we recreate, this 50m is what holds.
-    stop_grace_period: 50m
+    # Must be ≥ in-process WORKER_DRAIN_TIMEOUT + WORKER_PREVIEW_DRAIN_TIMEOUT
+    # (internal/config/config.go defaults 45m + 2h) so Docker doesn't SIGKILL
+    # the process while it is still draining in-flight coding turns or serving
+    # existing previews. This is the binding outer cap: both `--force-recreate`
+    # and any plain `docker stop` / `docker compose restart` go through
+    # stop_grace_period. deploy/scripts/deploy.sh's
+    # WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS (default 14400s) is a polling
+    # ceiling for the SIGTERM-then-wait loop, not a separate drain budget.
+    stop_grace_period: 3h
     restart: unless-stopped
     deploy:
       resources:
@@ -183,6 +183,9 @@ services:
 # IP). Declared external here so compose attaches to the existing network
 # instead of creating its own.
 networks:
+  default:
+    external: true
+    name: 143_default
   sandbox:
     external: true
     name: 143-sandbox

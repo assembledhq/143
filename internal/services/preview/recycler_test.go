@@ -36,7 +36,7 @@ func (p *countingProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, 
 // allows overriding the recycle_scheduled_at column.
 func newPreviewInstanceRowWithRecycleSchedule(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time, recycleScheduledAt *time.Time) []any {
 	row := newPreviewInstanceRow(id, sessionID, orgID, userID, status, handle, now)
-	row[26] = recycleScheduledAt
+	row[30] = recycleScheduledAt
 	return row
 }
 
@@ -142,7 +142,7 @@ func TestRecycleWorker_Phase2RecyclesAfterGracePeriod(t *testing.T) {
 		)
 	// UpdatePreviewStatusIfActive.
 	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// RevokeAllForPreview.
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
@@ -154,7 +154,7 @@ func TestRecycleWorker_Phase2RecyclesAfterGracePeriod(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// UpdatePreviewStatus (→ ready).
 	mock.ExpectExec("UPDATE preview_instances SET status = @status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// UpdatePreviewExpiry.
 	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").

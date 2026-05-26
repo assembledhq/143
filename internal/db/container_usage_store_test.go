@@ -31,6 +31,7 @@ func TestContainerUsageStore_RecordStart(t *testing.T) {
 		Provider:      "docker",
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
+		DiskLimitMB:   10240,
 		Image:         "143-sandbox:latest",
 		StartedAt:     startedAt,
 	}
@@ -39,7 +40,7 @@ func TestContainerUsageStore_RecordStart(t *testing.T) {
 	mock.ExpectExec("INSERT INTO container_usage_events").
 		WithArgs(
 			eventID, orgID, sessionID, "abc123",
-			"docker", 2.0, 4096, "143-sandbox:latest",
+			"docker", 2.0, 4096, 10240, "143-sandbox:latest",
 			startedAt,
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -88,29 +89,92 @@ func TestContainerUsageStore_GetUsageSummary(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_sessions"}).AddRow(125.5, 10))
 
 	// Capacity breakdown query
-	mock.ExpectQuery("SELECT cpu_limit, memory_limit_mb").
+	mock.ExpectQuery("SELECT cpu_limit, memory_limit_mb, disk_limit_mb").
 		WithArgs(orgID, start, end).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"cpu_limit", "memory_limit_mb", "minutes", "sessions"}).
-				AddRow(2.0, 4096, 100.0, 8).
-				AddRow(4.0, 8192, 25.5, 2),
+			pgxmock.NewRows([]string{"cpu_limit", "memory_limit_mb", "disk_limit_mb", "minutes", "sessions"}).
+				AddRow(2.0, 4096, 10240, 100.0, 8).
+				AddRow(4.0, 8192, 20480, 25.5, 2),
 		)
 
-	// Peak concurrent query — args ordered by first appearance in SQL:
-	// @end (e2 filter in JOIN), @org_id (WHERE), @start (WHERE).
-	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(concurrent\\)").
-		WithArgs(end, orgID, start).
-		WillReturnRows(pgxmock.NewRows([]string{"peak"}).AddRow(3))
+	// Peak concurrent intervals. This expectation intentionally matches the
+	// bounded interval fetch, not the old self-join aggregate.
+	mock.ExpectQuery("SELECT started_at, COALESCE\\(stopped_at, now\\(\\)\\) AS stopped_at").
+		WithArgs(orgID, start, end).
+		WillReturnRows(pgxmock.NewRows([]string{"started_at", "stopped_at"}).
+			AddRow(start.Add(1*time.Hour), start.Add(3*time.Hour)).
+			AddRow(start.Add(2*time.Hour), start.Add(4*time.Hour)).
+			AddRow(start.Add(2*time.Hour), start.Add(5*time.Hour)).
+			AddRow(start.Add(3*time.Hour), start.Add(6*time.Hour)))
 
 	summary, err := store.GetUsageSummary(context.Background(), orgID, start, end)
-	require.NoError(t, err)
-	require.Equal(t, 125.5, summary.TotalContainerMinutes)
-	require.Equal(t, 10, summary.TotalSessions)
-	require.Equal(t, 4, summary.PeakConcurrent) // 3 peers + 1 self
-	require.Len(t, summary.ByCapacity, 2)
-	require.Equal(t, 2.0, summary.ByCapacity[0].CPULimit)
-	require.Equal(t, 4096, summary.ByCapacity[0].MemoryLimitMB)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "GetUsageSummary should not return an error")
+	require.Equal(t, 125.5, summary.TotalContainerMinutes, "GetUsageSummary should preserve total minutes")
+	require.Equal(t, 10, summary.TotalSessions, "GetUsageSummary should preserve total session count")
+	require.Equal(t, 4, summary.PeakConcurrent, "GetUsageSummary should compute peak concurrency from fetched intervals")
+	require.Len(t, summary.ByCapacity, 2, "GetUsageSummary should return all capacity buckets")
+	require.Equal(t, 2.0, summary.ByCapacity[0].CPULimit, "GetUsageSummary should preserve capacity CPU limit")
+	require.Equal(t, 4096, summary.ByCapacity[0].MemoryLimitMB, "GetUsageSummary should preserve capacity memory")
+	require.Equal(t, 10240, summary.ByCapacity[0].DiskLimitMB, "GetUsageSummary should preserve capacity disk")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContainerUsageStore_GetUsageSummaryPeakConcurrent(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		intervals []timeInterval
+		expected  int
+	}{
+		{
+			name:      "empty",
+			intervals: nil,
+			expected:  0,
+		},
+		{
+			name: "single",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(10 * time.Minute)},
+			},
+			expected: 1,
+		},
+		{
+			name: "non-overlapping",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(10 * time.Minute)},
+				{start: base.Add(20 * time.Minute), stop: base.Add(30 * time.Minute)},
+			},
+			expected: 1,
+		},
+		{
+			name: "partially overlapping",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(30 * time.Minute)},
+				{start: base.Add(10 * time.Minute), stop: base.Add(40 * time.Minute)},
+				{start: base.Add(35 * time.Minute), stop: base.Add(50 * time.Minute)},
+			},
+			expected: 2,
+		},
+		{
+			name: "same-boundary intervals count as concurrent",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(10 * time.Minute)},
+				{start: base.Add(10 * time.Minute), stop: base.Add(20 * time.Minute)},
+			},
+			expected: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := computePeakConcurrent(tt.intervals)
+			require.Equal(t, tt.expected, actual, "peak concurrency should match overlapping interval semantics")
+		})
+	}
 }
 
 func TestContainerUsageStore_ListBySession(t *testing.T) {
@@ -131,7 +195,7 @@ func TestContainerUsageStore_ListBySession(t *testing.T) {
 
 	cols := []string{
 		"id", "org_id", "session_id", "container_id", "provider",
-		"cpu_limit", "memory_limit_mb", "image",
+		"cpu_limit", "memory_limit_mb", "disk_limit_mb", "image",
 		"started_at", "stopped_at", "duration_ms", "container_minutes",
 		"exit_reason", "created_at",
 	}
@@ -140,7 +204,7 @@ func TestContainerUsageStore_ListBySession(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).AddRow(
 				eventID, orgID, sessionID, "ctr-1", "docker",
-				2.0, 4096, "143-sandbox:latest",
+				2.0, 4096, 10240, "143-sandbox:latest",
 				now, &now, &dur, &mins,
 				&reason, now,
 			),
@@ -151,6 +215,7 @@ func TestContainerUsageStore_ListBySession(t *testing.T) {
 	require.Len(t, events, 1)
 	require.Equal(t, eventID, events[0].ID)
 	require.Equal(t, "ctr-1", events[0].ContainerID)
+	require.Equal(t, 10240, events[0].DiskLimitMB)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

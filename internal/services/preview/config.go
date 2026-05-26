@@ -2,9 +2,13 @@ package preview
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
@@ -48,23 +52,69 @@ const (
 	MaxInfraPerConfig    = 2
 	MinPort              = 1024
 	MaxPort              = 65535
+
+	DefaultInstallTimeoutSeconds = 420
+	MaxInstallTimeoutSeconds     = 1800
+
+	DefaultPreviewDiskMiB      = 10 * 1024
+	DefaultSingleServiceMemory = 384
+	DefaultMultiServiceMemory  = 768
+	DefaultInfraServiceMemory  = 1024
+	MaxPreviewCPUMillis        = 2000
+	MaxPreviewMemoryMiB        = 1024
+	MaxPreviewEphemeralDiskMiB = 10 * 1024
 )
+
+var ErrInvalidConfig = errors.New("invalid preview config")
+
+func InvalidConfigMessage(err error) string {
+	detail := "unknown error"
+	if err != nil {
+		detail = err.Error()
+		detail = strings.TrimPrefix(detail, ErrInvalidConfig.Error()+": ")
+		detail = strings.TrimPrefix(detail, "parse "+repoconfig.ConfigPath+": ")
+		detail = strings.TrimPrefix(detail, "validate "+repoconfig.ConfigPath+": ")
+	}
+	return fmt.Sprintf("Invalid %s preview config: %s. Fix the committed config and start preview again.", repoconfig.ConfigPath, detail)
+}
 
 // =============================================================================
 // Raw preview config (direct JSON unmarshal of the nested "preview" section in
 // .143/config.json).
 // =============================================================================
 
+type previewVersion string
+
+func (v *previewVersion) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*v = ""
+		return nil
+	}
+	var asString string
+	if err := json.Unmarshal(data, &asString); err == nil {
+		*v = previewVersion(asString)
+		return nil
+	}
+	var asNumber json.Number
+	if err := json.Unmarshal(data, &asNumber); err == nil {
+		*v = previewVersion(asNumber.String())
+		return nil
+	}
+	return fmt.Errorf("version must be a string or number")
+}
+
 // rawPreviewConfig is the direct JSON representation of the nested preview
 // section inside .143/config.json.
 // It supports both single-service (top-level command/port) and multi-service
 // (services map) formats.
 type rawPreviewConfig struct {
-	Version        string                                 `json:"version"`
+	Version        previewVersion                         `json:"version"`
 	Name           string                                 `json:"name"`
 	Primary        string                                 `json:"primary,omitempty"`
+	Install        *models.PreviewInstallConfig           `json:"install,omitempty"`
 	Services       map[string]models.ServiceConfig        `json:"services,omitempty"`
 	Infrastructure map[string]models.InfrastructureConfig `json:"infrastructure,omitempty"`
+	Resources      models.PreviewResourceRequirements     `json:"resources,omitempty"`
 	Credentials    models.CredentialConfig                `json:"credentials"`
 	Network        models.NetworkConfig                   `json:"network"`
 	Progressive    bool                                   `json:"progressive,omitempty"`
@@ -75,6 +125,15 @@ type rawPreviewConfig struct {
 	Port    int                    `json:"port,omitempty"`
 	Env     map[string]string      `json:"env,omitempty"`
 	Ready   *models.ReadinessProbe `json:"ready,omitempty"`
+}
+
+// ConfigOptions is lightweight metadata for presenting committed preview
+// config choices without launching a runtime.
+type ConfigOptions struct {
+	Names             []string `json:"names"`
+	DefaultName       string   `json:"default_name,omitempty"`
+	SelectedName      string   `json:"selected_name,omitempty"`
+	RequiresSelection bool     `json:"requires_selection"`
 }
 
 // isSingleService returns true if the config uses single-service top-level format.
@@ -95,9 +154,32 @@ func (r *rawPreviewConfig) hasBothFormats() bool {
 // ParseConfig parses the nested preview section from .143/config.json and
 // normalizes single-service configs to the multi-service format.
 func ParseConfig(data []byte) (*models.PreviewConfig, error) {
+	return ParseNamedConfig(data, "")
+}
+
+// ParseNamedConfig parses a specific named preview config from .143/config.json.
+// Repos may either use the legacy single preview object or a multi-config map:
+//
+//	{
+//	  "preview": {
+//	    "default": "web",
+//	    "configs": {
+//	      "web": {"primary": "web", "services": {...}},
+//	      "docs": {"primary": "docs", "services": {...}}
+//	    }
+//	  }
+//	}
+//
+// An omitted name auto-selects the only config or the declared default.
+func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 	previewData, err := extractPreviewSection(data)
 	if err != nil {
 		return nil, err
+	}
+	if selected, ok, err := selectNamedPreviewSection(previewData, name); err != nil {
+		return nil, err
+	} else if ok {
+		previewData = selected
 	}
 
 	var raw rawPreviewConfig
@@ -110,9 +192,11 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	}
 
 	cfg := &models.PreviewConfig{
-		Version:        raw.Version,
+		Version:        string(raw.Version),
 		Name:           raw.Name,
+		Install:        cloneInstallConfig(raw.Install),
 		Infrastructure: raw.Infrastructure,
+		Resources:      raw.Resources,
 		Credentials:    raw.Credentials,
 		Network:        raw.Network,
 		Progressive:    raw.Progressive,
@@ -146,8 +230,96 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	if cfg.Infrastructure == nil {
 		cfg.Infrastructure = make(map[string]models.InfrastructureConfig)
 	}
+	defaultPreviewInstallConfig(cfg.Install)
 
 	return cfg, nil
+}
+
+// InspectConfigOptions returns available named preview configs and the config
+// that would be selected for a request. It intentionally avoids full validation
+// so the create form can stay fast and only needs one GitHub content fetch.
+func InspectConfigOptions(data []byte, name string) (ConfigOptions, error) {
+	previewData, err := extractPreviewSection(data)
+	if err != nil {
+		return ConfigOptions{}, err
+	}
+	var probe struct {
+		Default string                     `json:"default"`
+		Configs map[string]json.RawMessage `json:"configs"`
+	}
+	if err := json.Unmarshal(previewData, &probe); err != nil {
+		return ConfigOptions{}, fmt.Errorf("parse preview config metadata: %w", err)
+	}
+	selectedName := strings.TrimSpace(name)
+	if len(probe.Configs) > 0 {
+		names := sortedPreviewConfigNames(probe.Configs)
+		defaultName := strings.TrimSpace(probe.Default)
+		if selectedName == "" {
+			selectedName = defaultName
+		}
+		if selectedName == "" && len(names) == 1 {
+			selectedName = names[0]
+		}
+		return ConfigOptions{
+			Names:             names,
+			DefaultName:       defaultName,
+			SelectedName:      selectedName,
+			RequiresSelection: selectedName == "",
+		}, nil
+	}
+	var raw rawPreviewConfig
+	if err := json.Unmarshal(previewData, &raw); err != nil {
+		return ConfigOptions{}, fmt.Errorf("parse preview config metadata: %w", err)
+	}
+	configName := strings.TrimSpace(raw.Name)
+	if configName == "" {
+		configName = "default"
+	}
+	if selectedName == "" {
+		selectedName = configName
+	}
+	return ConfigOptions{
+		Names:        []string{configName},
+		SelectedName: selectedName,
+	}, nil
+}
+
+func selectNamedPreviewSection(previewData []byte, name string) ([]byte, bool, error) {
+	var probe struct {
+		Default string                     `json:"default"`
+		Configs map[string]json.RawMessage `json:"configs"`
+	}
+	if err := json.Unmarshal(previewData, &probe); err != nil {
+		return nil, false, nil
+	}
+	if len(probe.Configs) == 0 {
+		return nil, false, nil
+	}
+	names := sortedPreviewConfigNames(probe.Configs)
+	selectedName := strings.TrimSpace(name)
+	if selectedName == "" {
+		selectedName = strings.TrimSpace(probe.Default)
+	}
+	if selectedName == "" && len(names) == 1 {
+		selectedName = names[0]
+	}
+	if selectedName == "" {
+		return nil, false, fmt.Errorf("preview_config_name is required; available configs: %s", strings.Join(names, ", "))
+	}
+	selected, ok := probe.Configs[selectedName]
+	if !ok {
+		return nil, false, fmt.Errorf("preview config %q not found; available configs: %s", selectedName, strings.Join(names, ", "))
+	}
+	return selected, true, nil
+}
+
+func sortedPreviewConfigNames(configs map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func extractPreviewSection(data []byte) ([]byte, error) {
@@ -214,6 +386,12 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	for name, svc := range cfg.Services {
 		if len(svc.Command) == 0 {
 			errs = append(errs, fmt.Sprintf("service %q: command is required", name))
+		} else {
+			for i, part := range svc.Command {
+				if strings.TrimSpace(part) == "" {
+					errs = append(errs, fmt.Sprintf("service %q: command[%d] must not be blank", name, i))
+				}
+			}
 		}
 		if svc.Port < MinPort || svc.Port > MaxPort {
 			errs = append(errs, fmt.Sprintf("service %q: port %d must be in range %d-%d", name, svc.Port, MinPort, MaxPort))
@@ -232,6 +410,9 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 			errs = append(errs, fmt.Sprintf("service %q: ready.http_path %q contains invalid characters (must match /[a-zA-Z0-9/_.-?&=%%]*)", name, svc.Ready.HTTPPath))
 		}
 	}
+
+	errs = append(errs, validatePreviewInstallConfig(cfg.Install)...)
+	errs = append(errs, validatePreviewResources(cfg.Resources)...)
 
 	// Per-infrastructure validation.
 	for name, infra := range cfg.Infrastructure {
@@ -267,12 +448,17 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 }
 
 // validHTTPPath only allows safe characters in readiness probe paths to prevent
-// shell injection when the path is interpolated into a curl command.
+// shell injection when the path is interpolated into a curl command. The negative
+// lookahead equivalent is implemented by rejecting /.. sequences after the
+// character allowlist passes, since Go's regexp package is RE2 (no lookahead).
 var validHTTPPath = regexp.MustCompile(`^/[a-zA-Z0-9/_.\-?&=%]*$`)
+var traversalSequence = regexp.MustCompile(`/\.\.(/|$)`)
+var validPreviewInstallCleanPath = regexp.MustCompile(`^[A-Za-z0-9_./@*+\-]+$`)
 
-// isValidHTTPPath checks that a readiness probe HTTP path contains only safe characters.
+// isValidHTTPPath checks that a readiness probe HTTP path contains only safe
+// characters and does not contain path traversal sequences (/../).
 func isValidHTTPPath(path string) bool {
-	return validHTTPPath.MatchString(path)
+	return validHTTPPath.MatchString(path) && !traversalSequence.MatchString(path)
 }
 
 // validatePathInsideRepo checks that a relative path does not escape the repo root.
@@ -287,6 +473,193 @@ func validatePathInsideRepo(field, path string) []string {
 	return nil
 }
 
+func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string {
+	if install == nil {
+		return nil
+	}
+	var errs []string
+	if len(install.Command) == 0 {
+		errs = append(errs, "preview.install.command is required")
+	} else {
+		for i, part := range install.Command {
+			if strings.TrimSpace(part) == "" {
+				errs = append(errs, fmt.Sprintf("preview.install.command[%d] is required", i))
+			}
+		}
+	}
+	if install.Cwd != "" {
+		errs = append(errs, validatePathInsideRepo("preview.install.cwd", install.Cwd)...)
+	}
+	for i, path := range install.Lockfiles {
+		field := fmt.Sprintf("preview.install.lockfiles[%d]", i)
+		if strings.TrimSpace(path) == "" {
+			errs = append(errs, field+" is required")
+			continue
+		}
+		errs = append(errs, validatePathInsideRepo(field, path)...)
+	}
+	for i, path := range install.CleanPaths {
+		field := fmt.Sprintf("preview.install.clean_paths[%d]", i)
+		if strings.TrimSpace(path) == "" {
+			errs = append(errs, field+" is required")
+			continue
+		}
+		errs = append(errs, validatePathInsideRepo(field, path)...)
+		if clean := filepath.Clean(path); clean == "." {
+			errs = append(errs, fmt.Sprintf("%s: path %q is too broad to clean", field, path))
+		}
+		if !validPreviewInstallCleanPath.MatchString(path) {
+			errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, path))
+		}
+	}
+	for i, path := range install.VerifyPaths {
+		field := fmt.Sprintf("preview.install.verify_paths[%d]", i)
+		if strings.TrimSpace(path) == "" {
+			errs = append(errs, field+" is required")
+			continue
+		}
+		errs = append(errs, validatePathInsideRepo(field, path)...)
+	}
+	if install.TimeoutSeconds < 0 || install.TimeoutSeconds > MaxInstallTimeoutSeconds {
+		errs = append(errs, fmt.Sprintf("preview.install.timeout_seconds must be between 1 and %d seconds when set", MaxInstallTimeoutSeconds))
+	}
+	return errs
+}
+
+func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
+	if install == nil {
+		return
+	}
+	if install.TimeoutSeconds == 0 {
+		install.TimeoutSeconds = DefaultInstallTimeoutSeconds
+	}
+}
+
+func validatePreviewResources(resources models.PreviewResourceRequirements) []string {
+	var errs []string
+
+	reqCPU, reqCPUSet, err := parseCPUQuantity("preview.resources.requests.cpu", resources.Requests.CPU)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	reqMemory, reqMemorySet, err := parseByteQuantityMiB("preview.resources.requests.memory", resources.Requests.Memory)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	reqDisk, reqDiskSet, err := parseByteQuantityMiB("preview.resources.requests.ephemeral-storage", resources.Requests.EphemeralStorage)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	limitCPU, limitCPUSet, err := parseCPUQuantity("preview.resources.limits.cpu", resources.Limits.CPU)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	limitMemory, limitMemorySet, err := parseByteQuantityMiB("preview.resources.limits.memory", resources.Limits.Memory)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	limitDisk, limitDiskSet, err := parseByteQuantityMiB("preview.resources.limits.ephemeral-storage", resources.Limits.EphemeralStorage)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	if reqCPUSet && reqCPU > MaxPreviewCPUMillis {
+		errs = append(errs, "preview.resources.requests.cpu must be at most 2 cores")
+	}
+	if limitCPUSet && limitCPU > MaxPreviewCPUMillis {
+		errs = append(errs, "preview.resources.limits.cpu must be at most 2 cores")
+	}
+	if reqMemorySet && reqMemory > MaxPreviewMemoryMiB {
+		errs = append(errs, "preview.resources.requests.memory must be at most 1Gi")
+	}
+	if limitMemorySet && limitMemory > MaxPreviewMemoryMiB {
+		errs = append(errs, "preview.resources.limits.memory must be at most 1Gi")
+	}
+	if reqDiskSet && reqDisk > MaxPreviewEphemeralDiskMiB {
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most 10Gi")
+	}
+	if limitDiskSet && limitDisk > MaxPreviewEphemeralDiskMiB {
+		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most 10Gi")
+	}
+
+	if reqCPUSet && limitCPUSet && reqCPU > limitCPU {
+		errs = append(errs, "preview.resources.requests.cpu must be less than or equal to preview.resources.limits.cpu")
+	}
+	if reqMemorySet && limitMemorySet && reqMemory > limitMemory {
+		errs = append(errs, "preview.resources.requests.memory must be less than or equal to preview.resources.limits.memory")
+	}
+	if reqDiskSet && limitDiskSet && reqDisk > limitDisk {
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be less than or equal to preview.resources.limits.ephemeral-storage")
+	}
+
+	return errs
+}
+
+func parseCPUQuantity(field, raw string) (int, bool, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false, nil
+	}
+	if strings.HasSuffix(value, "m") {
+		millisRaw := strings.TrimSuffix(value, "m")
+		millis, err := strconv.Atoi(millisRaw)
+		if err != nil || millis <= 0 {
+			return 0, true, fmt.Errorf("%s must be a positive CPU quantity such as 500m, 1, or 1.5", field)
+		}
+		return millis, true, nil
+	}
+	cores, err := strconv.ParseFloat(value, 64)
+	if err != nil || cores <= 0 {
+		return 0, true, fmt.Errorf("%s must be a positive CPU quantity such as 500m, 1, or 1.5", field)
+	}
+	return int(math.Ceil(cores * 1000)), true, nil
+}
+
+func parseByteQuantityMiB(field, raw string) (int, bool, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false, nil
+	}
+
+	lower := strings.ToLower(value)
+	units := []struct {
+		suffix string
+		mib    float64
+	}{
+		{suffix: "gib", mib: 1024},
+		{suffix: "gi", mib: 1024},
+		{suffix: "gb", mib: 1000000000.0 / 1048576.0},
+		{suffix: "g", mib: 1000000000.0 / 1048576.0},
+		{suffix: "mib", mib: 1},
+		{suffix: "mi", mib: 1},
+		{suffix: "mb", mib: 1000000.0 / 1048576.0},
+		{suffix: "m", mib: 1000000.0 / 1048576.0},
+		{suffix: "kib", mib: 1.0 / 1024.0},
+		{suffix: "ki", mib: 1.0 / 1024.0},
+		{suffix: "kb", mib: 1000.0 / 1048576.0},
+		{suffix: "k", mib: 1000.0 / 1048576.0},
+		{suffix: "b", mib: 1.0 / 1048576.0},
+	}
+	for _, unit := range units {
+		if !strings.HasSuffix(lower, unit.suffix) {
+			continue
+		}
+		numberRaw := strings.TrimSpace(value[:len(value)-len(unit.suffix)])
+		number, err := strconv.ParseFloat(numberRaw, 64)
+		if err != nil || number <= 0 {
+			return 0, true, fmt.Errorf("%s must be a positive byte quantity such as 512Mi, 1Gi, 500mb, or 5gb", field)
+		}
+		return int(math.Ceil(number * unit.mib)), true, nil
+	}
+
+	bytes, err := strconv.ParseFloat(value, 64)
+	if err != nil || bytes <= 0 {
+		return 0, true, fmt.Errorf("%s must be a positive byte quantity such as 512Mi, 1Gi, 500mb, or 5gb", field)
+	}
+	return int(math.Ceil(bytes / 1048576.0)), true, nil
+}
+
 // =============================================================================
 // Trust split resolution
 // =============================================================================
@@ -298,7 +671,7 @@ func validatePathInsideRepo(field, path string) []string {
 //
 // For connected previews (credentials.mode != "none"), ALL fields are pinned to
 // the base branch.
-func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig {
+func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) (*models.PreviewConfig, error) {
 	resolved := &models.PreviewConfig{
 		Version:     baseCfg.Version,
 		Name:        baseCfg.Name,
@@ -309,6 +682,15 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 		Credentials: baseCfg.Credentials,
 		Network:     baseCfg.Network,
 	}
+
+	if IsConnected(baseCfg) {
+		resolved.Install = cloneInstallConfig(baseCfg.Install)
+		resolved.Resources = baseCfg.Resources
+	} else {
+		resolved.Install = cloneInstallConfig(diffCfg.Install)
+		resolved.Resources = diffCfg.Resources
+	}
+	defaultPreviewInstallConfig(resolved.Install)
 
 	// Infrastructure: structure from base, init_script from diff (unless connected).
 	resolved.Infrastructure = make(map[string]models.InfrastructureConfig, len(baseCfg.Infrastructure))
@@ -346,7 +728,22 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 		}
 	}
 
-	return resolved
+	if errs := ValidateConfig(resolved); len(errs) > 0 {
+		return nil, fmt.Errorf("resolved config is invalid: %s", strings.Join(errs, "; "))
+	}
+	return resolved, nil
+}
+
+func cloneInstallConfig(install *models.PreviewInstallConfig) *models.PreviewInstallConfig {
+	if install == nil {
+		return nil
+	}
+	cloned := *install
+	cloned.Command = append([]string(nil), install.Command...)
+	cloned.Lockfiles = append([]string(nil), install.Lockfiles...)
+	cloned.CleanPaths = append([]string(nil), install.CleanPaths...)
+	cloned.VerifyPaths = append([]string(nil), install.VerifyPaths...)
+	return &cloned
 }
 
 // IsConnected returns true if the config references managed credentials or destinations.
@@ -411,13 +808,34 @@ func DetectReadiness(cfg *models.PreviewConfig) models.PreviewDetectionResult {
 
 // ResolveResourceLimits returns the appropriate resource limits based on config.
 func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
+	limits := models.ResourceLimits{
+		MemoryMiB: DefaultSingleServiceMemory,
+		CPUMillis: 500,
+		DiskMiB:   DefaultPreviewDiskMiB,
+	}
 	if len(cfg.Services) > 1 && len(cfg.Infrastructure) > 0 {
-		return models.ResourceLimits{MemoryMB: 2048, CPUMillis: 2000}
+		limits.MemoryMiB = DefaultInfraServiceMemory
+		limits.CPUMillis = 2000
+	} else if len(cfg.Services) > 1 {
+		limits.MemoryMiB = DefaultMultiServiceMemory
+		limits.CPUMillis = 1000
 	}
-	if len(cfg.Services) > 1 {
-		return models.ResourceLimits{MemoryMB: 1024, CPUMillis: 1000}
+
+	applyResourceList := func(list models.PreviewResourceList) {
+		if parsed, ok, err := parseCPUQuantity("preview.resources.cpu", list.CPU); err == nil && ok {
+			limits.CPUMillis = parsed
+		}
+		if parsed, ok, err := parseByteQuantityMiB("preview.resources.memory", list.Memory); err == nil && ok {
+			limits.MemoryMiB = parsed
+		}
+		if parsed, ok, err := parseByteQuantityMiB("preview.resources.ephemeral-storage", list.EphemeralStorage); err == nil && ok {
+			limits.DiskMiB = parsed
+		}
 	}
-	return models.ResourceLimits{MemoryMB: 512, CPUMillis: 500}
+	applyResourceList(cfg.Resources.Requests)
+	applyResourceList(cfg.Resources.Limits)
+
+	return limits
 }
 
 // ApplyResourceLimitsToSandboxConfig maps preview topology limits onto the
@@ -427,6 +845,7 @@ func ApplyResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, cfg *mo
 		return
 	}
 	limits := ResolveResourceLimits(cfg)
-	sandboxCfg.MemoryLimitMB = limits.MemoryMB
+	sandboxCfg.MemoryLimitMB = limits.MemoryMiB
 	sandboxCfg.CPULimit = float64(limits.CPUMillis) / 1000
+	sandboxCfg.DiskLimitGB = int(math.Ceil(float64(limits.DiskMiB) / 1024.0))
 }

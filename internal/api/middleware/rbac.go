@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"slices"
+	"strings"
 )
 
 // RequireRole returns middleware that restricts access to users whose role in
@@ -21,6 +22,14 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 			}
 
 			role := ActiveRoleFromContext(r.Context())
+			if role == "preview_api_token" {
+				if strings.HasPrefix(r.URL.Path, "/api/v1/previews") {
+					next.ServeHTTP(w, r)
+					return
+				}
+				writeError(w, http.StatusForbidden, "FORBIDDEN", "preview API tokens are limited to preview routes")
+				return
+			}
 			if !slices.Contains(roles, role) {
 				writeError(w, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
 				return
