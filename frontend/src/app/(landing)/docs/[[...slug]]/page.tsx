@@ -50,7 +50,7 @@ export default async function PublicDocsPage({ params }: DocsPageProps) {
   const MdxContent = page.data.body;
 
   return (
-    <DocsPage toc={page.data.toc} tableOfContent={{ single: false }}>
+    <DocsPage toc={page.data.toc} tableOfContent={{ single: false }} footer={{ enabled: false }}>
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <DocsBody>
