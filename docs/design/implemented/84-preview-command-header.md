@@ -10,11 +10,11 @@ Ready previews use a compact command header:
 
 - Left side: `Preview` title with quiet status metadata such as `Running` or `Partially ready`.
 - Right side: a primary `Open Preview` link when the preview is openable.
-- Secondary operations live behind `Preview actions`, including `Restart preview`, `Stop preview`, and lifetime controls.
+- Secondary operations live behind `Preview actions`, including `Restart preview`, `Stop preview`, and lifetime controls. `Restart preview` is a user-level "make the preview current again" command: active previews recycle in place, while terminal previews retry by starting a fresh preview row.
 
 The old ready-state status pill is intentionally removed. Readiness is useful context, but when the app is already openable it should not compete with the primary action.
 
-Failed previews are the exception: `Restart Preview` can become the primary header action because `Open Preview` is not available.
+Failed previews are the exception: `Retry Preview` can become the primary header action because `Open Preview` is not available. It uses the same unified preview-ensure command as start/restart, so users do not need to know whether the previous preview row can be recycled.
 
 ## Rationale
 

@@ -1098,7 +1098,6 @@ func (d *DockerPreviewProvider) previewInstallPathExists(ctx context.Context, sb
 
 func buildPreviewInstallCommand(install *models.PreviewInstallConfig, markerPath string) (string, error) {
 	var parts []string
-	parts = append(parts, "mkdir -p .143/cache/preview-install")
 	if len(install.CleanPaths) > 0 {
 		cleanArgs := make([]string, 0, len(install.CleanPaths))
 		for _, cleanPath := range install.CleanPaths {
@@ -1110,6 +1109,7 @@ func buildPreviewInstallCommand(install *models.PreviewInstallConfig, markerPath
 		}
 		parts = append(parts, "rm -rf -- "+strings.Join(cleanArgs, " "))
 	}
+	parts = append(parts, "mkdir -p .143/cache/preview-install")
 
 	escapedCmd := make([]string, 0, len(install.Command))
 	for _, arg := range install.Command {

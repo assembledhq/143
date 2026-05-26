@@ -1236,6 +1236,18 @@ func (m *Manager) HMRWatcher() *HMRWatcher {
 // re-provisions infrastructure, re-runs init scripts, and restarts services.
 // The preview instance ID and last_path are preserved.
 func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID) error {
+	return m.recyclePreview(ctx, orgID, previewID, nil)
+}
+
+// RecyclePreviewWithConfig restarts an active preview in place using a freshly
+// resolved config. The config is validated before any provider process is
+// stopped so invalid workspace edits do not take down the currently running
+// preview.
+func (m *Manager) RecyclePreviewWithConfig(ctx context.Context, orgID, previewID uuid.UUID, cfg *models.PreviewConfig) error {
+	return m.recyclePreview(ctx, orgID, previewID, cfg)
+}
+
+func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID, refreshedConfig *models.PreviewConfig) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
 		return fmt.Errorf("get preview instance: %w", err)
@@ -1251,6 +1263,31 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	input, err := m.loadRecycleInput(ctx, instance)
 	if err != nil {
 		return fmt.Errorf("load recycle input: %w", err)
+	}
+	if refreshedConfig != nil {
+		if errs := ValidateConfig(refreshedConfig); len(errs) > 0 {
+			return fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
+		}
+		input.Config = refreshedConfig
+		limits := ResolveResourceLimits(refreshedConfig)
+		configJSON, err := json.Marshal(refreshedConfig)
+		if err != nil {
+			return fmt.Errorf("marshal refreshed recycle config: %w", err)
+		}
+		if err := m.store.UpdatePreviewRecycleConfig(
+			ctx,
+			orgID,
+			previewID,
+			refreshedConfig.Name,
+			refreshedConfig.Primary,
+			computeConfigDigest(refreshedConfig),
+			limits.MemoryMiB,
+			limits.CPUMillis,
+			limits.DiskMiB,
+			configJSON,
+		); err != nil {
+			return err
+		}
 	}
 
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("recycling preview")
