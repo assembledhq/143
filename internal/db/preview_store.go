@@ -1178,6 +1178,24 @@ func (s *PreviewStore) ListLogsByPreview(ctx context.Context, orgID, previewInst
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewLog])
 }
 
+// ListLatestLogsByPreview returns the latest preview logs in chronological
+// order for display as a bounded tail.
+func (s *PreviewStore) ListLatestLogsByPreview(ctx context.Context, orgID, previewInstanceID uuid.UUID) ([]models.PreviewLog, error) {
+	query := fmt.Sprintf(`SELECT %s FROM (
+			SELECT %s FROM preview_logs
+			WHERE preview_instance_id = @pid AND org_id = @org_id
+			ORDER BY created_at DESC, id DESC
+			LIMIT 200
+		) latest
+		ORDER BY created_at ASC, id ASC`, previewLogColumns, previewLogColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list latest preview logs: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewLog])
+}
+
 // =============================================================================
 // Preview Access Sessions
 // =============================================================================

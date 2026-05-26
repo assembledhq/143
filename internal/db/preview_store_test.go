@@ -1269,6 +1269,34 @@ func TestPreviewStore_ListLogsByPreview(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_ListLatestLogsByPreview_ReturnsTailInChronologicalOrder(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	previewID := uuid.New()
+	orgID := uuid.New()
+
+	mock.ExpectQuery(`SELECT .+ FROM \(\s*SELECT .+ FROM preview_logs.+ORDER BY created_at DESC, id DESC\s+LIMIT 200\s*\) latest\s+ORDER BY created_at ASC, id ASC`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewLogTestCols).
+				AddRow(uuid.New(), previewID, orgID, "info", "start", "newer tail line",
+					json.RawMessage(`{}`), now).
+				AddRow(uuid.New(), previewID, orgID, "info", "start", "newest tail line",
+					json.RawMessage(`{}`), now.Add(time.Second)),
+		)
+
+	logs, err := store.ListLatestLogsByPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err, "ListLatestLogsByPreview should return the latest preview log tail")
+	require.Equal(t, []string{"newer tail line", "newest tail line"}, []string{logs[0].Message, logs[1].Message}, "tail logs should be returned in chronological display order")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // =============================================================================
 // Preview Access Session Tests
 // =============================================================================

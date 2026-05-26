@@ -417,8 +417,10 @@ export function PreviewPanel({
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
+  const [showPreviewRuntimeLogs, setShowPreviewRuntimeLogs] = useState(false);
   const [startupPhaseRailLayout, setStartupPhaseRailLayout] = useState<StartupPhaseRailLayout>("default");
   const startupErrorLogsId = useId();
+  const previewRuntimeLogsId = useId();
 
   // Poll preview status every 3s when active
   const {
@@ -471,10 +473,17 @@ export function PreviewPanel({
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
     (isActive && !isReady) || (status === "failed" && hasStartupRows);
+  const previewLogsTail = showPreviewRuntimeLogs && isActive && !isReady;
+  const shouldLoadPreviewLogs =
+    status === "failed" || previewLogsTail;
   const previewLogsQuery = useQuery({
-    queryKey: ["preview-logs", sessionId, instance?.id],
-    queryFn: () => api.sessions.preview.logs(sessionId),
-    enabled: status === "failed" && Boolean(instance),
+    queryKey: ["preview-logs", sessionId, instance?.id, previewLogsTail ? "tail" : "default"],
+    queryFn: () =>
+      previewLogsTail
+        ? api.sessions.preview.logs(sessionId, { tail: true })
+        : api.sessions.preview.logs(sessionId),
+    enabled: Boolean(instance) && shouldLoadPreviewLogs,
+    refetchInterval: previewLogsTail ? 2000 : false,
     retry: 1,
   });
   const startupErrorLogs = useMemo(() => {
@@ -492,6 +501,18 @@ export function PreviewPanel({
         ? "Could not load persisted preview logs. The startup summary is still available."
         : startupErrorLogs || "No startup logs were captured for this failure."
     : instance?.error || startupErrorLogs;
+  const visiblePreviewRuntimeLogs = useMemo(() => {
+    if (previewLogsQuery.isLoading) return "Loading preview logs...";
+    if (previewLogsQuery.isError) {
+      return "Could not load preview logs. Try closing and reopening this log view.";
+    }
+    const logs = previewLogsQuery.data
+      ?.filter((log) => log.step !== "design_feedback")
+      .map((log) => log.message.trim())
+      .filter(Boolean)
+      .join("\n");
+    return logs || "No preview logs have been captured yet.";
+  }, [previewLogsQuery.data, previewLogsQuery.isError, previewLogsQuery.isLoading]);
 
   // Start preview
   const startMutation = useMutation({
@@ -1019,16 +1040,34 @@ export function PreviewPanel({
           </div>
           <Collapsible>
             <div className="border-t bg-card/60 px-3 py-2">
-              <CollapsibleTrigger asChild>
+              <div className="flex flex-wrap items-center gap-2">
+                <CollapsibleTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="group h-7 px-2 text-xs text-muted-foreground"
+                  >
+                    Details
+                    <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                  </Button>
+                </CollapsibleTrigger>
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="group h-7 px-2 text-xs text-muted-foreground"
+                  className="h-7 px-2 text-xs text-muted-foreground"
+                  aria-expanded={showPreviewRuntimeLogs}
+                  aria-controls={previewRuntimeLogsId}
+                  onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
                 >
-                  Details
-                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                  {showPreviewRuntimeLogs ? "Hide preview logs" : "Show preview logs"}
+                  <ChevronDown
+                    className={cn(
+                      "size-3.5 transition-transform duration-200",
+                      showPreviewRuntimeLogs && "rotate-180",
+                    )}
+                  />
                 </Button>
-              </CollapsibleTrigger>
+              </div>
               <CollapsibleContent className="pt-2 pb-1">
                 <div className="space-y-1.5">
                   {startupChecklist.map((step) => (
@@ -1045,6 +1084,18 @@ export function PreviewPanel({
                   ))}
                 </div>
               </CollapsibleContent>
+              {showPreviewRuntimeLogs && (
+                <pre
+                  id={previewRuntimeLogsId}
+                  aria-label="Preview container logs"
+                  className={cn(
+                    "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
+                    previewLogsQuery.isError && "text-muted-foreground",
+                  )}
+                >
+                  {visiblePreviewRuntimeLogs}
+                </pre>
+              )}
             </div>
           </Collapsible>
         </div>

@@ -2460,6 +2460,44 @@ func TestPreviewHandler_GetLogs_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewHandler_GetLogs_TailUsesLatestLogs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+	mock.ExpectQuery(`SELECT [\s\S]+ FROM \(\s*SELECT [\s\S]+ FROM preview_logs[\s\S]+ORDER BY created_at DESC, id DESC`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPreviewLogTestCols).
+				AddRow(uuid.New(), previewID, orgID, "info", "start", "latest startup line", json.RawMessage("{}"), now),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/preview/logs?tail=true", nil)
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.GetLogs(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "tail preview logs should be returned successfully")
+	require.Contains(t, w.Body.String(), "latest startup line", "response should include latest preview log tail")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewHandler_GetLogs_UsesLatestFailedPreviewWhenNoActivePreview(t *testing.T) {
 	t.Parallel()
 

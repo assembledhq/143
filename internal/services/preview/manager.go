@@ -436,6 +436,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// whole launch returns. It also writes a preview_logs row with the tail
 	// of stdout/stderr when a service fails, so the user sees why.
 	observer := m.newServiceObserver(input.OrgID, instance.ID)
+	defer observer.Close()
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID), observer)
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
@@ -597,17 +598,130 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // callbacks fired after StartPreview returns (progressive support services,
 // the startService goroutine catching a non-zero exit) still land in the DB
 // even if the request context has already been canceled.
-func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID) ServiceObserver {
-	return &managerServiceObserver{manager: m, orgID: orgID, previewID: previewID}
+func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID) *managerServiceObserver {
+	observer := &managerServiceObserver{
+		manager:    m,
+		orgID:      orgID,
+		previewID:  previewID,
+		outputCh:   make(chan previewServiceOutput, serviceOutputBufferSize),
+		outputDone: make(chan struct{}),
+	}
+	go observer.runServiceOutputWriter()
+	return observer
 }
 
 type managerServiceObserver struct {
-	manager   *Manager
-	orgID     uuid.UUID
-	previewID uuid.UUID
+	manager      *Manager
+	orgID        uuid.UUID
+	previewID    uuid.UUID
+	outputCh     chan previewServiceOutput
+	outputDone   chan struct{}
+	outputMu     sync.Mutex
+	outputClosed bool
+	closeOnce    sync.Once
 }
 
 const observerWriteTimeout = 5 * time.Second
+const maxPersistedServiceOutputRunes = 4000
+const serviceOutputBufferSize = 512
+const serviceOutputFlushInterval = 250 * time.Millisecond
+const serviceOutputBatchLines = 50
+
+type previewServiceOutput struct {
+	name string
+	line string
+}
+
+func previewServiceOutputMessage(name, line string) string {
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
+		return ""
+	}
+	runes := []rune(line)
+	if len(runes) > maxPersistedServiceOutputRunes {
+		line = string(runes[:maxPersistedServiceOutputRunes]) + "..."
+	}
+	return fmt.Sprintf("[%s] %s", name, line)
+}
+
+func (o *managerServiceObserver) OnServiceOutput(name, line string) {
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	if o.outputClosed {
+		return
+	}
+	select {
+	case o.outputCh <- previewServiceOutput{name: name, line: line}:
+	default:
+		o.manager.logger.Warn().
+			Str("preview_id", o.previewID.String()).
+			Str("service", name).
+			Msg("observer: dropping preview service output because the buffer is full")
+	}
+}
+
+func (o *managerServiceObserver) Close() {
+	o.closeOnce.Do(func() {
+		o.outputMu.Lock()
+		o.outputClosed = true
+		close(o.outputCh)
+		o.outputMu.Unlock()
+		<-o.outputDone
+	})
+}
+
+func (o *managerServiceObserver) runServiceOutputWriter() {
+	defer close(o.outputDone)
+	ticker := time.NewTicker(serviceOutputFlushInterval)
+	defer ticker.Stop()
+
+	batch := make([]string, 0, serviceOutputBatchLines)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		o.writeServiceOutputLog(strings.Join(batch, "\n"))
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case output, ok := <-o.outputCh:
+			if !ok {
+				flush()
+				return
+			}
+			msg := previewServiceOutputMessage(output.name, output.line)
+			if msg == "" {
+				continue
+			}
+			batch = append(batch, msg)
+			if len(batch) >= serviceOutputBatchLines {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+func (o *managerServiceObserver) writeServiceOutputLog(msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: o.previewID,
+		OrgID:             o.orgID,
+		Level:             "info",
+		Step:              models.PreviewLogStepStart,
+		Message:           msg,
+		Metadata:          json.RawMessage(`{"batched":true}`),
+	}
+	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
+		o.manager.logger.Warn().Err(err).
+			Str("preview_id", o.previewID.String()).
+			Msg("observer: failed to write preview service output log")
+	}
+}
 
 func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
@@ -1177,6 +1291,7 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	// Restart via provider with same sandbox and config. Use the existing
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
 	observer := m.newServiceObserver(orgID, previewID)
+	defer observer.Close()
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
