@@ -11,7 +11,7 @@ PR #244 added `container_usage_events` persistence and a summary endpoint (`GET 
 - **Time-series data** — hourly buckets that the frontend aggregates into days using the viewer's timezone
 - **Dimensional breakdowns** — by user, capacity tier, exit reason
 - **LLM token tracking** — already captured per-session and per-message, but not aggregated for dashboard display
-- **Fast queries** — the raw events table with self-joins won't scale past ~50K events; a materialized rollup avoids O(n²) peak-concurrent scans on every page load
+- **Fast queries** — repeated raw-event aggregation won't scale past ~50K events; a materialized rollup avoids rescanning event intervals on every page load
 - **Export** — CSV download for external billing systems and finance workflows
 
 ## Data Layer
@@ -59,7 +59,7 @@ CREATE INDEX idx_usage_hourly_org_user_hour
 ```
 
 **Why a rollup table instead of live aggregation:**
-- The existing `GetUsageSummary` peak-concurrent query is O(n²) via self-join — unusable for dashboards that need per-day data for 30-90 days
+- The original `GetUsageSummary` peak-concurrent query was O(n²) via self-join; the legacy path now uses an interval sweep, but rollups are still the right shape for dashboard-scale per-day and per-breakdown reads
 - A rollup makes all dashboard queries O(hours) regardless of event count
 - The rollup job is idempotent: `INSERT ... ON CONFLICT DO UPDATE`, safe to re-run
 
@@ -471,7 +471,7 @@ queryKeys.usage = {
 
 ### Why not query raw events directly?
 
-The peak concurrent calculation in `GetUsageSummary` uses a self-join that is O(n²). For an org with 10K events/month, running this per-day for 30 days would mean 30 × O(10K²/30²) ≈ 30 × O(111K) comparisons. The rollup pre-computes this once.
+The legacy `GetUsageSummary` path now avoids the original O(n²) peak-concurrent self-join by fetching only event intervals that overlap the requested range and computing the peak with a Go sweep-line pass. Dashboard queries still read rollups so repeated per-day and per-breakdown views do not rescan raw events on every page load.
 
 ### Rollup staleness
 
