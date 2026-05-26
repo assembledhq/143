@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -14,6 +15,8 @@ import (
 )
 
 const previewSecretBundleColumns = "id, org_id, repository_id, name, active, source_type, source_config_encrypted, outputs_config_encrypted, exposure_policy, created_by_user_id, created_at"
+
+var ErrPreviewSecretBundleNameConflict = errors.New("preview secret bundle name already exists")
 
 type PreviewSecretBundleStore struct {
 	db     DBTX
@@ -129,6 +132,13 @@ func (s *PreviewSecretBundleStore) ReplaceActiveByID(ctx context.Context, orgID 
 		return nil, err
 	}
 	in.RepositoryID = existing.RepositoryID
+	if in.Name != existing.Name {
+		if _, err := getActivePreviewSecretBundleByName(ctx, tx, orgID, existing.RepositoryID, in.Name); err == nil {
+			return nil, ErrPreviewSecretBundleNameConflict
+		} else if err != pgx.ErrNoRows {
+			return nil, err
+		}
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE preview_secret_bundles
@@ -136,8 +146,8 @@ func (s *PreviewSecretBundleStore) ReplaceActiveByID(ctx context.Context, orgID 
 		WHERE org_id = @org_id
 		  AND repository_id = @repository_id
 		  AND active = true
-		  AND (id = @id OR name = @name)`,
-		pgx.NamedArgs{"org_id": orgID, "repository_id": existing.RepositoryID, "id": id, "name": in.Name},
+		  AND id = @id`,
+		pgx.NamedArgs{"org_id": orgID, "repository_id": existing.RepositoryID, "id": id},
 	); err != nil {
 		return nil, fmt.Errorf("deactivate previous preview secret bundle: %w", err)
 	}

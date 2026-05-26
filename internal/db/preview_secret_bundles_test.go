@@ -119,3 +119,51 @@ func TestPreviewSecretBundleStore_DisableInsertsInactiveSuccessor(t *testing.T) 
 	require.NoError(t, err, "Disable should preserve an inactive successor version")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestPreviewSecretBundleStore_ReplaceActiveByIDRejectsRenameConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	existingID := uuid.New()
+	conflictingID := uuid.New()
+	now := time.Now()
+	sourceEncrypted := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6e30="}`)
+	outputsEncrypted := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6W10="}`)
+	columns := []string{
+		"id", "org_id", "repository_id", "name", "active", "source_type", "source_config_encrypted",
+		"outputs_config_encrypted", "exposure_policy", "created_by_user_id", "created_at",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": existingID}).
+		WillReturnRows(pgxmock.NewRows(columns).AddRow(
+			existingID, orgID, repoID, "repo-dev", true, "managed", sourceEncrypted,
+			outputsEncrypted, "preview_runtime", userID, now,
+		))
+	mock.ExpectQuery("FROM preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repoID, "name": "repo-prod"}).
+		WillReturnRows(pgxmock.NewRows(columns).AddRow(
+			conflictingID, orgID, repoID, "repo-prod", true, "managed", sourceEncrypted,
+			outputsEncrypted, "preview_runtime", userID, now,
+		))
+	mock.ExpectRollback()
+
+	store := NewPreviewSecretBundleStore(mock, nil, "test-key")
+	_, err = store.ReplaceActiveByID(context.Background(), orgID, existingID, UpsertPreviewSecretBundleInput{
+		RepositoryID:    repoID,
+		Name:            "repo-prod",
+		Source:          models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://"}},
+		Outputs:         []models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}}},
+		CreatedByUserID: userID,
+	})
+
+	require.ErrorIs(t, err, ErrPreviewSecretBundleNameConflict, "ReplaceActiveByID should reject renaming over another active bundle")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

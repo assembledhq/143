@@ -1179,6 +1179,80 @@ func TestStartPreview_RunsPreviewInstallBeforeServices(t *testing.T) {
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
 }
 
+func TestStartPreview_WritesRuntimeSecretFilesAfterPreviewInstall(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var events []string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, onLine func([]byte)) (int, error) {
+			mu.Lock()
+			switch {
+			case strings.Contains(cmd, "'npm' 'ci'"):
+				events = append(events, "install")
+				mu.Unlock()
+				onLine([]byte("installed dependencies"))
+				return 0, nil
+			case strings.Contains(cmd, "'npm' 'run' 'dev'"):
+				events = append(events, "service")
+				mu.Unlock()
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+				return 0, nil
+			default:
+				events = append(events, "stream")
+				mu.Unlock()
+				return 0, nil
+			}
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			mu.Lock()
+			if strings.Contains(cmd, "__143_SECRET_FILE__") {
+				events = append(events, "secret_file")
+			}
+			mu.Unlock()
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 0, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			switch {
+			case path == "package-lock.json":
+				return []byte(`{"lockfileVersion":3}`), nil
+			case strings.Contains(path, ".143/cache/preview-install/"):
+				return nil, os.ErrNotExist
+			case path == "node_modules/.bin/next":
+				return nil, os.ErrNotExist
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
+	cfg := previewInstallTestConfig()
+	cfg.RuntimeSecretFiles = []models.PreviewRuntimeSecretFile{{
+		Path:    "development.conf.json",
+		Mode:    "0600",
+		Content: []byte(`{"database_url":"postgres://"}`),
+	}}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, nil, &recordingObserver{})
+	require.NoError(t, err, "StartPreview should succeed with runtime secret files")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	mu.Lock()
+	got := append([]string(nil), events...)
+	mu.Unlock()
+	require.Equal(t, []string{"install", "secret_file", "service"}, got, "runtime secret files should be written after install and before services")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
 func TestStartPreview_SkipsPreviewInstallWhenMarkerAndVerifyPathsExist(t *testing.T) {
 	t.Parallel()
 

@@ -242,6 +242,10 @@ func (h *PreviewSecretBundleHandler) Patch(w http.ResponseWriter, r *http.Reques
 		CreatedByUserID: user.ID,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrPreviewSecretBundleNameConflict) {
+			writeError(w, r, http.StatusConflict, "PREVIEW_SECRET_BUNDLE_NAME_CONFLICT", "preview secret bundle name already exists")
+			return
+		}
 		if err == pgx.ErrNoRows {
 			writeError(w, r, http.StatusNotFound, "PREVIEW_SECRET_BUNDLE_NOT_FOUND", "preview secret bundle not found")
 			return

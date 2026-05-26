@@ -285,15 +285,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
 		}
 
-		// Phase 4: Write generated secret files before install/service startup.
-		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
-			phaseErr = fmt.Errorf("write preview secret files: %w", err)
+		// Phase 4: Run the platform-managed install phase before services start.
+		if err := d.runPreviewInstall(ctx, state, cfg.Install, observer); err != nil {
+			phaseErr = fmt.Errorf("%w: %v", preview.ErrInstallFailed, err)
 			return phaseErr
 		}
 
-		// Phase 5: Run the platform-managed install phase before services start.
-		if err := d.runPreviewInstall(ctx, state, cfg.Install, observer); err != nil {
-			phaseErr = fmt.Errorf("%w: %v", preview.ErrInstallFailed, err)
+		// Phase 5: Write generated runtime secret files after install so install
+		// hooks cannot read preview-runtime app secrets.
+		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
+			phaseErr = fmt.Errorf("write preview secret files: %w", err)
 			return phaseErr
 		}
 

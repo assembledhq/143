@@ -21,6 +21,7 @@ type fakePreviewSecretBundleStore struct {
 	upsertInput  *db.UpsertPreviewSecretBundleInput
 	replaceID    uuid.UUID
 	replaceInput *db.UpsertPreviewSecretBundleInput
+	replaceErr   error
 	disabledName string
 	disabledUser uuid.UUID
 	row          models.PreviewSecretBundle
@@ -36,6 +37,9 @@ func (s *fakePreviewSecretBundleStore) Upsert(_ context.Context, _ uuid.UUID, in
 func (s *fakePreviewSecretBundleStore) ReplaceActiveByID(_ context.Context, _ uuid.UUID, id uuid.UUID, in db.UpsertPreviewSecretBundleInput) (*models.PreviewSecretBundle, error) {
 	s.replaceID = id
 	s.replaceInput = &in
+	if s.replaceErr != nil {
+		return nil, s.replaceErr
+	}
 	return &s.row, nil
 }
 
@@ -104,6 +108,40 @@ func TestPreviewSecretBundleHandler_PatchByIDMergesExistingBundle(t *testing.T) 
 	require.Equal(t, "repo-renamed", store.replaceInput.Name, "Patch should apply the requested rename")
 	require.Equal(t, store.source, store.replaceInput.Source, "Patch should preserve source when omitted")
 	require.Equal(t, store.outputs, store.replaceInput.Outputs, "Patch should preserve outputs when omitted")
+}
+
+func TestPreviewSecretBundleHandler_PatchByIDReturnsConflictForNameCollision(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
+		},
+		source:     models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://dev"}},
+		outputs:    []models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}}},
+		replaceErr: db.ErrPreviewSecretBundleNameConflict,
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{"name":"repo-prod"}`)
+	req := previewSecretBundleRequest(http.MethodPatch, "/api/v1/preview-secret-bundles/"+bundleID.String(), body, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Patch(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, "Patch should return conflict when renaming to an existing active bundle")
+	require.Contains(t, rr.Body.String(), "PREVIEW_SECRET_BUNDLE_NAME_CONFLICT", "response should include the conflict error code")
 }
 
 func TestPreviewSecretBundleHandler_TestDoesNotReturnPlaintext(t *testing.T) {
