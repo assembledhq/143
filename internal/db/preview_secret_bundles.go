@@ -14,7 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-const previewSecretBundleColumns = "id, org_id, repository_id, name, active, source_type, source_config_encrypted, outputs_config_encrypted, exposure_policy, created_by_user_id, created_at"
+const previewSecretBundleColumns = "id, org_id, repository_id, name, active, source_type, source_config_encrypted, outputs_config_encrypted, exposure_policy, created_by_user_id, created_at" // #nosec G101 -- SQL column list, not a credential
 
 var ErrPreviewSecretBundleNameConflict = errors.New("preview secret bundle name already exists")
 
