@@ -32,6 +32,7 @@ export const queryKeys = {
     all: ["repositories"] as const,
     summary: ["repositories", "summary"] as const,
     branches: (id: string) => ["repositories", id, "branches"] as const,
+    previewSecretBundles: (id: string) => ["repositories", id, "preview-secret-bundles"] as const,
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,

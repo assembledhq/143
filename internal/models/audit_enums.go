@@ -106,6 +106,12 @@ const (
 	AuditActionCredentialUpdated    AuditAction = "credential.updated" // #nosec G101 -- not a credential
 	AuditActionCredentialDeleted    AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
+	// Preview secret bundle actions
+	AuditActionPreviewSecretBundleUpdated  AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleDeleted  AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleResolved AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleFailed   AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
+
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
 	AuditActionAuthLogout   AuditAction = "auth.logout"
@@ -148,6 +154,8 @@ func (a AuditAction) Validate() error {
 		AuditActionTeamInvitationDeclined, AuditActionTeamInvitationClaimFailed,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
+		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
+		AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
 		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted:
@@ -181,6 +189,7 @@ const (
 	AuditResourceEvalBatch            AuditResourceType = "eval_batch"
 	AuditResourceAutomation           AuditResourceType = "automation"
 	AuditResourceOrganization         AuditResourceType = "organization"
+	AuditResourcePreviewSecretBundle  AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
 )
 
 func (t AuditResourceType) Validate() error {
@@ -191,7 +200,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
-		AuditResourceAutomation, AuditResourceOrganization:
+		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

@@ -529,6 +529,29 @@ func TestBuildServiceEnvs_ExtraEnvOverrides(t *testing.T) {
 	require.Equal(t, "http://abc.preview.localhost:9090", envs["worker"]["PREVIEW_ORIGIN"], "extraEnv must reach services with no user env")
 }
 
+func TestBuildServiceEnvs_RuntimeSecretEnvScopedBeforePlatformEnv(t *testing.T) {
+	t.Parallel()
+	d := &DockerPreviewProvider{}
+
+	cfg := &models.PreviewConfig{
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web":    {Port: 3000, Env: map[string]string{"DATABASE_URL": "repo", "PREVIEW_ORIGIN": "repo-origin"}},
+			"worker": {Port: 9000},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		RuntimeSecretEnv: map[string]map[string]string{
+			"web": {"DATABASE_URL": "secret", "PREVIEW_ORIGIN": "secret-origin"},
+		},
+	}
+
+	envs := d.buildServiceEnvs(cfg, nil, map[string]string{"PREVIEW_ORIGIN": "platform-origin"})
+
+	require.Equal(t, "secret", envs["web"]["DATABASE_URL"], "runtime secret env should override repo env for scoped services")
+	require.Equal(t, "platform-origin", envs["web"]["PREVIEW_ORIGIN"], "platform env should remain authoritative over secret env")
+	require.Empty(t, envs["worker"]["DATABASE_URL"], "runtime secret env should not reach unscoped services")
+}
+
 func TestBuildServiceEnvs_NoInfra(t *testing.T) {
 	t.Parallel()
 	d := &DockerPreviewProvider{}

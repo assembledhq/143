@@ -785,6 +785,7 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 		OrgID:           orgID,
 		UserID:          userID,
 		Config:          initialConfig,
+		RepositoryID:    target.RepositoryID,
 		BaseCommitSHA:   target.CommitSHA,
 		ExpiresAt:       branchPreviewExpiresAt(ttlSeconds),
 	}
