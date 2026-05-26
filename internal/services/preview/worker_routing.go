@@ -142,9 +142,8 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, exclud
 		return WorkerNode{}, err
 	}
 
-	best := WorkerNode{}
-	bestFound := false
-	bestCount := 0
+	// First pass: collect eligible workers.
+	var eligible []WorkerNode
 	for _, node := range nodes {
 		if _, skip := excluded[node.ID]; skip {
 			continue
@@ -156,19 +155,31 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, exclud
 		if worker.Mode != "worker" && worker.Mode != "all" {
 			continue
 		}
-		count, err := s.previews.CountActivePreviewsByWorker(ctx, worker.ID)
-		if err != nil {
-			return WorkerNode{}, fmt.Errorf("count active previews for %s: %w", worker.ID, err)
-		}
-		if !bestFound || count < bestCount || (count == bestCount && worker.ID < best.ID) {
-			best = worker
-			bestCount = count
-			bestFound = true
-		}
+		eligible = append(eligible, worker)
+	}
+	if len(eligible) == 0 {
+		return WorkerNode{}, ErrNoPreviewWorkers
 	}
 
-	if !bestFound {
-		return WorkerNode{}, ErrNoPreviewWorkers
+	// Fetch all counts in one query instead of N sequential round-trips.
+	ids := make([]string, len(eligible))
+	for i, w := range eligible {
+		ids[i] = w.ID
+	}
+	counts, err := s.previews.CountActivePreviewsByWorkers(ctx, ids)
+	if err != nil {
+		return WorkerNode{}, fmt.Errorf("count active previews for workers: %w", err)
+	}
+
+	// Second pass: pick the least-loaded worker (ties broken by lexicographic ID).
+	best := WorkerNode{}
+	bestCount := 0
+	for i, worker := range eligible {
+		count := counts[worker.ID]
+		if i == 0 || count < bestCount || (count == bestCount && worker.ID < best.ID) {
+			best = worker
+			bestCount = count
+		}
 	}
 	return best, nil
 }

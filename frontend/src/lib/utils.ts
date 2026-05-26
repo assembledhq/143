@@ -36,6 +36,25 @@ export function fileNameFromURL(url: string): string {
   return url.split("?")[0].split("#")[0].split("/").pop() || "file";
 }
 
+/**
+ * Validate that a URL from an untrusted source (e.g. API response) uses an
+ * allowed protocol before using it in an href or window.open call.
+ * Returns the URL unchanged when safe, or undefined when the protocol is not
+ * http(s) — preventing javascript: / data: XSS.
+ */
+export function safeExternalUrl(url: string | undefined | null): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:") {
+      return url;
+    }
+  } catch {
+    // Not a parseable absolute URL.
+  }
+  return undefined;
+}
+
 type FormatTimeAgoOptions = {
   fallback?: string;
   includeSeconds?: boolean;

@@ -456,6 +456,7 @@ func main() {
 						SandboxProvider: apiSandboxProvider,
 						SandboxCapacity: sandboxCapacity,
 						Snapshots:       snapshotStore,
+						GitHub:          services.GitHub,
 						NodeID:          cfg.NodeID,
 						Logger:          logger,
 					})

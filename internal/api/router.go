@@ -95,6 +95,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	previewStore := db.NewPreviewStore(pool)
+	previewAPITokenStore := db.NewPreviewAPITokenStore(pool)
 	nodeStore := db.NewNodeStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
@@ -636,14 +637,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
+	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
+	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
 	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
 	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
+	branchPreviewHandler.SetStopper(previewStopper)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
 	}
@@ -744,9 +749,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// Protected routes (authenticated)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth(middleware.AuthStores{
-				Sessions:    authSessionStore,
-				Users:       userStore,
-				Memberships: membershipStore,
+				Sessions:         authSessionStore,
+				Users:            userStore,
+				Memberships:      membershipStore,
+				PreviewAPITokens: previewAPITokenStore,
 			}, []byte(cfg.CSRFSigningKey), logger))
 			r.Use(middleware.LogContext(logger))
 			r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
@@ -861,6 +867,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
+				r.Get("/api/v1/previews", branchPreviewHandler.List)
+				r.Get("/api/v1/previews/configs", branchPreviewHandler.GetConfigOptions)
+				r.Get("/api/v1/previews/links/{link_type}/*", branchPreviewHandler.ResolveLink)
+				r.Get("/api/v1/previews/github/{owner}/{repo}/pull/{number}", branchPreviewHandler.GetPullRequest)
+				r.Get("/api/v1/previews/{preview_id}", branchPreviewHandler.Get)
 				r.Get("/api/v1/sessions/{id}/preview", previewHandler.GetPreview)
 				r.Get("/api/v1/sessions/{id}/preview/logs", previewHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
@@ -986,6 +997,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
 				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
+				r.Post("/api/v1/previews", branchPreviewHandler.Create)
+				r.Post("/api/v1/previews/{preview_id}/stop", branchPreviewHandler.Stop)
+				r.Post("/api/v1/previews/{preview_id}/restart", branchPreviewHandler.Restart)
+				r.Post("/api/v1/previews/{preview_id}/start-latest", branchPreviewHandler.StartLatest)
+				r.Post("/api/v1/previews/{preview_id}/bootstrap", branchPreviewHandler.MintBootstrapToken)
 				r.Post("/api/v1/sessions/{id}/preview", previewHandler.StartPreview)
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
 				r.Post("/api/v1/sessions/{id}/preview/ensure", previewHandler.EnsurePreview)
@@ -1096,6 +1112,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
 				r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
+				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
+				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
+				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)
 				r.Get("/api/v1/pm/context/pending", pmHandler.ListPendingRefreshes)
 				r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
 				r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
