@@ -1,15 +1,20 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"regexp"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -30,6 +35,7 @@ type StartRunner struct {
 	sandboxProvider agent.SandboxProvider
 	sandboxCapacity *agent.SandboxCapacityGate
 	snapshots       storage.SnapshotStore
+	github          branchPreviewGitHub
 	nodeID          string
 	logger          zerolog.Logger
 }
@@ -43,8 +49,13 @@ type StartRunnerConfig struct {
 	SandboxProvider agent.SandboxProvider
 	SandboxCapacity *agent.SandboxCapacityGate
 	Snapshots       storage.SnapshotStore
+	GitHub          branchPreviewGitHub
 	NodeID          string
 	Logger          zerolog.Logger
+}
+
+type branchPreviewGitHub interface {
+	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
 func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
@@ -57,9 +68,175 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 		sandboxProvider: cfg.SandboxProvider,
 		sandboxCapacity: cfg.SandboxCapacity,
 		snapshots:       cfg.Snapshots,
+		github:          cfg.GitHub,
 		nodeID:          cfg.NodeID,
 		logger:          cfg.Logger,
 	}
+}
+
+var gitCommitSHARe = regexp.MustCompile(`\A[0-9a-fA-F]{7,40}\z`)
+
+// StartReservedBranchPreview completes a target-owned branch preview by
+// creating a fresh sandbox, cloning the repository, checking out the pinned
+// commit, resolving the preview config, and launching the runtime.
+func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload StartBranchPreviewJobPayload) error {
+	if r == nil || r.manager == nil || r.previews == nil || r.repositories == nil || r.sandboxProvider == nil {
+		return fmt.Errorf("branch preview start runner is not configured")
+	}
+	reservation, err := r.previews.GetPreviewInstance(ctx, payload.OrgID, payload.PreviewID)
+	if err != nil {
+		return fmt.Errorf("get reserved branch preview: %w", err)
+	}
+	if reservation.Status != models.PreviewStatusStarting {
+		return fmt.Errorf("reserved branch preview is not starting (status=%s)", reservation.Status)
+	}
+	if reservation.PreviewTargetID == nil || *reservation.PreviewTargetID != payload.PreviewTargetID {
+		r.abort(ctx, reservation, "", "preview reservation no longer matches target")
+		return fmt.Errorf("reserved branch preview target mismatch")
+	}
+	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
+		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
+			return fmt.Errorf("reassign branch preview worker: %w", err)
+		}
+		reservation.WorkerNodeID = r.nodeID
+	}
+
+	target, err := r.previews.GetPreviewTarget(ctx, payload.OrgID, payload.PreviewTargetID)
+	if err != nil {
+		r.abort(ctx, reservation, "", fmt.Sprintf("target lookup: %v", err))
+		return fmt.Errorf("get preview target: %w", err)
+	}
+	if target.RepositoryID != payload.RepositoryID || target.CommitSHA != payload.CommitSHA {
+		r.abort(ctx, reservation, "", "preview target changed before startup")
+		return fmt.Errorf("preview target payload mismatch")
+	}
+	if !gitCommitSHARe.MatchString(target.CommitSHA) {
+		r.abort(ctx, reservation, "", "preview target commit sha is invalid")
+		return fmt.Errorf("invalid commit sha")
+	}
+	repo, err := r.repositories.GetByID(ctx, payload.OrgID, target.RepositoryID)
+	if err != nil {
+		r.abort(ctx, reservation, "", fmt.Sprintf("repository lookup: %v", err))
+		return fmt.Errorf("get repository: %w", err)
+	}
+	if !repo.IsActive() {
+		r.abort(ctx, reservation, "", "repository is disconnected")
+		return fmt.Errorf("repository is disconnected")
+	}
+	if r.github == nil {
+		r.abort(ctx, reservation, "", "GitHub is not configured on this worker")
+		return fmt.Errorf("github is not configured")
+	}
+
+	sandboxCfg := agent.DefaultSandboxConfig()
+	sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + agent.SlugForRepo(repo.FullName)
+	sandboxCfg.SessionID = reservation.ID.String()
+	sandboxCfg.OrgID = payload.OrgID.String()
+	sandboxCfg.Purpose = "branch_preview"
+	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, payload.Config)
+
+	var capacityReservation *agent.SandboxCapacityReservation
+	if r.sandboxCapacity != nil {
+		var capErr error
+		capacityReservation, capErr = r.sandboxCapacity.Acquire(ctx, agent.SandboxCapacityRequest{
+			Purpose: sandboxCfg.Purpose, SessionID: sandboxCfg.SessionID, OrgID: sandboxCfg.OrgID,
+		})
+		if capErr != nil {
+			r.registerCapacityDeadLetter(ctx, reservation)
+			return fmt.Errorf("%s: %w: %w", PreviewCapacityCode, ErrPreviewCapacity, capErr)
+		}
+		defer capacityReservation.Release()
+	}
+
+	sb, err := r.sandboxProvider.Create(ctx, sandboxCfg)
+	if err != nil {
+		r.abort(ctx, reservation, "", fmt.Sprintf("create sandbox: %v", err))
+		return fmt.Errorf("create sandbox: %w", err)
+	}
+	token, err := r.github.GetInstallationToken(ctx, repo.InstallationID)
+	if err != nil {
+		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("get GitHub token: %v", err))
+		return fmt.Errorf("get github token: %w", err)
+	}
+	if err := r.previews.UpdatePreviewPhase(ctx, payload.OrgID, payload.PreviewID, "checkout"); err != nil {
+		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("failed to persist checkout preview phase")
+	}
+	checkoutStarted := time.Now()
+	if err := r.sandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, target.Branch, token); err != nil {
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "clone")
+		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("clone repository: %v", err))
+		return fmt.Errorf("clone repository: %w", err)
+	}
+	var checkoutErr bytes.Buffer
+	exitCode, err := r.sandboxProvider.Exec(ctx, sb, "git checkout --detach "+target.CommitSHA, io.Discard, &checkoutErr)
+	if err != nil {
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout")
+		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("checkout commit: %v", err))
+		return fmt.Errorf("checkout commit: %w", err)
+	}
+	if exitCode != 0 {
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout")
+		msg := checkoutErr.String()
+		r.abort(ctx, reservation, sb.ID, "checkout commit failed: "+msg)
+		return fmt.Errorf("checkout commit failed with code %d: %s", exitCode, msg)
+	}
+	metrics.RecordBranchPreviewCheckout(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, time.Since(checkoutStarted))
+	metrics.RecordBranchPreviewPhaseDuration(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout", time.Since(checkoutStarted))
+
+	if err := r.previews.UpdatePreviewPhase(ctx, payload.OrgID, payload.PreviewID, "config"); err != nil {
+		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("failed to persist config preview phase")
+	}
+	configStarted := time.Now()
+	cfg := payload.Config
+	if cfg == nil {
+		cfg, err = r.readWorkspacePreviewConfig(ctx, sb, uuid.Nil, target.PreviewConfigName)
+		if err != nil {
+			metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config")
+			r.abort(ctx, reservation, sb.ID, fmt.Sprintf("read workspace config: %v", err))
+			return fmt.Errorf("PREVIEW_CONFIG_READ_FAILED: %w", err)
+		}
+		if cfg == nil {
+			metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config_missing")
+			r.abort(ctx, reservation, sb.ID, previewNoConfigMessage)
+			return fmt.Errorf("PREVIEW_NO_CONFIG: %s", previewNoConfigMessage)
+		}
+	}
+	if target.PreviewConfigName != "" && cfg.Name == "" {
+		cfg.Name = target.PreviewConfigName
+	}
+	metrics.RecordBranchPreviewPhaseDuration(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config", time.Since(configStarted))
+	if err := r.previews.UpdatePreviewTargetConfigDigest(ctx, payload.OrgID, payload.PreviewTargetID, computeConfigDigest(cfg)); err != nil {
+		// Abort rather than warn: a stale digest on the target causes future
+		// "config changed" comparisons to produce wrong results. If we can't
+		// persist the resolved config digest, don't launch.
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config_digest")
+		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("persist config digest: %v", err))
+		return fmt.Errorf("persist config digest: %w", err)
+	}
+
+	input := StartPreviewInput{
+		SessionID:                 uuid.Nil,
+		PreviewTargetID:           payload.PreviewTargetID,
+		OrgID:                     payload.OrgID,
+		UserID:                    payload.UserID,
+		Config:                    cfg,
+		Sandbox:                   sb,
+		BaseCommitSHA:             target.CommitSHA,
+		ProfileName:               payload.ProfileName,
+		RequestID:                 derefStringPtr(target.RequestID),
+		MetricsSource:             string(target.SourceType),
+		MetricsRepositoryFullName: repo.FullName,
+	}
+	metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, 1)
+	defer metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, -1)
+	_, err = r.manager.LaunchPreview(ctx, reservation, input)
+	if err != nil {
+		classified := ClassifyLaunchFailure(err)
+		r.abort(ctx, reservation, sb.ID, classified.Message)
+		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
+		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
+	}
+	return nil
 }
 
 // StartReservedPreview completes one reserved preview. It marks the preview
@@ -118,7 +295,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	}
 
 	if input.Config == nil {
-		cfg, err := r.readWorkspacePreviewConfig(ctx, acq.Sandbox, payload.SessionID)
+		cfg, err := r.readWorkspacePreviewConfig(ctx, acq.Sandbox, payload.SessionID, "")
 		if err != nil {
 			if errors.Is(err, ErrInvalidConfig) {
 				msg := InvalidConfigMessage(err)
@@ -317,18 +494,22 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 
 	actualID, err := r.sessions.PublishHydratedContainerID(ctx, orgID, session.ID, sandbox.ID)
 	if err != nil {
-		_ = r.sandboxProvider.Destroy(context.Background(), sandbox)
+		destroyCtx, destroyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = r.sandboxProvider.Destroy(destroyCtx, sandbox)
+		destroyCancel()
 		return acquireSandboxResult{Err: fmt.Errorf("publish container id: %w", err)}
 	}
 	if actualID != sandbox.ID {
-		_ = r.sandboxProvider.Destroy(context.Background(), sandbox)
+		destroyCtx, destroyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = r.sandboxProvider.Destroy(destroyCtx, sandbox)
+		destroyCancel()
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
 	}
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
 }
 
-func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, error) {
+func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID, previewConfigName string) (*models.PreviewConfig, error) {
 	if r.fileReader == nil {
 		return nil, nil
 	}
@@ -340,7 +521,7 @@ func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.
 		}
 		return nil, fmt.Errorf("read %s: %w", repoconfig.ConfigPath, err)
 	}
-	cfg, err := ParseConfig([]byte(content))
+	cfg, err := ParseNamedConfig([]byte(content), previewConfigName)
 	if err != nil {
 		r.logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("path", repoconfig.ConfigPath).Msg("committed preview config failed to parse")
 		return nil, fmt.Errorf("%w: parse %s: %w", ErrInvalidConfig, repoconfig.ConfigPath, err)

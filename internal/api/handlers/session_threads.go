@@ -353,6 +353,8 @@ func (h *SessionThreadHandler) ArchiveThread(w http.ResponseWriter, r *http.Requ
 }
 
 // ListThreads handles GET /sessions/{id}/threads — returns all threads for a session.
+// Unknown query parameters (including the legacy ?turn_numbers= filter that was
+// removed) are silently ignored; all threads for the session are returned.
 func (h *SessionThreadHandler) ListThreads(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))

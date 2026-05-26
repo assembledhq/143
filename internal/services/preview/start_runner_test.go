@@ -110,6 +110,7 @@ func TestStartRunnerReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 		context.Background(),
 		&agent.Sandbox{ID: "container-1", WorkDir: "/home/sandbox/repo"},
 		uuid.New(),
+		"",
 	)
 
 	require.Error(t, err, "invalid committed preview config should surface instead of being treated as missing config")

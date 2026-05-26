@@ -12,6 +12,7 @@ import {
   Target,
   FlaskConical,
   ScrollText,
+  MonitorPlay,
   Plus,
   LogOut,
   type LucideIcon,
@@ -53,6 +54,7 @@ export const staticActions: PaletteAction[] = [
 
   // Quick actions
   { id: "action-new-session", label: "New session", icon: Plus, href: "/sessions/new", preserveRepo: true, group: "quick-actions" },
+  { id: "action-create-preview", label: "Create preview", icon: MonitorPlay, href: "/previews/new", preserveRepo: true, hiddenRoles: ["viewer"], group: "quick-actions" },
   { id: "action-new-project", label: "New project", icon: Plus, href: "/projects/new", preserveRepo: true, hiddenRoles: ["builder"], group: "quick-actions" },
   { id: "action-new-eval", label: "Create eval task", icon: Plus, href: "/settings/evals/new", hiddenRoles: ["viewer", "builder"], group: "quick-actions" },
   { id: "action-logout", label: "Log out", icon: LogOut, group: "quick-actions" },
