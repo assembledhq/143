@@ -171,3 +171,20 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 		Error: models.ErrorDetail{Code: code, Message: message},
 	})
 }
+
+// nilIfEmpty returns a pointer to s, or nil when s is the empty string.
+// Used when mapping optional string fields to nullable DB columns.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// derefStrPtr dereferences a nullable string pointer, returning "" for nil.
+func derefStrPtr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}

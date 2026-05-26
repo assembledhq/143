@@ -93,6 +93,92 @@ func TestParseConfig_MultiService(t *testing.T) {
 	}
 }
 
+func TestInspectConfigOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      string
+		selected string
+		expected ConfigOptions
+	}{
+		{
+			name: "single preview config does not require selection",
+			raw: `{
+				"preview": {
+					"name": "web",
+					"command": ["npm", "run", "dev"],
+					"port": 3000
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"web"},
+				SelectedName: "web",
+			},
+		},
+		{
+			name: "multi config uses default",
+			raw: `{
+				"preview": {
+					"default": "web",
+					"configs": {
+						"docs": {"name": "docs", "command": ["npm", "run", "docs"], "port": 3001},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"docs", "web"},
+				DefaultName:  "web",
+				SelectedName: "web",
+			},
+		},
+		{
+			name: "multi config without default requires selection",
+			raw: `{
+				"preview": {
+					"configs": {
+						"api": {"name": "api", "command": ["go", "run", "."], "port": 8080},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:             []string{"api", "web"},
+				RequiresSelection: true,
+			},
+		},
+		{
+			name:     "selected config is preserved",
+			selected: "api",
+			raw: `{
+				"preview": {
+					"default": "web",
+					"configs": {
+						"api": {"name": "api", "command": ["go", "run", "."], "port": 8080},
+						"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000}
+					}
+				}
+			}`,
+			expected: ConfigOptions{
+				Names:        []string{"api", "web"},
+				DefaultName:  "web",
+				SelectedName: "api",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := InspectConfigOptions([]byte(tt.raw), tt.selected)
+			require.NoError(t, err, "InspectConfigOptions should parse valid preview config metadata")
+			require.Equal(t, tt.expected, actual, "InspectConfigOptions should return exact config selection metadata")
+		})
+	}
+}
+
 func TestParseConfig_AcceptsNumericVersionMarker(t *testing.T) {
 	t.Parallel()
 
@@ -808,7 +894,8 @@ func TestResolveConfig_NonConnected(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// Primary comes from base.
 	if resolved.Primary != "frontend" {
@@ -892,7 +979,8 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// All service fields pinned to base.
 	fe := resolved.Services["frontend"]
@@ -934,7 +1022,8 @@ func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 		},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	// Only services from base should exist.
 	if len(resolved.Services) != 1 {
@@ -969,7 +1058,8 @@ func TestResolveConfig_NonConnectedCanRemoveInstall(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{},
 	}
 
-	resolved := ResolveConfig(baseCfg, diffCfg)
+	resolved, err := ResolveConfig(baseCfg, diffCfg)
+	require.NoError(t, err, "ResolveConfig should succeed for valid configs")
 
 	require.Nil(t, resolved.Install, "non-connected preview should use nil install from diff instead of keeping stale base install")
 	require.Equal(t, []string{"go", "run", "."}, resolved.Services["app"].Command, "non-connected preview should still resolve runtime service fields from diff")

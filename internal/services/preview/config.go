@@ -7,6 +7,7 @@ import (
 	"math"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -126,6 +127,15 @@ type rawPreviewConfig struct {
 	Ready   *models.ReadinessProbe `json:"ready,omitempty"`
 }
 
+// ConfigOptions is lightweight metadata for presenting committed preview
+// config choices without launching a runtime.
+type ConfigOptions struct {
+	Names             []string `json:"names"`
+	DefaultName       string   `json:"default_name,omitempty"`
+	SelectedName      string   `json:"selected_name,omitempty"`
+	RequiresSelection bool     `json:"requires_selection"`
+}
+
 // isSingleService returns true if the config uses single-service top-level format.
 func (r *rawPreviewConfig) isSingleService() bool {
 	return len(r.Services) == 0 && len(r.Command) > 0
@@ -144,9 +154,32 @@ func (r *rawPreviewConfig) hasBothFormats() bool {
 // ParseConfig parses the nested preview section from .143/config.json and
 // normalizes single-service configs to the multi-service format.
 func ParseConfig(data []byte) (*models.PreviewConfig, error) {
+	return ParseNamedConfig(data, "")
+}
+
+// ParseNamedConfig parses a specific named preview config from .143/config.json.
+// Repos may either use the legacy single preview object or a multi-config map:
+//
+//	{
+//	  "preview": {
+//	    "default": "web",
+//	    "configs": {
+//	      "web": {"primary": "web", "services": {...}},
+//	      "docs": {"primary": "docs", "services": {...}}
+//	    }
+//	  }
+//	}
+//
+// An omitted name auto-selects the only config or the declared default.
+func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 	previewData, err := extractPreviewSection(data)
 	if err != nil {
 		return nil, err
+	}
+	if selected, ok, err := selectNamedPreviewSection(previewData, name); err != nil {
+		return nil, err
+	} else if ok {
+		previewData = selected
 	}
 
 	var raw rawPreviewConfig
@@ -200,6 +233,93 @@ func ParseConfig(data []byte) (*models.PreviewConfig, error) {
 	defaultPreviewInstallConfig(cfg.Install)
 
 	return cfg, nil
+}
+
+// InspectConfigOptions returns available named preview configs and the config
+// that would be selected for a request. It intentionally avoids full validation
+// so the create form can stay fast and only needs one GitHub content fetch.
+func InspectConfigOptions(data []byte, name string) (ConfigOptions, error) {
+	previewData, err := extractPreviewSection(data)
+	if err != nil {
+		return ConfigOptions{}, err
+	}
+	var probe struct {
+		Default string                     `json:"default"`
+		Configs map[string]json.RawMessage `json:"configs"`
+	}
+	if err := json.Unmarshal(previewData, &probe); err != nil {
+		return ConfigOptions{}, fmt.Errorf("parse preview config metadata: %w", err)
+	}
+	selectedName := strings.TrimSpace(name)
+	if len(probe.Configs) > 0 {
+		names := sortedPreviewConfigNames(probe.Configs)
+		defaultName := strings.TrimSpace(probe.Default)
+		if selectedName == "" {
+			selectedName = defaultName
+		}
+		if selectedName == "" && len(names) == 1 {
+			selectedName = names[0]
+		}
+		return ConfigOptions{
+			Names:             names,
+			DefaultName:       defaultName,
+			SelectedName:      selectedName,
+			RequiresSelection: selectedName == "",
+		}, nil
+	}
+	var raw rawPreviewConfig
+	if err := json.Unmarshal(previewData, &raw); err != nil {
+		return ConfigOptions{}, fmt.Errorf("parse preview config metadata: %w", err)
+	}
+	configName := strings.TrimSpace(raw.Name)
+	if configName == "" {
+		configName = "default"
+	}
+	if selectedName == "" {
+		selectedName = configName
+	}
+	return ConfigOptions{
+		Names:        []string{configName},
+		SelectedName: selectedName,
+	}, nil
+}
+
+func selectNamedPreviewSection(previewData []byte, name string) ([]byte, bool, error) {
+	var probe struct {
+		Default string                     `json:"default"`
+		Configs map[string]json.RawMessage `json:"configs"`
+	}
+	if err := json.Unmarshal(previewData, &probe); err != nil {
+		return nil, false, nil
+	}
+	if len(probe.Configs) == 0 {
+		return nil, false, nil
+	}
+	names := sortedPreviewConfigNames(probe.Configs)
+	selectedName := strings.TrimSpace(name)
+	if selectedName == "" {
+		selectedName = strings.TrimSpace(probe.Default)
+	}
+	if selectedName == "" && len(names) == 1 {
+		selectedName = names[0]
+	}
+	if selectedName == "" {
+		return nil, false, fmt.Errorf("preview_config_name is required; available configs: %s", strings.Join(names, ", "))
+	}
+	selected, ok := probe.Configs[selectedName]
+	if !ok {
+		return nil, false, fmt.Errorf("preview config %q not found; available configs: %s", selectedName, strings.Join(names, ", "))
+	}
+	return selected, true, nil
+}
+
+func sortedPreviewConfigNames(configs map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func extractPreviewSection(data []byte) ([]byte, error) {
@@ -266,6 +386,12 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	for name, svc := range cfg.Services {
 		if len(svc.Command) == 0 {
 			errs = append(errs, fmt.Sprintf("service %q: command is required", name))
+		} else {
+			for i, part := range svc.Command {
+				if strings.TrimSpace(part) == "" {
+					errs = append(errs, fmt.Sprintf("service %q: command[%d] must not be blank", name, i))
+				}
+			}
 		}
 		if svc.Port < MinPort || svc.Port > MaxPort {
 			errs = append(errs, fmt.Sprintf("service %q: port %d must be in range %d-%d", name, svc.Port, MinPort, MaxPort))
@@ -322,13 +448,17 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 }
 
 // validHTTPPath only allows safe characters in readiness probe paths to prevent
-// shell injection when the path is interpolated into a curl command.
+// shell injection when the path is interpolated into a curl command. The negative
+// lookahead equivalent is implemented by rejecting /.. sequences after the
+// character allowlist passes, since Go's regexp package is RE2 (no lookahead).
 var validHTTPPath = regexp.MustCompile(`^/[a-zA-Z0-9/_.\-?&=%]*$`)
+var traversalSequence = regexp.MustCompile(`/\.\.(/|$)`)
 var validPreviewInstallCleanPath = regexp.MustCompile(`^[A-Za-z0-9_./@*+\-]+$`)
 
-// isValidHTTPPath checks that a readiness probe HTTP path contains only safe characters.
+// isValidHTTPPath checks that a readiness probe HTTP path contains only safe
+// characters and does not contain path traversal sequences (/../).
 func isValidHTTPPath(path string) bool {
-	return validHTTPPath.MatchString(path)
+	return validHTTPPath.MatchString(path) && !traversalSequence.MatchString(path)
 }
 
 // validatePathInsideRepo checks that a relative path does not escape the repo root.
@@ -541,7 +671,7 @@ func parseByteQuantityMiB(field, raw string) (int, bool, error) {
 //
 // For connected previews (credentials.mode != "none"), ALL fields are pinned to
 // the base branch.
-func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig {
+func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) (*models.PreviewConfig, error) {
 	resolved := &models.PreviewConfig{
 		Version:     baseCfg.Version,
 		Name:        baseCfg.Name,
@@ -598,7 +728,10 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig
 		}
 	}
 
-	return resolved
+	if errs := ValidateConfig(resolved); len(errs) > 0 {
+		return nil, fmt.Errorf("resolved config is invalid: %s", strings.Join(errs, "; "))
+	}
+	return resolved, nil
 }
 
 func cloneInstallConfig(install *models.PreviewInstallConfig) *models.PreviewInstallConfig {
