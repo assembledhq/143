@@ -17,6 +17,7 @@ const nodeTestFiles = [
   'src/lib/query-keys.test.ts',
   'src/lib/session-composer-mentions.test.ts',
   'src/lib/session-open-position.test.ts',
+  'src/lib/source.test.ts',
   'src/lib/sse.test.ts',
   'src/lib/syntax-highlighter.test.ts',
   'src/lib/timeline.test.ts',
@@ -36,6 +37,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'collections': path.resolve(__dirname, './.source'),
     },
   },
   test: {
