@@ -19,4 +19,10 @@ describe("docsLayoutOptions", () => {
       sectionLinks.every((link) => "on" in link && link.on === "nav")
     ).toBe(true);
   });
+
+  it("uses a docs-owned theme switch instead of the Fumadocs sidebar default", () => {
+    const slots = docsLayoutOptions().slots ?? {};
+
+    expect(slots.themeSwitch).toBeDefined();
+  });
 });
