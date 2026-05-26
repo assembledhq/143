@@ -119,35 +119,34 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 		return nil, fmt.Errorf("iterate capacity buckets: %w", err)
 	}
 
-	// Peak concurrent containers (sampled by overlapping time ranges).
-	// NOTE: This self-join is O(n^2) in the number of events per org per period.
-	// Acceptable for <10K events/period; replace with a rollup table at higher scale.
-	var peakConcurrent int
-	err = s.db.QueryRow(ctx, `
-		SELECT COALESCE(MAX(concurrent), 0)
-		FROM (
-			SELECT COUNT(*) AS concurrent
-			FROM container_usage_events e1
-			JOIN container_usage_events e2
-			  ON e2.org_id = e1.org_id
-			 AND e2.started_at <= COALESCE(e1.stopped_at, now())
-			 AND COALESCE(e2.stopped_at, now()) >= e1.started_at
-			 AND e2.started_at < @end
-			 AND e2.id != e1.id
-			WHERE e1.org_id = @org_id AND e1.started_at >= @start AND e1.started_at < @end
-			GROUP BY e1.id
-		) sub`,
+	// Peak concurrent containers from bounded event intervals. This avoids the
+	// legacy O(n^2) self-join while preserving inclusive boundary semantics.
+	intervalRows, err := s.db.Query(ctx, `
+		SELECT started_at, COALESCE(stopped_at, now()) AS stopped_at
+		FROM container_usage_events
+		WHERE org_id = @org_id
+		  AND started_at < @end
+		  AND COALESCE(stopped_at, now()) >= @start
+		ORDER BY started_at`,
 		pgx.NamedArgs{"org_id": orgID, "start": start, "end": end},
-	).Scan(&peakConcurrent)
+	)
 	if err != nil {
-		return nil, fmt.Errorf("query peak concurrent: %w", err)
+		return nil, fmt.Errorf("query peak concurrent intervals: %w", err)
 	}
-	// The self-join counts overlapping peers; add 1 for the container itself.
-	// Use totalSessions > 0 (not peakConcurrent > 0) so that a single
-	// non-overlapping container correctly reports peak = 1.
-	if totalSessions > 0 {
-		peakConcurrent++
+	defer intervalRows.Close()
+
+	intervals := make([]timeInterval, 0)
+	for intervalRows.Next() {
+		var interval timeInterval
+		if err := intervalRows.Scan(&interval.start, &interval.stop); err != nil {
+			return nil, fmt.Errorf("scan peak concurrent interval: %w", err)
+		}
+		intervals = append(intervals, interval)
 	}
+	if err := intervalRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate peak concurrent intervals: %w", err)
+	}
+	peakConcurrent := computePeakConcurrent(intervals)
 
 	return &models.UsageSummary{
 		OrgID:                 orgID,

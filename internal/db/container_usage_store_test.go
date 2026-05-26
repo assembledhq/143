@@ -97,22 +97,116 @@ func TestContainerUsageStore_GetUsageSummary(t *testing.T) {
 				AddRow(4.0, 8192, 20480, 25.5, 2),
 		)
 
-	// Peak concurrent query — args ordered by first appearance in SQL:
-	// @end (e2 filter in JOIN), @org_id (WHERE), @start (WHERE).
-	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(concurrent\\)").
-		WithArgs(end, orgID, start).
-		WillReturnRows(pgxmock.NewRows([]string{"peak"}).AddRow(3))
+	// Peak concurrent query scans bounded intervals for the org/range. If the
+	// legacy self-join runs instead, this expectation will fail.
+	mock.ExpectQuery("SELECT started_at, COALESCE\\(stopped_at, now\\(\\)\\) AS stopped_at").
+		WithArgs(orgID, end, start).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"started_at", "stopped_at"}).
+				AddRow(start.Add(0*time.Minute), start.Add(10*time.Minute)).
+				AddRow(start.Add(5*time.Minute), start.Add(15*time.Minute)).
+				AddRow(start.Add(7*time.Minute), start.Add(20*time.Minute)).
+				AddRow(start.Add(30*time.Minute), start.Add(40*time.Minute)),
+		)
 
 	summary, err := store.GetUsageSummary(context.Background(), orgID, start, end)
-	require.NoError(t, err)
-	require.Equal(t, 125.5, summary.TotalContainerMinutes)
-	require.Equal(t, 10, summary.TotalSessions)
-	require.Equal(t, 4, summary.PeakConcurrent) // 3 peers + 1 self
-	require.Len(t, summary.ByCapacity, 2)
-	require.Equal(t, 2.0, summary.ByCapacity[0].CPULimit)
-	require.Equal(t, 4096, summary.ByCapacity[0].MemoryLimitMB)
-	require.Equal(t, 10240, summary.ByCapacity[0].DiskLimitMB)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "GetUsageSummary should return the aggregate usage summary")
+	require.Equal(t, 125.5, summary.TotalContainerMinutes, "summary should preserve total container minutes")
+	require.Equal(t, 10, summary.TotalSessions, "summary should preserve total sessions")
+	require.Equal(t, 3, summary.PeakConcurrent, "summary should compute peak concurrency from scanned intervals")
+	require.Len(t, summary.ByCapacity, 2, "summary should include capacity buckets")
+	require.Equal(t, 2.0, summary.ByCapacity[0].CPULimit, "summary should preserve capacity bucket CPU")
+	require.Equal(t, 4096, summary.ByCapacity[0].MemoryLimitMB, "summary should preserve capacity bucket memory")
+	require.Equal(t, 10240, summary.ByCapacity[0].DiskLimitMB, "summary should preserve capacity bucket disk")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContainerUsageStore_GetUsageSummary_EmptyPeakIntervals(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewContainerUsageStore(mock)
+	orgID := uuid.New()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+
+	mock.ExpectQuery("SELECT COALESCE\\(SUM").
+		WithArgs(orgID, start, end).
+		WillReturnRows(pgxmock.NewRows([]string{"total_minutes", "total_sessions"}).AddRow(0.0, 0))
+	mock.ExpectQuery("SELECT cpu_limit, memory_limit_mb, disk_limit_mb").
+		WithArgs(orgID, start, end).
+		WillReturnRows(pgxmock.NewRows([]string{"cpu_limit", "memory_limit_mb", "disk_limit_mb", "minutes", "sessions"}))
+	mock.ExpectQuery("SELECT started_at, COALESCE\\(stopped_at, now\\(\\)\\) AS stopped_at").
+		WithArgs(orgID, end, start).
+		WillReturnRows(pgxmock.NewRows([]string{"started_at", "stopped_at"}))
+
+	summary, err := store.GetUsageSummary(context.Background(), orgID, start, end)
+	require.NoError(t, err, "GetUsageSummary should allow an empty usage range")
+	require.Equal(t, 0, summary.PeakConcurrent, "empty interval scans should report zero peak concurrency")
+	require.Empty(t, summary.ByCapacity, "empty usage range should return no capacity buckets")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestComputePeakConcurrent(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		intervals []timeInterval
+		expected  int
+	}{
+		{
+			name:      "empty intervals",
+			intervals: nil,
+			expected:  0,
+		},
+		{
+			name: "single interval",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(10 * time.Minute)},
+			},
+			expected: 1,
+		},
+		{
+			name: "non-overlapping intervals",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(10 * time.Minute)},
+				{start: base.Add(20 * time.Minute), stop: base.Add(30 * time.Minute)},
+				{start: base.Add(40 * time.Minute), stop: base.Add(50 * time.Minute)},
+			},
+			expected: 1,
+		},
+		{
+			name: "partially overlapping intervals",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(20 * time.Minute)},
+				{start: base.Add(5 * time.Minute), stop: base.Add(15 * time.Minute)},
+				{start: base.Add(10 * time.Minute), stop: base.Add(30 * time.Minute)},
+			},
+			expected: 3,
+		},
+		{
+			name: "same-boundary intervals count as overlapping",
+			intervals: []timeInterval{
+				{start: base, stop: base.Add(10 * time.Minute)},
+				{start: base.Add(10 * time.Minute), stop: base.Add(20 * time.Minute)},
+			},
+			expected: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := computePeakConcurrent(tt.intervals)
+			require.Equal(t, tt.expected, actual, "computePeakConcurrent should return the expected interval overlap peak")
+		})
+	}
 }
 
 func TestContainerUsageStore_ListBySession(t *testing.T) {
