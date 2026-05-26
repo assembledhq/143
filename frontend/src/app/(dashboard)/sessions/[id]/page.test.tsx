@@ -3137,6 +3137,29 @@ describe('SessionDetailPage', () => {
     expect(within(viewPRLink).queryByRole('button')).not.toBeInTheDocument();
   });
 
+  it('only shows the PR action in the session detail header actions', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            repository_id: 'repo-1',
+            target_branch: 'main',
+            working_branch: 'fix/type-error-null-check',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const actions = await screen.findByLabelText('Session detail actions');
+
+    expect(within(actions).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
+    expect(within(actions).queryByRole('link', { name: 'Preview' })).not.toBeInTheDocument();
+    expect(within(actions).queryByRole('button', { name: 'Open preview' })).not.toBeInTheDocument();
+  });
+
   it('keeps the tab rail scrollable while separating top-right actions', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
