@@ -998,7 +998,6 @@ func TestSessionStore_UpdateResultClearsStaleFailureDetails(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
@@ -1615,7 +1614,7 @@ func TestSessionStore_UpdateTurnCompleteClearsStaleFailureDetails(t *testing.T) 
 	mock.ExpectExec(`UPDATE sessions[\s\S]+SET status = 'idle'[\s\S]+failure_explanation = NULL[\s\S]+failure_category = NULL[\s\S]+failure_next_steps = NULL[\s\S]+failure_retry_advised = false`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 3, &models.SessionResult{
@@ -1689,7 +1688,7 @@ func TestSessionStore_ListStalePendingSessions(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
@@ -1701,9 +1700,28 @@ func TestSessionStore_ListStalePendingSessions(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 
 	sessions, err := store.ListStalePendingSessions(context.Background(), time.Now().Add(-1*time.Hour))
-	require.NoError(t, err)
-	require.Len(t, sessions, 0)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "ListStalePendingSessions should not return an error")
+	require.Len(t, sessions, 0, "ListStalePendingSessions should return no rows from an empty result")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_ListStalePendingSessions_UsesLastActivityCutoff(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery("FROM sessions\\s+WHERE status = 'pending'[\\s\\S]+last_activity_at < @activity_before").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListStalePendingSessions(context.Background(), time.Now().Add(-1*time.Hour))
+	require.NoError(t, err, "ListStalePendingSessions should not return an error")
+	require.Len(t, sessions, 0, "ListStalePendingSessions should return no rows from an empty result")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ListExpiredSnapshots(t *testing.T) {

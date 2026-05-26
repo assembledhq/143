@@ -915,6 +915,33 @@ func (s *JobStore) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUI
 	return tag.RowsAffected() == 1, nil
 }
 
+// RetryWithLeaseAndTarget requeues a running job and updates its target worker
+// pin in the same fenced write. Used when a retry discovers durable state that
+// makes the next attempt node-specific.
+// lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
+func (s *JobStore) RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'pending',
+			last_error = $1,
+			run_at = $2,
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			target_node_id = $5,
+			updated_at = now()
+		WHERE id = $3
+		  AND status = 'running'
+		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken, targetNodeID)
+	if err != nil {
+		return false, fmt.Errorf("retry job with lease and target: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // RetryWithoutConsumingAttemptWithLease requeues a running job while undoing the
 // claim-time attempt increment. This preserves the existing semantics for
 // retryable capacity/dependency conditions.
@@ -938,6 +965,33 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jo
 		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("retry job without consuming attempt with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RetryWithoutConsumingAttemptWithLeaseAndTarget requeues a running job while
+// undoing the claim-time attempt increment and updating its target worker pin.
+// lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
+func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'pending',
+			last_error = $1,
+			run_at = $2,
+			attempts = GREATEST(attempts - 1, 0),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			target_node_id = $5,
+			updated_at = now()
+		WHERE id = $3
+		  AND status = 'running'
+		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken, targetNodeID)
+	if err != nil {
+		return false, fmt.Errorf("retry job without consuming attempt with lease and target: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }

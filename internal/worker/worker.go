@@ -36,6 +36,10 @@ type RetryableError struct {
 	// durable state, not for capacity/backlog gates.
 	BypassMaxRetryDuration bool
 	RetryAfter             *time.Duration
+	// TargetNodeID updates jobs.target_node_id when requeueing this retry.
+	// Use this when an unpinned attempt discovers the session's live sandbox
+	// already belongs to a specific worker node.
+	TargetNodeID *string
 }
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
@@ -86,6 +90,11 @@ type jobLeaseStore interface {
 	RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 	RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 	DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
+}
+
+type targetRetryLeaseStore interface {
+	RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
+	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 }
 
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
@@ -261,7 +270,7 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true, retryable.RetryAfter)
+		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true, retryable.RetryAfter, retryable.TargetNodeID)
 		return
 	}
 
@@ -354,10 +363,10 @@ func (w *Worker) failJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg
 }
 
 func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool) {
-	w.retryJobWithDelay(ctx, jobID, lockToken, errMsg, attempt, preserveAttempts, nil)
+	w.retryJobWithDelay(ctx, jobID, lockToken, errMsg, attempt, preserveAttempts, nil, nil)
 }
 
-func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration) {
+func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string) {
 	var backoff time.Duration
 	if override != nil {
 		backoff = *override
@@ -370,7 +379,19 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 		ok  bool
 		err error
 	)
-	if preserveAttempts {
+	if targetNodeID != nil {
+		if targetStore, supportsTargetRetry := w.jobs.(targetRetryLeaseStore); supportsTargetRetry {
+			if preserveAttempts {
+				ok, err = targetStore.RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx, jobID, lockToken, errMsg, runAt, targetNodeID)
+			} else {
+				ok, err = targetStore.RetryWithLeaseAndTarget(ctx, jobID, lockToken, errMsg, runAt, targetNodeID)
+			}
+		} else if preserveAttempts {
+			ok, err = w.jobs.RetryWithoutConsumingAttemptWithLease(ctx, jobID, lockToken, errMsg, runAt)
+		} else {
+			ok, err = w.jobs.RetryWithLease(ctx, jobID, lockToken, errMsg, runAt)
+		}
+	} else if preserveAttempts {
 		ok, err = w.jobs.RetryWithoutConsumingAttemptWithLease(ctx, jobID, lockToken, errMsg, runAt)
 	} else {
 		ok, err = w.jobs.RetryWithLease(ctx, jobID, lockToken, errMsg, runAt)
