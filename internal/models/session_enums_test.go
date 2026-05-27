@@ -153,6 +153,34 @@ func TestSessionInteractionMode_Validate(t *testing.T) {
 	}
 }
 
+func TestSessionRetryMode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     SessionRetryMode
+		expectErr bool
+	}{
+		{name: "checkpoint", value: SessionRetryModeCheckpoint},
+		{name: "start over", value: SessionRetryModeStartOver},
+		{name: "invalid", value: SessionRetryMode("fresh"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.value.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unknown retry modes")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known retry modes")
+		})
+	}
+}
+
 func TestSessionValidationPolicy_Validate(t *testing.T) {
 	t.Parallel()
 

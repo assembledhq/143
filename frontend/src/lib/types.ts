@@ -483,6 +483,12 @@ export interface Session {
   created_at: string;
 }
 
+export type SessionRetryMode = 'checkpoint' | 'start_over';
+
+export interface RetrySessionRequest {
+  mode?: SessionRetryMode;
+}
+
 export interface PRSummary {
   status: string;
   ci_status: string;
