@@ -288,7 +288,7 @@ func TestSessionHandler_RetrySession_EnrichesLinks(t *testing.T) {
 			),
 		)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"start_over"}`))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)

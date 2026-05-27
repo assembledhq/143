@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +37,14 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
+
+func qualifiedSessionThreadSelectColumns(alias string) string {
+	columns := strings.Split(sessionThreadSelectColumns, ",")
+	for i, column := range columns {
+		columns[i] = alias + "." + strings.TrimSpace(column)
+	}
+	return strings.Join(columns, ", ")
+}
 
 // ErrThreadLimitReached is returned when the maximum number of threads per session
 // has been reached and a new thread cannot be created.
@@ -106,6 +115,47 @@ func (s *SessionThreadStore) ListBySession(ctx context.Context, orgID, sessionID
 		return nil, fmt.Errorf("query session threads: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThread])
+}
+
+func (s *SessionThreadStore) GetRetryTarget(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionThread, error) {
+	query := `
+		WITH failed_thread AS (
+			SELECT ` + sessionThreadSelectColumns + `
+			FROM session_threads
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND archived_at IS NULL
+			  AND status = 'failed'
+			ORDER BY COALESCE(completed_at, last_activity_at, created_at) DESC, created_at DESC
+			LIMIT 1
+		), latest_user_thread AS (
+			SELECT ` + qualifiedSessionThreadSelectColumns("t") + `
+			FROM session_threads t
+			JOIN session_messages m
+			  ON m.thread_id = t.id
+			 AND m.org_id = t.org_id
+			 AND m.session_id = t.session_id
+			 AND m.role = 'user'
+			WHERE t.org_id = @org_id
+			  AND t.session_id = @session_id
+			  AND t.archived_at IS NULL
+			ORDER BY m.created_at DESC, m.id DESC
+			LIMIT 1
+		)
+		SELECT * FROM failed_thread
+		UNION ALL
+		SELECT * FROM latest_user_thread
+		WHERE NOT EXISTS (SELECT 1 FROM failed_thread)
+		LIMIT 1`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("query retry target thread: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
 }
 
 func (s *SessionThreadStore) CountBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {

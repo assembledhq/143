@@ -127,6 +127,23 @@ func (m SessionInteractionMode) Validate() error {
 	}
 }
 
+// SessionRetryMode controls how a failed session retry is dispatched.
+type SessionRetryMode string
+
+const (
+	SessionRetryModeCheckpoint SessionRetryMode = "checkpoint"
+	SessionRetryModeStartOver  SessionRetryMode = "start_over"
+)
+
+func (m SessionRetryMode) Validate() error {
+	switch m {
+	case SessionRetryModeCheckpoint, SessionRetryModeStartOver:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionRetryMode: %q", m)
+	}
+}
+
 // SessionValidationPolicy captures when validation should run for a session.
 type SessionValidationPolicy string
 
