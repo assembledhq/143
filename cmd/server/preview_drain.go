@@ -11,6 +11,34 @@ type activePreviewCounter interface {
 	CountActivePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error)
 }
 
+type previewRuntimeHeartbeatStore interface {
+	HeartbeatPreviewRuntimesByWorker(ctx context.Context, workerNodeID string, leaseExpiresAt time.Time) (int64, error)
+}
+
+func runPreviewRuntimeHeartbeat(ctx context.Context, previews previewRuntimeHeartbeatStore, workerNodeID string, logger zerolog.Logger, interval, leaseTTL time.Duration) {
+	if previews == nil || workerNodeID == "" {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if leaseTTL <= interval {
+		leaseTTL = 3 * interval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := previews.HeartbeatPreviewRuntimesByWorker(ctx, workerNodeID, time.Now().Add(leaseTTL)); err != nil {
+			logger.Warn().Err(err).Str("worker_node_id", workerNodeID).Msg("failed to heartbeat preview runtimes")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func waitForActivePreviewsToDrain(ctx context.Context, previews activePreviewCounter, workerNodeID string, logger zerolog.Logger, timeout time.Duration, pollInterval time.Duration) bool {
 	if previews == nil || workerNodeID == "" {
 		return true

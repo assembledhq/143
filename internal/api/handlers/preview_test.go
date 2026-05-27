@@ -563,6 +563,20 @@ func previewAnyArgs(n int) []any {
 	return args
 }
 
+var handlerPreviewRuntimeTestCols = []string{
+	"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+	"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+}
+
+func newHandlerPreviewRuntimeRow(runtimeID, orgID, previewID uuid.UUID, now time.Time) []any {
+	return []any{
+		runtimeID, orgID, previewID, 1, "worker-a",
+		"http://worker-a.internal", "", 0, string(models.PreviewRuntimeStatusStarting), now.Add(90 * time.Second),
+		now, nil, nil, "", now, now,
+	}
+}
+
 // expectAbortReservationNoDestroy emits the pgxmock sequence for an Abort that
 // releases the hold without destroying a container (either the sandbox was
 // reused so hydratedContainerID is "", or the turn still holds it). Callers
@@ -1477,7 +1491,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id").
+	mock.ExpectQuery("SELECT COUNT\\(DISTINCT preview_instance_id\\) FROM preview_runtimes WHERE worker_node_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
@@ -1489,6 +1503,12 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 	mock.ExpectQuery("UPDATE preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
+				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
+		)
 	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1572,7 +1592,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id").
+	mock.ExpectQuery("SELECT COUNT\\(DISTINCT preview_instance_id\\) FROM preview_runtimes WHERE worker_node_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
@@ -1584,6 +1604,12 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 	mock.ExpectQuery("UPDATE preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
+				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
+		)
 	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1742,7 +1768,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE worker_node_id").
+	mock.ExpectQuery("SELECT COUNT\\(DISTINCT preview_instance_id\\) FROM preview_runtimes WHERE worker_node_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
@@ -1754,6 +1780,12 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 	mock.ExpectQuery("UPDATE preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
+				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
+		)
 	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -2465,7 +2497,7 @@ func TestPreviewHandler_GetActivePreview_NoActivePreview(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT [\\s\\S]+ FROM preview_instances[\\s\\S]+status IN \\('stopped', 'expired', 'failed'\\)").
+	mock.ExpectQuery("SELECT [\\s\\S]+ FROM preview_instances[\\s\\S]+status IN \\('stopped', 'expired', 'failed', 'unavailable'\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
 
@@ -2504,7 +2536,7 @@ func TestPreviewHandler_GetPreview_ReturnsLatestStoppedPreviewWhenNoActivePrevie
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM preview_instances[\\s\\S]+status IN \\('stopped', 'expired', 'failed'\\)").
+	mock.ExpectQuery("SELECT .+ FROM preview_instances[\\s\\S]+status IN \\('stopped', 'expired', 'failed', 'unavailable'\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
@@ -2629,6 +2661,9 @@ func TestPreviewHandler_StopPreview_Success(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))

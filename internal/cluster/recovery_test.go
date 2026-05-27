@@ -36,6 +36,16 @@ func (s *recoverySessionExecutorStoreStub) ReclaimLost(ctx context.Context, stal
 	return s.reclaimFn(ctx, staleBefore, limit)
 }
 
+type recoveryPreviewRuntimeStoreStub struct {
+	calls  int
+	markFn func(ctx context.Context, cutoff time.Time, reason string) (int64, error)
+}
+
+func (s *recoveryPreviewRuntimeStoreStub) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutoff time.Time, reason string) (int64, error) {
+	s.calls++
+	return s.markFn(ctx, cutoff, reason)
+}
+
 func TestRecoveryLoop_RunOnce(t *testing.T) {
 	t.Parallel()
 
@@ -105,6 +115,41 @@ func TestRecoveryLoop_RunOnce(t *testing.T) {
 			require.NoError(t, err, "runOnce should not return an error")
 		})
 	}
+}
+
+func TestRecoveryLoop_MarksExpiredPreviewRuntimesBeforeJobs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	order := []string{}
+	nodes := &recoveryNodeStoreStub{
+		markDeadFn: func(ctx context.Context, staleBefore time.Time) (int64, error) {
+			order = append(order, "nodes")
+			return 1, nil
+		},
+	}
+	previews := &recoveryPreviewRuntimeStoreStub{
+		markFn: func(ctx context.Context, cutoff time.Time, reason string) (int64, error) {
+			order = append(order, "previews")
+			require.Equal(t, now, cutoff, "preview runtime sweep should use the current recovery time")
+			require.NotEmpty(t, reason, "preview runtime sweep should persist a recovery reason")
+			return 2, nil
+		},
+	}
+	jobs := &recoveryJobStoreStub{
+		reclaimFn: func(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+			order = append(order, "jobs")
+			return 3, nil
+		},
+	}
+	loop := NewRecoveryLoop(nodes, jobs, zerolog.Nop(), 90*time.Second, 100)
+	loop.SetPreviewRuntimes(previews)
+
+	err := loop.runOnce(context.Background(), now)
+
+	require.NoError(t, err, "runOnce should not return an error")
+	require.Equal(t, []string{"nodes", "previews", "jobs"}, order, "preview runtime recovery should run before job reclaim")
+	require.Equal(t, 1, previews.calls, "preview runtime recovery should run once")
 }
 
 func TestRecoveryLoop_ReclaimsLostSessionExecutorsBeforeJobs(t *testing.T) {

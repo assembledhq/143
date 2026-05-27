@@ -7,10 +7,20 @@ export type PreviewStatus =
   | "unhealthy"
   | "stopped"
   | "failed"
-  | "expired";
+  | "expired"
+  | "unavailable";
 
-export const ACTIVE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy", "starting"];
-export const CONTROLLABLE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy"];
+export const ACTIVE_PREVIEW_STATUSES: PreviewStatus[] = [
+  "ready",
+  "partially_ready",
+  "unhealthy",
+  "starting",
+];
+export const CONTROLLABLE_PREVIEW_STATUSES: PreviewStatus[] = [
+  "ready",
+  "partially_ready",
+  "unhealthy",
+];
 
 export function formatPreviewStatus(status: PreviewStatus | string): string {
   return status.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -78,6 +88,9 @@ export const PREVIEW_ERROR_CODES = {
   // crashed at boot or is bound to a different port than it declares in
   // .143/config.json.
   SERVICE_NOT_READY: "PREVIEW_SERVICE_NOT_READY",
+  // 503 — the preview URL is still valid, but the owning worker runtime is
+  // gone or its lease expired. Restarting the preview creates a new runtime.
+  RUNTIME_UNAVAILABLE: "PREVIEW_RUNTIME_UNAVAILABLE",
 } as const;
 
 export type PreviewErrorCode =
@@ -212,7 +225,11 @@ export interface ElementInfo {
 
 // Preview detection
 
-export type PreviewReadiness = "ready" | "admin_setup_required" | "partial" | "not_supported";
+export type PreviewReadiness =
+  | "ready"
+  | "admin_setup_required"
+  | "partial"
+  | "not_supported";
 
 export interface MissingCredential {
   credential_set: string;

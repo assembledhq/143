@@ -13,6 +13,7 @@ const (
 	PreviewStatusStopped        PreviewStatus = "stopped"
 	PreviewStatusFailed         PreviewStatus = "failed"
 	PreviewStatusExpired        PreviewStatus = "expired"
+	PreviewStatusUnavailable    PreviewStatus = "unavailable"
 )
 
 func (s PreviewStatus) Validate() error {
@@ -23,7 +24,8 @@ func (s PreviewStatus) Validate() error {
 		PreviewStatusUnhealthy,
 		PreviewStatusStopped,
 		PreviewStatusFailed,
-		PreviewStatusExpired:
+		PreviewStatusExpired,
+		PreviewStatusUnavailable:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewStatus: %q", s)
@@ -43,7 +45,43 @@ func (s PreviewStatus) IsActive() bool {
 // IsTerminal returns true for statuses where the preview has stopped.
 func (s PreviewStatus) IsTerminal() bool {
 	switch s {
-	case PreviewStatusStopped, PreviewStatusFailed, PreviewStatusExpired:
+	case PreviewStatusStopped, PreviewStatusFailed, PreviewStatusExpired, PreviewStatusUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+// PreviewRuntimeStatus captures the lifecycle of a worker-owned live preview runtime.
+type PreviewRuntimeStatus string
+
+const (
+	PreviewRuntimeStatusStarting PreviewRuntimeStatus = "starting"
+	PreviewRuntimeStatusReady    PreviewRuntimeStatus = "ready"
+	PreviewRuntimeStatusDraining PreviewRuntimeStatus = "draining"
+	PreviewRuntimeStatusLost     PreviewRuntimeStatus = "lost"
+	PreviewRuntimeStatusStopped  PreviewRuntimeStatus = "stopped"
+	PreviewRuntimeStatusFailed   PreviewRuntimeStatus = "failed"
+)
+
+func (s PreviewRuntimeStatus) Validate() error {
+	switch s {
+	case PreviewRuntimeStatusStarting,
+		PreviewRuntimeStatusReady,
+		PreviewRuntimeStatusDraining,
+		PreviewRuntimeStatusLost,
+		PreviewRuntimeStatusStopped,
+		PreviewRuntimeStatusFailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewRuntimeStatus: %q", s)
+	}
+}
+
+// IsActive returns true when a runtime can still own or serve preview traffic.
+func (s PreviewRuntimeStatus) IsActive() bool {
+	switch s {
+	case PreviewRuntimeStatusStarting, PreviewRuntimeStatusReady, PreviewRuntimeStatusDraining:
 		return true
 	default:
 		return false

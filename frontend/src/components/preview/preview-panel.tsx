@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Play,
@@ -78,6 +85,7 @@ const STATUS_LABELS: Record<PreviewStatus, string> = {
   stopped: "Stopped",
   failed: "Failed",
   expired: "Expired",
+  unavailable: "Unavailable",
 };
 
 const STARTUP_PHASE_RAIL_STACK_WIDTH = 300;
@@ -112,6 +120,7 @@ function statusColor(status: PreviewStatus): string {
       return "bg-destructive/15 text-destructive border-destructive/20";
     case "stopped":
     case "expired":
+    case "unavailable":
       return "bg-muted text-muted-foreground border-border";
     default:
       return "bg-primary/15 text-primary border-primary/20";
@@ -136,8 +145,11 @@ function buildStartupChecklist(
   // these on terminal transitions; this defensive layer also covers
   // historical rows from before the cascade landed.
   const parentTerminal =
-    status === "failed" || status === "stopped" || status === "expired";
-  const parentFailed = status === "failed";
+    status === "failed" ||
+    status === "stopped" ||
+    status === "expired" ||
+    status === "unavailable";
+  const parentFailed = status === "failed" || status === "unavailable";
 
   const infraFailed = infrastructure.find(
     (item) => item.status === "failed" || item.status === "unhealthy",
@@ -150,14 +162,18 @@ function buildStartupChecklist(
     infrastructure.every((item) => item.status === "healthy");
 
   const serviceFailed = services.find((service) => service.status === "failed");
-  const serviceStarting = services.find((service) => service.status === "starting");
+  const serviceStarting = services.find(
+    (service) => service.status === "starting",
+  );
   const anyServiceReady = services.some((service) => service.status === "ready");
   const allServicesReady =
-    services.length > 0 && services.every((service) => service.status === "ready");
-  const servicesCanStart = infrastructure.length === 0 || allInfraHealthy || anyServiceReady;
+    services.length > 0 &&
+    services.every((service) => service.status === "ready");
+  const servicesCanStart =
+    infrastructure.length === 0 || allInfraHealthy || anyServiceReady;
 
   const openPreviewState: StartupChecklistStepState =
-    status === "failed"
+    status === "failed" || status === "unavailable"
       ? "failed"
       : status === "ready" || status === "partially_ready"
         ? "complete"
@@ -172,7 +188,9 @@ function buildStartupChecklist(
         ? "Primary service is ready while background services finish."
         : status === "failed"
           ? "Preview startup failed before the app became reachable."
-          : "Waiting for the preview URL to become reachable.";
+          : status === "unavailable"
+            ? "The worker runtime that owned this preview is unavailable."
+            : "Waiting for the preview URL to become reachable.";
 
   const steps: StartupChecklistStep[] = [];
 
@@ -201,7 +219,11 @@ function buildStartupChecklist(
       infraState = "pending";
       infraDetail = "Waiting to start preview infrastructure.";
     }
-    steps.push({ title: "Infrastructure", state: infraState, detail: infraDetail });
+    steps.push({
+      title: "Infrastructure",
+      state: infraState,
+      detail: infraDetail,
+    });
   }
 
   let serviceState: StartupChecklistStepState;
@@ -213,7 +235,7 @@ function buildStartupChecklist(
     serviceState = "complete";
     serviceDetail = `${
       services.length === 1
-        ? services[0]?.service_name ?? "App"
+        ? (services[0]?.service_name ?? "App")
         : `${services.length} services`
     } ready`;
   } else if (parentTerminal) {
@@ -341,7 +363,8 @@ function PreviewActionsMenu({
                 Preview lifetime
               </span>
               <span className="block text-xs font-normal text-muted-foreground">
-                Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
+                Shuts off at {formatPreviewShutdownTime(expiresAt)} ·{" "}
+                {formatPreviewRemaining(expiresAt)}
               </span>
             </DropdownMenuLabel>
             {PREVIEW_LIFETIME_OPTIONS.map((option) => (
@@ -386,7 +409,8 @@ export function PreviewPanel({
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
   const [showPreviewRuntimeLogs, setShowPreviewRuntimeLogs] = useState(false);
-  const [startupPhaseRailLayout, setStartupPhaseRailLayout] = useState<StartupPhaseRailLayout>("default");
+  const [startupPhaseRailLayout, setStartupPhaseRailLayout] =
+    useState<StartupPhaseRailLayout>("default");
   const startupErrorLogsId = useId();
   const previewRuntimeLogsId = useId();
 
@@ -406,12 +430,21 @@ export function PreviewPanel({
       }),
     refetchInterval: (query) => {
       const st = query.state.data?.instance?.status;
-      if (!st || st === "stopped" || st === "failed" || st === "expired") return false;
+      if (
+        !st ||
+        st === "stopped" ||
+        st === "failed" ||
+        st === "expired" ||
+        st === "unavailable"
+      ) {
+        return false;
+      }
       return 3000;
     },
     retry: (failureCount, error) => {
       // Don't retry NO_ACTIVE_PREVIEW — it's a normal state, not a transient failure.
-      if ((error as { code?: string })?.code === "NO_ACTIVE_PREVIEW") return false;
+      if ((error as { code?: string })?.code === "NO_ACTIVE_PREVIEW")
+        return false;
       return failureCount < 2;
     },
   });
@@ -430,7 +463,7 @@ export function PreviewPanel({
   );
   const status = instance?.status;
   const lastPreviewStoppedAt =
-    status === "stopped" || status === "expired"
+    status === "stopped" || status === "expired" || status === "unavailable"
       ? instance?.stopped_at || instance?.updated_at
       : undefined;
   const isPreparing = status === "starting";
@@ -441,12 +474,18 @@ export function PreviewPanel({
   const isReady = status === "ready" || status === "partially_ready";
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
-    isPreparing || (status === "failed" && hasStartupRows);
+    isPreparing ||
+    ((status === "failed" || status === "unavailable") && hasStartupRows);
   const previewLogsTail = showPreviewRuntimeLogs && isPreparing;
   const shouldLoadPreviewLogs =
-    status === "failed" || previewLogsTail;
+    status === "failed" || status === "unavailable" || previewLogsTail;
   const previewLogsQuery = useQuery({
-    queryKey: ["preview-logs", sessionId, instance?.id, previewLogsTail ? "tail" : "default"],
+    queryKey: [
+      "preview-logs",
+      sessionId,
+      instance?.id,
+      previewLogsTail ? "tail" : "default",
+    ],
     queryFn: () =>
       previewLogsTail
         ? api.sessions.preview.logs(sessionId, { tail: true })
@@ -481,7 +520,11 @@ export function PreviewPanel({
       .filter(Boolean)
       .join("\n");
     return logs || "No preview logs have been captured yet.";
-  }, [previewLogsQuery.data, previewLogsQuery.isError, previewLogsQuery.isLoading]);
+  }, [
+    previewLogsQuery.data,
+    previewLogsQuery.isError,
+    previewLogsQuery.isLoading,
+  ]);
 
   // Ensure preview
   const startMutation = useMutation({
@@ -504,19 +547,19 @@ export function PreviewPanel({
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_EXPIRED) {
         setMutationError(
-          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again."
+          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again.",
         );
         return;
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_UNAVAILABLE) {
         setMutationError(
-          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
+          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again.",
         );
         return;
       }
       if (code === PREVIEW_ERROR_CODES.NO_SANDBOX) {
         setMutationError(
-          "Preview is unavailable on this server (Docker not configured). Contact an admin."
+          "Preview is unavailable on this server (Docker not configured). Contact an admin.",
         );
         return;
       }
@@ -525,7 +568,7 @@ export function PreviewPanel({
         // backend already destroyed our half-built container; the user just
         // needs to wait a beat and click again.
         setMutationError(
-          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again.",
         );
         return;
       }
@@ -535,7 +578,7 @@ export function PreviewPanel({
         // error code; suggest retry rather than burying the cause under the
         // generic "Failed to start preview:" prefix.
         setMutationError(
-          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy.",
         );
         return;
       }
@@ -599,7 +642,9 @@ export function PreviewPanel({
 
   const lifetimeMutation = useMutation({
     mutationFn: (durationSeconds: number) =>
-      api.sessions.preview.setLifetime(sessionId, { duration_seconds: durationSeconds }),
+      api.sessions.preview.setLifetime(sessionId, {
+        duration_seconds: durationSeconds,
+      }),
     onSuccess: () => {
       setMutationError(null);
       queryClient.invalidateQueries({
@@ -624,9 +669,9 @@ export function PreviewPanel({
     bootstrapMutateRef.current = bootstrapMutation.mutate;
   }, [bootstrapMutation.mutate]);
 
-  const previewOrigin = runtimePreviewOrigin || (instance
-    ? previewOriginTemplate.replace("{id}", instance.id)
-    : "");
+  const previewOrigin =
+    runtimePreviewOrigin ||
+    (instance ? previewOriginTemplate.replace("{id}", instance.id) : "");
 
   // Cache the parsed origin to avoid re-parsing on every postMessage event
   const parsedOrigin = useMemo(() => {
@@ -646,7 +691,7 @@ export function PreviewPanel({
         "[143 Preview] Preview origin matches app origin (%s). " +
           "This breaks iframe sandbox isolation. " +
           "Ensure PREVIEW_ORIGIN_TEMPLATE uses a different domain/port.",
-        parsedOrigin
+        parsedOrigin,
       );
     }
   }, [parsedOrigin]);
@@ -667,41 +712,36 @@ export function PreviewPanel({
   const pendingLoadCleanupRef = useRef<(() => void) | null>(null);
 
   // Post bootstrap token to iframe, retrying on iframe load if needed
-  const sendBootstrapToken = useCallback(
-    (token: string, origin: string) => {
-      // Clean up any previous pending listener
-      pendingLoadCleanupRef.current?.();
-      pendingLoadCleanupRef.current = null;
+  const sendBootstrapToken = useCallback((token: string, origin: string) => {
+    // Clean up any previous pending listener
+    pendingLoadCleanupRef.current?.();
+    pendingLoadCleanupRef.current = null;
 
-      const contentWindow = iframeRef.current?.contentWindow;
-      if (contentWindow) {
-        contentWindow.postMessage(
-          { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
-          origin
-        );
+    const contentWindow = iframeRef.current?.contentWindow;
+    if (contentWindow) {
+      contentWindow.postMessage(
+        { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
+        origin,
+      );
+      setBootstrapComplete(true);
+      return;
+    }
+    // Iframe not loaded yet - wait for load event and retry
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const onLoad = () => {
+      pendingLoadCleanupRef.current = null;
+      iframe.removeEventListener("load", onLoad);
+      const cw = iframe.contentWindow;
+      if (cw) {
+        cw.postMessage({ type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token }, origin);
         setBootstrapComplete(true);
-        return;
       }
-      // Iframe not loaded yet - wait for load event and retry
-      const iframe = iframeRef.current;
-      if (!iframe) return;
-      const onLoad = () => {
-        pendingLoadCleanupRef.current = null;
-        iframe.removeEventListener("load", onLoad);
-        const cw = iframe.contentWindow;
-        if (cw) {
-          cw.postMessage(
-            { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
-            origin
-          );
-          setBootstrapComplete(true);
-        }
-      };
-      iframe.addEventListener("load", onLoad);
-      pendingLoadCleanupRef.current = () => iframe.removeEventListener("load", onLoad);
-    },
-    []
-  );
+    };
+    iframe.addEventListener("load", onLoad);
+    pendingLoadCleanupRef.current = () =>
+      iframe.removeEventListener("load", onLoad);
+  }, []);
 
   // Clean up pending load listener on unmount
   useEffect(() => {
@@ -724,7 +764,7 @@ export function PreviewPanel({
         });
       }
     },
-    [parsedOrigin, sendBootstrapToken]
+    [parsedOrigin, sendBootstrapToken],
   );
 
   useEffect(() => {
@@ -751,7 +791,10 @@ export function PreviewPanel({
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
   const showTopControls =
-    status !== "starting" && status !== "stopped" && status !== "expired";
+    status !== "starting" &&
+    status !== "stopped" &&
+    status !== "expired" &&
+    status !== "unavailable";
   const statusMetadata = previewStatusMetadata(status);
   useEffect(() => {
     const rail = startupPhaseRailRef.current;
@@ -837,7 +880,9 @@ export function PreviewPanel({
                   disabled={isMutating}
                   onStop={() => stopMutation.mutate()}
                   onRestart={() => restartMutation.mutate()}
-                  onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
+                  onSetLifetime={(durationSeconds) =>
+                    lifetimeMutation.mutate(durationSeconds)
+                  }
                 />
               )}
 
@@ -861,7 +906,9 @@ export function PreviewPanel({
                   disabled={isMutating}
                   loading={startMutation.isPending}
                 >
-                  {!startMutation.isPending && <RotateCw className="size-3.5" />}
+                  {!startMutation.isPending && (
+                    <RotateCw className="size-3.5" />
+                  )}
                   Retry Preview
                 </Button>
               )}
@@ -901,14 +948,8 @@ export function PreviewPanel({
             <AlertTriangle className="size-4" />
             Failed to load preview status
           </div>
-          <p className="text-xs text-muted-foreground">
-            {statusError.message}
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => refetchStatus()}
-          >
+          <p className="text-xs text-muted-foreground">{statusError.message}</p>
+          <Button size="sm" variant="outline" onClick={() => refetchStatus()}>
             <RefreshCw className="size-3.5" />
             Retry
           </Button>
@@ -931,7 +972,9 @@ export function PreviewPanel({
                       disabled={isMutating}
                       loading={stopMutation.isPending}
                     >
-                      {!stopMutation.isPending && <Square className="size-3.5" />}
+                      {!stopMutation.isPending && (
+                        <Square className="size-3.5" />
+                      )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Stop preview</TooltipContent>
@@ -943,8 +986,12 @@ export function PreviewPanel({
                 <Loader2 className="size-5 animate-spin text-primary" />
               </div>
               <div className="space-y-1">
-                <p className="text-lg font-semibold text-foreground">Preparing preview</p>
-                <p className="text-sm text-muted-foreground">{startupSubtitle}</p>
+                <p className="text-lg font-semibold text-foreground">
+                  Preparing preview
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {startupSubtitle}
+                </p>
               </div>
               <div
                 ref={startupPhaseRailRef}
@@ -967,16 +1014,21 @@ export function PreviewPanel({
                       key={step.title}
                       className={cn(
                         "flex min-h-24 flex-col items-center gap-1.5 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
-                        step.state === "active" && "border-primary/30 text-foreground shadow-sm",
-                        step.state === "complete" && "text-emerald-600 dark:text-emerald-400",
-                        step.state === "failed" && "border-destructive/30 text-destructive",
+                        step.state === "active" &&
+                          "border-primary/30 text-foreground shadow-sm",
+                        step.state === "complete" &&
+                          "text-emerald-600 dark:text-emerald-400",
+                        step.state === "failed" &&
+                          "border-destructive/30 text-destructive",
                       )}
                     >
                       {startupStepIcon(step.state)}
                       <span className="text-balance font-medium">
                         {step.title}
                       </span>
-                      <span className="text-balance text-muted-foreground">{step.detail}</span>
+                      <span className="text-balance text-muted-foreground">
+                        {step.detail}
+                      </span>
                     </div>
                   );
                 })}
@@ -993,7 +1045,9 @@ export function PreviewPanel({
                 aria-controls={previewRuntimeLogsId}
                 onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
               >
-                {showPreviewRuntimeLogs ? "Hide preview logs" : "Show preview logs"}
+                {showPreviewRuntimeLogs
+                  ? "Hide preview logs"
+                  : "Show preview logs"}
                 <ChevronDown
                   className={cn(
                     "size-3.5 transition-transform duration-200",
@@ -1034,14 +1088,18 @@ export function PreviewPanel({
                 showFullStartupLogs
                   ? "max-h-[min(56vh,28rem)] overflow-y-auto text-foreground"
                   : "line-clamp-6",
-                previewLogsQuery.isError && showFullStartupLogs && "text-muted-foreground",
+                previewLogsQuery.isError &&
+                  showFullStartupLogs &&
+                  "text-muted-foreground",
               )}
             >
               {visibleStartupErrorLogs}
             </pre>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            {(startupErrorLogs || previewLogsQuery.isLoading || previewLogsQuery.isError) && (
+            {(startupErrorLogs ||
+              previewLogsQuery.isLoading ||
+              previewLogsQuery.isError) && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -1069,8 +1127,12 @@ export function PreviewPanel({
                 >
                   <div className="mt-0.5">{startupStepIcon(step.state)}</div>
                   <div className="min-w-0">
-                    <div className="font-medium text-foreground">{step.title}</div>
-                    <div className="text-xs text-muted-foreground">{step.detail}</div>
+                    <div className="font-medium text-foreground">
+                      {step.title}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {step.detail}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1082,9 +1144,7 @@ export function PreviewPanel({
       {/* Preview iframe */}
       {isReady && iframeSrc && (
         <div className="relative rounded-lg border bg-muted/30 overflow-hidden">
-          <div
-            className="mx-auto w-full"
-          >
+          <div className="mx-auto w-full">
             <div className="relative" style={{ paddingBottom: "62.5%" }}>
               {/* Sandbox threat model: allow-same-origin is required so the
                   iframe can set cookies and use localStorage on its own
@@ -1113,9 +1173,7 @@ export function PreviewPanel({
               {/* Design mode overlay */}
               {designMode && bootstrapComplete && (
                 <ErrorBoundary fallback={null}>
-                  <DesignModeOverlay
-                    sessionId={sessionId}
-                  />
+                  <DesignModeOverlay sessionId={sessionId} />
                 </ErrorBoundary>
               )}
             </div>
@@ -1124,41 +1182,48 @@ export function PreviewPanel({
       )}
 
       {/* Idle state */}
-      {(!status || status === "stopped" || status === "expired") && !statusLoading && (
-        <div className="rounded-lg border border-dashed p-8 flex flex-col items-center justify-center gap-3 text-center">
-          <div className="rounded-full bg-muted p-3">
-            <Monitor className="size-5 text-muted-foreground" />
+      {(!status ||
+        status === "stopped" ||
+        status === "expired" ||
+        status === "unavailable") &&
+        !statusLoading && (
+          <div className="rounded-lg border border-dashed p-8 flex flex-col items-center justify-center gap-3 text-center">
+            <div className="rounded-full bg-muted p-3">
+              <Monitor className="size-5 text-muted-foreground" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-medium">No preview running</p>
+              <p className="text-xs text-muted-foreground">
+                Start a preview to see live changes from the agent. Note that it
+                can take a few minutes for the environment to finish booting.
+              </p>
+              {instance?.created_at && lastPreviewStoppedAt && (
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    Started {formatTimeAgo(instance.created_at)}
+                  </span>
+                  <Badge
+                    variant="secondary"
+                    className={cn(statusColor(status ?? "stopped"))}
+                  >
+                    {status === "unavailable" ? "Unavailable" : "Stopped"}{" "}
+                    {formatTimeAgo(lastPreviewStoppedAt)}
+                  </Badge>
+                </div>
+              )}
+            </div>
+            <Button
+              size="sm"
+              onClick={() => startMutation.mutate()}
+              disabled={isMutating}
+              loading={startMutation.isPending}
+            >
+              {!startMutation.isPending && <Play className="size-3.5" />}
+              Start Preview
+            </Button>
+            <p className="text-xs text-muted-foreground"></p>
           </div>
-          <div className="space-y-1">
-            <p className="text-sm font-medium">No preview running</p>
-            <p className="text-xs text-muted-foreground">
-              Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
-            </p>
-            {instance?.created_at && lastPreviewStoppedAt && (
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                <span className="text-xs text-muted-foreground">
-                  Started {formatTimeAgo(instance.created_at)}
-                </span>
-                <Badge variant="secondary" className={cn(statusColor(status ?? "stopped"))}>
-                  Stopped {formatTimeAgo(lastPreviewStoppedAt)}
-                </Badge>
-              </div>
-            )}
-          </div>
-          <Button
-            size="sm"
-            onClick={() => startMutation.mutate()}
-            disabled={isMutating}
-            loading={startMutation.isPending}
-          >
-            {!startMutation.isPending && <Play className="size-3.5" />}
-            Start Preview
-          </Button>
-          <p className="text-xs text-muted-foreground">
-          </p>
-        </div>
-      )}
-
+        )}
     </div>
   );
 }
