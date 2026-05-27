@@ -22,11 +22,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -81,7 +76,6 @@ const STATUS_LABELS: Record<PreviewStatus, string> = {
   expired: "Expired",
 };
 
-const STARTUP_PHASES = ["Provisioning", "Starting", "Opening"] as const;
 const STARTUP_PHASE_RAIL_STACK_WIDTH = 300;
 const STARTUP_PHASE_RAIL_COMPACT_WIDTH = 420;
 
@@ -161,7 +155,7 @@ function buildStartupChecklist(
       ? "failed"
       : status === "ready" || status === "partially_ready"
         ? "complete"
-        : status === "starting"
+        : status === "starting" && allServicesReady
           ? "active"
           : "pending";
 
@@ -201,7 +195,7 @@ function buildStartupChecklist(
       infraState = "pending";
       infraDetail = "Waiting to start preview infrastructure.";
     }
-    steps.push({ title: "Spin up infrastructure", state: infraState, detail: infraDetail });
+    steps.push({ title: "Infrastructure", state: infraState, detail: infraDetail });
   }
 
   let serviceState: StartupChecklistStepState;
@@ -228,10 +222,10 @@ function buildStartupChecklist(
     serviceState = "pending";
     serviceDetail = "Waiting for services to boot.";
   }
-  steps.push({ title: "Start services", state: serviceState, detail: serviceDetail });
+  steps.push({ title: "Services", state: serviceState, detail: serviceDetail });
 
   steps.push({
-    title: "Open the preview",
+    title: "Preview",
     state: openPreviewState,
     detail: openPreviewDetail,
   });
@@ -270,41 +264,6 @@ function getStartupSubtitle(
   }
 
   return "Starting services";
-}
-
-function startupPhaseState(
-  phase: (typeof STARTUP_PHASES)[number],
-  services: PreviewService[],
-  infrastructure: PreviewInfrastructure[],
-): StartupChecklistStepState {
-  const hasInfrastructure = infrastructure.length > 0;
-  const allInfrastructureHealthy =
-    hasInfrastructure && infrastructure.every((item) => item.status === "healthy");
-  const provisioning = infrastructure.some((item) => item.status === "provisioning");
-  const anyServiceReady = services.some((service) => service.status === "ready");
-  const anyServiceStarting = services.some((service) => service.status === "starting");
-  const allServicesReady =
-    services.length > 0 && services.every((service) => service.status === "ready");
-
-  if (phase === "Provisioning") {
-    if (!hasInfrastructure || allInfrastructureHealthy) return "complete";
-    if (provisioning) return "active";
-    return "pending";
-  }
-
-  if (phase === "Starting") {
-    if (allServicesReady) return "complete";
-    if (!hasInfrastructure || allInfrastructureHealthy || anyServiceStarting || anyServiceReady) {
-      return "active";
-    }
-    return "pending";
-  }
-
-  // "Opening" has no `complete` state inside this canvas — completion is
-  // signalled by the canvas unmounting once the parent transitions to
-  // partially_ready or ready.
-  if (allServicesReady) return "active";
-  return "pending";
 }
 
 function formatPreviewShutdownTime(expiresAt: string): string {
@@ -785,10 +744,6 @@ export function PreviewPanel({
   const showTopControls =
     status !== "starting" && status !== "stopped" && status !== "expired";
   const statusMetadata = previewStatusMetadata(status);
-  const visibleStartupPhases = STARTUP_PHASES.filter(
-    (phase) => phase !== "Provisioning" || infrastructure.length > 0,
-  );
-
   useEffect(() => {
     const rail = startupPhaseRailRef.current;
     if (!rail) {
@@ -797,7 +752,7 @@ export function PreviewPanel({
 
     const updateLayout = (width: number) => {
       setStartupPhaseRailLayout(
-        getStartupPhaseRailLayout(width, visibleStartupPhases.length),
+        getStartupPhaseRailLayout(width, startupChecklist.length),
       );
     };
 
@@ -816,7 +771,7 @@ export function PreviewPanel({
     });
     observer.observe(rail);
     return () => observer.disconnect();
-  }, [visibleStartupPhases.length]);
+  }, [startupChecklist.length]);
 
   if (statusLoading) {
     return (
@@ -992,98 +947,65 @@ export function PreviewPanel({
                     ? "grid-cols-1"
                     : startupPhaseRailLayout === "compact"
                       ? "grid-cols-2"
-                      : visibleStartupPhases.length === 3
+                      : startupChecklist.length === 3
                         ? "grid-cols-3"
                         : "grid-cols-2",
                 )}
               >
-                {visibleStartupPhases.map((phase) => {
-                  const phaseState = startupPhaseState(phase, services, infrastructure);
+                {startupChecklist.map((step) => {
                   return (
                     <div
-                      key={phase}
+                      key={step.title}
                       className={cn(
-                        "flex flex-col items-center gap-2 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
-                        phaseState === "active" && "border-primary/30 text-foreground shadow-sm",
-                        phaseState === "complete" && "text-emerald-600 dark:text-emerald-400",
+                        "flex min-h-24 flex-col items-center gap-1.5 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
+                        step.state === "active" && "border-primary/30 text-foreground shadow-sm",
+                        step.state === "complete" && "text-emerald-600 dark:text-emerald-400",
+                        step.state === "failed" && "border-destructive/30 text-destructive",
                       )}
                     >
-                      {phaseState === "complete" ? (
-                        <CheckCircle2 className="size-3.5" />
-                      ) : phaseState === "active" ? (
-                        <Loader2 className="size-3.5 animate-spin text-primary" />
-                      ) : (
-                        <Circle className="size-3.5" />
-                      )}
-                      <span className={cn("text-balance", phaseState === "active" ? "font-medium" : undefined)}>
-                        {phase}
+                      {startupStepIcon(step.state)}
+                      <span className="text-balance font-medium">
+                        {step.title}
                       </span>
+                      <span className="text-balance text-muted-foreground">{step.detail}</span>
                     </div>
                   );
                 })}
               </div>
             </div>
           </div>
-          <Collapsible>
-            <div className="border-t bg-card/60 px-3 py-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <CollapsibleTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="group h-7 px-2 text-xs text-muted-foreground"
-                  >
-                    Details
-                    <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
-                  </Button>
-                </CollapsibleTrigger>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs text-muted-foreground"
-                  aria-expanded={showPreviewRuntimeLogs}
-                  aria-controls={previewRuntimeLogsId}
-                  onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
-                >
-                  {showPreviewRuntimeLogs ? "Hide preview logs" : "Show preview logs"}
-                  <ChevronDown
-                    className={cn(
-                      "size-3.5 transition-transform duration-200",
-                      showPreviewRuntimeLogs && "rotate-180",
-                    )}
-                  />
-                </Button>
-              </div>
-              <CollapsibleContent className="pt-2 pb-1">
-                <div className="space-y-1.5">
-                  {startupChecklist.map((step) => (
-                    <div
-                      key={step.title}
-                      className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
-                    >
-                      <div className="mt-0.5">{startupStepIcon(step.state)}</div>
-                      <div className="min-w-0">
-                        <div className="font-medium text-foreground">{step.title}</div>
-                        <div className="text-xs text-muted-foreground">{step.detail}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CollapsibleContent>
-              {showPreviewRuntimeLogs && (
-                <pre
-                  id={previewRuntimeLogsId}
-                  aria-label="Preview container logs"
+          <div className="border-t bg-card/60 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground"
+                aria-expanded={showPreviewRuntimeLogs}
+                aria-controls={previewRuntimeLogsId}
+                onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
+              >
+                {showPreviewRuntimeLogs ? "Hide preview logs" : "Show preview logs"}
+                <ChevronDown
                   className={cn(
-                    "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
-                    previewLogsQuery.isError && "text-muted-foreground",
+                    "size-3.5 transition-transform duration-200",
+                    showPreviewRuntimeLogs && "rotate-180",
                   )}
-                >
-                  {visiblePreviewRuntimeLogs}
-                </pre>
-              )}
+                />
+              </Button>
             </div>
-          </Collapsible>
+            {showPreviewRuntimeLogs && (
+              <pre
+                id={previewRuntimeLogsId}
+                aria-label="Preview container logs"
+                className={cn(
+                  "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
+                  previewLogsQuery.isError && "text-muted-foreground",
+                )}
+              >
+                {visiblePreviewRuntimeLogs}
+              </pre>
+            )}
+          </div>
         </div>
       )}
 
@@ -1129,35 +1051,21 @@ export function PreviewPanel({
               </Button>
             )}
           </div>
-          {hasStartupRows && (
-            <Collapsible>
-              <CollapsibleTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="group h-7 px-2 text-xs text-muted-foreground"
+          {hasStartupRows && startupChecklist.length > 0 && (
+            <div className="space-y-1.5 pt-1">
+              {startupChecklist.map((step) => (
+                <div
+                  key={step.title}
+                  className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
                 >
-                  Details
-                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="pt-2 pb-1">
-                <div className="space-y-1.5">
-                  {startupChecklist.map((step) => (
-                    <div
-                      key={step.title}
-                      className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
-                    >
-                      <div className="mt-0.5">{startupStepIcon(step.state)}</div>
-                      <div className="min-w-0">
-                        <div className="font-medium text-foreground">{step.title}</div>
-                        <div className="text-xs text-muted-foreground">{step.detail}</div>
-                      </div>
-                    </div>
-                  ))}
+                  <div className="mt-0.5">{startupStepIcon(step.state)}</div>
+                  <div className="min-w-0">
+                    <div className="font-medium text-foreground">{step.title}</div>
+                    <div className="text-xs text-muted-foreground">{step.detail}</div>
+                  </div>
                 </div>
-              </CollapsibleContent>
-            </Collapsible>
+              ))}
+            </div>
           )}
         </div>
       )}
