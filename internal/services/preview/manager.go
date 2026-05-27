@@ -77,7 +77,8 @@ type Manager struct {
 	sandboxProvider agent.SandboxProvider
 	logger          zerolog.Logger
 
-	workerNodeID string // identity of this worker for routing
+	workerNodeID           string // identity of this worker for routing
+	previewInternalBaseURL string // worker endpoint app/gateway nodes use for runtime routing
 
 	// previewOriginTemplate is used to compute PREVIEW_ORIGIN for each
 	// preview instance. "{id}" is replaced with the instance UUID. When
@@ -117,18 +118,19 @@ type OrgSettingsStore interface {
 
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
-	Store            *db.PreviewStore
-	SessionStore     *db.SessionStore
-	OrgSettingsStore OrgSettingsStore
-	Provider         PreviewCapableProvider
-	SandboxProvider  agent.SandboxProvider // used for destroy on final hold release
-	Inspector        PreviewInspector
-	SnapshotCache    *SnapshotCache
-	SecretResolver   *PreviewSecretResolver
-	AuditEmitter     *db.AuditEmitter
-	HMRWatcher       *HMRWatcher // optional; enables HMR screenshot capture
-	Logger           zerolog.Logger
-	WorkerNodeID     string
+	Store                  *db.PreviewStore
+	SessionStore           *db.SessionStore
+	OrgSettingsStore       OrgSettingsStore
+	Provider               PreviewCapableProvider
+	SandboxProvider        agent.SandboxProvider // used for destroy on final hold release
+	Inspector              PreviewInspector
+	SnapshotCache          *SnapshotCache
+	SecretResolver         *PreviewSecretResolver
+	AuditEmitter           *db.AuditEmitter
+	HMRWatcher             *HMRWatcher // optional; enables HMR screenshot capture
+	Logger                 zerolog.Logger
+	WorkerNodeID           string
+	PreviewInternalBaseURL string
 
 	// MaxPerUser / MaxPerOrg / MaxPerWorker cap concurrent active previews.
 	// Zero (the default) is NOT "unlimited" — it means "fall back to the
@@ -155,23 +157,24 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.Logger.Warn().Msg("preview.NewManager: Provider is nil — preview operations will fail until a provider is set")
 	}
 	m := &Manager{
-		store:                 cfg.Store,
-		sessionStore:          cfg.SessionStore,
-		orgSettings:           cfg.OrgSettingsStore,
-		provider:              cfg.Provider,
-		sandboxProvider:       cfg.SandboxProvider,
-		inspector:             cfg.Inspector,
-		snapshotCache:         cfg.SnapshotCache,
-		secretResolver:        cfg.SecretResolver,
-		auditEmitter:          cfg.AuditEmitter,
-		hmrWatcher:            cfg.HMRWatcher,
-		logger:                cfg.Logger,
-		workerNodeID:          cfg.WorkerNodeID,
-		previewOriginTemplate: cfg.PreviewOriginTemplate,
-		pollStopChs:           make(map[uuid.UUID]chan struct{}),
-		maxPerUser:            cfg.MaxPerUser,
-		maxPerOrg:             cfg.MaxPerOrg,
-		maxPerWorker:          cfg.MaxPerWorker,
+		store:                  cfg.Store,
+		sessionStore:           cfg.SessionStore,
+		orgSettings:            cfg.OrgSettingsStore,
+		provider:               cfg.Provider,
+		sandboxProvider:        cfg.SandboxProvider,
+		inspector:              cfg.Inspector,
+		snapshotCache:          cfg.SnapshotCache,
+		secretResolver:         cfg.SecretResolver,
+		auditEmitter:           cfg.AuditEmitter,
+		hmrWatcher:             cfg.HMRWatcher,
+		logger:                 cfg.Logger,
+		workerNodeID:           cfg.WorkerNodeID,
+		previewInternalBaseURL: strings.TrimRight(cfg.PreviewInternalBaseURL, "/"),
+		previewOriginTemplate:  cfg.PreviewOriginTemplate,
+		pollStopChs:            make(map[uuid.UUID]chan struct{}),
+		maxPerUser:             cfg.MaxPerUser,
+		maxPerOrg:              cfg.MaxPerOrg,
+		maxPerWorker:           cfg.MaxPerWorker,
 	}
 	if m.maxPerUser <= 0 {
 		m.maxPerUser = DefaultMaxPreviewsPerUser
@@ -246,31 +249,31 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 // follow up with LaunchPreview (success path) or AbortReservation (failure
 // path) — otherwise the preview row lingers in 'starting' with an active hold.
 func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (*models.PreviewInstance, error) {
-	return m.reservePreview(ctx, m.store, input, m.workerNodeID, true)
+	return m.reservePreview(ctx, m.store, input, m.workerNodeID, m.previewInternalBaseURL, true)
 }
 
 // ReservePreviewForWorkerInTx reserves a visible starting preview row for a
 // selected worker inside the caller's transaction. It deliberately does not
 // require a local preview provider, so API-only nodes can pair the reservation
 // atomically with enqueueing the durable start_preview job.
-func (m *Manager) ReservePreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, input StartPreviewInput, workerNodeID string) (*models.PreviewInstance, error) {
+func (m *Manager) ReservePreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, input StartPreviewInput, workerNodeID, workerEndpointURL string) (*models.PreviewInstance, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("transaction is required")
 	}
-	return m.reservePreview(ctx, m.store.WithTx(tx), input, workerNodeID, false)
+	return m.reservePreview(ctx, m.store.WithTx(tx), input, workerNodeID, workerEndpointURL, false)
 }
 
 // ReserveBranchPreviewForWorkerInTx reserves a standalone branch preview row
 // for a selected worker. Unlike session previews it does not acquire a session
 // sandbox hold; the branch runner creates and owns a dedicated sandbox.
-func (m *Manager) ReserveBranchPreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, input StartPreviewInput, workerNodeID string) (*models.PreviewInstance, error) {
+func (m *Manager) ReserveBranchPreviewForWorkerInTx(ctx context.Context, tx pgx.Tx, input StartPreviewInput, workerNodeID, workerEndpointURL string) (*models.PreviewInstance, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("transaction is required")
 	}
-	return m.reserveBranchPreview(ctx, m.store.WithTx(tx), input, workerNodeID)
+	return m.reserveBranchPreview(ctx, m.store.WithTx(tx), input, workerNodeID, workerEndpointURL)
 }
 
-func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID string) (*models.PreviewInstance, error) {
+func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID, workerEndpointURL string) (*models.PreviewInstance, error) {
 	if store == nil {
 		return nil, fmt.Errorf("preview store is not configured")
 	}
@@ -320,6 +323,11 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 	if err := store.CreateBranchPreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create branch preview instance: %w", err)
 	}
+	if workerEndpointURL != "" {
+		if err := store.CreatePreviewRuntime(ctx, newStartingRuntime(input.OrgID, instance.ID, workerNodeID, workerEndpointURL)); err != nil {
+			return nil, fmt.Errorf("create preview runtime: %w", err)
+		}
+	}
 	m.logger.Info().
 		Str("preview_id", instance.ID.String()).
 		Str("preview_target_id", targetID.String()).
@@ -335,7 +343,20 @@ func resolvePreviewExpiresAt(requested time.Time) time.Time {
 	return requested
 }
 
-func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID string, requireProvider bool) (*models.PreviewInstance, error) {
+func newStartingRuntime(orgID, previewID uuid.UUID, workerNodeID, endpointURL string) *models.PreviewRuntime {
+	now := time.Now()
+	return &models.PreviewRuntime{
+		OrgID:             orgID,
+		PreviewInstanceID: previewID,
+		RuntimeEpoch:      1,
+		WorkerNodeID:      workerNodeID,
+		EndpointURL:       strings.TrimRight(endpointURL, "/"),
+		Status:            models.PreviewRuntimeStatusStarting,
+		LeaseExpiresAt:    now.Add(90 * time.Second),
+	}
+}
+
+func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, input StartPreviewInput, workerNodeID, workerEndpointURL string, requireProvider bool) (*models.PreviewInstance, error) {
 	if requireProvider && m.provider == nil {
 		return nil, fmt.Errorf("preview provider is not configured")
 	}
@@ -426,6 +447,12 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	// use this field as an explicit guard instead of relying on SessionID == Nil
 	// as an indirect proxy for "was the hold acquired?".
 	instance.PreviewHoldingContainer = true
+	if workerEndpointURL != "" {
+		if err := store.CreatePreviewRuntime(ctx, newStartingRuntime(input.OrgID, instance.ID, workerNodeID, workerEndpointURL)); err != nil {
+			m.AbortReservation(ctx, instance, "", fmt.Sprintf("create preview runtime: %v", err))
+			return nil, fmt.Errorf("create preview runtime: %w", err)
+		}
+	}
 
 	m.logger.Info().
 		Str("preview_id", instance.ID.String()).
@@ -606,7 +633,16 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// Persist the handle. If this fails, the DB row has no route info and
 	// subsequent proxy/status calls would break — stop the provider and
 	// return so the caller aborts.
-	if err := m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort); err != nil {
+	if m.previewInternalBaseURL != "" {
+		if runtime, runtimeErr := m.store.GetActivePreviewRuntime(ctx, input.OrgID, instance.ID); runtimeErr == nil {
+			err = m.store.MarkPreviewRuntimeReady(ctx, input.OrgID, runtime.ID, handle.Handle, handle.PrimaryPort)
+		} else {
+			err = m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort)
+		}
+	} else {
+		err = m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort)
+	}
+	if err != nil {
 		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB, stopping provider")
 		_ = m.provider.StopPreview(ctx, handle.Handle)
 		return nil, fmt.Errorf("persist preview handle: %w", err)
@@ -1585,8 +1621,23 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		}
 		return err
 	}
+	var recycleRuntime *models.PreviewRuntime
+	if m.previewInternalBaseURL != "" {
+		recycleRuntime, err = m.store.CreateNextPreviewRuntime(ctx, orgID, previewID, m.workerNodeID, m.previewInternalBaseURL)
+		if err != nil {
+			if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not create runtime epoch"); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after runtime epoch error")
+			}
+			return fmt.Errorf("recycle: create runtime epoch: %w", err)
+		}
+	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
 	if err != nil {
+		if recycleRuntime != nil {
+			if runtimeErr := m.store.MarkPreviewRuntimeFailed(ctx, orgID, recycleRuntime.ID, err.Error()); runtimeErr != nil {
+				m.logger.Warn().Err(runtimeErr).Msg("recycle: failed to mark runtime failed after start error")
+			}
+		}
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
 		}
@@ -1596,7 +1647,12 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	// Update instance with new handle. This is critical — if it fails, the DB
 	// still points to the old (dead) handle and all subsequent proxy/status
 	// operations will break. Stop the new preview and fail the recycle.
-	if err := m.store.UpdatePreviewHandle(ctx, orgID, previewID, handle.Handle, handle.PrimaryPort); err != nil {
+	if recycleRuntime != nil {
+		err = m.store.MarkPreviewRuntimeReady(ctx, orgID, recycleRuntime.ID, handle.Handle, handle.PrimaryPort)
+	} else {
+		err = m.store.UpdatePreviewHandle(ctx, orgID, previewID, handle.Handle, handle.PrimaryPort)
+	}
+	if err != nil {
 		m.logger.Error().Err(err).Msg("recycle: failed to update handle, stopping new preview")
 		_ = m.provider.StopPreview(ctx, handle.Handle)
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not persist new handle"); statusErr != nil {

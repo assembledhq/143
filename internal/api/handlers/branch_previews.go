@@ -795,7 +795,7 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	reservation, err := h.manager.ReserveBranchPreviewForWorkerInTx(ctx, tx, input, worker.ID)
+	reservation, err := h.manager.ReserveBranchPreviewForWorkerInTx(ctx, tx, input, worker.ID, worker.BaseURL)
 	if err != nil {
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to reserve branch preview", err)
 	}

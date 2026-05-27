@@ -286,7 +286,7 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
 
 	body := string(src)
-	startWorkers := strings.Index(body, "\n\t\tprocessWorkers = startProcessWorkers(")
+	startWorkers := strings.Index(body, "processWorkers = startProcessWorkers(")
 	rehydrate := strings.Index(body, "orch.RehydrateSandboxAuthListeners(")
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
