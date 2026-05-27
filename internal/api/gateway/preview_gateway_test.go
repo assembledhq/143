@@ -912,7 +912,7 @@ func TestGateway_ProxyToWorker_InvalidRuntimeEndpoint(t *testing.T) {
 			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
 		}).AddRow(
 			runtimeID, orgID, previewID, 1, "worker-1",
-			"://bad-url", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			"", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
 			now, nil, nil, "", now, now,
 		))
 

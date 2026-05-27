@@ -419,11 +419,6 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	if err := store.CreatePreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create preview instance: %w", err)
 	}
-	if workerEndpointURL != "" {
-		if err := store.CreatePreviewRuntime(ctx, newStartingRuntime(input.OrgID, instance.ID, workerNodeID, workerEndpointURL)); err != nil {
-			return nil, fmt.Errorf("create preview runtime: %w", err)
-		}
-	}
 
 	// Acquire the preview's half of the sandbox refcount. Retry once, but
 	// only for transient I/O errors: a permanent PostgreSQL error or a
@@ -452,6 +447,11 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	// use this field as an explicit guard instead of relying on SessionID == Nil
 	// as an indirect proxy for "was the hold acquired?".
 	instance.PreviewHoldingContainer = true
+	if workerEndpointURL != "" {
+		if err := store.CreatePreviewRuntime(ctx, newStartingRuntime(input.OrgID, instance.ID, workerNodeID, workerEndpointURL)); err != nil {
+			return nil, fmt.Errorf("create preview runtime: %w", err)
+		}
+	}
 
 	m.logger.Info().
 		Str("preview_id", instance.ID.String()).

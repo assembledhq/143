@@ -1422,7 +1422,8 @@ func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNo
 	var count int
 	err := s.db.QueryRow(ctx,
 		fmt.Sprintf(`SELECT COUNT(DISTINCT preview_instance_id) FROM preview_runtimes WHERE worker_node_id = @worker
-		 AND status IN %s`, activeRuntimeStatusFilter),
+		 AND status IN %s
+		 AND lease_expires_at > now()`, activeRuntimeStatusFilter),
 		pgx.NamedArgs{"worker": workerNodeID},
 	).Scan(&count)
 	if err != nil {
@@ -1443,7 +1444,8 @@ func (s *PreviewStore) CountActiveStandalonePreviewsByWorker(ctx context.Context
 		 JOIN preview_instances pi ON pi.id = r.preview_instance_id AND pi.org_id = r.org_id
 		 WHERE r.worker_node_id = @worker
 		 AND pi.preview_target_id IS NOT NULL
-		 AND r.status IN %s`, activeRuntimeStatusFilter),
+		 AND r.status IN %s
+		 AND r.lease_expires_at > now()`, activeRuntimeStatusFilter),
 		pgx.NamedArgs{"worker": workerNodeID},
 	).Scan(&count)
 	if err != nil {
@@ -1466,6 +1468,7 @@ func (s *PreviewStore) CountActivePreviewsByWorkers(ctx context.Context, workerI
 		FROM preview_runtimes
 		WHERE worker_node_id = ANY(@worker_ids)
 		  AND status IN %s
+		  AND lease_expires_at > now()
 		GROUP BY worker_node_id`, activeRuntimeStatusFilter)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_ids": workerIDs})
 	if err != nil {

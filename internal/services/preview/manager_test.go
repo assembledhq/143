@@ -2133,7 +2133,13 @@ func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mgr := newTestManager(mock, &mockProvider{})
+	mgr := NewManager(ManagerConfig{
+		Store:                  db.NewPreviewStore(mock),
+		Provider:               &mockProvider{},
+		Logger:                 zerolog.Nop(),
+		WorkerNodeID:           "worker-1",
+		PreviewInternalBaseURL: "http://worker-1.internal",
+	})
 
 	orgID := uuid.New()
 	userID := uuid.New()

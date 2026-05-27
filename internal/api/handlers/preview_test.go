@@ -1500,15 +1500,15 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
+	mock.ExpectQuery("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 	mock.ExpectQuery("INSERT INTO preview_runtimes").
 		WithArgs(previewAnyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("UPDATE preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1601,15 +1601,15 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
+	mock.ExpectQuery("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 	mock.ExpectQuery("INSERT INTO preview_runtimes").
 		WithArgs(previewAnyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("UPDATE preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1777,15 +1777,15 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
+	mock.ExpectQuery("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 	mock.ExpectQuery("INSERT INTO preview_runtimes").
 		WithArgs(previewAnyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("UPDATE preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))

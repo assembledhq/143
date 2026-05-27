@@ -2006,7 +2006,7 @@ func TestPreviewStore_CountActivePreviewsByWorker(t *testing.T) {
 
 	store := NewPreviewStore(mock)
 
-	mock.ExpectQuery("SELECT COUNT").
+	mock.ExpectQuery("SELECT COUNT[\\s\\S]+lease_expires_at > now\\(\\)").
 		WithArgs(previewAnyArgs(1)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 

@@ -244,6 +244,57 @@ func TestInternalPreviewHandler_AuthorizePreviewActionRequiresRuntimeIdentity(t 
 	require.Equal(t, "PREVIEW_RUNTIME_MISMATCH", resp.Error.Code, "authorizePreviewAction should report runtime identity mismatch")
 }
 
+func TestInternalPreviewHandler_AuthorizePreviewActionRejectsStaleRuntime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	staleRuntimeID := uuid.New()
+	now := time.Now().UTC()
+
+	store := db.NewPreviewStore(mock)
+	handler := NewInternalPreviewHandler(&PreviewHandler{store: store, logger: zerolog.Nop()}, nil, "worker-1", "worker-secret", zerolog.Nop())
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 2, "worker-1",
+			"http://worker-1.internal", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy", nil)
+	req = withPreviewRouteParam(req, previewID.String())
+	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		PreviewID:    &previewID,
+		TargetNodeID: "worker-1",
+		RuntimeID:    &staleRuntimeID,
+		RuntimeEpoch: 1,
+		Action:       "proxy",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}))
+	rr := httptest.NewRecorder()
+
+	_, _, ok := handler.authorizePreviewAction(rr, req, "proxy")
+	require.False(t, ok, "authorizePreviewAction should reject proxy tokens for stale runtimes")
+	require.Equal(t, http.StatusForbidden, rr.Code, "authorizePreviewAction should fail closed on stale runtime identity")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "authorizePreviewAction should return a JSON error")
+	require.Equal(t, "PREVIEW_RUNTIME_MISMATCH", resp.Error.Code, "authorizePreviewAction should report runtime identity mismatch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestInternalPreviewHandler_StartPreview_RejectsMismatches(t *testing.T) {
 	t.Parallel()
 

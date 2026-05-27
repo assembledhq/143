@@ -410,7 +410,7 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		return
 	}
 	targetURL, err := url.Parse(runtime.EndpointURL)
-	if err != nil {
+	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("endpoint_url", runtime.EndpointURL).Msg("failed to parse preview runtime endpoint url")
 		writeRuntimeUnavailable(w)
 		return
