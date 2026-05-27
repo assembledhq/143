@@ -252,7 +252,7 @@ The UI should avoid offering repair actions when PR health is too stale or too a
 Recommended behavior:
 
 - if a fresh summary sync is in progress, show a lightweight syncing state and suppress repair buttons until eligibility is known
-- if mergeability remains `unknown` after retry, do not show `Resolve conflicts` yet; show the latest known sync time and a neutral waiting state
+- if mergeability remains `mergeability_pending` after retry, do not show `Resolve conflicts` yet; keep the Merge action visible but disabled in a neutral checking state
 - if failed checks cannot yet be confidently classified as `test`, do not show `Fix tests`; show the blocker summary without an agent-action CTA
 - if the health snapshot is older than a defined freshness threshold, show the row as stale and trigger a refresh rather than reusing old button eligibility
 
@@ -463,7 +463,7 @@ Long-term, `check_run` or workflow-job data should be the canonical source for r
 
 ### Mergeability retry
 
-GitHub mergeability is often computed asynchronously. If GitHub returns an indeterminate value, retry a few times with short backoff before persisting `unknown`.
+GitHub mergeability is often computed asynchronously. If GitHub returns an indeterminate value, retry a few times with short exponential backoff before persisting `mergeability_pending`; worker-driven syncs then keep retrying through the queue's exponential backoff until GitHub reports a definitive mergeability state or the retry window expires.
 
 ### Classification
 

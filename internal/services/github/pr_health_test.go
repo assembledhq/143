@@ -64,7 +64,28 @@ func TestNormalizeMergeState(t *testing.T) {
 			name:         "unknown mergeability stays unknown",
 			mergeable:    nil,
 			githubState:  "unknown",
-			expected:     models.PullRequestMergeStateUnknown,
+			expected:     models.PullRequestMergeStateMergeabilityPending,
+			hasConflicts: false,
+		},
+		{
+			name:         "empty null mergeability is pending",
+			mergeable:    nil,
+			githubState:  "",
+			expected:     models.PullRequestMergeStateMergeabilityPending,
+			hasConflicts: false,
+		},
+		{
+			name:         "mergeable null with dirty state is conflicted",
+			mergeable:    nil,
+			githubState:  "dirty",
+			expected:     models.PullRequestMergeStateConflicted,
+			hasConflicts: true,
+		},
+		{
+			name:         "mergeable null with blocked state is blocked",
+			mergeable:    nil,
+			githubState:  "blocked",
+			expected:     models.PullRequestMergeStateBlocked,
 			hasConflicts: false,
 		},
 	}
@@ -482,6 +503,42 @@ func TestBuildPRHealthSummaryText(t *testing.T) {
 			expected: "PR #184 is blocked by GitHub merge requirements.",
 		},
 		{
+			name: "checking mergeability",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateMergeabilityPending,
+				ChecksConfirmed:   true,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+				},
+			},
+			expected: "PR #184 is waiting for GitHub to finish checking mergeability.",
+		},
+		{
+			name: "legacy unknown mergeability",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateUnknown,
+				ChecksConfirmed:   true,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+				},
+			},
+			expected: "PR #184 is waiting for GitHub to finish checking mergeability.",
+		},
+		{
+			name: "behind base branch",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateBehind,
+				ChecksConfirmed:   true,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+				},
+			},
+			expected: "PR #184 needs the base branch updated before merging.",
+		},
+		{
 			name: "conflicts and tests",
 			health: models.PullRequestHealthResponse{
 				PullRequestNumber: 184,
@@ -642,6 +699,14 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 			input: models.PullRequestHealthResponse{
 				Status:     "open",
 				MergeState: models.PullRequestMergeStateUnknown,
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "pending mergeability state is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateMergeabilityPending,
 			},
 			expectCanMerge: false,
 		},

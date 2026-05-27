@@ -1821,6 +1821,76 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Session stopped')).toBeInTheDocument();
   });
 
+  it('clears stale running thread UI when an idle session status omits thread detail', async () => {
+    const sessionId = 'session-idle-thread-omitted';
+    const thread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Finish this run',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'idle',
+        sandbox_state: 'snapshotted',
+        snapshot_key: 'snapshots/session-idle-thread-omitted.tar',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    });
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
+  });
+
   it('archives a closed thread and switches focus to a remaining tab', async () => {
     const sessionId = 'session-archive-thread';
     let threads: SessionThread[] = [
@@ -4055,6 +4125,8 @@ describe('SessionDetailPage', () => {
       failure_category: 'test_failure',
       failure_next_steps: ['Check logs', 'Retry with debug'],
       failure_retry_advised: true,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
     };
 
     server.use(
@@ -4068,7 +4140,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('test_failure')).toBeInTheDocument();
     expect(screen.getByText('Check logs')).toBeInTheDocument();
     expect(screen.getByText('Retry with debug')).toBeInTheDocument();
-    expect(screen.getByText('Retry')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeInTheDocument();
   });
 
   it('shows duration for completed session', async () => {
@@ -5896,6 +5968,7 @@ describe('SessionDetailPage', () => {
       ...mockSessions[1],
       failure_category: 'codex_auth_expired',
       failure_explanation: 'Codex token expired',
+      failure_retry_advised: true,
       agent_type: 'codex',
     };
 
@@ -5912,8 +5985,37 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
     await screen.findByText('Failure details');
     expect(
-      await screen.findByText(/ChatGPT connected/),
+      await screen.findByText('ChatGPT connected — open the retry menu and choose Start over from beginning.'),
     ).toBeInTheDocument();
+  });
+
+  it('points codex auth users to Retry when saved progress exists', async () => {
+    const codexAuthSession: Session = {
+      ...mockSessions[1],
+      failure_category: 'codex_auth_expired',
+      failure_explanation: 'Codex token expired',
+      failure_retry_advised: true,
+      agent_type: 'codex',
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('scope')).toBe('personal');
+        return HttpResponse.json({ data: { status: 'completed' } });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+    expect(
+      await screen.findByText('ChatGPT connected — click Retry to continue this session.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeEnabled();
   });
 
   it('can toggle the detail panel visibility', async () => {
@@ -8388,21 +8490,23 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('Unknown user')).not.toBeInTheDocument();
   });
 
-  it('calls retry API when Retry button is clicked on failed session', async () => {
-    let retryCalled = false;
+  it('calls checkpoint retry API when primary retry button is clicked on failed session', async () => {
+    let retryBody: unknown;
 
     const failedSession: Session = {
       ...mockSessions[1],
       failure_explanation: 'Something broke',
       failure_retry_advised: true,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
     };
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
       }),
-      http.post('/api/v1/sessions/:id/retry', () => {
-        retryCalled = true;
+      http.post('/api/v1/sessions/:id/retry', async ({ request }) => {
+        retryBody = await request.json();
         return HttpResponse.json({ data: { ...failedSession, status: 'pending' } });
       }),
     );
@@ -8411,11 +8515,73 @@ describe('SessionDetailPage', () => {
     await screen.findByText('Failure details');
 
     const user = userEvent.setup();
-    const retryButton = screen.getByText('Retry');
+    const retryButton = screen.getByRole('button', { name: /^Retry$/i });
     await user.click(retryButton);
 
     await waitFor(() => {
-      expect(retryCalled).toBe(true);
+      expect(retryBody).toEqual({ mode: 'checkpoint' });
+    });
+  });
+
+  it('disables checkpoint retry without a checkpoint but keeps start-over available', async () => {
+    const failedSession: Session = {
+      ...mockSessions[1],
+      failure_explanation: 'Something broke',
+      failure_retry_advised: true,
+      sandbox_state: 'none',
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeDisabled();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /More retry actions/i }));
+    expect(await screen.findByRole('menuitem', { name: /Start over from beginning/i })).toBeInTheDocument();
+  });
+
+  it('requires confirmation before posting start-over retry mode', async () => {
+    let retryBody: unknown;
+    const failedSession: Session = {
+      ...mockSessions[1],
+      failure_explanation: 'Something broke',
+      failure_retry_advised: true,
+      sandbox_state: 'none',
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/retry', async ({ request }) => {
+        retryBody = await request.json();
+        return HttpResponse.json({ data: { ...failedSession, status: 'pending' } });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /More retry actions/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /Start over from beginning/i }));
+
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(retryBody).toBeUndefined();
+
+    await user.click(screen.getByRole('button', { name: /^Start over$/i }));
+
+    await waitFor(() => {
+      expect(retryBody).toEqual({ mode: 'start_over' });
     });
   });
 
