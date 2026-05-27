@@ -552,7 +552,7 @@ func main() {
 			services.LinearAgentDeps.Stores = stores
 		}
 
-			processWorkers = startProcessWorkers(
+		processWorkers = startProcessWorkers(
 			ctx,
 			pool,
 			logger,
@@ -566,14 +566,15 @@ func main() {
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
 			previewRoutingReady.Load,
-				sandboxCapacity,
-			)
-			if workerPreviewStore != nil && cfg.NodeID != "" {
-				go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
-			}
+			sandboxCapacity,
+		)
+		if workerPreviewStore != nil && cfg.NodeID != "" {
+			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
+		}
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
+		recoveryLoop.SetPreviewRuntimes(workerPreviewStore)
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)

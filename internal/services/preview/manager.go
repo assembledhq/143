@@ -449,6 +449,7 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	instance.PreviewHoldingContainer = true
 	if workerEndpointURL != "" {
 		if err := store.CreatePreviewRuntime(ctx, newStartingRuntime(input.OrgID, instance.ID, workerNodeID, workerEndpointURL)); err != nil {
+			m.AbortReservation(ctx, instance, "", fmt.Sprintf("create preview runtime: %v", err))
 			return nil, fmt.Errorf("create preview runtime: %w", err)
 		}
 	}

@@ -475,7 +475,7 @@ func translateWorkerRuntimeMismatch(resp *http.Response) bool {
 	if resp.StatusCode != http.StatusForbidden {
 		return false
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))

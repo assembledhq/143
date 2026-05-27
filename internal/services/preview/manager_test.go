@@ -2184,6 +2184,66 @@ func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestReservePreview_RuntimeCreateErrorReleasesHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := NewManager(ManagerConfig{
+		Store:                  db.NewPreviewStore(mock),
+		Provider:               &mockProvider{},
+		Logger:                 zerolog.Nop(),
+		WorkerNodeID:           "worker-1",
+		PreviewInternalBaseURL: "http://worker-1.internal",
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnError(fmt.Errorf("runtime insert failed"))
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "", true),
+		)
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Config:    validPreviewConfig(),
+	})
+
+	require.Error(t, err, "ReservePreview should return runtime insert errors")
+	require.Contains(t, err.Error(), "create preview runtime", "ReservePreview should identify runtime insert failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestLaunchPreview_NilProviderErrors(t *testing.T) {
 	t.Parallel()
 

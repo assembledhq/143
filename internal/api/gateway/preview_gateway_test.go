@@ -883,6 +883,57 @@ func TestGateway_ProxyToWorker_TranslatesWorkerRuntimeMismatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestGateway_ProxyToWorker_PreservesLargeNonMismatchForbiddenBody(t *testing.T) {
+	t.Parallel()
+
+	largeBody := strings.Repeat("x", 70*1024)
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusForbidden)
+		_, err := io.WriteString(w, largeBody)
+		require.NoError(t, err, "worker test server should write the large body")
+	}))
+	defer workerServer.Close()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 1, "worker-runtime",
+			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/forbidden", nil)
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "proxyToWorker should preserve non-mismatch forbidden responses")
+	require.Equal(t, largeBody, rr.Body.String(), "proxyToWorker should not truncate non-mismatch forbidden bodies")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestGateway_ProxyToWorker_InvalidRuntimeEndpoint(t *testing.T) {
 	t.Parallel()
 
