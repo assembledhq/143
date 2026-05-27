@@ -285,9 +285,12 @@ describe("PreviewPanel component", () => {
     });
 
     expect(screen.getByText("Provisioning postgres")).toBeInTheDocument();
-    expect(screen.getByText("Provisioning")).toBeInTheDocument();
-    expect(screen.getByText("Starting")).toBeInTheDocument();
-    expect(screen.getByText("Opening")).toBeInTheDocument();
+    expect(screen.getByText("Infrastructure")).toBeInTheDocument();
+    expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
+    expect(screen.getByText("Services")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for services to boot.")).toBeInTheDocument();
+    expect(screen.getByText("Preview")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for the preview URL to become reachable.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restart preview" })).not.toBeInTheDocument();
     expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
@@ -409,7 +412,7 @@ describe("PreviewPanel component", () => {
     });
   });
 
-  it("hides the Provisioning rail tile when the preview has no infrastructure", async () => {
+  it("hides the infrastructure startup card when the preview has no infrastructure", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -418,9 +421,23 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    expect(screen.queryByText("Provisioning")).not.toBeInTheDocument();
-    expect(screen.getByText("Starting")).toBeInTheDocument();
-    expect(screen.getByText("Opening")).toBeInTheDocument();
+    expect(screen.queryByText("Infrastructure")).not.toBeInTheDocument();
+    expect(screen.getByText("Services")).toBeInTheDocument();
+    expect(screen.getByText("Preview")).toBeInTheDocument();
+  });
+
+  it("marks services active while a preview starts before service rows arrive", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+
+    const servicesCard = screen.getByText("Services").closest("div");
+    expect(servicesCard).not.toBeNull();
+    expect(servicesCard).toHaveClass("border-primary/30");
   });
 
   it("does not show duplicated startup guidance or checklist by default", async () => {
@@ -846,7 +863,7 @@ describe("PreviewPanel component", () => {
     expect(heading.className).toContain("text-destructive");
   });
 
-  it("uses one primary starting label in the startup canvas", async () => {
+  it("uses one primary startup heading in the startup canvas", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -855,7 +872,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    expect(screen.getAllByText("Starting")).toHaveLength(1);
+    expect(screen.getAllByText("Preparing preview")).toHaveLength(1);
   });
 
   it("uses quiet metadata for the partially_ready phase instead of a status badge", async () => {
@@ -915,8 +932,7 @@ describe("PreviewPanel component", () => {
     expect(button.querySelector("svg.lucide-play")).not.toBeInTheDocument();
   });
 
-  it("keeps infrastructure and service details collapsed until requested", async () => {
-    const user = userEvent.setup();
+  it("shows infrastructure and service details in startup cards without a separate details section", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus(
         { status: "starting" },
@@ -955,20 +971,16 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preparing preview")).toBeInTheDocument();
     });
 
-    expect(screen.queryByText("postgres is provisioning")).not.toBeInTheDocument();
-    expect(screen.queryByText("web is starting")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Details" }));
-
-    expect(screen.getByText("Spin up infrastructure")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
+    expect(screen.getByText("Infrastructure")).toBeInTheDocument();
     expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
-    expect(screen.getByText("Start services")).toBeInTheDocument();
+    expect(screen.getByText("Services")).toBeInTheDocument();
     expect(screen.getByText("web is starting")).toBeInTheDocument();
-    expect(screen.getByText("Open the preview")).toBeInTheDocument();
+    expect(screen.getByText("Preview")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for the preview URL to become reachable.")).toBeInTheDocument();
   });
 
   it("renders orphaned pending children as terminal when the parent preview failed", async () => {
-    const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus(
         { status: "failed", error: "provider start preview failed" },
@@ -1007,8 +1019,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: /Details/ }));
-
+    expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
     expect(screen.getByText("postgres did not finish provisioning")).toBeInTheDocument();
     expect(screen.getByText("web did not finish starting")).toBeInTheDocument();
     expect(screen.queryByText("postgres is provisioning")).not.toBeInTheDocument();
