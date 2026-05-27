@@ -233,6 +233,19 @@
   }
 }
 
+@layer components {
+  @media (min-width: 48rem) {
+    #nd-docs-layout.docs-fumadocs-layout {
+      --fd-sidebar-width: 244px;
+    }
+  }
+
+  #nd-sidebar [data-radix-scroll-area-viewport],
+  #nd-sidebar-mobile [data-radix-scroll-area-viewport] {
+    padding-inline: 1.125rem;
+  }
+}
+
 /* Working / "AI thinking" status indicator. A slow gradient sweep on the dot
    reads as ongoing thought rather than a 1Hz network ping. The accompanying
    halo breathes at half speed so the two cycles never sync. */
