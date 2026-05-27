@@ -47,9 +47,13 @@ func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
 // This is a constant interpolated via fmt.Sprintf — safe because it is never user input.
 const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy')`
 
+// activeRuntimeStatusFilter is the SQL IN clause for live runtime attachments.
+// Keep in sync with models.PreviewRuntimeStatus.IsActive().
+const activeRuntimeStatusFilter = `('starting', 'ready', 'draining')`
+
 // terminalStatusFilter is the SQL IN clause for preview statuses that can be
 // shown as the most recent preview history when no active preview exists.
-const terminalStatusFilter = `('stopped', 'expired', 'failed')`
+const terminalStatusFilter = `('stopped', 'expired', 'failed', 'unavailable')`
 
 // --- Column lists ---
 
@@ -58,6 +62,10 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
+
+const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, worker_node_id,
+	endpoint_url, preview_handle, primary_port, status, lease_expires_at,
+	last_heartbeat_at, drain_requested_at, stopped_at, error, created_at, updated_at`
 
 const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
 	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
@@ -499,6 +507,160 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 	return nil
 }
 
+// CreatePreviewRuntime inserts a live worker attachment for a preview instance.
+func (s *PreviewStore) CreatePreviewRuntime(ctx context.Context, r *models.PreviewRuntime) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_runtimes (
+			org_id, preview_instance_id, runtime_epoch, worker_node_id, endpoint_url,
+			preview_handle, primary_port, status, lease_expires_at
+		) VALUES (
+			@org_id, @preview_instance_id, @runtime_epoch, @worker_node_id, @endpoint_url,
+			@preview_handle, @primary_port, @status, @lease_expires_at
+		) RETURNING %s`, previewRuntimeColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":              r.OrgID,
+		"preview_instance_id": r.PreviewInstanceID,
+		"runtime_epoch":       r.RuntimeEpoch,
+		"worker_node_id":      r.WorkerNodeID,
+		"endpoint_url":        r.EndpointURL,
+		"preview_handle":      r.PreviewHandle,
+		"primary_port":        r.PrimaryPort,
+		"status":              r.Status,
+		"lease_expires_at":    r.LeaseExpiresAt,
+	})
+	if err != nil {
+		return fmt.Errorf("insert preview runtime: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewRuntime])
+	if err != nil {
+		return fmt.Errorf("scan preview runtime: %w", err)
+	}
+	*r = row
+	return nil
+}
+
+// CreateNextPreviewRuntime stops existing active epochs and inserts a starting
+// runtime with the next epoch in one transaction.
+func (s *PreviewStore) CreateNextPreviewRuntime(ctx context.Context, orgID, previewID uuid.UUID, workerNodeID, endpointURL string) (*models.PreviewRuntime, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin next preview runtime: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txStore := s.WithTx(tx)
+	if _, err := tx.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_runtimes
+		 SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), updated_at = now()
+		 WHERE preview_instance_id = @preview_id AND org_id = @org_id AND status IN %s`, activeRuntimeStatusFilter),
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	); err != nil {
+		return nil, fmt.Errorf("stop previous preview runtimes: %w", err)
+	}
+
+	var nextEpoch int
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(MAX(runtime_epoch), 0) + 1
+		 FROM preview_runtimes
+		 WHERE org_id = @org_id AND preview_instance_id = @preview_id`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	).Scan(&nextEpoch); err != nil {
+		return nil, fmt.Errorf("select next preview runtime epoch: %w", err)
+	}
+
+	runtime := newStartingPreviewRuntime(orgID, previewID, nextEpoch, workerNodeID, endpointURL)
+	if err := txStore.CreatePreviewRuntime(ctx, runtime); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit next preview runtime: %w", err)
+	}
+	return runtime, nil
+}
+
+func newStartingPreviewRuntime(orgID, previewID uuid.UUID, epoch int, workerNodeID, endpointURL string) *models.PreviewRuntime {
+	now := time.Now().UTC()
+	return &models.PreviewRuntime{
+		OrgID:             orgID,
+		PreviewInstanceID: previewID,
+		RuntimeEpoch:      epoch,
+		WorkerNodeID:      workerNodeID,
+		EndpointURL:       endpointURL,
+		Status:            models.PreviewRuntimeStatusStarting,
+		LeaseExpiresAt:    now.Add(90 * time.Second),
+	}
+}
+
+// GetActivePreviewRuntime returns the latest live, leased runtime for a preview.
+func (s *PreviewStore) GetActivePreviewRuntime(ctx context.Context, orgID, previewID uuid.UUID) (*models.PreviewRuntime, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM preview_runtimes
+		WHERE org_id = @org_id
+		  AND preview_instance_id = @preview_id
+		  AND status IN %s
+		  AND lease_expires_at > now()
+		ORDER BY runtime_epoch DESC
+		LIMIT 1`, previewRuntimeColumns, activeRuntimeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "preview_id": previewID})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview runtime: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewRuntime])
+	if err != nil {
+		return nil, fmt.Errorf("get active preview runtime: %w", err)
+	}
+	return &row, nil
+}
+
+// MarkPreviewRuntimeReady marks a runtime ready and mirrors routing fields onto
+// preview_instances for API compatibility.
+func (s *PreviewStore) MarkPreviewRuntimeReady(ctx context.Context, orgID, runtimeID uuid.UUID, handle string, port int) error {
+	tag, err := s.db.Exec(ctx, `
+		WITH runtime AS (
+			UPDATE preview_runtimes
+			SET status = 'ready',
+				preview_handle = @handle,
+				primary_port = @port,
+				last_heartbeat_at = now(),
+				updated_at = now()
+			WHERE id = @runtime_id AND org_id = @org_id
+			RETURNING preview_instance_id, worker_node_id
+		)
+		UPDATE preview_instances pi
+		SET worker_node_id = runtime.worker_node_id,
+			preview_handle = @handle,
+			port = @port,
+			updated_at = now(),
+			recycled_at = now()
+		FROM runtime
+		WHERE pi.id = runtime.preview_instance_id AND pi.org_id = @org_id`,
+		pgx.NamedArgs{"org_id": orgID, "runtime_id": runtimeID, "handle": handle, "port": port},
+	)
+	if err != nil {
+		return fmt.Errorf("mark preview runtime ready: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview runtime not found")
+	}
+	return nil
+}
+
+func (s *PreviewStore) MarkPreviewRuntimeFailed(ctx context.Context, orgID, runtimeID uuid.UUID, reason string) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE preview_runtimes
+		 SET status = 'failed',
+		     stopped_at = COALESCE(stopped_at, now()),
+		     error = @error,
+		     updated_at = now()
+		 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": runtimeID, "org_id": orgID, "error": reason},
+	); err != nil {
+		return fmt.Errorf("mark preview runtime failed: %w", err)
+	}
+	return nil
+}
+
 // CreateBranchPreviewInstance inserts a preview runtime reservation owned by a
 // preview target instead of a session. Branch preview sandboxes are standalone,
 // so session_id is persisted as NULL and preview_holding_container remains
@@ -783,10 +945,10 @@ func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, i
 func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	phase := previewPhaseForStatus(status)
 	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
-		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	if status.IsTerminal() {
 		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
-			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id": id, "org_id": orgID, "status": status, "phase": phase, "error": errMsg,
@@ -807,6 +969,8 @@ func previewPhaseForStatus(status models.PreviewStatus) string {
 		return "stopped"
 	case models.PreviewStatusExpired:
 		return "expired"
+	case models.PreviewStatusUnavailable:
+		return "unavailable"
 	case models.PreviewStatusFailed:
 		return "failed"
 	default:
@@ -870,6 +1034,14 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 	}
 	if err := s.cascadeChildrenToTerminal(ctx, orgID, id, models.PreviewStatusStopped, ""); err != nil {
 		return err
+	}
+	if _, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_runtimes
+		 SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), updated_at = now()
+		 WHERE preview_instance_id = @id AND org_id = @org_id AND status IN %s`, activeRuntimeStatusFilter),
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	); err != nil {
+		return fmt.Errorf("stop preview runtimes: %w", err)
 	}
 	return nil
 }
@@ -1296,8 +1468,9 @@ func (s *PreviewStore) CountActiveStandalonePreviewsByUser(ctx context.Context, 
 func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE worker_node_id = @worker
-		 AND status IN %s`, activeStatusFilter),
+		fmt.Sprintf(`SELECT COUNT(DISTINCT preview_instance_id) FROM preview_runtimes WHERE worker_node_id = @worker
+		 AND status IN %s
+		 AND lease_expires_at > now()`, activeRuntimeStatusFilter),
 		pgx.NamedArgs{"worker": workerNodeID},
 	).Scan(&count)
 	if err != nil {
@@ -1313,9 +1486,13 @@ func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNo
 func (s *PreviewStore) CountActiveStandalonePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM preview_instances WHERE worker_node_id = @worker
-		 AND preview_target_id IS NOT NULL
-		 AND status IN %s`, activeStatusFilter),
+		fmt.Sprintf(`SELECT COUNT(DISTINCT r.preview_instance_id)
+		 FROM preview_runtimes r
+		 JOIN preview_instances pi ON pi.id = r.preview_instance_id AND pi.org_id = r.org_id
+		 WHERE r.worker_node_id = @worker
+		 AND pi.preview_target_id IS NOT NULL
+		 AND r.status IN %s
+		 AND r.lease_expires_at > now()`, activeRuntimeStatusFilter),
 		pgx.NamedArgs{"worker": workerNodeID},
 	).Scan(&count)
 	if err != nil {
@@ -1334,11 +1511,12 @@ func (s *PreviewStore) CountActivePreviewsByWorkers(ctx context.Context, workerI
 		return map[string]int{}, nil
 	}
 	query := fmt.Sprintf(`
-		SELECT worker_node_id, COUNT(*) AS count
-		FROM preview_instances
+		SELECT worker_node_id, COUNT(DISTINCT preview_instance_id) AS count
+		FROM preview_runtimes
 		WHERE worker_node_id = ANY(@worker_ids)
 		  AND status IN %s
-		GROUP BY worker_node_id`, activeStatusFilter)
+		  AND lease_expires_at > now()
+		GROUP BY worker_node_id`, activeRuntimeStatusFilter)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_ids": workerIDs})
 	if err != nil {
 		return nil, fmt.Errorf("count active previews by workers: %w", err)
@@ -1354,6 +1532,98 @@ func (s *PreviewStore) CountActivePreviewsByWorkers(ctx context.Context, workerI
 		counts[nodeID] = count
 	}
 	return counts, rows.Err()
+}
+
+// MarkPreviewRuntimesDrainingByWorker marks live runtimes owned by a draining worker.
+// lint:allow-no-orgid reason="cross-org worker drain marks runtimes owned by this node"
+func (s *PreviewStore) MarkPreviewRuntimesDrainingByWorker(ctx context.Context, workerNodeID string) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_runtimes
+		 SET status = 'draining', drain_requested_at = COALESCE(drain_requested_at, now()), updated_at = now()
+		 WHERE worker_node_id = @worker AND status IN %s`, activeRuntimeStatusFilter),
+		pgx.NamedArgs{"worker": workerNodeID},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark preview runtimes draining by worker: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// HeartbeatPreviewRuntimesByWorker extends leases for live runtimes owned by a worker.
+// lint:allow-no-orgid reason="cross-org worker heartbeat extends runtimes owned by this node"
+func (s *PreviewStore) HeartbeatPreviewRuntimesByWorker(ctx context.Context, workerNodeID string, leaseExpiresAt time.Time) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_runtimes
+		 SET last_heartbeat_at = now(), lease_expires_at = @lease_expires_at, updated_at = now()
+		 WHERE worker_node_id = @worker AND status IN %s`, activeRuntimeStatusFilter),
+		pgx.NamedArgs{"worker": workerNodeID, "lease_expires_at": leaseExpiresAt},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("heartbeat preview runtimes by worker: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkActivePreviewRuntimesLostByWorker marks a worker's live runtimes lost and
+// transitions their preview instances to unavailable.
+// lint:allow-no-orgid reason="cross-org worker shutdown/recovery marks runtimes owned by this node"
+func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorker(ctx context.Context, workerNodeID, reason string) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`WITH lost AS (
+			UPDATE preview_runtimes
+			SET status = 'lost',
+				error = @reason,
+				stopped_at = COALESCE(stopped_at, now()),
+				updated_at = now()
+			WHERE worker_node_id = @worker AND status IN %s
+			RETURNING org_id, preview_instance_id
+		)
+		UPDATE preview_instances pi
+		SET status = 'unavailable',
+			error = @reason,
+			stopped_at = COALESCE(stopped_at, now()),
+			updated_at = now()
+		FROM lost
+		WHERE pi.id = lost.preview_instance_id
+		  AND pi.org_id = lost.org_id
+		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
+		pgx.NamedArgs{"worker": workerNodeID, "reason": reason},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark active preview runtimes lost by worker: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkExpiredPreviewRuntimesLost marks runtimes with expired leases lost and
+// transitions their previews to unavailable.
+// lint:allow-no-orgid reason="cross-org recovery sweep repairs stale preview runtime ownership"
+func (s *PreviewStore) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutoff time.Time, reason string) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`WITH lost AS (
+			UPDATE preview_runtimes
+			SET status = 'lost',
+				error = @reason,
+				stopped_at = COALESCE(stopped_at, now()),
+				updated_at = now()
+			WHERE lease_expires_at < @cutoff AND status IN %s
+			RETURNING org_id, preview_instance_id
+		)
+		UPDATE preview_instances pi
+		SET status = 'unavailable',
+			error = @reason,
+			stopped_at = COALESCE(stopped_at, now()),
+			updated_at = now()
+		FROM lost
+		WHERE pi.id = lost.preview_instance_id
+		  AND pi.org_id = lost.org_id
+		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
+		pgx.NamedArgs{"cutoff": cutoff, "reason": reason},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark expired preview runtimes lost: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // StandaloneCapacityCounts holds the three preview counts needed to enforce

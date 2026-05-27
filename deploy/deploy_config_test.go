@@ -307,6 +307,11 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "WORKER_HOST_PORT", "worker deploy should pass the allocated host port into docker compose")
 	require.Contains(t, deploy, `local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"`, "worker deploy should default to the existing worker port only unless operators explicitly open a blue/green range")
 	require.Contains(t, deploy, "app-to-worker network must allow every configured worker blue/green port", "worker deploy should warn operators that app nodes must be able to reach every advertised worker generation port")
+	require.Contains(t, deploy, "worker_runtime_endpoint_in_use", "worker deploy should check preview runtime DB ownership before reusing a worker endpoint")
+	require.Contains(t, deploy, "FROM preview_runtimes WHERE endpoint_url", "worker deploy should query active preview runtime endpoints before selecting a generation port")
+	require.Contains(t, deploy, "status IN ('starting', 'ready', 'draining')", "worker deploy should treat starting, ready, and draining preview runtimes as endpoint owners")
+	require.Contains(t, deploy, `find_free_worker_port "$worker_private_ip"`, "worker deploy should pass the worker private IP into port selection so endpoint URLs match runtime routing")
+	require.Contains(t, deploy, "refusing to reuse it", "worker deploy should fail closed when runtime endpoint ownership cannot be verified")
 	require.Contains(t, deploy, "drain_worker_containers_blocking", "worker deploy should fall back to a blocking drain when no extra blue/green port is configured")
 	require.Contains(t, deploy, "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain.", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
 }

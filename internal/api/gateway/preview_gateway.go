@@ -624,27 +624,23 @@ func acceptsHTMLDocument(accept string) bool {
 }
 
 func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
-	instance, err := g.store.GetPreviewInstance(r.Context(), orgID, previewID)
+	runtime, err := g.store.GetActivePreviewRuntime(r.Context(), orgID, previewID)
 	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to resolve preview worker")
-		http.Error(w, "preview unavailable", http.StatusBadGateway)
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to resolve active preview runtime")
+		writeRuntimeUnavailable(w)
 		return
 	}
-	worker, err := g.workerSelect.ResolveNode(r.Context(), instance.WorkerNodeID)
-	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("worker_node_id", instance.WorkerNodeID).Msg("failed to resolve preview worker node")
-		http.Error(w, "preview unavailable", http.StatusBadGateway)
-		return
-	}
-	targetURL, err := url.Parse(worker.BaseURL)
-	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("base_url", worker.BaseURL).Msg("failed to parse preview worker base url")
-		http.Error(w, "preview unavailable", http.StatusBadGateway)
+	targetURL, err := url.Parse(runtime.EndpointURL)
+	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("endpoint_url", runtime.EndpointURL).Msg("failed to parse preview runtime endpoint url")
+		writeRuntimeUnavailable(w)
 		return
 	}
 	token, err := auth.GeneratePreviewToken(g.tokenSecret, auth.PreviewTokenClaims{
 		OrgID:        orgID,
-		TargetNodeID: worker.ID,
+		TargetNodeID: runtime.WorkerNodeID,
+		RuntimeID:    &runtime.ID,
+		RuntimeEpoch: runtime.RuntimeEpoch,
 		PreviewID:    &previewID,
 		Action:       "proxy",
 		ExpiresAt:    time.Now().Add(30 * time.Second),
@@ -666,6 +662,10 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 			req.Header.Set("Authorization", "Bearer "+token)
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			if translateWorkerRuntimeMismatch(resp) {
+				return nil
+			}
+
 			g.injectSecurityHeaders(resp.Header)
 			stripSensitiveResponseHeaders(resp.Header)
 
@@ -690,6 +690,56 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func translateWorkerRuntimeMismatch(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return false
+	}
+
+	var parsed models.ErrorResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return false
+	}
+	switch parsed.Error.Code {
+	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
+	default:
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return false
+	}
+
+	replacement, _ := json.Marshal(models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
+			Message: "preview runtime is unavailable; restart the preview",
+		},
+	})
+	resp.StatusCode = http.StatusServiceUnavailable
+	resp.Status = fmt.Sprintf("%d %s", http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+	resp.Header = make(http.Header)
+	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Set("Cache-Control", "no-store")
+	resp.ContentLength = int64(len(replacement))
+	resp.Body = io.NopCloser(bytes.NewReader(replacement))
+	return true
+}
+
+func writeRuntimeUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
+			Message: "preview runtime is unavailable; restart the preview",
+		},
+	})
 }
 
 // =============================================================================

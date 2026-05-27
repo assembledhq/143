@@ -607,7 +607,7 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	reservation, err := h.manager.ReservePreviewForWorkerInTx(ctx, tx, input, worker.ID)
+	reservation, err := h.manager.ReservePreviewForWorkerInTx(ctx, tx, input, worker.ID, worker.BaseURL)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
