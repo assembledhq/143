@@ -316,6 +316,18 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain.", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
 }
 
+func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, `endpoint_reuse_mode="${2:-strict}"`, "worker port selection should default to strict preview runtime endpoint ownership checks")
+	require.Contains(t, deploy, `[ "$endpoint_reuse_mode" = "after-blocking-drain" ]`, "worker port selection should support explicit reuse after the old worker generation has fully drained")
+	require.Contains(t, deploy, `host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"`, "blocking drain fallback should reuse the released default endpoint without requiring active preview runtime rows to disappear first")
+}
+
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 
