@@ -1,6 +1,6 @@
 # Design: Sandbox Preview Server
 
-> **Status:** Implemented | **Last reviewed:** 2026-04-22
+> **Status:** Implemented | **Last reviewed:** 2026-05-27
 >
 > **Implementation notes:** Preview now runs with an app-owned public edge and worker-owned runtime. App nodes mint/bootstrap access and host the wildcard preview gateway; worker nodes own sandbox hydrate/reuse, preview lifecycle, inspector actions, cleanup, and browser proxying.
 
@@ -104,7 +104,7 @@ Instead:
 The production contract now differs from the original single-node MVP in a few important ways:
 
 - App nodes still own `/api/v1/sessions/{id}/preview/*`, bootstrap token mint/exchange, and the public wildcard preview gateway.
-- Worker nodes own all preview runtime behavior: sandbox hydrate/reuse, `preview.Manager`, provider `Start/Stop/Dial`, inspector actions, WebSocket/HMR snooping, recycle, and idle/TTL cleanup.
+- Worker nodes own all preview runtime behavior: sandbox hydrate/reuse, `preview.Manager`, provider `Start/Stop/Dial`, inspector actions, WebSocket/HMR snooping, recycle, idle/TTL cleanup, and worker-local branch preview startup snapshot restore/create.
 - `sessions.worker_node_id` durably records which worker currently owns a live session container so live-preview reuse can be routed back to the correct worker.
 - `preview_instances.worker_node_id` remains the source of truth for active-preview routing.
 - App-to-worker hops use short-lived signed preview tokens over the existing worker HTTP listener rather than direct Docker access from app nodes.
@@ -374,7 +374,7 @@ Preview startup time is the single biggest UX bottleneck. A typical first-time p
 
 #### Filesystem Snapshot Caching
 
-After a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox state — node_modules installed, build artifacts ready, infrastructure initialized. The snapshot is keyed by:
+For branch/PR previews pinned to a committed SHA, after a successful preview startup (all three phases complete), the system takes a **filesystem snapshot** of the sandbox workspace state — node_modules installed, build artifacts ready, source files restored. The snapshot is keyed by:
 
 ```
 snapshot_key = hash(lockfile_contents + base_commit + preview_config_hash)
@@ -387,7 +387,7 @@ On subsequent preview starts for the same repo with the same dependencies:
 3. Runs only Init (if infrastructure is needed) and Start phases
 4. **Result**: startup drops from 30-90 seconds to 5-15 seconds
 
-Snapshots are stored on the worker's local disk (SSD) with an LRU eviction policy. Default cache size: 20 GB per worker, with each snapshot typically 200 MB - 1 GB depending on node_modules size.
+Snapshots are stored on the worker's local disk (SSD) with an LRU eviction policy. Default cache size: 20 GB per worker, with each snapshot typically 200 MB - 1 GB depending on node_modules size. Configs that deliver preview secrets as generated files are excluded from restore and create so plaintext secret files never enter the startup cache. Session previews intentionally skip this commit-keyed snapshot cache because their workspaces may include unpushed agent changes; they reduce start time by reusing the live session sandbox container when it is still running, or by hydrating the exact session snapshot when reuse is not possible.
 
 **Invalidation**: snapshots are invalidated when:
 - The lockfile changes (new dependencies)
