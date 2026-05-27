@@ -136,4 +136,15 @@ describe("SidebarLayout", () => {
     const content = getByTestId("content").parentElement;
     expect(content?.className).toContain("hidden");
   });
+
+  it("contains overscroll inside the session panes", () => {
+    const { container, getByTestId } = renderLayout("content");
+
+    const shell = container.firstElementChild;
+    expect(shell).toHaveClass("overflow-hidden");
+    expect(shell).toHaveClass("overscroll-none");
+
+    const content = getByTestId("content").parentElement;
+    expect(content).toHaveClass("overscroll-contain");
+  });
 });

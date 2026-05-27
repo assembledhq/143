@@ -2577,7 +2577,7 @@ function ChatPanel({
         tabIndex={0}
         aria-label="Session conversation"
         data-session-transcript-scroll="true"
-        className="flex-1 overflow-y-auto space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        className="flex-1 overflow-y-auto overscroll-contain space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
       >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />

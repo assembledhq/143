@@ -31,7 +31,7 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
   const contentHiddenOnMobile = mobileShow === "sidebar";
 
   return (
-    <div className="absolute inset-0 flex overflow-hidden">
+    <div className="absolute inset-0 flex overflow-hidden overscroll-none">
       <div
         data-testid="sidebar-pane"
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
@@ -49,7 +49,7 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
 
       <div
         className={cn(
-          "flex-1 min-w-0 overflow-auto",
+          "flex-1 min-w-0 overflow-auto overscroll-contain",
           contentHiddenOnMobile && "hidden md:block",
         )}
       >
