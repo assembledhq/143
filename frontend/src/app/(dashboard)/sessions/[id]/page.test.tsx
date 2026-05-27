@@ -5691,6 +5691,7 @@ describe('SessionDetailPage', () => {
       ...mockSessions[1],
       failure_category: 'codex_auth_expired',
       failure_explanation: 'Codex token expired',
+      failure_retry_advised: true,
       agent_type: 'codex',
     };
 
@@ -5707,8 +5708,37 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
     await screen.findByText('Failure details');
     expect(
-      await screen.findByText(/ChatGPT connected/),
+      await screen.findByText('ChatGPT connected — open the retry menu and choose Start over from beginning.'),
     ).toBeInTheDocument();
+  });
+
+  it('points codex auth users to Retry when saved progress exists', async () => {
+    const codexAuthSession: Session = {
+      ...mockSessions[1],
+      failure_category: 'codex_auth_expired',
+      failure_explanation: 'Codex token expired',
+      failure_retry_advised: true,
+      agent_type: 'codex',
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('scope')).toBe('personal');
+        return HttpResponse.json({ data: { status: 'completed' } });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+    expect(
+      await screen.findByText('ChatGPT connected — click Retry to continue this session.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeEnabled();
   });
 
   it('can toggle the detail panel visibility', async () => {

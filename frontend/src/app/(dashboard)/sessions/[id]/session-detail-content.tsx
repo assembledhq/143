@@ -609,7 +609,9 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
             {isCodexAuthFailure && isCodexAuthenticated && (
               <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                ChatGPT connected — click Retry to re-run this session.
+                {checkpointRetryUnavailable
+                  ? "ChatGPT connected — open the retry menu and choose Start over from beginning."
+                  : "ChatGPT connected — click Retry to continue this session."}
               </p>
             )}
           </CardContent>
