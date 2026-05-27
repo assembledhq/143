@@ -69,23 +69,25 @@ type PRService struct {
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
-	users                 *db.UserStore
-	orgs                  *db.OrganizationStore
-	prTemplates           *db.PRTemplateStore
-	previews              *db.PreviewStore
-	previewStopper        PreviewStopper
-	prHealthStreams       *cache.PullRequestStreams
-	llmClient             llm.Client
-	audit                 *db.AuditEmitter
-	sandboxProvider       agent.SandboxProvider   // used by the push-based PR flow
-	snapshots             storage.SnapshotStore   // used by the push-based PR flow
-	sandboxAuth           agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
-	logger                zerolog.Logger
-	baseURL               string
-	appBaseURL            string
-	previewOriginTemplate string
-	httpClient            *http.Client
-	linearMilestones      LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
+	users                   *db.UserStore
+	orgs                    *db.OrganizationStore
+	prTemplates             *db.PRTemplateStore
+	previews                *db.PreviewStore
+	previewStopper          PreviewStopper
+	prHealthStreams         *cache.PullRequestStreams
+	llmClient               llm.Client
+	audit                   *db.AuditEmitter
+	sandboxProvider         agent.SandboxProvider   // used by the push-based PR flow
+	snapshots               storage.SnapshotStore   // used by the push-based PR flow
+	sandboxAuth             agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
+	logger                  zerolog.Logger
+	baseURL                 string
+	appBaseURL              string
+	previewOriginTemplate   string
+	httpClient              *http.Client
+	mergeabilityRetryDelays []time.Duration
+	mergeabilityRetryWait   func(context.Context, time.Duration) error
+	linearMilestones        LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use

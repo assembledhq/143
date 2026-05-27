@@ -794,7 +794,7 @@ export interface PullRequestHealthResponse {
   head_sha: string;
   base_sha: string;
   health_version: number;
-  merge_state: "unknown" | "clean" | "conflicted" | "behind" | "blocked";
+  merge_state: "unknown" | "mergeability_pending" | "clean" | "conflicted" | "behind" | "blocked";
   has_conflicts: boolean;
   failing_test_count: number;
   needs_agent_action: boolean;

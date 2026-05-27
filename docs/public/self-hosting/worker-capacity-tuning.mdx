@@ -12,9 +12,7 @@ tags:
 llm_summary: Tune worker process count, active sandbox limits, CPU, memory, and disk controls for self-hosted 143 worker hosts.
 ---
 
-# Worker capacity tuning
-
-Workers run coding-agent jobs and sandboxed previews. Capacity settings should match host size, repository workload, and expected session concurrency.
+Worker capacity controls how many coding-agent jobs and sandboxed previews can run at once. Tune it from actual host resources, repository workload, expected session concurrency, and the isolation model operators should be able to rely on.
 
 ## Key controls
 

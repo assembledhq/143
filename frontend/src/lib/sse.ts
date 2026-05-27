@@ -2,7 +2,7 @@ import type {
   EvalBatchUpdatedEvent,
   EvalBootstrapUpdatedEvent,
   PullRequestUpdatedEvent,
-  Session,
+  SessionDetail,
   SessionLog,
 } from "./types";
 import { captureError } from "./errors";
@@ -99,8 +99,8 @@ export type SSEEventType = (typeof SSE_EVENT)[keyof typeof SSE_EVENT];
 /** Typed payloads for each SSE event type. */
 export interface SSEEventPayloads {
   [SSE_EVENT.LOG]: SessionLog;
-  [SSE_EVENT.STATUS]: Session;
-  [SSE_EVENT.DONE]: Session;
+  [SSE_EVENT.STATUS]: SessionDetail;
+  [SSE_EVENT.DONE]: SessionDetail;
   [SSE_EVENT.HUMAN_INPUT_CREATED]: SessionLog;
   [SSE_EVENT.HUMAN_INPUT_UPDATED]: SessionLog;
   [SSE_EVENT.PULL_REQUEST_UPDATED]: PullRequestUpdatedEvent;

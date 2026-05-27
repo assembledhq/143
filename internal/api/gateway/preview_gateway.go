@@ -202,6 +202,9 @@ const bootstrapHTML = `<!DOCTYPE html>
       credentials: 'same-origin'
     }).then(function(resp) {
       if (resp.ok) {
+        if (window.parent !== window) {
+          window.parent.postMessage({type: 'preview_bootstrap_complete'}, appOrigin);
+        }
         window.location.href = '/';
       } else {
         document.body.textContent = 'Bootstrap failed: ' + resp.status;

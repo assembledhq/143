@@ -1544,6 +1544,213 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
+  it('refreshes thread state when session status SSE payload omits thread detail', async () => {
+    const sessionId = 'session-status-refreshes-thread-state';
+    const thread: SessionThread = {
+      id: 'thread-main',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Main',
+      status: 'idle',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    let sessionFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            sandbox_state: sessionFetchCount >= 2 ? 'running' : 'snapshotted',
+            threads: [{
+              ...thread,
+              status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            }],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Start work',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Start work')).toBeInTheDocument();
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'running',
+        sandbox_state: 'running',
+      });
+    });
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('refreshes thread state when the session SSE stream opens', async () => {
+    const sessionId = 'session-open-refreshes-thread-state';
+    const thread: SessionThread = {
+      id: 'thread-main',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Main',
+      status: 'idle',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    let sessionFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            sandbox_state: sessionFetchCount >= 2 ? 'running' : 'snapshotted',
+            threads: [{
+              ...thread,
+              status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            }],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Start work',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Start work')).toBeInTheDocument();
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].onopen?.(new Event('open'));
+    });
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('polls active session detail so missed status events self-heal', async () => {
+    const sessionId = 'session-active-detail-polling';
+    const thread: SessionThread = {
+      id: 'thread-main',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Main',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    let sessionFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: sessionFetchCount >= 2 ? 'completed' : 'running',
+            sandbox_state: sessionFetchCount >= 2 ? 'snapshotted' : 'running',
+            threads: [{
+              ...thread,
+              status: sessionFetchCount >= 2 ? 'completed' : 'running',
+            }],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Start work',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    }, { timeout: 5000 });
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+  }, 10000);
+
   it('clears stale running thread UI when a cancelled session status omits thread detail', async () => {
     const sessionId = 'session-cancelled-thread-omitted';
     const thread: SessionThread = {
@@ -1612,6 +1819,76 @@ describe('SessionDetailPage', () => {
       expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
     });
     expect(screen.getByText('Session stopped')).toBeInTheDocument();
+  });
+
+  it('clears stale running thread UI when an idle session status omits thread detail', async () => {
+    const sessionId = 'session-idle-thread-omitted';
+    const thread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Finish this run',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'idle',
+        sandbox_state: 'snapshotted',
+        snapshot_key: 'snapshots/session-idle-thread-omitted.tar',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    });
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
   });
 
   it('archives a closed thread and switches focus to a remaining tab', async () => {

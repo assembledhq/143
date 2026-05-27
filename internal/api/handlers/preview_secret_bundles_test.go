@@ -183,6 +183,34 @@ func TestPreviewSecretBundleHandler_TestDoesNotReturnPlaintext(t *testing.T) {
 	require.Equal(t, "repo-dev", resp.Data.Bundle.Name, "Test should return non-secret bundle metadata")
 }
 
+func TestPreviewSecretBundleHandler_UpsertRejectsInvalidJSONFileValue(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	store := &fakePreviewSecretBundleStore{}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{
+		"name": "repo-dev",
+		"source": {"type": "managed", "values": {"development_conf_json": "{\"bad\":"}},
+		"outputs": [{
+			"type": "file",
+			"path": "development.conf.json",
+			"format": "json",
+			"value": "secret:development_conf_json"
+		}]
+	}`)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/preview-secret-bundles", body, orgID, userID)
+	addURLParam(req, "id", repoID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Upsert(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Upsert should reject invalid JSON file secret values before saving")
+	require.Nil(t, store.upsertInput, "Upsert should not save invalid preview secret bundle output configuration")
+}
+
 func TestPreviewSecretBundleHandler_DeletePassesUserForInactiveSuccessor(t *testing.T) {
 	t.Parallel()
 

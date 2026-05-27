@@ -40,6 +40,112 @@ const previewCapacityRetryDelay = 5 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
 const failureCategoryStaleSandbox = "stale_sandbox"
 
+var sandboxCapacityDetailPattern = regexp.MustCompile(`sandbox capacity reached:\s*(\d+)/(\d+)\s+sandboxes active or reserved`)
+
+const sandboxCapacityBaseExplanation = "The worker could not acquire local sandbox capacity before the job retry window expired. This can happen during deploys or when other sessions are holding all sandbox slots."
+
+func sandboxCapacityFailureExplanation(ctx context.Context, stores *Stores, logger zerolog.Logger, deadLetterErr error) string {
+	var samples []db.WorkerLoadSample
+	if stores != nil && stores.Jobs != nil {
+		loaded, err := stores.Jobs.WorkerLoadSamples(ctx)
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to load worker capacity details for sandbox-capacity failure")
+		} else {
+			if loaded == nil {
+				loaded = []db.WorkerLoadSample{}
+			}
+			samples = loaded
+		}
+	}
+	return formatSandboxCapacityFailureExplanation(deadLetterErr, samples)
+}
+
+func formatSandboxCapacityFailureExplanation(deadLetterErr error, samples []db.WorkerLoadSample) string {
+	parts := []string{sandboxCapacityBaseExplanation}
+	if detail := finalSandboxCapacityCheck(deadLetterErr); detail != "" {
+		parts = append(parts, detail)
+	}
+	if samples != nil {
+		parts = append(parts, formatWorkerLoadForSandboxCapacity(samples))
+	}
+	parts = append(parts, "Sandbox capacity is local to a worker node and is consumed by live session sandboxes, preview-held sandboxes, and in-flight reservations.")
+	return strings.Join(parts, " ")
+}
+
+func finalSandboxCapacityCheck(err error) string {
+	if err == nil {
+		return ""
+	}
+	matches := sandboxCapacityDetailPattern.FindStringSubmatch(err.Error())
+	if len(matches) == 3 {
+		return fmt.Sprintf("Final capacity check: worker reported %s/%s local sandbox slots active or reserved.", matches[1], matches[2])
+	}
+	if errors.Is(err, agent.ErrSandboxCapacity) {
+		return "Final capacity check: worker reported local sandbox capacity was full."
+	}
+	return ""
+}
+
+func formatWorkerLoadForSandboxCapacity(samples []db.WorkerLoadSample) string {
+	var runningSessions int64
+	var sandboxContainers int64
+	var activePreviews int64
+	var previewHeldContainers int64
+	var runningSessionJobs int64
+	for _, sample := range samples {
+		runningSessions += sample.RunningSessions
+		sandboxContainers += sample.SandboxContainers
+		activePreviews += sample.ActivePreviews
+		previewHeldContainers += sample.PreviewHeldContainers
+		runningSessionJobs += sample.RunningSessionJobs
+	}
+	return fmt.Sprintf(
+		"Current worker load: %d running %s, %d session sandbox %s, %d active %s, %d preview-held %s, and %d running session/preview %s across %d %s.",
+		runningSessions,
+		pluralize("session", runningSessions),
+		sandboxContainers,
+		pluralize("container", sandboxContainers),
+		activePreviews,
+		pluralize("preview", activePreviews),
+		previewHeldContainers,
+		pluralize("sandbox", previewHeldContainers),
+		runningSessionJobs,
+		pluralize("job", runningSessionJobs),
+		len(samples),
+		pluralize("worker", int64(len(samples))),
+	)
+}
+
+func pluralize(singular string, count int64) string {
+	if count == 1 {
+		return singular
+	}
+	return singular + "s"
+}
+
+func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool) {
+	if stores == nil || stores.Jobs == nil {
+		return nil, false
+	}
+	excludeNodeID, _ := jobctx.WorkerNodeIDFromContext(ctx)
+	targetNodeID, err := stores.Jobs.SelectWorkerWithSandboxCapacity(ctx, excludeNodeID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to select worker with available sandbox capacity")
+		return nil, false
+	}
+	if targetNodeID != nil {
+		logger.Info().
+			Str("target_node_id", *targetNodeID).
+			Str("excluded_node_id", excludeNodeID).
+			Msg("routing sandbox capacity retry to worker with available capacity")
+		return targetNodeID, false
+	}
+	logger.Info().
+		Str("excluded_node_id", excludeNodeID).
+		Msg("no alternate worker advertises sandbox capacity; clearing retry target pin")
+	return nil, true
+}
+
 func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
 	if stores == nil || stores.Sessions == nil {
 		return
@@ -108,7 +214,6 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 		defer cancel()
 
 		errMsg := "Session stopped because sandbox capacity stayed full until the retry window expired."
-		explanation := "The worker could not acquire local sandbox capacity before the job retry window expired. This can happen during deploys or when other sessions are holding all sandbox slots."
 		nextSteps := []string{
 			"Retry the session when sandbox capacity is available",
 			"Cancel sessions that are no longer needed to free up capacity",
@@ -117,7 +222,6 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 		failureCategory := agent.FailureCategorySandboxCapacity
 		failedSession.Status = models.SessionStatusFailed
 		failedSession.Error = &errMsg
-		failedSession.FailureExplanation = &explanation
 		failedSession.FailureCategory = &failureCategory
 		failedSession.FailureNextSteps = nextSteps
 		failedSession.FailureRetryAdvised = true
@@ -138,6 +242,8 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 				Msg("failed to mark session failed after sandbox capacity dead-letter")
 			return
 		}
+		explanation := sandboxCapacityFailureExplanation(writeCtx, stores, logger, deadLetterErr)
+		failedSession.FailureExplanation = &explanation
 		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, agent.FailureCategorySandboxCapacity, nextSteps, true); err != nil {
 			logger.Error().
 				Err(err).
@@ -1280,12 +1386,13 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
 				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
 					Msg("local sandbox capacity reached; retrying run_agent")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTargetNodeID}
 			}
 			if errors.Is(err, agent.ErrRecoveryAttemptsExhausted) {
 				logger.Warn().
@@ -1579,6 +1686,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				retryAfter := sandboxCapacityRetryDelay
+				targetNodeID, clearTargetNodeID := sandboxCapacityRetryTarget(ctx, stores, logger)
 				var capacityThreadID *uuid.UUID
 				if hasThread {
 					threadIDLocal := threadID
@@ -1589,7 +1697,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("local sandbox capacity reached; retrying continue_session")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTargetNodeID}
 			}
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an
@@ -1779,7 +1887,13 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 			return fmt.Errorf("parse pull request ID: %w", err)
 		}
 		logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("starting sync_pull_request_state job")
-		return services.PR.SyncPullRequestState(ctx, orgID, pullRequestID)
+		if err := services.PR.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
+			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+				return &RetryableError{Err: err, ConsumeAttempt: true}
+			}
+			return err
+		}
+		return nil
 	}
 }
 

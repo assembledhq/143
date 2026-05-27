@@ -3,10 +3,11 @@
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ExternalLink, GitBranch, GitPullRequest, KeyRound, Loader2, RotateCw, Square } from "lucide-react";
+import { AlertTriangle, GitBranch, GitPullRequest, KeyRound, Loader2, RotateCw, Square } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -196,20 +197,10 @@ export default function PreviewLandingPage({
           <Card>
             <CardContent className="pt-4 pb-4">
               <div className="flex items-center gap-3">
-                <a
-                  href={safeExternalUrl(preview!.preview_url)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 truncate font-mono text-sm text-foreground underline-offset-4 hover:underline"
-                >
+                <p className="flex-1 truncate font-mono text-sm text-foreground">
                   {preview!.preview_url}
-                </a>
-                <Button asChild size="sm">
-                  <a href={safeExternalUrl(preview!.preview_url)} target="_blank" rel="noopener noreferrer">
-                    <ExternalLink className="h-4 w-4" />
-                    Open preview
-                  </a>
-                </Button>
+                </p>
+                <OpenPreviewButton previewId={preview?.preview_id} previewUrl={preview?.preview_url} size="sm" />
               </div>
             </CardContent>
           </Card>
