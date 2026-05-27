@@ -216,6 +216,22 @@ export const api = {
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
     branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
+    previewSecretBundles: {
+      list: (id: string) =>
+        get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`),
+      get: (bundleId: string) =>
+        get<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/preview-secret-bundles/${bundleId}`),
+      upsert: (id: string, body: import('./types').PreviewSecretBundleUpsertRequest) =>
+        post<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`, body),
+      patch: (bundleId: string, body: import('./types').PreviewSecretBundlePatchRequest) =>
+        patch<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/preview-secret-bundles/${bundleId}`, body),
+      test: (bundleId: string) =>
+        post<import('./types').SingleResponse<import('./types').PreviewSecretBundleTestResult>>(`/api/v1/preview-secret-bundles/${bundleId}/test`),
+      delete: (id: string, name: string) =>
+        del(`/api/v1/repositories/${id}/preview-secret-bundles/${encodeURIComponent(name)}`),
+      deleteById: (bundleId: string) =>
+        del(`/api/v1/preview-secret-bundles/${bundleId}`),
+    },
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),

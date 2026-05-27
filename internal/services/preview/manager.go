@@ -69,7 +69,6 @@ type Manager struct {
 	store        *db.PreviewStore
 	sessionStore *db.SessionStore
 	orgSettings  OrgSettingsStore
-	secrets      PreviewSecretBundleResolver
 	provider     PreviewCapableProvider
 	// sandboxProvider is used to destroy the underlying sandbox container
 	// when the last holder (preview or turn) releases its hold. Optional —
@@ -97,6 +96,9 @@ type Manager struct {
 	// snapshotCache handles filesystem snapshot caching for fast startup.
 	snapshotCache *SnapshotCache
 
+	secretResolver *PreviewSecretResolver
+	auditEmitter   *db.AuditEmitter
+
 	// pollStopChs tracks stop channels for pollSupportServiceStatus goroutines,
 	// keyed by preview ID. Closing the channel stops the poll goroutine,
 	// preventing it from overwriting a "stopped" status with "ready".
@@ -113,23 +115,20 @@ type OrgSettingsStore interface {
 	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
 }
 
-type PreviewSecretBundleResolver interface {
-	GetEnv(ctx context.Context, orgID uuid.UUID, name string) (map[string]string, error)
-}
-
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
-	Store                *db.PreviewStore
-	SessionStore         *db.SessionStore
-	OrgSettingsStore     OrgSettingsStore
-	PreviewSecretBundles PreviewSecretBundleResolver
-	Provider             PreviewCapableProvider
-	SandboxProvider      agent.SandboxProvider // used for destroy on final hold release
-	Inspector            PreviewInspector
-	SnapshotCache        *SnapshotCache
-	HMRWatcher           *HMRWatcher // optional; enables HMR screenshot capture
-	Logger               zerolog.Logger
-	WorkerNodeID         string
+	Store            *db.PreviewStore
+	SessionStore     *db.SessionStore
+	OrgSettingsStore OrgSettingsStore
+	Provider         PreviewCapableProvider
+	SandboxProvider  agent.SandboxProvider // used for destroy on final hold release
+	Inspector        PreviewInspector
+	SnapshotCache    *SnapshotCache
+	SecretResolver   *PreviewSecretResolver
+	AuditEmitter     *db.AuditEmitter
+	HMRWatcher       *HMRWatcher // optional; enables HMR screenshot capture
+	Logger           zerolog.Logger
+	WorkerNodeID     string
 
 	// MaxPerUser / MaxPerOrg / MaxPerWorker cap concurrent active previews.
 	// Zero (the default) is NOT "unlimited" — it means "fall back to the
@@ -159,11 +158,12 @@ func NewManager(cfg ManagerConfig) *Manager {
 		store:                 cfg.Store,
 		sessionStore:          cfg.SessionStore,
 		orgSettings:           cfg.OrgSettingsStore,
-		secrets:               cfg.PreviewSecretBundles,
 		provider:              cfg.Provider,
 		sandboxProvider:       cfg.SandboxProvider,
 		inspector:             cfg.Inspector,
 		snapshotCache:         cfg.SnapshotCache,
+		secretResolver:        cfg.SecretResolver,
+		auditEmitter:          cfg.AuditEmitter,
 		hmrWatcher:            cfg.HMRWatcher,
 		logger:                cfg.Logger,
 		workerNodeID:          cfg.WorkerNodeID,
@@ -197,6 +197,7 @@ type StartPreviewInput struct {
 	UserID                    uuid.UUID // for per-user concurrency cap
 	Sandbox                   *agent.Sandbox
 	Config                    *models.PreviewConfig
+	RepositoryID              uuid.UUID
 	BaseCommitSHA             string
 	ProfileName               string
 	ExpiresAt                 time.Time
@@ -344,6 +345,9 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
+		return nil, err
+	}
 
 	existing, err := store.GetActivePreviewForSession(ctx, input.OrgID, input.SessionID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -432,6 +436,60 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	return instance, nil
 }
 
+func (m *Manager) resolvePreviewSecrets(ctx context.Context, input StartPreviewInput) error {
+	if input.Config == nil {
+		return nil
+	}
+	refs := SecretBundleRefs(input.Config)
+	if len(refs) == 0 {
+		return nil
+	}
+	if m.secretResolver == nil {
+		err := fmt.Errorf("preview secret resolver is not configured")
+		m.emitPreviewSecretResolveAudit(ctx, input, refs, models.AuditActionPreviewSecretBundleFailed, err)
+		return err
+	}
+	if err := m.secretResolver.Resolve(ctx, input.OrgID, input.RepositoryID, input.Config); err != nil {
+		m.emitPreviewSecretResolveAudit(ctx, input, refs, models.AuditActionPreviewSecretBundleFailed, err)
+		return err
+	}
+	m.emitPreviewSecretResolveAudit(ctx, input, refs, models.AuditActionPreviewSecretBundleResolved, nil)
+	return nil
+}
+
+func (m *Manager) emitPreviewSecretResolveAudit(ctx context.Context, input StartPreviewInput, refs []models.PreviewSecretBundleRef, action models.AuditAction, resolveErr error) {
+	if m.auditEmitter == nil {
+		return
+	}
+	for _, ref := range refs {
+		resourceID := ref.Bundle
+		details := map[string]any{
+			"repository_id": input.RepositoryID.String(),
+			"bundle":        ref.Bundle,
+			"services":      ref.Services,
+			"env":           ref.Env,
+			"files":         ref.Files,
+		}
+		if resolveErr != nil {
+			details["error"] = resolveErr.Error()
+		}
+		rawDetails, err := json.Marshal(details)
+		if err != nil {
+			m.logger.Warn().Err(err).Str("bundle", ref.Bundle).Msg("marshal preview secret resolve audit details")
+			rawDetails = nil
+		}
+		m.auditEmitter.EmitSystemAction(ctx, db.SystemActionParams{
+			OrgID:        input.OrgID,
+			ActorID:      "preview-secret-resolver",
+			Action:       action,
+			ResourceType: models.AuditResourcePreviewSecretBundle,
+			ResourceID:   &resourceID,
+			Details:      rawDetails,
+			SessionID:    &input.SessionID,
+		})
+	}
+}
+
 // LaunchPreview takes a reserved preview and completes startup: it updates
 // the row if the caller resolved a different config after reservation (e.g.
 // workspace autodetect), creates service/infra rows, invokes the provider,
@@ -450,6 +508,9 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	}
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
+	}
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
+		return nil, err
 	}
 
 	// If the caller resolved a different config after reservation (autodetect
@@ -534,14 +595,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// of stdout/stderr when a service fails, so the user sees why.
 	observer := m.newServiceObserver(input.OrgID, instance.ID, input.MetricsSource, input.MetricsRepositoryFullName)
 	defer observer.Close()
-	credentialEnv, err := m.resolveCredentialRuntimeEnv(ctx, input.OrgID, input.Config)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, RuntimeEnv{
-		Platform: m.platformEnv(instance.ID),
-		Services: credentialEnv,
-	}, observer)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID), observer)
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
@@ -1525,17 +1579,13 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
 	observer := m.newServiceObserver(orgID, previewID, "", "")
 	defer observer.Close()
-	credentialEnv, err := m.resolveCredentialRuntimeEnv(ctx, orgID, input.Config)
-	if err != nil {
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
-			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after credential resolution error")
+			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after secret resolution error")
 		}
 		return err
 	}
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, RuntimeEnv{
-		Platform: m.platformEnv(previewID),
-		Services: credentialEnv,
-	}, observer)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
@@ -1629,41 +1679,6 @@ func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
 	}
 	origin := strings.ReplaceAll(m.previewOriginTemplate, "{id}", previewID.String())
 	return map[string]string{"PREVIEW_ORIGIN": origin}
-}
-
-func (m *Manager) resolveCredentialRuntimeEnv(ctx context.Context, orgID uuid.UUID, cfg *models.PreviewConfig) (map[string]map[string]string, error) {
-	if cfg == nil || cfg.Credentials.Mode == "" || cfg.Credentials.Mode == "none" {
-		return nil, nil
-	}
-	if cfg.Credentials.Mode != "managed_env" {
-		return nil, fmt.Errorf("%w: credentials.mode %q is not supported", ErrInvalidConfig, cfg.Credentials.Mode)
-	}
-	if m.secrets == nil {
-		return nil, fmt.Errorf("preview credential resolver is not configured")
-	}
-	bundle, err := m.secrets.GetEnv(ctx, orgID, cfg.Credentials.CredentialSet)
-	if err != nil {
-		return nil, fmt.Errorf("resolve preview credential set %q: %w", cfg.Credentials.CredentialSet, err)
-	}
-
-	allowlisted := make(map[string]string, len(cfg.Credentials.Env))
-	for _, key := range cfg.Credentials.Env {
-		value, ok := bundle[key]
-		if !ok {
-			return nil, fmt.Errorf("preview credential set %q is missing env var %q", cfg.Credentials.CredentialSet, key)
-		}
-		allowlisted[key] = value
-	}
-
-	envByService := make(map[string]map[string]string, len(cfg.Credentials.InjectInto))
-	for _, serviceName := range cfg.Credentials.InjectInto {
-		env := make(map[string]string, len(allowlisted))
-		for key, value := range allowlisted {
-			env[key] = value
-		}
-		envByService[serviceName] = env
-	}
-	return envByService, nil
 }
 
 func (m *Manager) previewOrigin(previewID uuid.UUID) string {
@@ -1873,6 +1888,10 @@ func loadRecycleInput(instance *models.PreviewInstance) (StartPreviewInput, erro
 }
 
 func previewTargetIDValue(id *uuid.UUID) uuid.UUID {
+	return uuidPointerValue(id)
+}
+
+func uuidPointerValue(id *uuid.UUID) uuid.UUID {
 	if id == nil {
 		return uuid.Nil
 	}
@@ -1882,6 +1901,7 @@ func previewTargetIDValue(id *uuid.UUID) uuid.UUID {
 func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
 	input, err := loadRecycleInput(instance)
 	if err == nil {
+		input.RepositoryID = m.recycleRepositoryID(ctx, instance)
 		return input, nil
 	}
 	if !errors.Is(err, errMissingRecycleInput) {
@@ -1896,6 +1916,24 @@ func (m *Manager) loadRecycleInput(ctx context.Context, instance *models.Preview
 		Str("preview_id", instance.ID.String()).
 		Msg("recycle input missing; rebuilding preview restart input from persisted session and service state")
 	return rebuilt, nil
+}
+
+func (m *Manager) recycleRepositoryID(ctx context.Context, instance *models.PreviewInstance) uuid.UUID {
+	if instance.PreviewTargetID != nil && *instance.PreviewTargetID != uuid.Nil {
+		target, err := m.store.GetPreviewTarget(ctx, instance.OrgID, *instance.PreviewTargetID)
+		if err == nil {
+			return target.RepositoryID
+		}
+		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to load preview target repository for recycle")
+	}
+	if instance.SessionID != uuid.Nil && m.sessionStore != nil {
+		session, err := m.sessionStore.GetByID(ctx, instance.OrgID, instance.SessionID)
+		if err == nil {
+			return uuidPointerValue(session.RepositoryID)
+		}
+		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to load session repository for recycle")
+	}
+	return uuid.Nil
 }
 
 func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *models.PreviewInstance) (StartPreviewInput, error) {
@@ -1959,6 +1997,7 @@ func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *model
 		UserID:        instance.UserID,
 		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace"},
 		Config:        cfg,
+		RepositoryID:  uuidPointerValue(session.RepositoryID),
 		BaseCommitSHA: instance.BaseCommitSHA,
 		ProfileName:   instance.ProfileName,
 	}, nil

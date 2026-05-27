@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,7 +63,6 @@ const imagePullTimeout = 5 * time.Minute
 // for running preview service processes inside the sandbox.
 type SandboxExecutor interface {
 	ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
-	ExecStreamWithOptions(ctx context.Context, sb *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), stderr io.Writer) (int, error)
 	Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
 	ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error)
 }
@@ -210,7 +210,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, runtimeEnv preview.RuntimeEnv, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -291,8 +291,15 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			return phaseErr
 		}
 
-		// Phase 5: Build service environment with injected credentials.
-		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, runtimeEnv)
+		// Phase 5: Write generated runtime secret files after install so install
+		// hooks cannot read preview-runtime app secrets.
+		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
+			phaseErr = fmt.Errorf("write preview secret files: %w", err)
+			return phaseErr
+		}
+
+		// Phase 6: Build service environment with injected credentials.
+		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, extraEnv)
 		return nil
 	}(); err != nil {
 		d.cleanupState(handle)
@@ -1361,20 +1368,35 @@ func (d *DockerPreviewProvider) startService(
 	env map[string]string,
 	observer preview.ServiceObserver,
 ) error {
-	if len(svcCfg.Command) == 0 {
-		return fmt.Errorf("service command is required")
-	}
-	execEnv := make(map[string]string, len(env)+1)
-	for k, v := range env {
-		execEnv[k] = v
-	}
-	// Always inject HOST=0.0.0.0 for framework dev servers that default to
-	// loopback binding.
-	execEnv["HOST"] = "0.0.0.0"
-	workingDir := state.sandbox.WorkDir
+	// Build the command with environment variables and working directory.
+	var cmdParts []string
+
+	// Change to working directory if specified.
 	if svcCfg.Cwd != "" {
-		workingDir = path.Join(state.sandbox.WorkDir, svcCfg.Cwd)
+		cmdParts = append(cmdParts, "cd", shellEscape(svcCfg.Cwd), "&&")
 	}
+
+	// Set environment variables in sorted order for deterministic commands.
+	envKeys := make([]string, 0, len(env))
+	for k := range env {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		cmdParts = append(cmdParts, fmt.Sprintf("%s=%s", k, shellEscape(env[k])))
+	}
+
+	// Always inject HOST=0.0.0.0 for binding.
+	cmdParts = append(cmdParts, "HOST=0.0.0.0")
+
+	// Add the actual command (each element shell-escaped).
+	escapedCmd := make([]string, len(svcCfg.Command))
+	for i, c := range svcCfg.Command {
+		escapedCmd[i] = shellEscape(c)
+	}
+	cmdParts = append(cmdParts, strings.Join(escapedCmd, " "))
+
+	cmd := strings.Join(cmdParts, " ")
 
 	ss := &serviceState{
 		name:   name,
@@ -1431,11 +1453,7 @@ func (d *DockerPreviewProvider) startService(
 		stderrSplitter := &previewLineSplitter{onLine: func(line []byte) {
 			appendTail(string(line))
 		}}
-		exitCode, err := d.executor.ExecStreamWithOptions(svcCtx, state.sandbox, agent.ExecStreamOptions{
-			Cmd:        append([]string(nil), svcCfg.Command...),
-			Env:        execEnv,
-			WorkingDir: workingDir,
-		}, func(line []byte) {
+		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
 			// Copy the bytes because ExecStream reuses the slice across calls.
 			appendTail(string(line))
 		}, stderrSplitter)
@@ -1629,7 +1647,7 @@ func (d *DockerPreviewProvider) resolveSandboxNetwork(ctx context.Context, conta
 // Credential helpers
 // =============================================================================
 
-func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infraCreds map[string]preview.InfraCredential, runtimeEnv preview.RuntimeEnv) map[string]map[string]string {
+func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infraCreds map[string]preview.InfraCredential, extraEnv map[string]string) map[string]map[string]string {
 	envs := make(map[string]map[string]string, len(cfg.Services))
 
 	// Start with service-declared env vars.
@@ -1657,17 +1675,17 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 		}
 	}
 
-	// Inject managed credential bundle env into the services selected by the
-	// repo config. These values intentionally apply after infrastructure
-	// credentials so customer-provided credentials can override local preview
-	// defaults when a config asks for that.
-	for serviceName, managedEnv := range runtimeEnv.Services {
-		env, ok := envs[serviceName]
+	// Inject resolved preview secret env into scoped services. These values are
+	// applied after repo env and generated infrastructure credentials, but
+	// before platform env so PREVIEW_ORIGIN and similar worker-owned values
+	// remain authoritative.
+	for service, secretEnv := range cfg.RuntimeSecretEnv {
+		env, ok := envs[service]
 		if !ok {
 			continue
 		}
-		for k, v := range managedEnv {
-			env[k] = v
+		for key, value := range secretEnv {
+			env[key] = value
 		}
 	}
 
@@ -1676,12 +1694,68 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 	// service.env and infrastructure.inject_env. Mutation in place is fine —
 	// env is the same map reference stored in envs[svcName].
 	for _, env := range envs {
-		for k, v := range runtimeEnv.Platform {
+		for k, v := range extraEnv {
 			env[k] = v
 		}
 	}
 
 	return envs
+}
+
+func (d *DockerPreviewProvider) writeRuntimeSecretFiles(ctx context.Context, sb *agent.Sandbox, files []models.PreviewRuntimeSecretFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	if d.executor == nil {
+		return fmt.Errorf("sandbox executor is not configured")
+	}
+	for _, file := range files {
+		cmd, err := buildWriteRuntimeSecretFileCmd(file)
+		if err != nil {
+			return err
+		}
+		var stderr bytes.Buffer
+		exitCode, err := d.executor.Exec(ctx, sb, cmd, io.Discard, &stderr)
+		if err != nil {
+			return fmt.Errorf("write %s: %w", file.Path, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("write %s exited with code %d: %s", file.Path, exitCode, strings.TrimSpace(stderr.String()))
+		}
+	}
+	return nil
+}
+
+func buildWriteRuntimeSecretFileCmd(file models.PreviewRuntimeSecretFile) (string, error) {
+	cleanPath := path.Clean(file.Path)
+	if file.Path == "" || path.IsAbs(file.Path) || strings.HasPrefix(cleanPath, "../") || cleanPath == ".." {
+		return "", fmt.Errorf("secret file path %q must stay inside the repo", file.Path)
+	}
+	for _, part := range strings.Split(cleanPath, "/") {
+		if part == ".git" {
+			return "", fmt.Errorf("secret file path %q must not target .git", file.Path)
+		}
+	}
+	mode := file.Mode
+	if mode == "" {
+		mode = "0600"
+	}
+	if _, err := strconv.ParseUint(mode, 8, 32); err != nil {
+		return "", fmt.Errorf("secret file mode %q is not octal", mode)
+	}
+	dir := path.Dir(cleanPath)
+	encoded := base64.StdEncoding.EncodeToString(file.Content)
+	return fmt.Sprintf(
+		`set -eu; mkdir -p %s; umask 077; base64 -d > %s <<'__143_SECRET_FILE__'
+%s
+__143_SECRET_FILE__
+chmod %s %s`,
+		shellEscape(dir),
+		shellEscape(cleanPath),
+		encoded,
+		shellEscape(mode),
+		shellEscape(cleanPath),
+	), nil
 }
 
 func resolveCredentialTemplate(template string, cred preview.InfraCredential) string {

@@ -7,16 +7,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
-	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/models"
 )
 
-var previewSecretBundleCols = []string{"id", "org_id", "name", "encrypted_env", "created_by", "created_at", "updated_at"}
-
-func TestPreviewSecretBundleStore_UpsertEncryptsAndScopesByOrg(t *testing.T) {
+func TestPreviewSecretBundleStore_UpsertEncryptsAndVersions(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -24,47 +22,48 @@ func TestPreviewSecretBundleStore_UpsertEncryptsAndScopesByOrg(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
+	repoID := uuid.New()
 	userID := uuid.New()
-	store := NewPreviewSecretBundleStore(mock, nil)
-	env := map[string]string{"DATABASE_URL": "postgres://preview", "STRIPE_SECRET_KEY": "sk_test"}
-
-	mock.ExpectExec("INSERT INTO preview_secret_bundles").
-		WithArgs(orgID, "repo-staging", pgxmock.AnyArg(), userID).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-
-	err = store.UpsertEnv(context.Background(), orgID, userID, "repo-staging", env)
-	require.NoError(t, err, "UpsertEnv should save a valid bundle")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestPreviewSecretBundleStore_GetEnvDecryptsEnv(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "creating mock pool should not error")
-	defer mock.Close()
-
-	orgID := uuid.New()
 	bundleID := uuid.New()
-	userID := uuid.New()
-	now := time.Now()
-	env := map[string]string{"DATABASE_URL": "postgres://preview"}
-	plaintext, err := json.Marshal(env)
-	require.NoError(t, err, "fixture env should marshal")
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repoID, "name": "repo-dev"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{
+			"org_id":                   orgID,
+			"repository_id":            repoID,
+			"name":                     "repo-dev",
+			"source_type":              "managed",
+			"source_config_encrypted":  pgxmock.AnyArg(),
+			"outputs_config_encrypted": pgxmock.AnyArg(),
+			"exposure_policy":          "preview_runtime",
+			"created_by_user_id":       userID,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "name", "active", "source_type", "source_config_encrypted",
+			"outputs_config_encrypted", "exposure_policy", "created_by_user_id", "created_at",
+		}).AddRow(
+			bundleID, orgID, repoID, "repo-dev", true, "managed", []byte(`{"alg":"dev-plaintext","ciphertext":"djA6e30="}`),
+			[]byte(`{"alg":"dev-plaintext","ciphertext":"djA6W10="}`), "preview_runtime", userID, time.Now(),
+		))
+	mock.ExpectCommit()
 
-	store := NewPreviewSecretBundleStore(mock, nil)
-	mock.ExpectQuery("SELECT .* FROM preview_secret_bundles WHERE org_id").
-		WithArgs(orgID, "repo-staging").
-		WillReturnRows(pgxmock.NewRows(previewSecretBundleCols).
-			AddRow(bundleID, orgID, "repo-staging", crypto.DevEncrypt(plaintext), &userID, now, now))
+	store := NewPreviewSecretBundleStore(mock, nil, "test-key")
+	row, err := store.Upsert(context.Background(), orgID, UpsertPreviewSecretBundleInput{
+		RepositoryID:    repoID,
+		Name:            "repo-dev",
+		Source:          models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://"}},
+		Outputs:         []models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}}},
+		CreatedByUserID: userID,
+	})
 
-	got, err := store.GetEnv(context.Background(), orgID, "repo-staging")
-	require.NoError(t, err, "GetEnv should decrypt a saved bundle")
-	require.Equal(t, env, got, "GetEnv should return the decrypted environment values")
+	require.NoError(t, err, "Upsert should insert a new active bundle version")
+	require.Equal(t, bundleID, row.ID, "Upsert should return the inserted bundle row")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestPreviewSecretBundleStore_ListSummariesHidesValues(t *testing.T) {
+func TestPreviewSecretBundleStore_DisableInsertsInactiveSuccessor(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -72,75 +71,99 @@ func TestPreviewSecretBundleStore_ListSummariesHidesValues(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	bundleID := uuid.New()
+	repoID := uuid.New()
 	userID := uuid.New()
+	activeID := uuid.New()
+	inactiveID := uuid.New()
 	now := time.Now()
-	plaintext, err := json.Marshal(map[string]string{"STRIPE_SECRET_KEY": "sk_test", "DATABASE_URL": "postgres://preview"})
-	require.NoError(t, err, "fixture env should marshal")
+	sourceEncrypted := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6e30="}`)
+	outputsEncrypted := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6W10="}`)
 
-	store := NewPreviewSecretBundleStore(mock, nil)
-	mock.ExpectQuery("SELECT .* FROM preview_secret_bundles WHERE org_id").
-		WithArgs(orgID).
-		WillReturnRows(pgxmock.NewRows(previewSecretBundleCols).
-			AddRow(bundleID, orgID, "repo-staging", crypto.DevEncrypt(plaintext), &userID, now, now))
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repoID, "name": "repo-dev"}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "name", "active", "source_type", "source_config_encrypted",
+			"outputs_config_encrypted", "exposure_policy", "created_by_user_id", "created_at",
+		}).AddRow(
+			activeID, orgID, repoID, "repo-dev", true, "managed", sourceEncrypted,
+			outputsEncrypted, "preview_runtime", userID, now,
+		))
+	mock.ExpectExec("UPDATE preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": activeID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{
+			"org_id":                   orgID,
+			"repository_id":            repoID,
+			"name":                     "repo-dev",
+			"active":                   false,
+			"source_type":              "managed",
+			"source_config_encrypted":  sourceEncrypted,
+			"outputs_config_encrypted": outputsEncrypted,
+			"exposure_policy":          "preview_runtime",
+			"created_by_user_id":       userID,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "name", "active", "source_type", "source_config_encrypted",
+			"outputs_config_encrypted", "exposure_policy", "created_by_user_id", "created_at",
+		}).AddRow(
+			inactiveID, orgID, repoID, "repo-dev", false, "managed", sourceEncrypted,
+			outputsEncrypted, "preview_runtime", userID, now,
+		))
+	mock.ExpectCommit()
 
-	got, err := store.ListSummaries(context.Background(), orgID)
-	require.NoError(t, err, "ListSummaries should decrypt bundles to derive env names")
-	require.Equal(t, []models.PreviewSecretBundleSummary{{
-		ID:        bundleID,
-		Name:      "repo-staging",
-		EnvNames:  []string{"DATABASE_URL", "STRIPE_SECRET_KEY"},
-		CreatedBy: &userID,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}}, got, "ListSummaries should return sorted env names without secret values")
+	store := NewPreviewSecretBundleStore(mock, nil, "test-key")
+	err = store.Disable(context.Background(), orgID, repoID, "repo-dev", userID)
+
+	require.NoError(t, err, "Disable should preserve an inactive successor version")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestPreviewSecretBundleInputValidate(t *testing.T) {
+func TestPreviewSecretBundleStore_ReplaceActiveByIDRejectsRenameConflict(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		input   models.PreviewSecretBundleInput
-		wantErr bool
-	}{
-		{
-			name:  "valid",
-			input: models.PreviewSecretBundleInput{Name: "repo-staging", Env: map[string]string{"DATABASE_URL": "postgres://preview"}},
-		},
-		{
-			name:    "blank name",
-			input:   models.PreviewSecretBundleInput{Name: " ", Env: map[string]string{"DATABASE_URL": "postgres://preview"}},
-			wantErr: true,
-		},
-		{
-			name:    "invalid name",
-			input:   models.PreviewSecretBundleInput{Name: "repo/staging", Env: map[string]string{"DATABASE_URL": "postgres://preview"}},
-			wantErr: true,
-		},
-		{
-			name:    "invalid env var name",
-			input:   models.PreviewSecretBundleInput{Name: "repo-staging", Env: map[string]string{"database-url": "postgres://preview"}},
-			wantErr: true,
-		},
-		{
-			name:    "empty env",
-			input:   models.PreviewSecretBundleInput{Name: "repo-staging", Env: map[string]string{}},
-			wantErr: true,
-		},
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	existingID := uuid.New()
+	conflictingID := uuid.New()
+	now := time.Now()
+	sourceEncrypted := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6e30="}`)
+	outputsEncrypted := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6W10="}`)
+	columns := []string{
+		"id", "org_id", "repository_id", "name", "active", "source_type", "source_config_encrypted",
+		"outputs_config_encrypted", "exposure_policy", "created_by_user_id", "created_at",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": existingID}).
+		WillReturnRows(pgxmock.NewRows(columns).AddRow(
+			existingID, orgID, repoID, "repo-dev", true, "managed", sourceEncrypted,
+			outputsEncrypted, "preview_runtime", userID, now,
+		))
+	mock.ExpectQuery("FROM preview_secret_bundles").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repoID, "name": "repo-prod"}).
+		WillReturnRows(pgxmock.NewRows(columns).AddRow(
+			conflictingID, orgID, repoID, "repo-prod", true, "managed", sourceEncrypted,
+			outputsEncrypted, "preview_runtime", userID, now,
+		))
+	mock.ExpectRollback()
 
-			err := tt.input.Validate()
-			if tt.wantErr {
-				require.Error(t, err, "Validate should reject invalid preview secret bundle input")
-				return
-			}
-			require.NoError(t, err, "Validate should accept valid preview secret bundle input")
-		})
-	}
+	store := NewPreviewSecretBundleStore(mock, nil, "test-key")
+	_, err = store.ReplaceActiveByID(context.Background(), orgID, existingID, UpsertPreviewSecretBundleInput{
+		RepositoryID:    repoID,
+		Name:            "repo-prod",
+		Source:          models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://"}},
+		Outputs:         []models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}}},
+		CreatedByUserID: userID,
+	})
+
+	require.ErrorIs(t, err, ErrPreviewSecretBundleNameConflict, "ReplaceActiveByID should reject renaming over another active bundle")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

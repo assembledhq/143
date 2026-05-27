@@ -198,6 +198,61 @@ type PreviewStartupCache struct {
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 }
 
+// PreviewSecretBundle is one insert-only version of a repo-scoped preview
+// secret bundle. Encrypted configs are never exposed through JSON responses.
+type PreviewSecretBundle struct {
+	ID                     uuid.UUID       `db:"id" json:"id"`
+	OrgID                  uuid.UUID       `db:"org_id" json:"org_id"`
+	RepositoryID           uuid.UUID       `db:"repository_id" json:"repository_id"`
+	Name                   string          `db:"name" json:"name"`
+	Active                 bool            `db:"active" json:"active"`
+	SourceType             string          `db:"source_type" json:"source_type"`
+	SourceConfigEncrypted  json.RawMessage `db:"source_config_encrypted" json:"-"`
+	OutputsConfigEncrypted json.RawMessage `db:"outputs_config_encrypted" json:"-"`
+	ExposurePolicy         string          `db:"exposure_policy" json:"exposure_policy"`
+	CreatedByUserID        uuid.UUID       `db:"created_by_user_id" json:"created_by_user_id"`
+	CreatedAt              time.Time       `db:"created_at" json:"created_at"`
+}
+
+type PreviewSecretBundleSource struct {
+	Type   string            `json:"type"`
+	Values map[string]string `json:"values,omitempty"`
+}
+
+type PreviewSecretBundleOutput struct {
+	Type    string            `json:"type"`
+	Values  map[string]string `json:"values,omitempty"`
+	Path    string            `json:"path,omitempty"`
+	Format  string            `json:"format,omitempty"`
+	Mode    string            `json:"mode,omitempty"`
+	Content json.RawMessage   `json:"content,omitempty"`
+	Value   string            `json:"value,omitempty"`
+}
+
+type PreviewSecretBundleSummary struct {
+	ID              uuid.UUID                    `json:"id"`
+	RepositoryID    uuid.UUID                    `json:"repository_id"`
+	Name            string                       `json:"name"`
+	SourceType      string                       `json:"source_type"`
+	ExposurePolicy  string                       `json:"exposure_policy"`
+	Outputs         []PreviewSecretOutputSummary `json:"outputs"`
+	CreatedByUserID uuid.UUID                    `json:"created_by_user_id"`
+	CreatedAt       time.Time                    `json:"created_at"`
+}
+
+type PreviewSecretBundleTestResult struct {
+	Status string                     `json:"status"`
+	Bundle PreviewSecretBundleSummary `json:"bundle"`
+	Error  string                     `json:"error,omitempty"`
+}
+
+type PreviewSecretOutputSummary struct {
+	Type   string   `json:"type"`
+	Env    []string `json:"env,omitempty"`
+	Path   string   `json:"path,omitempty"`
+	Format string   `json:"format,omitempty"`
+}
+
 // PRPreviewState tracks the PR comment lifecycle for preview integration.
 type PRPreviewState struct {
 	ID                     uuid.UUID       `db:"id" json:"id"`
@@ -230,9 +285,13 @@ type PreviewConfig struct {
 	Services       map[string]ServiceConfig        `json:"services"`
 	Infrastructure map[string]InfrastructureConfig `json:"infrastructure,omitempty"`
 	Resources      PreviewResourceRequirements     `json:"resources,omitempty"`
+	Secrets        []PreviewSecretBundleRef        `json:"secrets,omitempty"`
 	Credentials    CredentialConfig                `json:"credentials"`
 	Network        NetworkConfig                   `json:"network"`
 	Progressive    bool                            `json:"progressive,omitempty"`
+
+	RuntimeSecretEnv   map[string]map[string]string `json:"-"`
+	RuntimeSecretFiles []PreviewRuntimeSecretFile   `json:"-"`
 }
 
 // PreviewResourceRequirements follows the Kubernetes resources shape for
@@ -283,6 +342,25 @@ type CredentialConfig struct {
 	CredentialSet string   `json:"credential_set,omitempty"`
 	Env           []string `json:"env,omitempty"`
 	InjectInto    []string `json:"inject_into,omitempty"`
+}
+
+// PreviewSecretBundleRef is the non-secret repo-authored reference to an
+// admin-managed preview secret bundle.
+type PreviewSecretBundleRef struct {
+	Bundle   string   `json:"bundle"`
+	Services []string `json:"services,omitempty"`
+	Env      []string `json:"env,omitempty"`
+	Files    []string `json:"files,omitempty"`
+}
+
+// PreviewRuntimeSecretFile is populated by the preview secret resolver at
+// launch time. Content intentionally has no JSON encoding so plaintext cannot
+// leak into persisted preview recycle config.
+type PreviewRuntimeSecretFile struct {
+	Services []string `json:"services,omitempty"`
+	Path     string   `json:"path"`
+	Mode     string   `json:"mode,omitempty"`
+	Content  []byte   `json:"-"`
 }
 
 // NetworkConfig controls sandbox network access.
@@ -507,20 +585,30 @@ type PreviewStatusResponse struct {
 
 // PreviewDetectionResult is the API response for GET /repos/{owner}/{repo}/preview/detect.
 type PreviewDetectionResult struct {
-	Readiness           PreviewReadiness    `json:"readiness"`
-	ConfigName          string              `json:"config_name,omitempty"`
-	Services            []string            `json:"services,omitempty"`
-	PrimaryService      string              `json:"primary_service,omitempty"`
-	Infrastructure      []string            `json:"infrastructure,omitempty"`
-	MissingCredentials  []MissingCredential `json:"missing_credentials,omitempty"`
-	MissingDestinations []string            `json:"missing_destinations,omitempty"`
-	ValidationErrors    []string            `json:"validation_errors,omitempty"`
+	Readiness            PreviewReadiness      `json:"readiness"`
+	ConfigName           string                `json:"config_name,omitempty"`
+	Services             []string              `json:"services,omitempty"`
+	PrimaryService       string                `json:"primary_service,omitempty"`
+	Infrastructure       []string              `json:"infrastructure,omitempty"`
+	MissingCredentials   []MissingCredential   `json:"missing_credentials,omitempty"`
+	MissingSecretBundles []MissingSecretBundle `json:"missing_secret_bundles,omitempty"`
+	MissingDestinations  []string              `json:"missing_destinations,omitempty"`
+	ValidationErrors     []string              `json:"validation_errors,omitempty"`
 }
 
 // MissingCredential describes a credential set that needs admin setup.
 type MissingCredential struct {
 	CredentialSet string   `json:"credential_set"`
 	EnvVars       []string `json:"env_vars"`
+}
+
+// MissingSecretBundle describes a preview secret bundle that needs admin setup.
+type MissingSecretBundle struct {
+	Bundle   string   `json:"bundle"`
+	Services []string `json:"services,omitempty"`
+	Env      []string `json:"env,omitempty"`
+	Files    []string `json:"files,omitempty"`
+	Status   string   `json:"status"`
 }
 
 // =============================================================================

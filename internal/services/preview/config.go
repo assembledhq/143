@@ -115,6 +115,7 @@ type rawPreviewConfig struct {
 	Services       map[string]models.ServiceConfig        `json:"services,omitempty"`
 	Infrastructure map[string]models.InfrastructureConfig `json:"infrastructure,omitempty"`
 	Resources      models.PreviewResourceRequirements     `json:"resources,omitempty"`
+	Secrets        json.RawMessage                        `json:"secrets,omitempty"`
 	Credentials    models.CredentialConfig                `json:"credentials"`
 	Network        models.NetworkConfig                   `json:"network"`
 	Progressive    bool                                   `json:"progressive,omitempty"`
@@ -201,6 +202,11 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 		Network:        raw.Network,
 		Progressive:    raw.Progressive,
 	}
+	secrets, err := parsePreviewSecrets(raw.Secrets)
+	if err != nil {
+		return nil, fmt.Errorf("parse preview.secrets: %w", err)
+	}
+	cfg.Secrets = secrets
 
 	if raw.isSingleService() {
 		// Normalize single-service to multi-service format.
@@ -233,6 +239,25 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 	defaultPreviewInstallConfig(cfg.Install)
 
 	return cfg, nil
+}
+
+func parsePreviewSecrets(raw json.RawMessage) ([]models.PreviewSecretBundleRef, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	var single models.PreviewSecretBundleRef
+	if strings.HasPrefix(trimmed, "{") {
+		if err := json.Unmarshal(raw, &single); err != nil {
+			return nil, err
+		}
+		return []models.PreviewSecretBundleRef{single}, nil
+	}
+	var many []models.PreviewSecretBundleRef
+	if err := json.Unmarshal(raw, &many); err != nil {
+		return nil, fmt.Errorf("must be an object or array of objects")
+	}
+	return many, nil
 }
 
 // InspectConfigOptions returns available named preview configs and the config
@@ -438,25 +463,34 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	}
 
 	// Credential inject_into validation.
-	switch cfg.Credentials.Mode {
-	case "", "none":
-		// OK.
-	case "managed_env":
-		if strings.TrimSpace(cfg.Credentials.CredentialSet) == "" {
-			errs = append(errs, "credentials: credential_set is required when mode is managed_env")
-		}
-		if len(cfg.Credentials.Env) == 0 {
-			errs = append(errs, "credentials: env must include at least one variable when mode is managed_env")
-		}
-		if len(cfg.Credentials.InjectInto) == 0 {
-			errs = append(errs, "credentials: inject_into must include at least one service when mode is managed_env")
-		}
-	default:
-		errs = append(errs, fmt.Sprintf("credentials.mode %q is not supported (expected \"none\" or \"managed_env\")", cfg.Credentials.Mode))
-	}
 	for _, svcName := range cfg.Credentials.InjectInto {
 		if _, ok := cfg.Services[svcName]; !ok {
 			errs = append(errs, fmt.Sprintf("credentials: inject_into references unknown service %q", svcName))
+		}
+	}
+	for i, ref := range cfg.Secrets {
+		field := fmt.Sprintf("secrets[%d]", i)
+		if strings.TrimSpace(ref.Bundle) == "" {
+			errs = append(errs, field+": bundle is required")
+		}
+		if len(ref.Services) == 0 {
+			errs = append(errs, field+": services is required")
+		}
+		for _, svcName := range ref.Services {
+			if _, ok := cfg.Services[svcName]; !ok {
+				errs = append(errs, fmt.Sprintf("%s: services references unknown service %q", field, svcName))
+			}
+		}
+		for _, envName := range ref.Env {
+			if !isValidSecretEnvName(envName) {
+				errs = append(errs, fmt.Sprintf("%s: env %q is not a valid environment variable name", field, envName))
+			}
+		}
+		for _, path := range ref.Files {
+			errs = append(errs, validateSecretFilePath(field+": files", path)...)
+		}
+		if len(ref.Files) > 0 && !secretServicesCoverAll(ref.Services, previewServiceNames(cfg.Services)) {
+			errs = append(errs, field+": files are workspace-wide, so services must include every preview service")
 		}
 	}
 
@@ -470,6 +504,35 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 var validHTTPPath = regexp.MustCompile(`^/[a-zA-Z0-9/_.\-?&=%]*$`)
 var traversalSequence = regexp.MustCompile(`/\.\.(/|$)`)
 var validPreviewInstallCleanPath = regexp.MustCompile(`^[A-Za-z0-9_./@*+\-]+$`)
+var validSecretEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func isValidSecretEnvName(name string) bool {
+	return validSecretEnvName.MatchString(name)
+}
+
+func previewServiceNames(services map[string]models.ServiceConfig) []string {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	return names
+}
+
+func secretServicesCoverAll(scopedServices []string, allServices []string) bool {
+	if len(allServices) == 0 {
+		return true
+	}
+	seen := make(map[string]struct{}, len(scopedServices))
+	for _, service := range scopedServices {
+		seen[service] = struct{}{}
+	}
+	for _, service := range allServices {
+		if _, ok := seen[service]; !ok {
+			return false
+		}
+	}
+	return true
+}
 
 // isValidHTTPPath checks that a readiness probe HTTP path contains only safe
 // characters and does not contain path traversal sequences (/../).
@@ -487,6 +550,22 @@ func validatePathInsideRepo(field, path string) []string {
 		return []string{fmt.Sprintf("%s: path %q escapes the repo root", field, path)}
 	}
 	return nil
+}
+
+func validateSecretFilePath(field, path string) []string {
+	errs := validatePathInsideRepo(field, path)
+	clean := filepath.Clean(path)
+	if clean == "." || strings.TrimSpace(path) == "" {
+		return append(errs, fmt.Sprintf("%s: path is required", field))
+	}
+	parts := strings.Split(clean, string(filepath.Separator))
+	for _, part := range parts {
+		if part == ".git" {
+			errs = append(errs, fmt.Sprintf("%s: path %q must not target .git", field, path))
+			break
+		}
+	}
+	return errs
 }
 
 func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string {
@@ -696,6 +775,7 @@ func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) (*models.PreviewConfi
 		// Security-sensitive: always from base.
 		Primary:     baseCfg.Primary,
 		Credentials: baseCfg.Credentials,
+		Secrets:     append([]models.PreviewSecretBundleRef(nil), baseCfg.Secrets...),
 		Network:     baseCfg.Network,
 	}
 
@@ -764,6 +844,9 @@ func cloneInstallConfig(install *models.PreviewInstallConfig) *models.PreviewIns
 
 // IsConnected returns true if the config references managed credentials or destinations.
 func IsConnected(cfg *models.PreviewConfig) bool {
+	if len(SecretBundleRefs(cfg)) > 0 {
+		return true
+	}
 	if cfg.Credentials.Mode != "" && cfg.Credentials.Mode != "none" {
 		return true
 	}
@@ -771,6 +854,23 @@ func IsConnected(cfg *models.PreviewConfig) bool {
 		return true
 	}
 	return false
+}
+
+// SecretBundleRefs returns repo-authored secret bundle refs. Legacy
+// credentials.managed_env config is normalized to the same shape so the
+// resolver and readiness surfaces share one path.
+func SecretBundleRefs(cfg *models.PreviewConfig) []models.PreviewSecretBundleRef {
+	if len(cfg.Secrets) > 0 {
+		return cfg.Secrets
+	}
+	if cfg.Credentials.Mode == "" || cfg.Credentials.Mode == "none" {
+		return nil
+	}
+	return []models.PreviewSecretBundleRef{{
+		Bundle:   cfg.Credentials.CredentialSet,
+		Services: cfg.Credentials.InjectInto,
+		Env:      cfg.Credentials.Env,
+	}}
 }
 
 // =============================================================================
@@ -803,6 +903,15 @@ func DetectReadiness(cfg *models.PreviewConfig) models.PreviewDetectionResult {
 		result.MissingCredentials = append(result.MissingCredentials, models.MissingCredential{
 			CredentialSet: cfg.Credentials.CredentialSet,
 			EnvVars:       cfg.Credentials.Env,
+		})
+	}
+	for _, ref := range cfg.Secrets {
+		result.MissingSecretBundles = append(result.MissingSecretBundles, models.MissingSecretBundle{
+			Bundle:   ref.Bundle,
+			Services: ref.Services,
+			Env:      ref.Env,
+			Files:    ref.Files,
+			Status:   "setup_required",
 		})
 	}
 	if len(cfg.Network.Destinations) > 0 {

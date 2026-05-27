@@ -7,117 +7,232 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/stretchr/testify/require"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
-type mockPreviewSecretBundleStore struct {
-	listFn   func(ctx context.Context, orgID uuid.UUID) ([]models.PreviewSecretBundleSummary, error)
-	upsertFn func(ctx context.Context, orgID, createdBy uuid.UUID, name string, env map[string]string) error
-	deleteFn func(ctx context.Context, orgID uuid.UUID, name string) error
+type fakePreviewSecretBundleStore struct {
+	upsertInput  *db.UpsertPreviewSecretBundleInput
+	replaceID    uuid.UUID
+	replaceInput *db.UpsertPreviewSecretBundleInput
+	replaceErr   error
+	disabledName string
+	disabledUser uuid.UUID
+	row          models.PreviewSecretBundle
+	source       models.PreviewSecretBundleSource
+	outputs      []models.PreviewSecretBundleOutput
 }
 
-func (m *mockPreviewSecretBundleStore) ListSummaries(ctx context.Context, orgID uuid.UUID) ([]models.PreviewSecretBundleSummary, error) {
-	if m.listFn != nil {
-		return m.listFn(ctx, orgID)
-	}
-	return nil, nil
+func (s *fakePreviewSecretBundleStore) Upsert(_ context.Context, _ uuid.UUID, in db.UpsertPreviewSecretBundleInput) (*models.PreviewSecretBundle, error) {
+	s.upsertInput = &in
+	return &s.row, nil
 }
 
-func (m *mockPreviewSecretBundleStore) UpsertEnv(ctx context.Context, orgID, createdBy uuid.UUID, name string, env map[string]string) error {
-	if m.upsertFn != nil {
-		return m.upsertFn(ctx, orgID, createdBy, name, env)
+func (s *fakePreviewSecretBundleStore) ReplaceActiveByID(_ context.Context, _ uuid.UUID, id uuid.UUID, in db.UpsertPreviewSecretBundleInput) (*models.PreviewSecretBundle, error) {
+	s.replaceID = id
+	s.replaceInput = &in
+	if s.replaceErr != nil {
+		return nil, s.replaceErr
 	}
+	return &s.row, nil
+}
+
+func (s *fakePreviewSecretBundleStore) GetActive(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) (*models.PreviewSecretBundle, error) {
+	return &s.row, nil
+}
+
+func (s *fakePreviewSecretBundleStore) GetActiveByID(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*models.PreviewSecretBundle, error) {
+	return &s.row, nil
+}
+
+func (s *fakePreviewSecretBundleStore) ListActive(_ context.Context, _ uuid.UUID, _ uuid.UUID) ([]models.PreviewSecretBundle, error) {
+	return []models.PreviewSecretBundle{s.row}, nil
+}
+
+func (s *fakePreviewSecretBundleStore) Disable(_ context.Context, _ uuid.UUID, _ uuid.UUID, name string, userID uuid.UUID) error {
+	s.disabledName = name
+	s.disabledUser = userID
 	return nil
 }
 
-func (m *mockPreviewSecretBundleStore) Delete(ctx context.Context, orgID uuid.UUID, name string) error {
-	if m.deleteFn != nil {
-		return m.deleteFn(ctx, orgID, name)
-	}
-	return nil
+func (s *fakePreviewSecretBundleStore) DecryptSource(_ context.Context, _ uuid.UUID, _ models.PreviewSecretBundle) (models.PreviewSecretBundleSource, error) {
+	return s.source, nil
 }
 
-func newPreviewSecretBundleRequest(t *testing.T, method, path, name string, body any, orgID, userID uuid.UUID) *http.Request {
-	t.Helper()
-	var buf bytes.Buffer
-	if body != nil {
-		require.NoError(t, json.NewEncoder(&buf).Encode(body), "request body should encode as JSON")
-	}
-	req := httptest.NewRequest(method, path, &buf)
-	req.Header.Set("Content-Type", "application/json")
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
-	if name != "" {
-		rctx := chi.NewRouteContext()
-		rctx.URLParams.Add("name", name)
-		ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
-	}
-	return req.WithContext(ctx)
+func (s *fakePreviewSecretBundleStore) DecryptOutputs(_ context.Context, _ uuid.UUID, _ models.PreviewSecretBundle) ([]models.PreviewSecretBundleOutput, error) {
+	return s.outputs, nil
 }
 
-func TestPreviewSecretBundleHandler_List(t *testing.T) {
+func TestPreviewSecretBundleHandler_PatchByIDMergesExistingBundle(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
-	handler := NewPreviewSecretBundleHandler(&mockPreviewSecretBundleStore{
-		listFn: func(_ context.Context, gotOrgID uuid.UUID) ([]models.PreviewSecretBundleSummary, error) {
-			require.Equal(t, orgID, gotOrgID, "List should scope preview secret bundles to the active org")
-			return []models.PreviewSecretBundleSummary{{Name: "staging", EnvNames: []string{"API_TOKEN"}}}, nil
-		},
-	})
-	req := newPreviewSecretBundleRequest(t, http.MethodGet, "/api/v1/settings/preview-secret-bundles", "", nil, orgID, uuid.New())
-	rr := httptest.NewRecorder()
-
-	handler.List(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code, "List should return OK")
-	var resp models.ListResponse[models.PreviewSecretBundleSummary]
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "List response should be valid JSON")
-	require.Equal(t, []models.PreviewSecretBundleSummary{{Name: "staging", EnvNames: []string{"API_TOKEN"}}}, resp.Data, "List should return bundle summaries")
-}
-
-func TestPreviewSecretBundleHandler_UpsertScopesAndValidates(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
+	repoID := uuid.New()
 	userID := uuid.New()
-	handler := NewPreviewSecretBundleHandler(&mockPreviewSecretBundleStore{
-		upsertFn: func(_ context.Context, gotOrgID, gotCreatedBy uuid.UUID, name string, env map[string]string) error {
-			require.Equal(t, orgID, gotOrgID, "Upsert should scope preview secret bundles to the active org")
-			require.Equal(t, userID, gotCreatedBy, "Upsert should record the current user as creator")
-			require.Equal(t, "staging", name, "Upsert should use the URL name")
-			require.Equal(t, map[string]string{"API_TOKEN": "secret"}, env, "Upsert should pass the submitted env map")
-			return nil
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
 		},
-	})
-	body := models.PreviewSecretBundleInput{Name: "staging", Env: map[string]string{"API_TOKEN": "secret"}}
-	req := newPreviewSecretBundleRequest(t, http.MethodPut, "/api/v1/settings/preview-secret-bundles/staging", "staging", body, orgID, userID)
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://dev"}},
+		outputs: []models.PreviewSecretBundleOutput{{
+			Type:   "env",
+			Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"},
+		}},
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{"name":"repo-renamed"}`)
+	req := previewSecretBundleRequest(http.MethodPatch, "/api/v1/preview-secret-bundles/"+bundleID.String(), body, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
 	rr := httptest.NewRecorder()
 
-	handler.Upsert(rr, req)
+	handler.Patch(rr, req)
 
-	require.Equal(t, http.StatusNoContent, rr.Code, "Upsert should return no content after saving")
+	require.Equal(t, http.StatusOK, rr.Code, "Patch should return success")
+	require.Equal(t, bundleID, store.replaceID, "Patch should update the active version addressed by id")
+	require.NotNil(t, store.replaceInput, "Patch should pass a replacement input")
+	require.Equal(t, repoID, store.replaceInput.RepositoryID, "Patch should keep the existing repository scope")
+	require.Equal(t, "repo-renamed", store.replaceInput.Name, "Patch should apply the requested rename")
+	require.Equal(t, store.source, store.replaceInput.Source, "Patch should preserve source when omitted")
+	require.Equal(t, store.outputs, store.replaceInput.Outputs, "Patch should preserve outputs when omitted")
 }
 
-func TestPreviewSecretBundleHandler_DeleteMissingReturnsNotFound(t *testing.T) {
+func TestPreviewSecretBundleHandler_PatchByIDReturnsConflictForNameCollision(t *testing.T) {
 	t.Parallel()
 
-	handler := NewPreviewSecretBundleHandler(&mockPreviewSecretBundleStore{
-		deleteFn: func(_ context.Context, _ uuid.UUID, _ string) error {
-			return pgx.ErrNoRows
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
 		},
-	})
-	req := newPreviewSecretBundleRequest(t, http.MethodDelete, "/api/v1/settings/preview-secret-bundles/staging", "staging", nil, uuid.New(), uuid.New())
+		source:     models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://dev"}},
+		outputs:    []models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}}},
+		replaceErr: db.ErrPreviewSecretBundleNameConflict,
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{"name":"repo-prod"}`)
+	req := previewSecretBundleRequest(http.MethodPatch, "/api/v1/preview-secret-bundles/"+bundleID.String(), body, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Patch(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, "Patch should return conflict when renaming to an existing active bundle")
+	require.Contains(t, rr.Body.String(), "PREVIEW_SECRET_BUNDLE_NAME_CONFLICT", "response should include the conflict error code")
+}
+
+func TestPreviewSecretBundleHandler_TestDoesNotReturnPlaintext(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
+		},
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"DATABASE_URL": "postgres://user:pass@db/app"}},
+		outputs: []models.PreviewSecretBundleOutput{{
+			Type:   "env",
+			Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"},
+		}},
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/preview-secret-bundles/"+bundleID.String()+"/test", nil, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Test(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Test should return success for a resolvable bundle")
+	require.NotContains(t, rr.Body.String(), "postgres://user:pass@db/app", "Test response should not include plaintext secret values")
+	var resp models.SingleResponse[models.PreviewSecretBundleTestResult]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Test response should be valid JSON")
+	require.Equal(t, "ready", resp.Data.Status, "Test should report ready for valid managed bundle outputs")
+	require.Equal(t, "repo-dev", resp.Data.Bundle.Name, "Test should return non-secret bundle metadata")
+}
+
+func TestPreviewSecretBundleHandler_DeletePassesUserForInactiveSuccessor(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              uuid.New(),
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
+		},
+		outputs: []models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}}},
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	req := previewSecretBundleRequest(http.MethodDelete, "/api/v1/repositories/"+repoID.String()+"/preview-secret-bundles/repo-dev", nil, orgID, userID)
+	addURLParam(req, "id", repoID.String())
+	addURLParam(req, "name", "repo-dev")
 	rr := httptest.NewRecorder()
 
 	handler.Delete(rr, req)
 
-	require.Equal(t, http.StatusNotFound, rr.Code, "Delete should map missing bundles to not found")
+	require.Equal(t, http.StatusNoContent, rr.Code, "Delete should return no content")
+	require.Equal(t, "repo-dev", store.disabledName, "Delete should disable the requested bundle")
+	require.Equal(t, userID, store.disabledUser, "Delete should pass the actor for the inactive successor version")
+}
+
+func previewSecretBundleRequest(method string, target string, body *bytes.Buffer, orgID, userID uuid.UUID) *http.Request {
+	var reader *bytes.Reader
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		reader = bytes.NewReader(body.Bytes())
+	}
+	req := httptest.NewRequest(method, target, reader)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	return req.WithContext(ctx)
+}
+
+func addURLParam(req *http.Request, key string, value string) {
+	routeCtx := chi.RouteContext(req.Context())
+	if routeCtx == nil {
+		routeCtx = chi.NewRouteContext()
+		*req = *req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	}
+	routeCtx.URLParams.Add(key, value)
 }
