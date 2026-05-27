@@ -72,6 +72,31 @@ describe("PRHealthBanner", () => {
     expect(button).toHaveAttribute("title", "GitHub is not allowing this PR to merge yet.");
   });
 
+  it("shows pending mergeability as a disabled Merge button state", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          merge_state: "mergeability_pending",
+          checks_confirmed: true,
+          summary: "PR #42 is waiting for GitHub to finish checking mergeability.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Checking mergeability")).not.toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: /Checking mergeability…/ });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "Waiting for GitHub to check mergeability.");
+  });
+
   it("renders an optional Review action in the PR action row", async () => {
     const onReview = vi.fn();
     renderWithProviders(
