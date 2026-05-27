@@ -1779,7 +1779,13 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 			return fmt.Errorf("parse pull request ID: %w", err)
 		}
 		logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("starting sync_pull_request_state job")
-		return services.PR.SyncPullRequestState(ctx, orgID, pullRequestID)
+		if err := services.PR.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
+			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+				return &RetryableError{Err: err, ConsumeAttempt: true}
+			}
+			return err
+		}
+		return nil
 	}
 }
 

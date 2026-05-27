@@ -3231,6 +3231,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     // or health events missed while the tab was hidden or the EventSource was
     // reconnecting.
     staleTime: 30_000,
+    refetchInterval: (query) => {
+      const mergeState = query.state.data?.data?.merge_state;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" ? 5_000 : false;
+    },
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
