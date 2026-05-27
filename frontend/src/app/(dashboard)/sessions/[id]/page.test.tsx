@@ -748,6 +748,14 @@ describe('SessionDetailPage', () => {
     expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-full');
   });
 
+  it('clips crowded session header metadata before it can overlap the detail toggle', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-header-summary')).toHaveClass('overflow-hidden');
+    expect(screen.getByTestId('session-header-actions')).toHaveClass('shrink-0');
+  });
+
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: query === '(max-width: 767px)',
