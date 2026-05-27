@@ -1847,6 +1847,34 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 	return nil
 }
 
+// TryMarkPRCreationQueued atomically starts PR creation from any non-in-flight,
+// non-terminal state. It rejects concurrent submitters and sessions that have
+// already created a PR.
+func (s *SessionStore) TryMarkPRCreationQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	query := `UPDATE sessions
+		SET pr_creation_state = 'queued', pr_creation_error = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND pr_creation_state NOT IN ('queued', 'pushing', 'succeeded')
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return false, err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return true, nil
+}
+
 // TryMarkPRPushQueued atomically transitions pr_push_state from any non-in-
 // flight state ('idle', 'succeeded', 'failed') to 'queued', clearing any
 // previous error. Returns (true, nil) when the row was updated, (false, nil)

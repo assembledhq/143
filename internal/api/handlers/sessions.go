@@ -70,6 +70,7 @@ type SessionHandler struct {
 	repoStore          *db.RepositoryStore
 	orgStore           *db.OrganizationStore
 	jobStore           *db.JobStore
+	txStarter          db.TxStarter
 	messageStore       *db.SessionMessageStore
 	reviewLoopStore    *db.SessionReviewLoopStore
 	reviewCommentStore *db.SessionReviewCommentStore
@@ -403,6 +404,10 @@ func (h *SessionHandler) SetStreams(streams *cache.SessionStreams) {
 	h.streams = streams
 }
 
+func (h *SessionHandler) SetTxStarter(txStarter db.TxStarter) {
+	h.txStarter = txStarter
+}
+
 // SetShutdownSignal wires a channel that is closed when the server is
 // shutting down. SSE stream handlers listen on it so they return promptly
 // during graceful shutdown instead of blocking Server.Shutdown until its
@@ -485,10 +490,85 @@ func NewSessionHandler(
 		repoStore:        repoStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		txStarter:        nil,
 		messageStore:     messageStore,
 		threadStore:      threadStore,
 		llmClient:        llmClient,
 		logger:           logger,
+	}
+}
+
+type publishActionTxError struct {
+	phase string
+	err   error
+}
+
+func (e *publishActionTxError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.phase + ": " + e.err.Error()
+}
+
+func (e *publishActionTxError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (h *SessionHandler) enqueuePublishActionInTx(
+	ctx context.Context,
+	orgID uuid.UUID,
+	sessionID uuid.UUID,
+	queue string,
+	jobType string,
+	payload any,
+	dedupeKey string,
+	markQueued func(context.Context, *db.SessionStore) (bool, error),
+) (bool, error) {
+	if h.txStarter == nil {
+		return false, &publishActionTxError{phase: "begin", err: errors.New("transaction starter not configured")}
+	}
+	tx, err := h.txStarter.Begin(ctx)
+	if err != nil {
+		return false, &publishActionTxError{phase: "begin", err: err}
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txSessions := db.NewSessionStore(tx)
+	txSessions.SetLogger(h.logger)
+	queued, err := markQueued(ctx, txSessions)
+	if err != nil {
+		return false, &publishActionTxError{phase: "state", err: err}
+	}
+	if !queued {
+		return false, nil
+	}
+
+	jobID, err := h.jobStore.EnqueueInTx(ctx, tx, orgID, queue, jobType, payload, 5, &dedupeKey)
+	if err != nil {
+		return false, &publishActionTxError{phase: "enqueue", err: err}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, &publishActionTxError{phase: "commit", err: err}
+	}
+	h.jobStore.Notify(context.WithoutCancel(ctx), jobID)
+	h.publishSessionStatusAfterCommit(ctx, orgID, sessionID)
+	return true, nil
+}
+
+func (h *SessionHandler) publishSessionStatusAfterCommit(ctx context.Context, orgID, sessionID uuid.UUID) {
+	if h.streams == nil {
+		return
+	}
+	session, err := h.runStore.GetByID(context.WithoutCancel(ctx), orgID, sessionID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to reload session after queued publish action")
+		return
+	}
+	if err := h.streams.PublishStatus(context.WithoutCancel(ctx), &session); err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to publish queued session status")
 	}
 }
 
@@ -1806,15 +1886,29 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"agent",
+		"open_pr",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
+		},
+	)
+	if err != nil {
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR creation as queued", err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
 		return
 	}
-
-	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-		zerolog.Ctx(r.Context()).Warn().Err(err).
-			Str("session_id", sessionID.String()).
-			Msg("failed to mark PR creation as queued")
+	if !queued {
+		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+		return
 	}
 
 	sessionIDStr := sessionID.String()
@@ -1912,13 +2006,24 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("create_branch:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "create_branch", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue branch creation job", err)
-		return
-	}
-	queued, err := h.runStore.TryMarkBranchCreationQueued(r.Context(), orgID, sessionID)
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"agent",
+		"create_branch",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkBranchCreationQueued(ctx, orgID, sessionID)
+		},
+	)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue branch creation job", err)
 		return
 	}
 	if !queued {
@@ -2056,21 +2161,29 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "push_pr_changes", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue push job", err)
-		return
-	}
-
 	// Atomically transition pr_push_state from any non-in-flight state to
 	// 'queued'. The in-memory precheck above rejects the obvious case where
 	// the column is already queued/pushing, but two concurrent requests can
 	// both pass that check and reach this line. CAS resolves the race: the
-	// loser sees rows-affected=0 and returns 409 — the dedupeKey on the
-	// enqueue above already collapsed both requests onto a single worker
-	// job, so no duplicate work runs.
-	queued, err := h.runStore.TryMarkPRPushQueued(r.Context(), orgID, sessionID)
+	// loser sees rows-affected=0 and returns 409 before inserting a job.
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"agent",
+		"push_pr_changes",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkPRPushQueued(ctx, orgID, sessionID)
+		},
+	)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue push job", err)
 		return
 	}
 	if !queued {
@@ -2896,14 +3009,29 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"default",
+		"open_pr",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
+		},
+	)
+	if err != nil {
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR creation as queued", err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
 		return
 	}
-	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-		zerolog.Ctx(r.Context()).Warn().Err(err).
-			Str("session_id", sessionID.String()).
-			Msg("failed to mark PR creation as queued on session end")
+	if !queued {
+		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+		return
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session
