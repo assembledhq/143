@@ -1579,6 +1579,12 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
 	observer := m.newServiceObserver(orgID, previewID, "", "")
 	defer observer.Close()
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after secret resolution error")
+		}
+		return err
+	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {

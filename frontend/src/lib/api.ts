@@ -278,6 +278,16 @@ export const api = {
       revoke: (id: string) =>
         del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
     },
+    secretBundles: {
+      list: () => get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>('/api/v1/settings/preview-secret-bundles'),
+      upsert: (name: string, env: Record<string, string>) =>
+        request<void>(`/api/v1/settings/preview-secret-bundles/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name, env }),
+        }),
+      delete: (name: string) =>
+        del<void>(`/api/v1/settings/preview-secret-bundles/${encodeURIComponent(name)}`),
+    },
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
