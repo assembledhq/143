@@ -1,8 +1,14 @@
 import { useState } from "react";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Loader2, type LucideIcon } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import type { FileLine } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 export interface ContextExpandResult {
   startLine: number;
@@ -14,6 +20,7 @@ export interface ContextExpandResult {
 
 interface ContextExpanderProps {
   kind: "top" | "middle" | "bottom";
+  viewMode?: "unified" | "split";
   /** Number of hidden lines between hunks */
   hiddenLineCount: number;
   /** Session ID for fetching context */
@@ -22,7 +29,7 @@ interface ContextExpanderProps {
   filePath?: string;
   /** Inclusive hidden range bounds. */
   hiddenStart: number;
-  hiddenEnd: number;
+  hiddenEnd?: number;
   /** Currently visible range inside the hidden range. */
   visibleStart?: number;
   visibleEnd?: number;
@@ -40,6 +47,7 @@ interface ContextExpanderProps {
  */
 export function ContextExpander({
   kind,
+  viewMode = "unified",
   hiddenLineCount,
   sessionId,
   filePath,
@@ -51,39 +59,39 @@ export function ContextExpander({
   contextUnavailable = false,
   onContextUnavailable,
 }: ContextExpanderProps) {
-  const [loading, setLoading] = useState(false);
+  const [loadingDirection, setLoadingDirection] = useState<"above" | "below" | null>(null);
 
   if (hiddenLineCount <= 0) return null;
 
+  const loading = loadingDirection !== null;
   const canExpand = !contextUnavailable && sessionId && filePath && onExpand;
-  const canExpandAbove = canExpand && (visibleStart == null || visibleStart > hiddenStart);
-  const canExpandBelow = canExpand && (visibleEnd == null || visibleEnd < hiddenEnd);
-  const canExpandAll = canExpand && (visibleStart !== hiddenStart || visibleEnd !== hiddenEnd);
+  const hasKnownHiddenEnd = hiddenEnd != null;
+  const canExpandAbove = canExpand && hasKnownHiddenEnd && (visibleStart == null || visibleStart > hiddenStart);
+  const canExpandBelow = canExpand && (!hasKnownHiddenEnd || visibleEnd == null || visibleEnd < hiddenEnd);
+  const controlDirections: Array<"above" | "below"> =
+    kind === "top" ? ["above"] : kind === "bottom" ? ["below"] : ["above", "below"];
 
-  async function fetchRange(direction: "above" | "below" | "all") {
+  async function fetchRange(direction: "above" | "below") {
     if (!canExpand) return;
     if (direction === "above" && !canExpandAbove) return;
     if (direction === "below" && !canExpandBelow) return;
-    if (direction === "all" && !canExpandAll) return;
-    setLoading(true);
+    setLoadingDirection(direction);
     try {
       let line = hiddenStart;
       const above = 0;
       let below = 0;
 
       if (direction === "above") {
+        if (hiddenEnd == null) return;
         const fetchEnd = visibleStart != null ? visibleStart - 1 : hiddenEnd;
         const fetchStart = Math.max(hiddenStart, fetchEnd - 19);
         line = fetchStart;
         below = fetchEnd - fetchStart;
       } else if (direction === "below") {
         const fetchStart = visibleEnd != null ? visibleEnd + 1 : hiddenStart;
-        const fetchEnd = Math.min(hiddenEnd, fetchStart + 19);
+        const fetchEnd = hiddenEnd == null ? fetchStart + 19 : Math.min(hiddenEnd, fetchStart + 19);
         line = fetchStart;
         below = fetchEnd - fetchStart;
-      } else {
-        line = hiddenStart;
-        below = hiddenEnd - hiddenStart;
       }
 
       const resp = await api.sessions.getFileContext(
@@ -110,64 +118,113 @@ export function ContextExpander({
         onContextUnavailable?.();
       }
     } finally {
-      setLoading(false);
+      setLoadingDirection(null);
     }
   }
 
   const trailingText = contextUnavailable
     ? "Additional file context unavailable for this session"
     : kind === "top"
-    ? "Before change"
+    ? ""
     : kind === "bottom"
-    ? "After change"
-    : `Show ${hiddenLineCount} hidden lines`;
+    ? ""
+    : `${hiddenLineCount} hidden lines`;
 
   const titleText = contextUnavailable
     ? "Additional file context unavailable for this session"
     : canExpand
-    ? `Show ${hiddenLineCount} hidden lines`
+    ? hasKnownHiddenEnd
+      ? `Reveal ${hiddenLineCount} hidden context lines`
+      : "Reveal context below"
     : "Context expansion unavailable (sandbox not running)";
+  const gutterWidthClass = viewMode === "split" ? "w-[66px]" : "w-[100px]";
+  const prefixSpacerClass = viewMode === "split" ? "w-0" : "w-[20px]";
+
+  function renderControl({
+    direction,
+    label,
+    tooltip,
+    disabled,
+    Icon,
+  }: {
+    direction: "above" | "below";
+    label: string;
+    tooltip: string;
+    disabled: boolean;
+    Icon: LucideIcon;
+  }) {
+    const isLoading = loadingDirection === direction;
+
+    return (
+      <Tooltip key={direction}>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            disabled={loading || disabled}
+            className="h-4 w-8 shrink-0 rounded-sm p-0 text-primary hover:bg-primary/10 disabled:text-muted-foreground"
+            onClick={() => fetchRange(direction)}
+            aria-label={label}
+            title={tooltip}
+          >
+            {isLoading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">{tooltip}</TooltipContent>
+      </Tooltip>
+    );
+  }
 
   return (
     <div
-      className="flex items-center justify-center gap-2 px-3 py-2 text-xs text-muted-foreground/80 border-y border-border/40 bg-muted/15"
+      className="flex min-w-fit items-stretch border-y border-sky-200/70 bg-sky-50/80 text-xs text-muted-foreground/80 dark:border-sky-900/50 dark:bg-sky-950/20"
       title={titleText}
     >
-      {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronDown className="h-3 w-3" />}
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        disabled={loading || !canExpandAbove}
-        className="h-7 px-2 font-mono text-xs"
-        onClick={() => fetchRange("above")}
-        aria-label="Show 20 above"
-      >
-        Show 20 above
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        disabled={loading || !canExpandBelow}
-        className="h-7 px-2 font-mono text-xs"
-        onClick={() => fetchRange("below")}
-        aria-label="Show 20 below"
-      >
-        Show 20 below
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        disabled={loading || !canExpandAll}
-        className="h-7 px-2 font-mono text-xs"
-        onClick={() => fetchRange("all")}
-        aria-label="Show all hidden lines"
-      >
-        Show all
-      </Button>
-      <span aria-label={trailingText}>{trailingText}</span>
+      <TooltipProvider>
+        <div
+          data-testid="context-expander-gutter-controls"
+          className={`${gutterWidthClass} flex shrink-0 items-center justify-center bg-sky-100/80 dark:bg-sky-950/40`}
+        >
+          <div className="flex flex-col items-center justify-center gap-0.5">
+            {controlDirections.map((controlDirection) =>
+              renderControl({
+                direction: controlDirection,
+                label:
+                  controlDirection === "above"
+                    ? "Reveal context above"
+                    : "Reveal context below",
+                tooltip:
+                  controlDirection === "above"
+                    ? "Reveal context above"
+                    : "Reveal context below",
+                disabled:
+                  controlDirection === "above"
+                    ? !canExpandAbove
+                    : !canExpandBelow,
+                Icon: controlDirection === "above" ? ChevronUp : ChevronDown,
+              })
+            )}
+          </div>
+        </div>
+      </TooltipProvider>
+      <div
+        data-testid="context-expander-prefix-spacer"
+        className={`${prefixSpacerClass} shrink-0 bg-sky-50/80 dark:bg-sky-950/20`}
+      />
+      <div className="flex min-h-7 flex-1 items-center px-2">
+        <span
+          data-testid="context-expander-label"
+          aria-label={trailingText || undefined}
+          className="font-mono"
+        >
+          {trailingText}
+        </span>
+      </div>
     </div>
   );
 }

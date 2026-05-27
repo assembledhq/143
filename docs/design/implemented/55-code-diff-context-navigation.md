@@ -1,6 +1,6 @@
 # Design: Accurate, Navigable Session Diffs
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-01
+> **Status:** Implemented | **Last reviewed:** 2026-05-27
 
 > Unifies two gaps in the current review surface: GitHub-style movement through surrounding file context and diff snapshots that are explicitly tied to the immutable branch basis for the session.
 >
@@ -101,18 +101,17 @@ Current limitations:
 
 Each file section should behave like a sequence of visible diff blocks separated by expandable context gaps, and the entire diff should carry explicit provenance about what branch basis it was computed from.
 
-For every hidden range, the UI should support:
+For every hidden range, the UI should support GitHub-style directional icon controls anchored to the relevant boundary:
 
-- `Show 20 above`
-- `Show 20 below`
-- `Show all`
+- Up arrow: render above the visible change and reveal the next context window immediately above it.
+- Down arrow: render below the visible change and reveal the next context window immediately below it.
 
 Expected behavior:
 
 - Before the first hunk, show a top gap if the first changed line is not line 1.
-- Between hunks, show an expandable gap with directional controls instead of a single midpoint fetch.
+- Between hunks, keep directional controls in the line-number gutter instead of a single midpoint fetch or prose-like buttons.
 - After the last hunk, show a bottom gap when the file has trailing content.
-- After expanding part of a gap, keep controls visible until the gap is fully revealed.
+- After expanding part of a gap, keep the relevant boundary control visible in the same line-number gutter position until that side is fully revealed.
 - Expanded context lines should render exactly like existing context lines in unified and split views, including line numbers and comment affordances.
 - Session detail should be able to expose, at minimum, the diff capture timestamp and the immutable base commit used to compute the cached patch.
 - If a session has a live sandbox, file context should be served from the container as today.
@@ -283,7 +282,7 @@ Recommended response:
 Why this helps:
 
 - The UI can render top and bottom expanders accurately.
-- "Show all" can request the remainder without guessing.
+- Repeated directional requests can move toward either boundary without guessing.
 - The frontend does not need to infer EOF from undersized responses.
 
 Backend work:
@@ -300,9 +299,8 @@ Current behavior fetches a chunk centered inside the hidden gap. That prevents r
 
 Instead:
 
-- `Show above` should fetch lines adjacent to the current top visible boundary.
-- `Show below` should fetch lines adjacent to the current bottom visible boundary.
-- `Show all` should fetch the entire remaining range for that gap.
+- The up-arrow control should fetch lines adjacent to the current top visible boundary.
+- The down-arrow control should fetch lines adjacent to the current bottom visible boundary.
 
 This makes the UX predictable and matches GitHub's mental model.
 
@@ -349,7 +347,7 @@ What should change over time is the abstraction boundary:
 
 ### 10. Snapshot-backed file context when no container is alive
 
-The current file-context endpoint requires a live Docker container, which means the moment a session finishes and its sandbox is torn down, `Show 20 above` / `Show 20 below` stop working — even though the workspace state is already persisted as a snapshot tar in object storage and PR creation already reads from it. Reviewing a completed session is the most common reason to expand context, so this is the worst possible failure mode.
+The current file-context endpoint requires a live Docker container, which means the moment a session finishes and its sandbox is torn down, directional context expansion stops working — even though the workspace state is already persisted as a snapshot tar in object storage and PR creation already reads from it. Reviewing a completed session is the most common reason to expand context, so this is the worst possible failure mode.
 
 GitHub does not run a sandbox to serve `Show more` clicks. It reads from a stored artifact (git objects). We should follow the same shape: read from the artifact we already have (`session.snapshot_key`), without rehydrating any container.
 
@@ -372,7 +370,7 @@ Caching:
 
 Cold-path latency:
 
-- First read after sandbox teardown pays a tar fetch from object storage. For typical session workspaces this is in the few-hundred-millisecond range, which is acceptable for a discrete user action like "Show 20 above".
+- First read after sandbox teardown pays a tar fetch from object storage. For typical session workspaces this is in the few-hundred-millisecond range, which is acceptable for a discrete user action like revealing more context.
 - Hot reads (same session, same or different file) are local-disk fast.
 
 Path safety:
@@ -407,7 +405,7 @@ Notes:
 Scope:
 
 - Replace one-shot midpoint gap expansion between hunks with directional expansion.
-- Support repeated `Show 20 above`, `Show 20 below`, and `Show all` within middle gaps.
+- Support repeated up/down directional expansion within middle gaps.
 - Keep using the existing file-context endpoint initially.
 - Read from the same cached diff path introduced in phase 1.
 
@@ -491,7 +489,7 @@ Possible optimizations:
 Scope:
 
 - Stop returning `NO_SANDBOX` for any session that still has a usable workspace snapshot.
-- Serve `Show 20 above`, `Show 20 below`, and `Show all` from the persisted snapshot tar without restoring a Docker container.
+- Serve up/down directional context windows from the persisted snapshot tar without restoring a Docker container.
 - Preserve today's behavior for sessions that have a live container (no regression on the hot path) and for sessions that have neither a container nor a snapshot (continue to render the disabled expander UI).
 
 Backend changes:
@@ -537,7 +535,7 @@ Frontend:
 - `context-expander` tests for directional fetch requests
 - `file-diff-section` tests for top, middle, and bottom gaps
 - split and unified rendering tests for expanded context
-- tests for repeated expansion and `Show all`
+- tests for repeated directional expansion
 - tests that comments still attach to expanded lines and preserve `(file_path, side, line_number)` anchors
 
 Backend:
@@ -590,7 +588,7 @@ It is tempting to keep patching `expandedGaps`, but that will make top/bottom su
 
 ### 4. Snapshot reads can be slow on cold paths
 
-The first `Show 20 above` after a sandbox tear-down requires a tar fetch from object storage. For unusually large workspaces or remote object stores with high latency this can be visibly slower than a live read. Mitigations: per-snapshot LRU on host disk, prefetch on diff-page load, and a clear loading state. Watch for tail latency metrics after Phase 6 ships.
+The first directional expansion after a sandbox tear-down requires a tar fetch from object storage. For unusually large workspaces or remote object stores with high latency this can be visibly slower than a live read. Mitigations: per-snapshot LRU on host disk, prefetch on diff-page load, and a clear loading state. Watch for tail latency metrics after Phase 6 ships.
 
 ### 5. Hostile tar entries
 

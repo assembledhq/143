@@ -45,7 +45,7 @@ interface ContextGapState {
   kind: GapKind;
   key: string;
   hiddenStart: number;
-  hiddenEnd: number;
+  hiddenEnd?: number;
   lineDelta: number;
   visibleStart?: number;
   visibleEnd?: number;
@@ -139,7 +139,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       setVisibleLineState({ file, count: INITIAL_RENDERED_DIFF_LINES });
     }
 
-    const buildGapState = useCallback((kind: GapKind, key: string, hiddenStart: number, hiddenEnd: number, lineDelta: number) => {
+    const buildGapState = useCallback((kind: GapKind, key: string, hiddenStart: number, hiddenEnd: number | undefined, lineDelta: number) => {
       const existing = gapStates.get(key);
       if (existing) return existing;
       return { kind, key, hiddenStart, hiddenEnd, lineDelta, lines: [] } as ContextGapState;
@@ -163,6 +163,11 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           next.set(gap.key, {
             ...existing,
             lines: mergedLines,
+            hiddenEnd:
+              existing.hiddenEnd ??
+              (meta.totalLines >= existing.hiddenStart
+                ? meta.totalLines
+                : existing.hiddenStart - 1),
             visibleStart:
               existing.visibleStart != null
                 ? Math.min(existing.visibleStart, meta.startLine)
@@ -201,7 +206,9 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
 
     const renderGap = useCallback((gap: ContextGapState) => {
       const gapState = gapStates.get(gap.key) ?? gap;
-      const hiddenLineCount = gapState.hiddenEnd - gapState.hiddenStart + 1;
+      const hiddenLineCount = gapState.hiddenEnd == null
+        ? 1
+        : gapState.hiddenEnd - gapState.hiddenStart + 1;
       if (hiddenLineCount <= 0) return null;
 
       const expandedHunk = gapState.lines.length > 0 ? {
@@ -217,11 +224,12 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
         <div key={gap.key}>
           <ContextExpander
             kind={gap.kind}
+            viewMode={viewMode}
             hiddenLineCount={hiddenLineCount}
             sessionId={sessionId}
             filePath={file.newPath}
             hiddenStart={gap.hiddenStart}
-            hiddenEnd={gap.hiddenEnd}
+            hiddenEnd={gapState.hiddenEnd}
             visibleStart={gapState.visibleStart}
             visibleEnd={gapState.visibleEnd}
             onExpand={makeHandleContextExpand(gapState)}
@@ -287,9 +295,14 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           type: "gap",
           gap: buildGapState("bottom", `${file.newPath}:bottom`, lastNewEnd + 1, totalLines, lastNewEnd - lastEnd),
         });
+      } else if (totalLines == null && sessionId && lastEnd != null && lastNewEnd != null) {
+        items.push({
+          type: "gap",
+          gap: buildGapState("bottom", `${file.newPath}:bottom`, lastNewEnd + 1, undefined, lastNewEnd - lastEnd),
+        });
       }
       return items;
-    }, [buildGapState, file.hunks, file.newPath, fileContextMeta]);
+    }, [buildGapState, file.hunks, file.newPath, fileContextMeta, sessionId]);
     const totalRenderableLines = useMemo(
       () => file.hunks.reduce((sum, hunk) => sum + countRenderableLines(hunk), 0),
       [file.hunks],
