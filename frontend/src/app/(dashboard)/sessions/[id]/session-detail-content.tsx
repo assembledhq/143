@@ -2367,19 +2367,26 @@ function ChatPanel({
       }
       const existingThreads = existing.data.threads ?? [];
       const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
-      const threads = hasThreadPayload ? updated.threads! : (
-        updated.status === "cancelled"
-          ? existingThreads.map((thread) => (
-            workingStatusesSet.has(thread.status)
-              ? {
-                ...thread,
-                status: "cancelled" as const,
-                completed_at: updated.completed_at ?? thread.completed_at,
-              }
-              : thread
-          ))
-          : existingThreads
-      );
+      const threads = hasThreadPayload ? updated.threads! : existingThreads.map((thread) => {
+        if (!workingStatusesSet.has(thread.status)) {
+          return thread;
+        }
+        if (updated.status === "cancelled") {
+          return {
+            ...thread,
+            status: "cancelled" as const,
+            completed_at: updated.completed_at ?? thread.completed_at,
+          };
+        }
+        if (updated.status === "idle") {
+          return {
+            ...thread,
+            status: "idle" as const,
+            completed_at: updated.completed_at ?? thread.completed_at,
+          };
+        }
+        return thread;
+      });
       return {
         ...existing,
         data: {
@@ -2441,7 +2448,9 @@ function ChatPanel({
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
         mergeSessionStatusUpdate(updated);
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+        if ((!updated.threads || updated.threads.length === 0) && updated.status === "running") {
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+        }
         // When the session transitions out of running (e.g. sandbox creation
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
