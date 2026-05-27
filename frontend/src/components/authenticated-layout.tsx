@@ -471,7 +471,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   if (showLoadingSkeleton) {
     return (
-      <div className="flex h-dvh">
+      <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
         <aside
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
@@ -506,7 +506,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
           </header>
-          <main className="flex-1 overflow-auto bg-background">
+          <main className="flex-1 overflow-auto overscroll-contain bg-background">
             <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
               <div className="h-7 w-40 rounded bg-muted animate-pulse" />
               <div className="space-y-3">
@@ -530,7 +530,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="flex h-dvh">
+    <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
       {/* Desktop sidebar (md and up) */}
       <aside
         data-testid="app-sidebar"
@@ -584,7 +584,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             onCreateSession={handleCreateSessionOpen}
           />
         ) : null}
-        <main className="flex-1 overflow-auto bg-background relative flex flex-col">
+        <main className="flex-1 overflow-auto overscroll-contain bg-background relative flex flex-col">
           <div className="relative max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 flex-1 min-h-0">
             {children}
           </div>

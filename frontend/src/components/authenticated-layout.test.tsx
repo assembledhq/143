@@ -151,6 +151,23 @@ describe("AuthenticatedLayout", () => {
     expect(contentWrapper).toHaveClass("min-h-0");
   });
 
+  it("pins the authenticated app shell to the visual viewport and contains overscroll", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const appShell = container.firstElementChild;
+    expect(appShell).toHaveClass("fixed");
+    expect(appShell).toHaveClass("inset-0");
+    expect(appShell).toHaveClass("overflow-hidden");
+    expect(appShell).toHaveClass("overscroll-none");
+
+    const main = container.querySelector("main");
+    expect(main).toHaveClass("overscroll-contain");
+  });
+
   it("shows settings entries in the collapsible sidebar section", async () => {
     const user = userEvent.setup();
 
