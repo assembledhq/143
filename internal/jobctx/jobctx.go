@@ -20,6 +20,7 @@ const (
 	jobCreatedAtKey
 	jobIDKey
 	ownerKindKey
+	workerNodeIDKey
 )
 
 // DeadLetterHook runs synchronously on the worker's poll goroutine when
@@ -63,6 +64,15 @@ func WithOwnerKind(ctx context.Context, ownerKind string) context.Context {
 func OwnerKindFromContext(ctx context.Context) (string, bool) {
 	ownerKind, ok := ctx.Value(ownerKindKey).(string)
 	return ownerKind, ok && ownerKind != ""
+}
+
+func WithWorkerNodeID(ctx context.Context, nodeID string) context.Context {
+	return context.WithValue(ctx, workerNodeIDKey, nodeID)
+}
+
+func WorkerNodeIDFromContext(ctx context.Context) (string, bool) {
+	nodeID, ok := ctx.Value(workerNodeIDKey).(string)
+	return nodeID, ok && nodeID != ""
 }
 
 func WithDeadTargetNode(ctx context.Context, nodeID string) context.Context {

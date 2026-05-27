@@ -73,6 +73,13 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
+type nilStringPointerArg struct{}
+
+func (nilStringPointerArg) Match(v interface{}) bool {
+	targetNodeID, ok := v.(*string)
+	return ok && targetNodeID == nil
+}
+
 func TestHandoffError(t *testing.T) {
 	t.Parallel()
 
@@ -201,6 +208,30 @@ func TestWorker_Poll(t *testing.T) {
 				expectClaim(mock, jobID, orgID, "retryable_job", json.RawMessage(`{}`), now, lockToken)
 				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
 					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "retryable failure can clear stale target pin",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				handlerErr := &RetryableError{
+					Err:               errors.New("capacity reached"),
+					ClearTargetNodeID: true,
+				}
+
+				w.Register("clear_target_retry_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "clear_target_retry_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)[\\s\\S]+target_node_id").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken, nilStringPointerArg{}).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
