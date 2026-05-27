@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +38,7 @@ type StartRunner struct {
 	sandboxProvider agent.SandboxProvider
 	sandboxCapacity *agent.SandboxCapacityGate
 	snapshots       storage.SnapshotStore
+	snapshotCache   previewStartupCache
 	github          branchPreviewGitHub
 	nodeID          string
 	logger          zerolog.Logger
@@ -49,6 +53,7 @@ type StartRunnerConfig struct {
 	SandboxProvider agent.SandboxProvider
 	SandboxCapacity *agent.SandboxCapacityGate
 	Snapshots       storage.SnapshotStore
+	SnapshotCache   *SnapshotCache
 	GitHub          branchPreviewGitHub
 	NodeID          string
 	Logger          zerolog.Logger
@@ -59,6 +64,10 @@ type branchPreviewGitHub interface {
 }
 
 func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
+	snapshotCache := previewStartupCache(cfg.SnapshotCache)
+	if snapshotCache == nil && cfg.Manager != nil {
+		snapshotCache = cfg.Manager.SnapshotCache()
+	}
 	return &StartRunner{
 		manager:         cfg.Manager,
 		previews:        cfg.Previews,
@@ -68,6 +77,7 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 		sandboxProvider: cfg.SandboxProvider,
 		sandboxCapacity: cfg.SandboxCapacity,
 		snapshots:       cfg.Snapshots,
+		snapshotCache:   snapshotCache,
 		github:          cfg.GitHub,
 		nodeID:          cfg.NodeID,
 		logger:          cfg.Logger,
@@ -75,6 +85,12 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 }
 
 var gitCommitSHARe = regexp.MustCompile(`\A[0-9a-fA-F]{7,40}\z`)
+
+type previewStartupCache interface {
+	FindSnapshot(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*CacheHit, error)
+	RestoreSnapshot(ctx context.Context, sb *agent.Sandbox, hit *CacheHit) error
+	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error
+}
 
 // StartReservedBranchPreview completes a target-owned branch preview by
 // creating a fresh sandbox, cloning the repository, checking out the pinned
@@ -228,6 +244,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		MetricsSource:             string(target.SourceType),
 		MetricsRepositoryFullName: repo.FullName,
 	}
+	startupCacheKey := r.maybeRestoreBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, target.CommitSHA, sb, cfg)
 	metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, 1)
 	defer metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, -1)
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
@@ -237,6 +254,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
+	r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKey, sb, cfg)
 	return nil
 }
 
@@ -529,4 +547,137 @@ func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.
 		return nil, fmt.Errorf("%w: parse %s: %w", ErrInvalidConfig, repoconfig.ConfigPath, err)
 	}
 	return cfg, nil
+}
+
+func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, commitSHA string, sb *agent.Sandbox, cfg *models.PreviewConfig) string {
+	if r == nil || r.snapshotCache == nil || r.sandboxProvider == nil || sb == nil || cfg == nil || commitSHA == "" {
+		return ""
+	}
+	if previewConfigHasRuntimeSecretFiles(cfg) {
+		// Runtime secret files are written into the shared workspace during
+		// LaunchPreview. The startup cache snapshots that workspace after
+		// launch, so do not read or write cache entries for these configs:
+		// otherwise worker-local cache blobs could retain plaintext secrets.
+		r.logger.Debug().
+			Str("repository_id", repoID.String()).
+			Msg("branch preview startup cache skipped because config delivers preview secrets as files")
+		return ""
+	}
+	snapshotKey, err := r.computeBranchPreviewStartupCacheKey(ctx, sb, cfg, commitSHA)
+	if err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("commit_sha", commitSHA).
+			Msg("branch preview startup cache key unavailable; launching cold")
+		return ""
+	}
+	hit, err := r.snapshotCache.FindSnapshot(ctx, orgID, repoID, snapshotKey)
+	if err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache lookup failed; launching cold")
+		return snapshotKey
+	}
+	if hit == nil {
+		r.logger.Debug().
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache miss")
+		return snapshotKey
+	}
+	if err := r.snapshotCache.RestoreSnapshot(ctx, sb, hit); err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache restore failed; launching cold")
+		return snapshotKey
+	}
+	r.logger.Info().
+		Str("repository_id", repoID.String()).
+		Str("snapshot_key", snapshotKey).
+		Msg("branch preview startup cache restored")
+	return snapshotKey
+}
+
+func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string, sb *agent.Sandbox, cfg *models.PreviewConfig) {
+	if r == nil || r.snapshotCache == nil || sb == nil || snapshotKey == "" {
+		return
+	}
+	if previewConfigHasRuntimeSecretFiles(cfg) {
+		// See maybeRestoreBranchPreviewStartupCache for why secret-file
+		// configs are excluded from the workspace snapshot cache.
+		r.logger.Debug().
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	defer cancel()
+	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, snapshotKey, SnapshotMetadata{OrgID: orgID, RepoID: repoID}); err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("failed to create branch preview startup cache")
+	}
+}
+
+func (r *StartRunner) computeBranchPreviewStartupCacheKey(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, commitSHA string) (string, error) {
+	lockfiles := branchPreviewStartupCacheLockfiles(cfg)
+	var lockInput bytes.Buffer
+	for _, lockfile := range lockfiles {
+		cleanPath, err := cleanBranchPreviewStartupCachePath(lockfile)
+		if err != nil {
+			return "", fmt.Errorf("preview.install.lockfiles path %q: %w", lockfile, err)
+		}
+		body, err := r.sandboxProvider.ReadFile(ctx, sb, cleanPath)
+		if err != nil {
+			return "", fmt.Errorf("read preview.install lockfile %q: %w", cleanPath, err)
+		}
+		lockInput.WriteString(cleanPath)
+		lockInput.WriteByte(0)
+		lockInput.Write(body)
+		lockInput.WriteByte(0)
+	}
+	return ComputeSnapshotKey(lockInput.Bytes(), commitSHA, computeConfigDigest(cfg)), nil
+}
+
+func branchPreviewStartupCacheLockfiles(cfg *models.PreviewConfig) []string {
+	if cfg == nil || cfg.Install == nil || len(cfg.Install.Lockfiles) == 0 {
+		return nil
+	}
+	lockfiles := append([]string(nil), cfg.Install.Lockfiles...)
+	sort.Strings(lockfiles)
+	return lockfiles
+}
+
+func previewConfigHasRuntimeSecretFiles(cfg *models.PreviewConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.RuntimeSecretFiles) > 0 {
+		return true
+	}
+	for _, ref := range SecretBundleRefs(cfg) {
+		if len(ref.Files) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanBranchPreviewStartupCachePath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return "", fmt.Errorf("path must be relative")
+	}
+	clean := path.Clean(trimmed)
+	if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." {
+		return "", fmt.Errorf("path must stay inside the repository")
+	}
+	return clean, nil
 }
