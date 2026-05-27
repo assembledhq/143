@@ -990,12 +990,17 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   find_free_worker_port() {
     local worker_private_ip="$1"
+    local endpoint_reuse_mode="${2:-strict}"
     local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
     local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
     local port
 
     if [ -z "$worker_private_ip" ]; then
       echo "ERROR: worker private IP is required to verify preview runtime endpoint reuse safety." >&2
+      return 1
+    fi
+    if [ "$endpoint_reuse_mode" != "strict" ] && [ "$endpoint_reuse_mode" != "after-blocking-drain" ]; then
+      echo "ERROR: invalid worker endpoint reuse mode: $endpoint_reuse_mode" >&2
       return 1
     fi
     if [[ "$start" == *[!0-9]* ]] || [[ "$end" == *[!0-9]* ]]; then
@@ -1011,7 +1016,15 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     for port in $(seq "$start" "$end"); do
-      if ! worker_port_in_use "$port" && ! worker_runtime_endpoint_in_use "$worker_private_ip" "$port"; then
+      if worker_port_in_use "$port"; then
+        continue
+      fi
+      if [ "$endpoint_reuse_mode" = "after-blocking-drain" ]; then
+        echo "Worker host port ${port} is free after blocking drain; reusing the drained endpoint." >&2
+        echo "$port"
+        return 0
+      fi
+      if ! worker_runtime_endpoint_in_use "$worker_private_ip" "$port"; then
         echo "$port"
         return 0
       fi
@@ -1087,7 +1100,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         echo "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain."
         drain_worker_containers_blocking "$old_containers"
         old_containers=""
-        host_port="$(find_free_worker_port "$worker_private_ip")" || return 1
+        host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")" || return 1
       else
         return 1
       fi
