@@ -12,9 +12,7 @@ tags:
 llm_summary: Configure the `preview` section of `.143/config.json` so 143 can start services, check readiness, and expose a live session preview.
 ---
 
-# Preview environments
-
-A preview is a live view of your app running inside a 143 session. When an agent edits a UI, reviewers can inspect the result next to the transcript and diff.
+A preview turns a session from "read the diff" into "try the changed app." It is most useful when reviewers need to click through UI, inspect full-stack behavior, or confirm that an agent's change works in context.
 
 Previews are configured in `.143/config.json` under the top-level `preview` key. Commit that file to the repository so sessions, branch previews, and API-triggered previews all read the same contract.
 
