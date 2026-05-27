@@ -111,6 +111,10 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	handlerCtx = jobctx.WithLockToken(handlerCtx, executor.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(models.JobOwnerKindSessionExecutor))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
+	handlerCtx = jobctx.WithWorkerNodeID(handlerCtx, executor.HostNodeID)
+	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != executor.HostNodeID {
+		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
+	}
 	handlerCtx, cancelHandler := context.WithCancel(handlerCtx)
 
 	var lostOwnership atomic.Bool
@@ -316,7 +320,7 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, timeoutErr.Error())
 			return nil
 		}
-		r.retryJob(writeCtx, executor, job, err.Error(), !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID)
+		r.retryJob(writeCtx, executor, job, err.Error(), !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
 		r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusRequeued, 0, err.Error())
 		return nil
 	}
@@ -326,12 +330,12 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 		r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, err.Error())
 		return nil
 	}
-	r.retryJob(writeCtx, executor, job, err.Error(), false, nil, nil)
+	r.retryJob(writeCtx, executor, job, err.Error(), false, nil, nil, false)
 	r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusRequeued, 0, err.Error())
 	return nil
 }
 
-func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.SessionExecutor, job *models.Job, errMsg string, preserveAttempts bool, override *time.Duration, targetNodeID *string) {
+func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.SessionExecutor, job *models.Job, errMsg string, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) {
 	backoff := retryBackoff(job.Attempts)
 	if override != nil {
 		backoff = *override
@@ -341,7 +345,8 @@ func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.S
 		ok  bool
 		err error
 	)
-	if targetNodeID != nil {
+	updateTarget := targetNodeID != nil || clearTargetNodeID
+	if updateTarget {
 		if targetStore, supportsTargetRetry := r.Jobs.(targetRetryLeaseStore); supportsTargetRetry {
 			if preserveAttempts {
 				ok, err = targetStore.RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx, job.ID, executor.LockToken, errMsg, runAt, targetNodeID)
