@@ -16,7 +16,7 @@ export default function PublicDocsLayout({ children }: { children: ReactNode }) 
           prefetch: false,
         }}
         containerProps={{
-          className: "bg-background",
+          className: "docs-fumadocs-layout bg-background",
         }}
       >
         {children}
