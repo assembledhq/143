@@ -2264,6 +2264,29 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 	}
 }
 
+func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return ghservice.ErrPullRequestMergeabilityPending
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "pending mergeability should defer the job instead of succeeding")
+	require.ErrorIs(t, retryable.Err, ghservice.ErrPullRequestMergeabilityPending, "deferred job should preserve the pending mergeability sentinel")
+	require.Nil(t, retryable.RetryAfter, "pending mergeability should use the worker's exponential backoff schedule")
+	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
+}
+
 type prHandlerCalls struct {
 	syncCalls      int
 	reconcileCalls int

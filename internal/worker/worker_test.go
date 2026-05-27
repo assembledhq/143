@@ -236,6 +236,27 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "retryable failure can consume attempts for exponential backoff",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				handlerErr := &RetryableError{Err: errors.New("mergeability pending"), ConsumeAttempt: true}
+
+				w.Register("attempt_consuming_retryable_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "attempt_consuming_retryable_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("run_at = \\$2,\\s+locked_by_node_id = NULL").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
 			name: "retryable max duration bypass retries old job",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()

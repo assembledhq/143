@@ -30,6 +30,11 @@ type JobHandler func(ctx context.Context, jobType string, payload json.RawMessag
 // zero-delay retry without colliding with the "unset, use backoff" sentinel.
 type RetryableError struct {
 	Err error
+	// ConsumeAttempt keeps the retryable job in the retryable-duration window
+	// while allowing the attempts counter to advance so exponential backoff can
+	// grow across repeated attempts. Leave false for capacity/dependency gates
+	// that should not spend the job's normal attempt budget.
+	ConsumeAttempt bool
 	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
 	// when the job row is older than maxRetryableDuration. Use this only when a
 	// successful retry is expected immediately after the current attempt repaired
@@ -275,7 +280,7 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
+		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
 		return
 	}
 

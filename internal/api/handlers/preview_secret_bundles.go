@@ -466,6 +466,11 @@ func validatePreviewSecretBundleRequest(body previewSecretBundleUpsertRequest) [
 			errs = append(errs, "outputs["+strconv.Itoa(i)+"].type is not supported")
 		}
 	}
+	if len(errs) == 0 {
+		if err := previewsvc.ValidatePreviewSecretBundle(body.Source, body.Outputs); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
 	return errs
 }
 

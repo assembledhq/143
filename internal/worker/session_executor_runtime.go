@@ -320,7 +320,7 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, timeoutErr.Error())
 			return nil
 		}
-		r.retryJob(writeCtx, executor, job, err.Error(), true, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
+		r.retryJob(writeCtx, executor, job, err.Error(), !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
 		r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusRequeued, 0, err.Error())
 		return nil
 	}
