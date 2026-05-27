@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import getStartedMeta from "../../../../docs/public/getting-started/meta.json";
 import guidesMeta from "../../../../docs/public/guides/meta.json";
@@ -37,6 +39,24 @@ describe("public docs source", () => {
     expect(sectionMetas.every((meta) => !("root" in meta))).toBe(true);
   });
 
+  it("does not repeat section titles as body headings on overview pages", () => {
+    const tests = [
+      { slug: "getting-started", title: getStartedMeta.title },
+      { slug: "guides", title: guidesMeta.title },
+      { slug: "self-hosting", title: selfHostingMeta.title },
+      { slug: "reference", title: referenceMeta.title },
+    ];
+
+    for (const tt of tests) {
+      const content = readFileSync(
+        join(process.cwd(), "..", "docs", "public", tt.slug, "index.mdx"),
+        "utf8"
+      );
+
+      expect(content).not.toContain(`\n# ${tt.title}\n`);
+    }
+  });
+
   it("lists curated public docs with stable urls and metadata", () => {
     const docs = getAllPublicDocs();
 
@@ -63,7 +83,7 @@ describe("public docs source", () => {
     expect(raw.content).toContain("## Set up the config");
     expect(raw.content).toContain("## Secrets and config");
     expect(raw.content).toContain("`preview.credentials`");
-    expect(raw.content).toContain("managed credential set");
+    expect(raw.content).toContain("admin-managed values");
   });
 
   it("generates llms.txt from the public docs index", () => {
