@@ -5282,7 +5282,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   return (
     <div className="flex h-full">
       {/* Center area: chat or review diff view */}
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div
+        data-testid="session-conversation-workspace"
+        className="flex-1 min-w-0 md:min-w-[440px] flex flex-col"
+      >
         {!isDedicatedMobileReview ? (
           <>
             <MobileSessionTopBar
