@@ -942,6 +942,43 @@ func TestJobStore_CountRunningOwnedByNode_ReturnsWrappedErrors(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_SelectWorkerWithSandboxCapacity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("(?s)WITH candidates AS.*live_sandbox_count_error").
+		WithArgs(pgxmock.AnyArg(), "worker-full").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
+
+	nodeID, err := store.SelectWorkerWithSandboxCapacity(context.Background(), "worker-full")
+	require.NoError(t, err, "SelectWorkerWithSandboxCapacity should not return an error")
+	require.NotNil(t, nodeID, "SelectWorkerWithSandboxCapacity should return an available worker")
+	require.Equal(t, "worker-with-space", *nodeID, "SelectWorkerWithSandboxCapacity should pick the advertised worker with capacity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_SelectWorkerWithSandboxCapacity_NoAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("WITH candidates AS").
+		WithArgs(pgxmock.AnyArg(), "worker-full").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+
+	nodeID, err := store.SelectWorkerWithSandboxCapacity(context.Background(), "worker-full")
+	require.NoError(t, err, "SelectWorkerWithSandboxCapacity should not treat no rows as an error")
+	require.Nil(t, nodeID, "SelectWorkerWithSandboxCapacity should return nil when no worker advertises capacity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func jobDedupeKeyPtr(s string) *string {
 	return &s
 }
