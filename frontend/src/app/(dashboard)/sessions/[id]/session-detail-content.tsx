@@ -131,7 +131,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -480,6 +480,7 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
 function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+  const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
 
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
@@ -491,11 +492,13 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
   const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
 
   const retryMutation = useMutation({
-    mutationFn: () => api.sessions.retry(session.id),
+    mutationFn: (mode: SessionRetryMode) => api.sessions.retry(session.id, { mode }),
     onSuccess: () => {
+      setShowStartOverRetryDialog(false);
       queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
   });
+  const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed";
 
   const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
@@ -542,17 +545,41 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
                 )}
               </CardTitle>
               {session.failure_retry_advised && (
-                <DisabledTooltip disabled={retryMutation.isPending} content="Retrying session...">
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    onClick={() => retryMutation.mutate()}
-                    disabled={retryMutation.isPending}
+                <div className="inline-flex">
+                  <DisabledTooltip
+                    disabled={retryMutation.isPending || checkpointRetryUnavailable}
+                    content={checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
                   >
-                    <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
-                    {retryMutation.isPending ? "Retrying..." : "Retry"}
-                  </Button>
-                </DisabledTooltip>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      className="rounded-r-none border-r-0"
+                      onClick={() => retryMutation.mutate("checkpoint")}
+                      disabled={retryMutation.isPending || checkpointRetryUnavailable}
+                    >
+                      <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
+                      {retryMutation.isPending ? "Retrying..." : "Retry"}
+                    </Button>
+                  </DisabledTooltip>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        className="rounded-l-none px-2"
+                        aria-label="More retry actions"
+                        disabled={retryMutation.isPending}
+                      >
+                        <ChevronDown className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setShowStartOverRetryDialog(true)}>
+                        Start over from beginning
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               )}
             </div>
           </CardHeader>
@@ -582,10 +609,31 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
             {isCodexAuthFailure && isCodexAuthenticated && (
               <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                ChatGPT connected — click Retry to re-run this session.
+                {checkpointRetryUnavailable
+                  ? "ChatGPT connected — open the retry menu and choose Start over from beginning."
+                  : "ChatGPT connected — click Retry to continue this session."}
               </p>
             )}
           </CardContent>
+          <AlertDialog open={showStartOverRetryDialog} onOpenChange={setShowStartOverRetryDialog}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Start over from beginning?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This clears the current visible retry result and starts the session again from its original base.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={retryMutation.isPending}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => retryMutation.mutate("start_over")}
+                  disabled={retryMutation.isPending}
+                >
+                  Start over
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </Card>
       )}
       {showDeviceCodeModal && (

@@ -949,7 +949,11 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *run})
 }
 
-// RetrySession resets a failed session back to pending and re-enqueues it.
+const retryCheckpointTranscriptNote = "Retrying from the latest saved progress."
+
+// RetrySession retries a failed session. The default mode resumes from the
+// latest durable checkpoint; start_over preserves the old destructive rerun
+// path for explicit user selection.
 func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -958,6 +962,40 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mode, err := parseRetrySessionMode(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_RETRY_MODE", "invalid retry mode", err)
+		return
+	}
+
+	switch mode {
+	case models.SessionRetryModeCheckpoint:
+		h.retrySessionFromCheckpoint(w, r, orgID, sessionID)
+	case models.SessionRetryModeStartOver:
+		h.retrySessionStartOver(w, r, orgID, sessionID)
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_RETRY_MODE", "invalid retry mode")
+	}
+}
+
+func parseRetrySessionMode(r *http.Request) (models.SessionRetryMode, error) {
+	var req models.RetrySessionRequest
+	if r.Body != nil {
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+	}
+	if req.Mode == "" {
+		req.Mode = models.SessionRetryModeCheckpoint
+	}
+	if err := req.Mode.Validate(); err != nil {
+		return "", err
+	}
+	return req.Mode, nil
+}
+
+func (h *SessionHandler) retrySessionStartOver(w http.ResponseWriter, r *http.Request, orgID, sessionID uuid.UUID) {
 	if err := h.runStore.ResetForRetry(r.Context(), orgID, sessionID); err != nil {
 		if errors.Is(err, db.ErrSessionNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
@@ -998,7 +1036,8 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 
 	sessionIDStr := sessionID.String()
 	retryDetails := sessionAuditSnapshot(&session, nil, map[string]any{
-		"job_type": "run_agent",
+		"job_type":   "run_agent",
+		"retry_mode": string(models.SessionRetryModeStartOver),
 		"changes": map[string]any{
 			"status": auditChange("failed", session.Status),
 		},
@@ -1006,6 +1045,132 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionRetried, models.AuditResourceSession, &sessionIDStr, &sessionID, nil,
 		marshalAuditDetails(h.logger, retryDetails))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
+}
+
+func (h *SessionHandler) retrySessionFromCheckpoint(w http.ResponseWriter, r *http.Request, orgID, sessionID uuid.UUID) {
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, db.ErrSessionNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch session", err)
+		return
+	}
+	if session.Status != models.SessionStatusFailed {
+		writeError(w, r, http.StatusConflict, "NOT_FAILED", "session is not in failed status")
+		return
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" || session.SandboxState == models.SandboxStateDestroyed {
+		writeError(w, r, http.StatusConflict, "CHECKPOINT_UNAVAILABLE", "No saved progress is available.")
+		return
+	}
+	if session.PendingSnapshotKey != nil && strings.TrimSpace(*session.PendingSnapshotKey) != "" {
+		writeError(w, r, http.StatusConflict, "CHECKPOINT_PENDING", "checkpoint upload is still pending")
+		return
+	}
+
+	targetThread, err := h.threadStore.GetRetryTarget(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusConflict, "NO_RETRY_THREAD", "no visible retry thread is available")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "THREAD_LOOKUP_FAILED", "failed to find retry thread", err)
+		return
+	}
+
+	claimedSession, err := h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusConflict, "CHECKPOINT_UNAVAILABLE", "No saved progress is available.")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "RETRY_FAILED", "failed to claim session for checkpoint retry", err)
+		return
+	}
+
+	claimedThread, err := h.claimRetryThread(r.Context(), orgID, sessionID, targetThread)
+	if err != nil {
+		h.revertCheckpointRetry(r.Context(), orgID, sessionID, uuid.Nil, models.ThreadStatus(""))
+		if errors.Is(err, db.ErrThreadRunningLimitReached) || errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusConflict, "THREAD_NOT_RETRYABLE", "retry thread is not available")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "THREAD_CLAIM_FAILED", "failed to claim retry thread", err)
+		return
+	}
+
+	messageThreadID := claimedThread.ID
+	note := models.SessionMessage{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		ThreadID:   &messageThreadID,
+		TurnNumber: claimedThread.CurrentTurn + 1,
+		Role:       models.MessageRoleAssistant,
+		Content:    retryCheckpointTranscriptNote,
+	}
+	if err := h.messageStore.Create(r.Context(), &note); err != nil {
+		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
+		writeError(w, r, http.StatusInternalServerError, "MESSAGE_FAILED", "failed to add retry transcript note", err)
+		return
+	}
+
+	dedupeKey := db.ContinueSessionDedupeKey(claimedThread.ID)
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"thread_id":  claimedThread.ID.String(),
+		"org_id":     orgID.String(),
+	}
+	if _, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(&claimedSession)); err != nil {
+		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue session continuation job", err)
+		return
+	}
+
+	h.enrichSessionLinks(r.Context(), orgID, &claimedSession)
+	sessionIDStr := sessionID.String()
+	retryDetails := sessionAuditSnapshot(&claimedSession, nil, map[string]any{
+		"job_type":   "continue_session",
+		"retry_mode": string(models.SessionRetryModeCheckpoint),
+		"thread_id":  claimedThread.ID.String(),
+		"changes": map[string]any{
+			"status": auditChange(session.Status, claimedSession.Status),
+		},
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionRetried, models.AuditResourceSession, &sessionIDStr, &sessionID, nil,
+		marshalAuditDetails(h.logger, retryDetails))
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: claimedSession})
+}
+
+func (h *SessionHandler) claimRetryThread(ctx context.Context, orgID, sessionID uuid.UUID, targetThread models.SessionThread) (models.SessionThread, error) {
+	if targetThread.Status == models.ThreadStatusIdle {
+		return h.threadStore.ClaimIdleForSession(ctx, orgID, sessionID, targetThread.ID, models.MaxRunningThreadsPerSession)
+	}
+	if retryThreadStatusResumable(targetThread.Status) {
+		return h.threadStore.ClaimForResumeInSession(ctx, orgID, sessionID, targetThread.ID, models.MaxRunningThreadsPerSession)
+	}
+	return models.SessionThread{}, pgx.ErrNoRows
+}
+
+func retryThreadStatusResumable(status models.ThreadStatus) bool {
+	for _, resumable := range models.ResumableThreadStatuses {
+		if status == resumable {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *SessionHandler) revertCheckpointRetry(ctx context.Context, orgID, sessionID, threadID uuid.UUID, previousThreadStatus models.ThreadStatus) {
+	if err := h.runStore.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusFailed); err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to revert checkpoint retry session status")
+	}
+	if threadID != uuid.Nil && previousThreadStatus != "" {
+		if err := h.threadStore.UpdateStatus(ctx, orgID, threadID, previousThreadStatus); err != nil {
+			h.logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to revert checkpoint retry thread status")
+		}
+	}
 }
 
 // GetLogs returns all logs for a run as a JSON array.
