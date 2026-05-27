@@ -1186,7 +1186,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 	}
 
 	lastStatus := run.Status
-	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+	if err := sw.WriteEvent(sse.EventStatus, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to SSE stream")
 		return
 	}
@@ -1241,7 +1241,8 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 			// Send a status event whenever the session status changes.
 			if run.Status != lastStatus {
 				lastStatus = run.Status
-				if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+				statusPayload := h.sessionStatusPayload(ctx, orgID, run)
+				if err := sw.WriteEvent(sse.EventStatus, statusPayload); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write status event to SSE stream")
 					return
 				}
@@ -1250,7 +1251,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 			sw.Flush()
 
 			if isTerminalStatus(run.Status) {
-				if err := sw.WriteEvent(sse.EventDone, run); err != nil {
+				if err := sw.WriteEvent(sse.EventDone, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write done event to SSE stream")
 					return
 				}
@@ -1291,7 +1292,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 		}
 		lastDeliveredStreamID = streamID
 	}
-	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+	if err := sw.WriteEvent(sse.EventStatus, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to Redis-backed SSE stream")
 		return false
 	}
@@ -1348,13 +1349,14 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				sw.Flush()
 				return true
 			}
-			if err := sw.WriteEvent(sse.EventStatus, updated); err != nil {
+			statusPayload := h.sessionStatusPayload(ctx, orgID, updated)
+			if err := sw.WriteEvent(sse.EventStatus, statusPayload); err != nil {
 				logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis status event to SSE stream")
 				return true
 			}
 			sw.Flush()
 			if isTerminalStatus(updated.Status) {
-				if err := sw.WriteEvent(sse.EventDone, updated); err != nil {
+				if err := sw.WriteEvent(sse.EventDone, statusPayload); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis done event to SSE stream")
 					return true
 				}
@@ -1363,6 +1365,26 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 			}
 		}
 	}
+}
+
+func (h *SessionHandler) sessionStatusPayload(ctx context.Context, orgID uuid.UUID, session models.Session) models.SessionDetail {
+	detail := models.SessionDetail{
+		Session: session,
+		Threads: []models.SessionThread{},
+	}
+	if h.threadStore == nil {
+		return detail
+	}
+	threads, err := h.threadStore.ListBySession(ctx, orgID, session.ID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load threads for session SSE status")
+		return detail
+	}
+	if threads == nil {
+		return detail
+	}
+	detail.Threads = threads
+	return detail
 }
 
 func (h *SessionHandler) catchUpLogs(ctx context.Context, orgID, runID uuid.UUID, lastEventID string) ([]models.SessionLog, error) {
