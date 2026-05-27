@@ -131,7 +131,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -340,6 +340,54 @@ function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session
     cancel_requested_at: undefined,
     model_override: session?.agent_type === loop.agent_type ? session.model_override : undefined,
   };
+}
+
+function threadStatusForSessionStatus(status: Session["status"]): ThreadStatus | null {
+  switch (status) {
+    case "pending":
+      return "pending";
+    case "running":
+      return "running";
+    case "idle":
+      return "idle";
+    case "awaiting_input":
+      return "awaiting_input";
+    case "completed":
+    case "pr_created":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return null;
+  }
+}
+
+function reconcileThreadsForOmittedStatusUpdate(
+  threads: SessionThread[],
+  updated: Session,
+): SessionThread[] {
+  const threadStatus = threadStatusForSessionStatus(updated.status);
+  if (!threadStatus || threadStatus === "running") {
+    return threads;
+  }
+
+  return threads.map((thread) => {
+    if (!workingStatusesSet.has(thread.status)) {
+      return thread;
+    }
+
+    return {
+      ...thread,
+      status: threadStatus,
+      completed_at: (
+        threadStatus === "completed" ||
+        threadStatus === "failed" ||
+        threadStatus === "cancelled"
+      ) ? updated.completed_at ?? thread.completed_at : thread.completed_at,
+    };
+  });
 }
 
 export function trackInFlightAgentUpdate(
@@ -2350,19 +2398,7 @@ function ChatPanel({
         return { data: { ...updated, threads: [] } };
       }
       const existingThreads = existing.data.threads ?? [];
-      const threads = updated.threads ?? (
-        updated.status === "cancelled"
-          ? existingThreads.map((thread) => (
-            workingStatusesSet.has(thread.status)
-              ? {
-                ...thread,
-                status: "cancelled" as const,
-                completed_at: updated.completed_at ?? thread.completed_at,
-              }
-              : thread
-          ))
-          : existingThreads
-      );
+      const threads = updated.threads ?? reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
       return {
         ...existing,
         data: {
