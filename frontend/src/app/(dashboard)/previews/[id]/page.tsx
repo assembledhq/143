@@ -14,6 +14,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { ACTIVE_PREVIEW_STATUSES, CONTROLLABLE_PREVIEW_STATUSES, formatPreviewStatus, type PreviewStatus } from "@/lib/preview-types";
+import {
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
+  PREVIEW_BOOTSTRAP_READY_EVENT,
+  PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+} from "@/lib/preview-bootstrap";
 import { safeExternalUrl } from "@/lib/utils";
 
 export default function PreviewLandingPage({
@@ -22,11 +27,16 @@ export default function PreviewLandingPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  return <PreviewLandingContent id={id} />;
+}
+
+export function PreviewLandingContent({ id }: { id: string }) {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const launchMode = searchParams.get("launch") === "1";
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bootstrappedPreviewIdRef = useRef<string | null>(null);
+  const launchStartAttemptedRef = useRef<string | null>(null);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const previewQuery = useQuery<SingleResponse<BranchPreviewResponse>>({
     queryKey: ["branch-preview", id],
@@ -84,6 +94,8 @@ export default function PreviewLandingPage({
 
   useEffect(() => {
     if (!shouldStartForLaunch || !launchTargetId) return;
+    if (launchStartAttemptedRef.current === launchTargetId) return;
+    launchStartAttemptedRef.current = launchTargetId;
     restartPreview.mutate({ previewId: launchTargetId, latest: true });
   }, [launchTargetId, restartPreview, shouldStartForLaunch]);
 
@@ -93,7 +105,13 @@ export default function PreviewLandingPage({
 
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== previewOrigin) return;
-      if (event.data?.type !== "preview_bootstrap_ready") return;
+      if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
+        if (bootstrappedPreviewIdRef.current === activePreviewId) {
+          window.location.href = previewUrl;
+        }
+        return;
+      }
+      if (event.data?.type !== PREVIEW_BOOTSTRAP_READY_EVENT) return;
       if (bootstrappedPreviewIdRef.current === activePreviewId || bootstrapPreview.isPending) return;
 
       bootstrappedPreviewIdRef.current = activePreviewId;
@@ -101,12 +119,9 @@ export default function PreviewLandingPage({
       bootstrapPreview.mutate(activePreviewId, {
         onSuccess: (data) => {
           iframeRef.current?.contentWindow?.postMessage(
-            { type: "preview_bootstrap_token", token: data.data.token },
+            { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token: data.data.token },
             previewOrigin,
           );
-          window.setTimeout(() => {
-            window.location.href = previewUrl;
-          }, 250);
         },
         onError: (err) => {
           bootstrappedPreviewIdRef.current = null;
@@ -160,7 +175,15 @@ export default function PreviewLandingPage({
             ) : null}
 
             <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => previewQuery.refetch()}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  launchStartAttemptedRef.current = null;
+                  previewQuery.refetch();
+                }}
+              >
                 <RotateCw className="h-4 w-4" />
                 Refresh
               </Button>
