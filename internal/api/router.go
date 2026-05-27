@@ -664,6 +664,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	branchPreviewHandler.SetStopper(previewStopper)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
+		prService.SetPreviewOriginTemplate(cfg.PreviewOriginTemplate)
 	}
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.

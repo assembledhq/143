@@ -183,6 +183,7 @@ export interface BranchPreviewResponse {
   stable_url: string;
   preview_url?: string;
   expires_at?: string;
+  stopped_at?: string;
   services?: import('./preview-types').PreviewService[];
   infrastructure?: import('./preview-types').PreviewInfrastructure[];
   logs?: import('./preview-types').PreviewLog[];
