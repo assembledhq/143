@@ -12,9 +12,7 @@ tags:
 llm_summary: Configure a GitHub App for self-hosted 143 so the platform can access repos, receive webhooks, and create PRs.
 ---
 
-# GitHub App setup
-
-Self-hosted 143 uses a GitHub App for repository access. The app grants scoped installation access and emits webhooks for repo, issue, PR, and review events.
+In a self-hosted deployment, the GitHub App is both the repository access mechanism and the webhook source. Configure it before importing repositories or routing issue, PR, and review events into 143.
 
 ## Create the app
 
