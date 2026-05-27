@@ -16,6 +16,8 @@ import (
 type PreviewTokenClaims struct {
 	OrgID        uuid.UUID  `json:"org_id"`
 	TargetNodeID string     `json:"target_node_id"`
+	RuntimeID    *uuid.UUID `json:"runtime_id,omitempty"`
+	RuntimeEpoch int        `json:"runtime_epoch,omitempty"`
 	SessionID    *uuid.UUID `json:"session_id,omitempty"`
 	PreviewID    *uuid.UUID `json:"preview_id,omitempty"`
 	Action       string     `json:"action"`

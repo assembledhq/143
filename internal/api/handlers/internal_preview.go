@@ -423,6 +423,10 @@ func (h *InternalPreviewHandler) authorizePreviewAction(w http.ResponseWriter, r
 		writeError(w, r, http.StatusForbidden, "PREVIEW_MISMATCH", "preview token does not match the requested preview")
 		return uuid.Nil, nil, false
 	}
+	if action == "proxy" && (claims.RuntimeID == nil || claims.RuntimeEpoch <= 0) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_RUNTIME_MISMATCH", "preview token does not match an active runtime")
+		return uuid.Nil, nil, false
+	}
 	return previewID, claims, true
 }
 

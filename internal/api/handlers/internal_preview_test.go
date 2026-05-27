@@ -217,6 +217,33 @@ func TestInternalPreviewHandler_AuthorizeFailures(t *testing.T) {
 	}
 }
 
+func TestInternalPreviewHandler_AuthorizePreviewActionRequiresRuntimeIdentity(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	handler := newInternalPreviewTestHandler(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy", nil)
+	req = withPreviewRouteParam(req, previewID.String())
+	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		PreviewID:    &previewID,
+		TargetNodeID: "worker-1",
+		Action:       "proxy",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}))
+	rr := httptest.NewRecorder()
+
+	_, _, ok := handler.authorizePreviewAction(rr, req, "proxy")
+	require.False(t, ok, "authorizePreviewAction should reject preview proxy tokens without runtime identity")
+	require.Equal(t, http.StatusForbidden, rr.Code, "authorizePreviewAction should fail closed on missing runtime identity")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "authorizePreviewAction should return a JSON error")
+	require.Equal(t, "PREVIEW_RUNTIME_MISMATCH", resp.Error.Code, "authorizePreviewAction should report runtime identity mismatch")
+}
+
 func TestInternalPreviewHandler_StartPreview_RejectsMismatches(t *testing.T) {
 	t.Parallel()
 
@@ -564,6 +591,7 @@ func TestInternalPreviewHandler_ProxyFailuresAndHelpers(t *testing.T) {
 
 	orgID := uuid.New()
 	previewID := uuid.New()
+	runtimeID := uuid.New()
 	store := db.NewPreviewStore(mock)
 	manager := previewsvc.NewManager(previewsvc.ManagerConfig{
 		Store:        store,
@@ -579,7 +607,7 @@ func TestInternalPreviewHandler_ProxyFailuresAndHelpers(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy/assets/app.js", nil)
 	req = withPreviewRouteParam(req, previewID.String())
 	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
-		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", RuntimeID: &runtimeID, RuntimeEpoch: 1, Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 	rr := httptest.NewRecorder()
 
@@ -595,7 +623,7 @@ func TestInternalPreviewHandler_ProxyFailuresAndHelpers(t *testing.T) {
 	wsReq.Header.Set("Connection", "upgrade")
 	wsReq.Header.Set("Upgrade", "websocket")
 	wsReq.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
-		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", RuntimeID: &runtimeID, RuntimeEpoch: 1, Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 	wsResp := httptest.NewRecorder()
 
@@ -622,6 +650,7 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 	sessionID := uuid.New()
 	userID := uuid.New()
 	previewID := uuid.New()
+	runtimeID := uuid.New()
 	now := time.Now().UTC()
 
 	clientConn, serverConn := net.Pipe()
@@ -659,7 +688,7 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy/assets/app.js", nil)
 	req = withPreviewRouteParam(req, previewID.String())
 	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
-		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", RuntimeID: &runtimeID, RuntimeEpoch: 1, Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 	req.Header.Set("Cookie", "__Host-preview_session=preview-secret; csrf_token=csrf-token; session_token=session-token")
 	rr := httptest.NewRecorder()
@@ -681,6 +710,7 @@ func TestInternalPreviewHandler_ProxyWebSocket_HijackUnsupported(t *testing.T) {
 	sessionID := uuid.New()
 	userID := uuid.New()
 	previewID := uuid.New()
+	runtimeID := uuid.New()
 	now := time.Now().UTC()
 
 	clientConn, serverConn := net.Pipe()
@@ -708,7 +738,7 @@ func TestInternalPreviewHandler_ProxyWebSocket_HijackUnsupported(t *testing.T) {
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
-		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", RuntimeID: &runtimeID, RuntimeEpoch: 1, Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
 	}))
 	rr := httptest.NewRecorder()
 

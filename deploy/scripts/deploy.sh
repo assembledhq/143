@@ -960,6 +960,27 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker ps --format '{{.Ports}}' | grep -Eq "(^|, |:)${port}->8080/tcp"
   }
 
+  worker_runtime_endpoint_in_use() {
+    local worker_private_ip="$1" port="$2" endpoint count
+    endpoint="http://${worker_private_ip}:${port}"
+
+    if [ -z "${DB_HOST:-}" ] || [ -z "${DB_PASSWORD:-}" ]; then
+      echo "ERROR: DB_HOST and DB_PASSWORD are required to verify preview runtime endpoint reuse safety." >&2
+      return 0
+    fi
+
+    if ! count="$(docker run --rm -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \
+      psql -h "$DB_HOST" -U onefortythree -d onefortythree \
+      -v endpoint="$endpoint" \
+      -tAc "SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining')" 2>/dev/null)"; then
+      echo "ERROR: could not verify preview runtime endpoint reuse safety for ${endpoint}; refusing to reuse it." >&2
+      return 0
+    fi
+
+    count="$(printf '%s' "$count" | tr -d '[:space:]')"
+    [ "${count:-0}" -gt 0 ]
+  }
+
   worker_blue_green_extra_ports_configured() {
     local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
     local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
@@ -968,10 +989,15 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   find_free_worker_port() {
+    local worker_private_ip="$1"
     local start="${WORKER_BLUE_GREEN_PORT_START:-8080}"
     local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
     local port
 
+    if [ -z "$worker_private_ip" ]; then
+      echo "ERROR: worker private IP is required to verify preview runtime endpoint reuse safety." >&2
+      return 1
+    fi
     if [[ "$start" == *[!0-9]* ]] || [[ "$end" == *[!0-9]* ]]; then
       echo "ERROR: WORKER_BLUE_GREEN_PORT_START and WORKER_BLUE_GREEN_PORT_END must be numeric." >&2
       return 1
@@ -985,12 +1011,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     for port in $(seq "$start" "$end"); do
-      if ! worker_port_in_use "$port"; then
+      if ! worker_port_in_use "$port" && ! worker_runtime_endpoint_in_use "$worker_private_ip" "$port"; then
         echo "$port"
         return 0
       fi
     done
-    echo "ERROR: no free worker host port in ${start}-${end}" >&2
+    echo "ERROR: no reusable worker host port in ${start}-${end}; Docker or active preview_runtimes still own every endpoint" >&2
     return 1
   }
 
@@ -1056,12 +1082,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
     generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
     node_id="${base_node_id}-g${generation}"
-    if ! host_port="$(find_free_worker_port)"; then
+    if ! host_port="$(find_free_worker_port "$worker_private_ip")"; then
       if [ -n "$old_containers" ] && ! worker_blue_green_extra_ports_configured; then
         echo "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain."
         drain_worker_containers_blocking "$old_containers"
         old_containers=""
-        host_port="$(find_free_worker_port)" || return 1
+        host_port="$(find_free_worker_port "$worker_private_ip")" || return 1
       else
         return 1
       fi
@@ -1337,11 +1363,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_port_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
 IMAGE_TAG='$IMAGE_TAG'
+DB_HOST='$DB_HOST'
+DB_PASSWORD='$DB_PASSWORD'
 DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'
 DOCKER_PRUNE_UNTIL='${DOCKER_PRUNE_UNTIL:-24h}'
 DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'

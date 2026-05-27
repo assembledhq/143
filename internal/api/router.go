@@ -594,6 +594,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		HMRWatcher:            hmrWatcher,
 		Logger:                logger,
 		WorkerNodeID:          cfg.NodeID,
+		PreviewInternalBaseURL: cfg.PreviewInternalBaseURL,
 		PreviewOriginTemplate: cfg.PreviewOriginTemplate,
 		MaxPerUser:            cfg.PreviewMaxPerUser,
 		MaxPerOrg:             cfg.PreviewMaxPerOrg,
