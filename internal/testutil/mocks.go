@@ -22,18 +22,19 @@ var (
 // MockSandboxProvider is a configurable mock for agent.SandboxProvider.
 // Set the function fields to control behavior in tests.
 type MockSandboxProvider struct {
-	Name_        string
-	CreateFn     func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error)
-	CloneRepoFn  func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error
-	ExecFn       func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
-	ExecStreamFn func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
-	ReadFileFn   func(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error)
-	WriteFileFn  func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error
-	DestroyFn    func(ctx context.Context, sb *agent.Sandbox) error
-	ConnInfoFn   func(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error)
-	SnapshotFn   func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error)
-	RestoreFn    func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error
-	IsAliveFn    func(ctx context.Context, sb *agent.Sandbox) (bool, error)
+	Name_                   string
+	CreateFn                func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error)
+	CloneRepoFn             func(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error
+	ExecFn                  func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
+	ExecStreamFn            func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
+	ExecStreamWithOptionsFn func(ctx context.Context, sb *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), stderr io.Writer) (int, error)
+	ReadFileFn              func(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error)
+	WriteFileFn             func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error
+	DestroyFn               func(ctx context.Context, sb *agent.Sandbox) error
+	ConnInfoFn              func(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error)
+	SnapshotFn              func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error)
+	RestoreFn               func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error
+	IsAliveFn               func(ctx context.Context, sb *agent.Sandbox) (bool, error)
 
 	// StartInteractiveCommandFn lets tests override the live-handle path.
 	// When nil, StartInteractiveCommand returns a MockInteractiveCommandHandle
@@ -171,6 +172,20 @@ func (m *MockSandboxProvider) ExecStream(ctx context.Context, sb *agent.Sandbox,
 			}
 		}
 		return code, nil
+	}
+	return 0, nil
+}
+
+func (m *MockSandboxProvider) ExecStreamWithOptions(ctx context.Context, sb *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), stderr io.Writer) (int, error) {
+	cmd := fmt.Sprint(opts.Cmd)
+	m.mu.Lock()
+	m.ExecCalls = append(m.ExecCalls, cmd)
+	m.mu.Unlock()
+	if m.ExecStreamWithOptionsFn != nil {
+		return m.ExecStreamWithOptionsFn(ctx, sb, opts, onLine, stderr)
+	}
+	if m.ExecStreamFn != nil {
+		return m.ExecStreamFn(ctx, sb, cmd, onLine, stderr)
 	}
 	return 0, nil
 }

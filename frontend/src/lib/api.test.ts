@@ -1550,4 +1550,49 @@ describe('api client', () => {
       expect(result.data).toHaveLength(1);
     });
   });
+
+  describe('preview secret bundles', () => {
+    it('lists preview secret bundles', async () => {
+      server.use(
+        http.get('/api/v1/settings/preview-secret-bundles', () => {
+          return HttpResponse.json({ data: [{ id: 'bundle-1', name: 'staging', env_names: ['API_TOKEN'], created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }] });
+        }),
+      );
+
+      const result = await api.previews.secretBundles.list();
+
+      expect(result.data[0].name).toBe('staging');
+      expect(result.data[0].env_names).toEqual(['API_TOKEN']);
+    });
+
+    it('upserts preview secret bundles', async () => {
+      let capturedBody: unknown;
+      let capturedUrl: string | undefined;
+      server.use(
+        http.put('/api/v1/settings/preview-secret-bundles/:name', async ({ request }) => {
+          capturedUrl = request.url;
+          capturedBody = await request.json();
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await api.previews.secretBundles.upsert('staging-api', { API_TOKEN: 'secret' });
+
+      expect(capturedUrl).toContain('/api/v1/settings/preview-secret-bundles/staging-api');
+      expect(capturedBody).toEqual({ name: 'staging-api', env: { API_TOKEN: 'secret' } });
+    });
+
+    it('deletes preview secret bundles', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.delete('/api/v1/settings/preview-secret-bundles/:name', ({ request }) => {
+          capturedUrl = request.url;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await expect(api.previews.secretBundles.delete('staging')).resolves.toBeUndefined();
+      expect(capturedUrl).toContain('/api/v1/settings/preview-secret-bundles/staging');
+    });
+  });
 });
