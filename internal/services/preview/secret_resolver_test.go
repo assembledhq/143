@@ -69,3 +69,48 @@ func TestRenderPreviewSecretOutputsRejectsServiceScopedFileOutputs(t *testing.T)
 	require.Error(t, err, "renderPreviewSecretOutputs should reject file outputs that are scoped to only some services")
 	require.Contains(t, err.Error(), "file outputs are workspace-wide", "error should explain why all services must be included")
 }
+
+func TestRenderPreviewSecretOutputsRendersWholeJSONFileFromSecretValue(t *testing.T) {
+	t.Parallel()
+
+	env, files, err := renderPreviewSecretOutputs(
+		models.PreviewSecretBundleRef{Bundle: "repo-dev", Services: []string{"web"}, Files: []string{"development.conf.json"}},
+		models.PreviewSecretBundleSource{
+			Type: "managed",
+			Values: map[string]string{
+				"development_conf_json": `{"msgbroker":{"queue_type":"local"},"private_key":"-----BEGIN KEY-----\nabc\n-----END KEY-----\n"}`,
+			},
+		},
+		[]models.PreviewSecretBundleOutput{{
+			Type:   "file",
+			Path:   "development.conf.json",
+			Format: "json",
+			Value:  "secret:development_conf_json",
+		}},
+		[]string{"web"},
+	)
+
+	require.NoError(t, err, "renderPreviewSecretOutputs should accept a whole JSON document from a managed secret value")
+	require.Empty(t, env, "whole JSON file outputs should not create env vars")
+	require.Len(t, files, 1, "renderPreviewSecretOutputs should return one generated file")
+	require.JSONEq(t, `{"msgbroker":{"queue_type":"local"},"private_key":"-----BEGIN KEY-----\nabc\n-----END KEY-----\n"}`, string(files[0].Content), "renderPreviewSecretOutputs should render the secret value as JSON")
+}
+
+func TestRenderPreviewSecretOutputsRejectsInvalidWholeJSONFileValue(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := renderPreviewSecretOutputs(
+		models.PreviewSecretBundleRef{Bundle: "repo-dev", Services: []string{"web"}, Files: []string{"development.conf.json"}},
+		models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"development_conf_json": `{"bad":`}},
+		[]models.PreviewSecretBundleOutput{{
+			Type:   "file",
+			Path:   "development.conf.json",
+			Format: "json",
+			Value:  "secret:development_conf_json",
+		}},
+		[]string{"web"},
+	)
+
+	require.Error(t, err, "renderPreviewSecretOutputs should reject invalid JSON document secret values")
+	require.Contains(t, err.Error(), "parse json file value", "error should identify the invalid JSON value")
+}
