@@ -11,16 +11,18 @@ import (
 type PullRequestMergeState string
 
 const (
-	PullRequestMergeStateUnknown    PullRequestMergeState = "unknown"
-	PullRequestMergeStateClean      PullRequestMergeState = "clean"
-	PullRequestMergeStateConflicted PullRequestMergeState = "conflicted"
-	PullRequestMergeStateBehind     PullRequestMergeState = "behind"
-	PullRequestMergeStateBlocked    PullRequestMergeState = "blocked"
+	PullRequestMergeStateUnknown             PullRequestMergeState = "unknown"
+	PullRequestMergeStateMergeabilityPending PullRequestMergeState = "mergeability_pending"
+	PullRequestMergeStateClean               PullRequestMergeState = "clean"
+	PullRequestMergeStateConflicted          PullRequestMergeState = "conflicted"
+	PullRequestMergeStateBehind              PullRequestMergeState = "behind"
+	PullRequestMergeStateBlocked             PullRequestMergeState = "blocked"
 )
 
 func (s PullRequestMergeState) Validate() error {
 	switch s {
 	case PullRequestMergeStateUnknown,
+		PullRequestMergeStateMergeabilityPending,
 		PullRequestMergeStateClean,
 		PullRequestMergeStateConflicted,
 		PullRequestMergeStateBehind,

@@ -113,10 +113,18 @@ describe("session PR action state", () => {
         reason: "Waiting for GitHub to confirm required checks.",
       },
       {
+        name: "pending mergeability",
+        health: { ...baseHealth, can_merge: false, merge_state: "mergeability_pending" as const },
+        disabled: true,
+        reason: "Waiting for GitHub to check mergeability.",
+        label: "Checking mergeability…",
+      },
+      {
         name: "healthy",
         health: baseHealth,
         disabled: false,
         reason: undefined,
+        label: "Merge",
       },
     ];
 
@@ -125,7 +133,7 @@ describe("session PR action state", () => {
       expect(state.visible, `${tt.name} should keep Merge in the PR lifecycle row`).toBe(true);
       expect(state.disabled, `${tt.name} should map Merge disabled state`).toBe(tt.disabled);
       expect(state.disabledReason, `${tt.name} should map Merge reason`).toBe(tt.reason);
+      expect(state.label, `${tt.name} should map Merge label`).toBe(tt.label ?? "Merge");
     }
   });
 });
-
