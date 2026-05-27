@@ -3213,7 +3213,7 @@ func TestSessionHandler_StreamLogsViaRedis_StatusPayloadIncludesThreads(t *testi
 				AddRow(sessionHandlerThreadRow(threadID, runID, orgID, "Main", models.ThreadStatusRunning, 2, now)...),
 		)
 
-	rec := httptest.NewRecorder()
+	rec := newLockedRecorder()
 	sw := sse.NewWriter(rec)
 	require.NotNil(t, sw, "SSE writer should initialize")
 
@@ -3224,7 +3224,7 @@ func TestSessionHandler_StreamLogsViaRedis_StatusPayloadIncludesThreads(t *testi
 	}()
 
 	require.Eventually(t, func() bool {
-		return strings.Contains(rec.Body.String(), "event: status")
+		return strings.Contains(rec.BodyString(), "event: status")
 	}, 2*time.Second, 20*time.Millisecond, "Redis stream helper should emit the initial status event")
 	cancel()
 
@@ -3239,7 +3239,7 @@ func TestSessionHandler_StreamLogsViaRedis_StatusPayloadIncludesThreads(t *testi
 		ID      uuid.UUID              `json:"id"`
 		Threads []models.SessionThread `json:"threads"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(extractSSEData(t, rec.Body.String(), "status")), &payload), "status event data should decode as SessionDetail")
+	require.NoError(t, json.Unmarshal([]byte(extractSSEData(t, rec.BodyString(), "status")), &payload), "status event data should decode as SessionDetail")
 	require.Equal(t, runID, payload.ID, "status payload should preserve the session id")
 	require.Equal(t, []models.SessionThread{{
 		ID:                  threadID,
