@@ -213,15 +213,6 @@ export interface PreviewAPIToken {
   created_at: string;
 }
 
-export interface PreviewSecretBundleSummary {
-  id: string;
-  name: string;
-  env_names: string[];
-  created_by?: string;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Integration {
   id: string;
   org_id: string;

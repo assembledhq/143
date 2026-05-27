@@ -219,8 +219,6 @@ export const api = {
     previewSecretBundles: {
       list: (id: string) =>
         get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`),
-      get: (bundleId: string) =>
-        get<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/preview-secret-bundles/${bundleId}`),
       upsert: (id: string, body: import('./types').PreviewSecretBundleUpsertRequest) =>
         post<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`, body),
       patch: (bundleId: string, body: import('./types').PreviewSecretBundlePatchRequest) =>
@@ -229,8 +227,6 @@ export const api = {
         post<import('./types').SingleResponse<import('./types').PreviewSecretBundleTestResult>>(`/api/v1/preview-secret-bundles/${bundleId}/test`),
       delete: (id: string, name: string) =>
         del(`/api/v1/repositories/${id}/preview-secret-bundles/${encodeURIComponent(name)}`),
-      deleteById: (bundleId: string) =>
-        del(`/api/v1/preview-secret-bundles/${bundleId}`),
     },
   },
   pullRequests: {
@@ -277,16 +273,6 @@ export const api = {
         post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
       revoke: (id: string) =>
         del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
-    },
-    secretBundles: {
-      list: () => get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>('/api/v1/settings/preview-secret-bundles'),
-      upsert: (name: string, env: Record<string, string>) =>
-        request<void>(`/api/v1/settings/preview-secret-bundles/${encodeURIComponent(name)}`, {
-          method: 'PUT',
-          body: JSON.stringify({ name, env }),
-        }),
-      delete: (name: string) =>
-        del<void>(`/api/v1/settings/preview-secret-bundles/${encodeURIComponent(name)}`),
     },
   },
   sessionComposer: {
