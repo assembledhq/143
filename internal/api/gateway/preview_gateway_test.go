@@ -26,6 +26,24 @@ func gatewayStringPtr(value string) *string {
 	return &value
 }
 
+var previewGatewayInstanceColumns = []string{
+	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"preview_holding_container",
+}
+
+func previewGatewayInstanceRow(id, sessionID uuid.UUID, targetID *uuid.UUID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, stoppedAt *time.Time) []any {
+	return []any{
+		id, sessionID, targetID, orgID, userID, "default", "preview", string(status),
+		"docker", "worker-1", "handle-1", "web", 3000,
+		"sha256:abc", "deadbeef", now, now.Add(time.Minute), stoppedAt,
+		"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), string(status), nil, "", now, now, now, nil,
+		false,
+	}
+}
+
 func TestExtractPreviewID(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
@@ -537,6 +555,7 @@ func TestGateway_ServeHTTP_BootstrapPage(t *testing.T) {
 	require.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	require.Contains(t, w.Body.String(), "https://app.143.dev")
 	require.Contains(t, w.Body.String(), "preview_bootstrap_token")
+	require.Contains(t, w.Body.String(), "preview_bootstrap_complete", "bootstrap page should notify the parent after the gateway sets the preview session cookie")
 }
 
 func TestGateway_ServeHTTP_BootstrapExchange_MissingToken(t *testing.T) {
@@ -555,6 +574,80 @@ func TestGateway_ServeHTTP_BootstrapExchange_MissingToken(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestGateway_ServeHTTP_BootstrapExchange_AllowsTargetHost(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	accessSessionID := uuid.New()
+	now := time.Now()
+	secret := []byte("test-secret")
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:  store,
+		Logger: zerolog.Nop(),
+	})
+	gw := NewGateway(GatewayConfig{
+		Store:        store,
+		Manager:      manager,
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions WHERE session_token_hash").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, now.Add(5*time.Minute), nil, now, now),
+		)
+	mock.ExpectExec("UPDATE preview_access_sessions SET last_accessed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+				"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+				"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+				"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+				"preview_holding_container",
+			}).AddRow(
+				previewID, sessionID, &targetID, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
+				"docker", "worker-1", "handle-1", "web", 3000,
+				"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
+				"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
+				false,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/bootstrap/exchange", strings.NewReader(`{"token":"bootstrap-token"}`))
+	req.Host = targetID.String() + ".preview.143.dev"
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "bootstrap exchange should accept a token minted for the runtime when the host is the preview target")
+	require.Len(t, w.Result().Cookies(), 1, "bootstrap exchange should issue one preview session cookie")
+	cookie := w.Result().Cookies()[0]
+	_, cookieHostID, _, err := decodeCookieValue(secret, cookie.Value)
+	require.NoError(t, err, "preview session cookie should decode")
+	require.Equal(t, targetID, cookieHostID, "preview session cookie should be scoped to the public target host")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestGateway_ServeHTTP_Proxy_NoCookie(t *testing.T) {
 	t.Parallel()
 
@@ -565,8 +658,203 @@ func TestGateway_ServeHTTP_Proxy_NoCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	gw.ServeHTTP(w, req)
-	require.Equal(t, http.StatusUnauthorized, w.Code)
-	require.Contains(t, w.Body.String(), "preview session required")
+	require.Equal(t, http.StatusOK, w.Code, "direct preview visits without a preview session should render the lightweight control overlay")
+	require.Contains(t, w.Header().Get("Content-Type"), "text/html", "overlay response should be HTML")
+	require.Contains(t, w.Body.String(), "Start preview", "overlay should expose the primary start action")
+	require.Contains(t, w.Body.String(), "https://app.143.dev/previews/"+previewID.String(), "overlay should link back to the app-owned start flow")
+}
+
+func TestGateway_ServeHTTP_Proxy_NoCookieStoppedTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Date(2026, 5, 26, 20, 15, 0, 0, time.UTC)
+	stoppedAt := now.Add(-10 * time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "stopped direct preview visits should render the lightweight control overlay")
+	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
+	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped target overlay should show the terminal status")
+	require.Contains(t, w.Body.String(), "May 26, 2026 20:05 UTC", "stopped target overlay should show when the preview stopped")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_NoCookieActiveTargetRedirectsToLaunch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusReady, now, nil)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusFound, w.Code, "active direct preview visits should redirect into the bootstrap launch flow")
+	require.Equal(t, "https://app.143.dev/previews/"+targetID.String()+"?launch=1", w.Header().Get("Location"), "active target redirect should preserve the target host id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_StaleStoppedTargetCookieShowsRestart(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	stoppedAt := now.Add(-10 * time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	secret := []byte("test-secret")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, now.Add(5*time.Minute), nil, now, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:        db.NewPreviewStore(mock),
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, targetID, accessSessionID)})
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "stale stopped target cookies should fall back to the restart overlay")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "stale preview cookie should be cleared")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
+	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
+	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped target overlay should show terminal status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_RevokedTargetCookieRedirectsToLaunch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	revokedAt := now.Add(-time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	secret := []byte("test-secret")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, now.Add(5*time.Minute), &revokedAt, now, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusReady, now, nil)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:        db.NewPreviewStore(mock),
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, targetID, accessSessionID)})
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusFound, w.Code, "revoked target cookies should redirect through launch instead of showing a raw auth error")
+	require.Equal(t, "https://app.143.dev/previews/"+targetID.String()+"?launch=1", w.Header().Get("Location"), "revoked target cookie redirect should preserve the target host id")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "revoked target cookie should be cleared")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestGateway_ServeHTTP_Proxy_InvalidCookie(t *testing.T) {

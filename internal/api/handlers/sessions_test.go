@@ -3081,6 +3081,51 @@ func newSessionTestStreams(t *testing.T) (*cache.SessionStreams, *miniredis.Mini
 	return cache.NewSessionStreams(client, zerolog.Nop(), nil), mr
 }
 
+var sessionHandlerThreadColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id",
+	"current_turn", "last_activity_at",
+	"result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
+func sessionHandlerThreadRow(threadID, sessionID, orgID uuid.UUID, label string, status models.ThreadStatus, turn int, now time.Time) []any {
+	return []any{
+		threadID, sessionID, orgID, "codex", nil,
+		label, nil, nil, string(status), nil,
+		turn, nil,
+		nil, nil, nil, nil,
+		nil, nil, now,
+		nil, nil, float64(0), 0, nil,
+	}
+}
+
+func extractSSEData(t *testing.T, body string, eventName string) string {
+	t.Helper()
+
+	blocks := strings.Split(body, "\n\n")
+	for _, block := range blocks {
+		lines := strings.Split(block, "\n")
+		foundEvent := false
+		var data []string
+		for _, line := range lines {
+			if line == "event: "+eventName {
+				foundEvent = true
+				continue
+			}
+			if strings.HasPrefix(line, "data: ") {
+				data = append(data, strings.TrimPrefix(line, "data: "))
+			}
+		}
+		if foundEvent {
+			return strings.Join(data, "\n")
+		}
+	}
+	require.Failf(t, "missing SSE event", "expected event %q in body %q", eventName, body)
+	return ""
+}
+
 func TestSessionHandler_CatchUpLogs_UsesRedisRangeAndFallbacks(t *testing.T) {
 	t.Parallel()
 
@@ -3129,6 +3174,86 @@ func TestShouldSkipRedisLog(t *testing.T) {
 	seen, skip = shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(5), "bad-last-id", uuid.New())
 	require.False(t, skip, "invalid last delivered stream IDs should not skip newer entries")
 	require.Equal(t, "", seen, "invalid last delivered stream IDs should not be preserved")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_StatusPayloadIncludesThreads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now().UTC()
+	run := models.Session{
+		ID:             runID,
+		OrgID:          orgID,
+		PrimaryIssueID: &issueID,
+		Status:         models.SessionStatusRunning,
+		AgentType:      models.AgentTypeCodex,
+		CurrentTurn:    1,
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+	mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id .+ archived_at IS NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionHandlerThreadColumns).
+				AddRow(sessionHandlerThreadRow(threadID, runID, orgID, "Main", models.ThreadStatusRunning, 2, now)...),
+		)
+
+	rec := newLockedRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		done <- handler.streamLogsViaRedis(ctx, sw, orgID, run, "")
+	}()
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(rec.BodyString(), "event: status")
+	}, 2*time.Second, 20*time.Millisecond, "Redis stream helper should emit the initial status event")
+	cancel()
+
+	select {
+	case ok := <-done:
+		require.True(t, ok, "canceled contexts should exit the Redis stream helper cleanly")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Redis stream helper did not return after context cancellation")
+	}
+
+	var payload struct {
+		ID      uuid.UUID              `json:"id"`
+		Threads []models.SessionThread `json:"threads"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(extractSSEData(t, rec.BodyString(), "status")), &payload), "status event data should decode as SessionDetail")
+	require.Equal(t, runID, payload.ID, "status payload should preserve the session id")
+	require.Equal(t, []models.SessionThread{{
+		ID:                  threadID,
+		SessionID:           runID,
+		OrgID:               orgID,
+		AgentType:           models.AgentTypeCodex,
+		Label:               "Main",
+		Status:              models.ThreadStatusRunning,
+		CurrentTurn:         2,
+		CreatedAt:           now,
+		CostCents:           0,
+		PendingMessageCount: 0,
+	}}, payload.Threads, "status payload should include current session thread state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_StreamLogsViaRedis_FallsBackWhenRedisUnavailable(t *testing.T) {

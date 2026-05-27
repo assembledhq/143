@@ -582,23 +582,23 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	previewManager := preview.NewManager(preview.ManagerConfig{
-		Store:                 previewStore,
-		SessionStore:          sessionStore,
-		OrgSettingsStore:      orgStore,
-		Provider:              previewProvider,
-		SandboxProvider:       sandboxProvider,
-		Inspector:             previewInspector,
-		SnapshotCache:         previewSnapshotCache,
-		SecretResolver:        preview.NewPreviewSecretResolver(previewSecretBundleStore),
-		AuditEmitter:          auditEmitter,
-		HMRWatcher:            hmrWatcher,
-		Logger:                logger,
-		WorkerNodeID:          cfg.NodeID,
+		Store:                  previewStore,
+		SessionStore:           sessionStore,
+		OrgSettingsStore:       orgStore,
+		Provider:               previewProvider,
+		SandboxProvider:        sandboxProvider,
+		Inspector:              previewInspector,
+		SnapshotCache:          previewSnapshotCache,
+		SecretResolver:         preview.NewPreviewSecretResolver(previewSecretBundleStore),
+		AuditEmitter:           auditEmitter,
+		HMRWatcher:             hmrWatcher,
+		Logger:                 logger,
+		WorkerNodeID:           cfg.NodeID,
 		PreviewInternalBaseURL: cfg.PreviewInternalBaseURL,
-		PreviewOriginTemplate: cfg.PreviewOriginTemplate,
-		MaxPerUser:            cfg.PreviewMaxPerUser,
-		MaxPerOrg:             cfg.PreviewMaxPerOrg,
-		MaxPerWorker:          cfg.PreviewMaxPerWorker,
+		PreviewOriginTemplate:  cfg.PreviewOriginTemplate,
+		MaxPerUser:             cfg.PreviewMaxPerUser,
+		MaxPerOrg:              cfg.PreviewMaxPerOrg,
+		MaxPerWorker:           cfg.PreviewMaxPerWorker,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -665,6 +665,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	branchPreviewHandler.SetStopper(previewStopper)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
+		prService.SetPreviewOriginTemplate(cfg.PreviewOriginTemplate)
 	}
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.

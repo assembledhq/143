@@ -79,6 +79,50 @@ func (f fakeBranchPreviewGitHub) GetFileContent(context.Context, string, string,
 	return `{"preview":{"name":"web","command":["npm","run","dev"],"port":3000}}`, nil
 }
 
+func TestBranchPreviewHandler_ResponseForPreviewUsesTargetPreviewOrigin(t *testing.T) {
+	t.Parallel()
+
+	targetID := uuid.New()
+	previewID := uuid.New()
+	repoID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	handler := NewBranchPreviewHandler(
+		nil,
+		nil,
+		nil,
+		nil,
+		"https://143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	target := &models.PreviewTarget{
+		ID:              targetID,
+		OrgID:           orgID,
+		RepositoryID:    repoID,
+		Branch:          "feature/login",
+		CommitSHA:       "abcdef1234567890abcdef1234567890abcdef12",
+		SourceType:      models.PreviewSourceTypePullRequest,
+		SourceID:        "acme/app#7",
+		CreatedByUserID: userID,
+		CreatedAt:       now,
+	}
+	instance := &models.PreviewInstance{
+		ID:              previewID,
+		PreviewTargetID: &targetID,
+		OrgID:           orgID,
+		UserID:          userID,
+		Status:          models.PreviewStatusReady,
+		ExpiresAt:       now.Add(time.Hour),
+	}
+
+	resp := handler.responseForPreview(targetID.String(), target, instance)
+
+	require.NotNil(t, resp.PreviewURL, "response should expose a preview URL when a template is configured")
+	require.Equal(t, "https://"+targetID.String()+".preview.143.dev", *resp.PreviewURL, "branch preview URL should use the stable preview target host instead of the runtime instance host")
+	require.NotContains(t, *resp.PreviewURL, previewID.String(), "branch preview URL should survive runtime restarts that replace the instance ID")
+}
+
 func TestBranchPreviewHandler_CreateResolvesBranchHeadAndCreatesTarget(t *testing.T) {
 	t.Parallel()
 

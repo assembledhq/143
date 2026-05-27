@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"net"
 	"net/http"
@@ -21,8 +22,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
-	"golang.org/x/net/html"
+	xhtml "golang.org/x/net/html"
 
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
@@ -200,6 +202,9 @@ const bootstrapHTML = `<!DOCTYPE html>
       credentials: 'same-origin'
     }).then(function(resp) {
       if (resp.ok) {
+        if (window.parent !== window) {
+          window.parent.postMessage({type: 'preview_bootstrap_complete'}, appOrigin);
+        }
         window.location.href = '/';
       } else {
         document.body.textContent = 'Bootstrap failed: ' + resp.status;
@@ -247,8 +252,10 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify the token's preview matches the hostname's preview ID.
-	if sess.PreviewInstanceID != previewID {
+	// Verify the token's runtime preview is valid for the public host ID.
+	// Branch-preview links use the stable preview target ID as the hostname,
+	// while session previews still use the runtime instance ID directly.
+	if !g.bootstrapSessionMatchesHost(r, sess, previewID) {
 		http.Error(w, "token does not match this preview", http.StatusForbidden)
 		return
 	}
@@ -264,6 +271,24 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (g *Gateway) bootstrapSessionMatchesHost(r *http.Request, sess *models.PreviewAccessSession, hostID uuid.UUID) bool {
+	if sess.PreviewInstanceID == hostID {
+		return true
+	}
+	if g.store == nil {
+		return false
+	}
+	instance, err := g.store.GetPreviewInstance(r.Context(), sess.OrgID, sess.PreviewInstanceID)
+	if err != nil {
+		g.logger.Warn().Err(err).
+			Str("preview_id", sess.PreviewInstanceID.String()).
+			Str("host_id", hostID.String()).
+			Msg("failed to resolve bootstrap preview host")
+		return false
+	}
+	return instance.PreviewTargetID != nil && *instance.PreviewTargetID == hostID
+}
+
 // =============================================================================
 // Proxy
 // =============================================================================
@@ -272,18 +297,19 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// Read and validate the session cookie.
 	cookie, err := r.Cookie(g.cookieName())
 	if err != nil {
-		http.Error(w, "preview session required — complete bootstrap first", http.StatusUnauthorized)
+		g.servePreviewControlOverlay(w, r, previewID)
 		return
 	}
 
-	orgID, cookiePreviewID, accessSessionID, err := decodeCookieValue(g.cookieSecret, cookie.Value)
+	orgID, cookieHostID, accessSessionID, err := decodeCookieValue(g.cookieSecret, cookie.Value)
 	if err != nil {
 		http.Error(w, "invalid preview session", http.StatusUnauthorized)
 		return
 	}
 
-	// Verify the cookie's preview ID matches the hostname's preview ID.
-	if cookiePreviewID != previewID {
+	// Verify the cookie's public host ID matches the hostname. For branch
+	// previews this is the stable target ID, not the runtime instance ID.
+	if cookieHostID != previewID {
 		http.Error(w, "preview session does not match this preview", http.StatusForbidden)
 		return
 	}
@@ -307,12 +333,27 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 
 	if cached.revokedAt != nil {
 		g.evictCachedSession(accessSessionID)
+		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
+			return
+		}
 		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
 		return
 	}
 	if now.After(cached.expiresAt) {
 		g.evictCachedSession(accessSessionID)
+		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
+			return
+		}
 		http.Error(w, "preview session has expired", http.StatusUnauthorized)
+		return
+	}
+	runtimePreviewID := sess.PreviewInstanceID
+	if runtimePreviewID != previewID && !g.accessSessionMatchesTargetHost(r, sess, previewID) {
+		g.evictCachedSession(accessSessionID)
+		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
+			return
+		}
+		http.Error(w, "preview session no longer matches this preview", http.StatusForbidden)
 		return
 	}
 
@@ -325,6 +366,9 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 				// Session was revoked between cache fill and extend — evict
 				// the stale cache entry and deny access immediately.
 				g.evictCachedSession(accessSessionID)
+				if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
+					return
+				}
 				http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
 				return
 			}
@@ -345,25 +389,202 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// URL does not overwrite last_path (which is used for navigation restore).
 	if r.URL.Path == previewHeartbeatPath {
 		// Still record access for idle timeout tracking.
-		if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
-			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+		if err := g.manager.RecordAccess(r.Context(), orgID, runtimePreviewID); err != nil {
+			g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record access")
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	// Record activity for idle timeout tracking.
-	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+	if err := g.manager.RecordAccess(r.Context(), orgID, runtimePreviewID); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record access")
 	}
 	if shouldRecordPreviewLastPath(r) {
-		if err := g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path); err != nil {
-			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record last path")
+		if err := g.manager.RecordLastPath(r.Context(), orgID, runtimePreviewID, r.URL.Path); err != nil {
+			g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record last path")
 		}
 	}
 
-	g.proxyToWorker(w, r, orgID, previewID)
+	g.proxyToWorker(w, r, orgID, runtimePreviewID)
 }
+
+func (g *Gateway) handleStaleTargetSession(w http.ResponseWriter, r *http.Request, previewID uuid.UUID, sess *models.PreviewAccessSession, accessSessionID uuid.UUID) bool {
+	if sess == nil || sess.PreviewInstanceID == previewID {
+		return false
+	}
+	g.evictCachedSession(accessSessionID)
+	g.clearPreviewSessionCookie(w)
+	g.servePreviewControlOverlay(w, r, previewID)
+	return true
+}
+
+func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     g.cookieName(),
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   g.secureCookie,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
+	})
+}
+
+func (g *Gateway) accessSessionMatchesTargetHost(r *http.Request, sess *models.PreviewAccessSession, hostID uuid.UUID) bool {
+	if g.store == nil {
+		return false
+	}
+	instance, err := g.store.GetPreviewInstance(r.Context(), sess.OrgID, sess.PreviewInstanceID)
+	if err != nil {
+		g.logger.Warn().Err(err).
+			Str("preview_id", sess.PreviewInstanceID.String()).
+			Str("host_id", hostID.String()).
+			Msg("failed to resolve target-host preview session")
+		return false
+	}
+	return instance.PreviewTargetID != nil && *instance.PreviewTargetID == hostID && instance.Status.IsActive()
+}
+
+func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
+	data := g.previewControlOverlayData(r, previewID)
+	controlURL := g.previewControlURL(previewID)
+	if data.AutoLaunch {
+		http.Redirect(w, r, controlURL, http.StatusFound)
+		return
+	}
+	statusURL := g.previewStatusURL(previewID)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprintf(
+		w,
+		previewControlOverlayHTML,
+		stdhtml.EscapeString(data.Title),
+		stdhtml.EscapeString(data.Title),
+		stdhtml.EscapeString(data.Description),
+		stdhtml.EscapeString(data.StatusLine),
+		stdhtml.EscapeString(controlURL),
+		stdhtml.EscapeString(data.ActionLabel),
+		stdhtml.EscapeString(statusURL),
+	); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to write preview control overlay")
+	}
+}
+
+type previewControlOverlayData struct {
+	Title       string
+	Description string
+	StatusLine  string
+	ActionLabel string
+	AutoLaunch  bool
+}
+
+func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID) previewControlOverlayData {
+	fallback := previewControlOverlayData{
+		Title:       "Start preview",
+		Description: "This preview is not connected in this browser yet. Start it from 143; when it is ready, the preview opens here.",
+		StatusLine:  "Status: Not connected",
+		ActionLabel: "Start preview",
+	}
+	if g.store == nil {
+		return fallback
+	}
+	instance, err := g.store.GetPreviewForPublicHost(r.Context(), previewID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to load preview control overlay state")
+		}
+		return fallback
+	}
+	statusLine := "Status: " + previewStatusLabel(instance.Status)
+	if instance.StoppedAt != nil {
+		statusLine += " · stopped " + instance.StoppedAt.UTC().Format("Jan 2, 2006 15:04 MST")
+	}
+	if instance.Status.IsActive() {
+		return previewControlOverlayData{
+			Title:       "Open preview",
+			Description: "This preview is running, but this browser is not connected yet. 143 will connect it and open the preview here.",
+			StatusLine:  statusLine,
+			ActionLabel: "Open preview",
+			AutoLaunch:  true,
+		}
+	}
+	return previewControlOverlayData{
+		Title:       "Restart preview",
+		Description: "This preview is stopped. Restart it from 143; when it is ready, the preview opens here.",
+		StatusLine:  statusLine,
+		ActionLabel: "Restart preview",
+	}
+}
+
+func previewStatusLabel(status models.PreviewStatus) string {
+	switch status {
+	case models.PreviewStatusStarting:
+		return "Starting"
+	case models.PreviewStatusReady:
+		return "Ready"
+	case models.PreviewStatusPartiallyReady:
+		return "Partially ready"
+	case models.PreviewStatusUnhealthy:
+		return "Unhealthy"
+	case models.PreviewStatusStopped:
+		return "Stopped"
+	case models.PreviewStatusFailed:
+		return "Failed"
+	case models.PreviewStatusExpired:
+		return "Expired"
+	default:
+		return string(status)
+	}
+}
+
+func (g *Gateway) previewControlURL(previewID uuid.UUID) string {
+	return g.previewStatusURL(previewID) + "?launch=1"
+}
+
+func (g *Gateway) previewStatusURL(previewID uuid.UUID) string {
+	appOrigin := strings.TrimRight(g.appOrigin, "/")
+	if appOrigin == "" {
+		appOrigin = "https://143.dev"
+	}
+	return appOrigin + "/previews/" + previewID.String()
+}
+
+const previewControlOverlayHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s</title>
+<style>
+:root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+.panel { width: min(92vw, 380px); border: 1px solid color-mix(in srgb, CanvasText 14%%, transparent); border-radius: 12px; padding: 24px; box-shadow: 0 18px 60px color-mix(in srgb, CanvasText 12%%, transparent); }
+.eyebrow { margin: 0 0 8px; font-size: 12px; color: color-mix(in srgb, CanvasText 56%%, transparent); }
+h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: 0; }
+p { margin: 10px 0 0; font-size: 14px; line-height: 1.5; color: color-mix(in srgb, CanvasText 68%%, transparent); }
+.status { color: CanvasText; font-weight: 600; }
+.actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+a { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; border-radius: 8px; padding: 0 14px; font-size: 14px; font-weight: 600; text-decoration: none; }
+.primary { background: CanvasText; color: Canvas; }
+.secondary { border: 1px solid color-mix(in srgb, CanvasText 16%%, transparent); color: CanvasText; }
+</style>
+</head>
+<body>
+<main class="panel">
+<p class="eyebrow">143 preview</p>
+<h1>%s</h1>
+<p>%s</p>
+<p class="status">%s</p>
+<div class="actions">
+<a class="primary" href="%s">%s</a>
+<a class="secondary" href="%s">View status and logs</a>
+</div>
+</main>
+</body>
+</html>`
 
 const (
 	previewPlatformPathPrefix = "/__143_"
@@ -707,7 +928,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 // or comments. Falls back to appending scriptBlock when neither tag is
 // present (e.g., HTML fragments).
 func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
-	z := html.NewTokenizer(bytes.NewReader(body))
+	z := xhtml.NewTokenizer(bytes.NewReader(body))
 	offset := -1
 	consumed := 0
 	for {
@@ -717,13 +938,13 @@ func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
 		consumed += len(raw)
 
 		switch tokenType {
-		case html.ErrorToken:
+		case xhtml.ErrorToken:
 			// End of input or parse error — no matching end tag found.
 			if offset == -1 {
 				return append(body, []byte(scriptBlock)...)
 			}
 			return spliceAt(body, offset, scriptBlock)
-		case html.EndTagToken:
+		case xhtml.EndTagToken:
 			name, _ := z.TagName()
 			if string(name) == "head" {
 				return spliceAt(body, tokenStart, scriptBlock)
