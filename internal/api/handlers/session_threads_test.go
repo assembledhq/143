@@ -135,6 +135,7 @@ func (m *mockSessionStoreForThread) UpdateStatus(ctx context.Context, orgID, ses
 
 type mockMessageStore struct {
 	createFn             func(ctx context.Context, msg *models.SessionMessage) error
+	getByIDFn            func(ctx context.Context, orgID uuid.UUID, id int64) (models.SessionMessage, error)
 	listByThreadFn       func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
 	listWindowByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
@@ -144,6 +145,13 @@ func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessag
 		return m.createFn(ctx, msg)
 	}
 	return nil
+}
+
+func (m *mockMessageStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) (models.SessionMessage, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, id)
+	}
+	return models.SessionMessage{ID: id, OrgID: orgID}, nil
 }
 
 func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
@@ -194,6 +202,49 @@ func (m *mockJobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opt
 	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
 }
 
+type mockThreadInboxStoreForHandler struct {
+	listRecoverableFn  func(ctx context.Context, orgID, threadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error)
+	retryRecoverableFn func(ctx context.Context, orgID, threadID, entryID uuid.UUID, allowUnknown bool) (models.ThreadInboxEntry, error)
+}
+
+func (m *mockThreadInboxStoreForHandler) AppendForMessage(context.Context, uuid.UUID, db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error) {
+	return models.ThreadInboxEntry{}, nil
+}
+
+func (m *mockThreadInboxStoreForHandler) GetByClientMessageID(context.Context, uuid.UUID, uuid.UUID, string) (models.ThreadInboxEntry, error) {
+	return models.ThreadInboxEntry{}, pgx.ErrNoRows
+}
+
+func (m *mockThreadInboxStoreForHandler) ListDeliverySummariesBySession(context.Context, uuid.UUID, uuid.UUID) (map[uuid.UUID]models.ThreadInboxDeliverySummary, error) {
+	return map[uuid.UUID]models.ThreadInboxDeliverySummary{}, nil
+}
+
+func (m *mockThreadInboxStoreForHandler) GetDeliverySummaryByThread(context.Context, uuid.UUID, uuid.UUID) (models.ThreadInboxDeliverySummary, error) {
+	return models.ThreadInboxDeliverySummary{}, nil
+}
+
+func (m *mockThreadInboxStoreForHandler) ListRecoverableByThread(ctx context.Context, orgID, threadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error) {
+	if m.listRecoverableFn != nil {
+		return m.listRecoverableFn(ctx, orgID, threadID, limit)
+	}
+	return []models.ThreadInboxEntry{}, nil
+}
+
+func (m *mockThreadInboxStoreForHandler) RetryRecoverable(ctx context.Context, orgID, threadID, entryID uuid.UUID, allowUnknown bool) (models.ThreadInboxEntry, error) {
+	if m.retryRecoverableFn != nil {
+		return m.retryRecoverableFn(ctx, orgID, threadID, entryID, allowUnknown)
+	}
+	return models.ThreadInboxEntry{ID: entryID, OrgID: orgID, ThreadID: threadID, DeliveryState: models.ThreadInboxDeliveryStatePending}, nil
+}
+
+func (m *mockThreadInboxStoreForHandler) CountPendingByThread(context.Context, uuid.UUID, uuid.UUID) (int, error) {
+	return 0, nil
+}
+
+func (m *mockThreadInboxStoreForHandler) CountPendingBySession(context.Context, uuid.UUID, uuid.UUID) (int, error) {
+	return 0, nil
+}
+
 // --- Helper to build the handler ---
 
 type threadTestDeps struct {
@@ -221,6 +272,27 @@ func newThreadHandler(t *testing.T) (*SessionThreadHandler, *threadTestDeps) {
 		deps.jobStore,
 		zerolog.Nop(),
 	)
+	return NewSessionThreadHandler(svc), deps
+}
+
+func newThreadHandlerWithInbox(t *testing.T, inbox thread.ThreadInboxStore) (*SessionThreadHandler, *threadTestDeps) {
+	t.Helper()
+	deps := &threadTestDeps{
+		threadStore:  &mockThreadStore{},
+		sessionStore: &mockSessionStoreForThread{},
+		messageStore: &mockMessageStore{},
+		logStore:     &mockLogStore{},
+		jobStore:     &mockJobStore{},
+	}
+	svc := thread.NewService(
+		deps.threadStore,
+		deps.sessionStore,
+		deps.messageStore,
+		deps.logStore,
+		deps.jobStore,
+		zerolog.Nop(),
+	)
+	svc.SetThreadInboxStore(inbox)
 	return NewSessionThreadHandler(svc), deps
 }
 
@@ -973,6 +1045,92 @@ func TestSessionThreadHandler_GetThread(t *testing.T) {
 	}
 }
 
+func TestSessionThreadHandler_ListRecoverableInboxEntries(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	entryID := uuid.New()
+	reason := "runtime lease expired after live delivery before ack"
+	inbox := &mockThreadInboxStoreForHandler{
+		listRecoverableFn: func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error) {
+			require.Equal(t, orgID, gotOrgID, "handler should pass the request org")
+			require.Equal(t, threadID, gotThreadID, "handler should list entries for the requested thread")
+			require.Greater(t, limit, 0, "handler should use a bounded recoverable-entry limit")
+			return []models.ThreadInboxEntry{{
+				ID:            entryID,
+				OrgID:         orgID,
+				SessionID:     sessionID,
+				ThreadID:      threadID,
+				DeliveryState: models.ThreadInboxDeliveryStateUnknownDelivery,
+				LastError:     &reason,
+			}}, nil
+		},
+	}
+	handler, deps := newThreadHandlerWithInbox(t, inbox)
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, OrgID: orgID, SessionID: sessionID}, nil
+	}
+
+	req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/inbox/recoverable", "", orgID, map[string]string{
+		"id":  sessionID.String(),
+		"tid": threadID.String(),
+	})
+	rr := httptest.NewRecorder()
+
+	handler.ListRecoverableInboxEntries(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ListRecoverableInboxEntries should return HTTP 200")
+	var resp models.ListResponse[models.ThreadInboxEntry]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response body should be valid JSON")
+	require.Equal(t, entryID, resp.Data[0].ID, "handler should return recoverable inbox entries")
+	require.Equal(t, models.ThreadInboxDeliveryStateUnknownDelivery, resp.Data[0].DeliveryState, "handler should preserve recovery state")
+}
+
+func TestSessionThreadHandler_RetryInboxEntry(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	entryID := uuid.New()
+	inbox := &mockThreadInboxStoreForHandler{
+		retryRecoverableFn: func(_ context.Context, gotOrgID, gotThreadID, gotEntryID uuid.UUID, allowUnknown bool) (models.ThreadInboxEntry, error) {
+			require.Equal(t, orgID, gotOrgID, "handler should pass the request org")
+			require.Equal(t, threadID, gotThreadID, "handler should retry entries for the requested thread")
+			require.Equal(t, entryID, gotEntryID, "handler should retry the requested entry")
+			require.True(t, allowUnknown, "handler should pass explicit unknown-delivery replay consent from the request body")
+			return models.ThreadInboxEntry{
+				ID:            entryID,
+				OrgID:         orgID,
+				SessionID:     sessionID,
+				ThreadID:      threadID,
+				DeliveryState: models.ThreadInboxDeliveryStatePending,
+			}, nil
+		},
+	}
+	handler, deps := newThreadHandlerWithInbox(t, inbox)
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, OrgID: orgID, SessionID: sessionID}, nil
+	}
+
+	req := threadRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/inbox/"+entryID.String()+"/retry", `{"replay_unknown_delivery":true}`, orgID, map[string]string{
+		"id":       sessionID.String(),
+		"tid":      threadID.String(),
+		"entry_id": entryID.String(),
+	})
+	rr := httptest.NewRecorder()
+
+	handler.RetryInboxEntry(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "RetryInboxEntry should return HTTP 200")
+	var resp models.SingleResponse[models.ThreadInboxEntry]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response body should be valid JSON")
+	require.Equal(t, entryID, resp.Data.ID, "handler should return the retried inbox entry")
+	require.Equal(t, models.ThreadInboxDeliveryStatePending, resp.Data.DeliveryState, "handler should return the entry to pending")
+}
+
 func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 	t.Parallel()
 
@@ -1188,11 +1346,12 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 				require.NoError(t, err, "response body should be valid JSON")
 				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
 			} else {
-				var resp models.SingleResponse[models.SessionMessage]
+				var resp models.SingleResponse[models.SendThreadMessageResponse]
 				err := json.Unmarshal(w.Body.Bytes(), &resp)
 				require.NoError(t, err, "response body should be valid JSON")
-				require.Equal(t, "please continue", resp.Data.Content, "should return the message content")
-				require.Equal(t, models.MessageRoleUser, resp.Data.Role, "should set the message role to user")
+				require.Equal(t, "please continue", resp.Data.Message.Content, "should return the message content")
+				require.Equal(t, models.MessageRoleUser, resp.Data.Message.Role, "should set the message role to user")
+				require.Equal(t, models.ThreadInboxDeliveryStateAcked, resp.Data.DeliveryState, "should expose the fallback delivery state when the durable inbox is not wired in this test")
 			}
 		})
 	}

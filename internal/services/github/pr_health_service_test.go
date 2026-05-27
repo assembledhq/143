@@ -1760,7 +1760,7 @@ var prHealthSessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -1780,7 +1780,7 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status mod
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, 0, now, "snapshotted", nil,
+		nil, 0, now, "snapshotted", int64(0), nil,
 		nil, // pending_snapshot_key
 		nil, // pending_snapshot_set_at
 		nil, nil, nil, "", "",

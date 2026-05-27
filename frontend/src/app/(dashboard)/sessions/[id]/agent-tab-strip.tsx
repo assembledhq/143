@@ -43,6 +43,36 @@ function addTabButtonClassName(): string {
   return "h-7 w-7 shrink-0 rounded-sm text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100 focus-visible:opacity-100";
 }
 
+function formatDeliverySummary(thread: SessionThread): string | null {
+  const delivery = thread.inbox_delivery;
+  if (!delivery || delivery.state === "idle") {
+    return null;
+  }
+  const stateLabel =
+    delivery.state === "dead_letter"
+      ? "dead letter"
+      : delivery.state === "unknown_delivery"
+        ? "unknown"
+        : delivery.state.replace(/_/g, " ");
+  const parts: string[] = [];
+  if (delivery.pending_count > 0) {
+    parts.push(`${delivery.pending_count} waiting`);
+  }
+  if (delivery.delivering_count > 0) {
+    parts.push(`${delivery.delivering_count} delivering`);
+  }
+  if (delivery.delivered_count > 0) {
+    parts.push(`${delivery.delivered_count} delivered`);
+  }
+  if (delivery.unknown_delivery_count > 0) {
+    parts.push(`${delivery.unknown_delivery_count} uncertain`);
+  }
+  if (delivery.dead_letter_count > 0) {
+    parts.push(`${delivery.dead_letter_count} failed`);
+  }
+  return `Delivery ${stateLabel}${parts.length > 0 ? ` · ${parts.join(" · ")}` : ""}`;
+}
+
 // Compute per-thread overlap: a path counts as an overlap when at least two
 // distinct active threads have touched it. Computed client-side from the
 // session-wide file events so the tab strip can render a badge without an
@@ -145,6 +175,7 @@ export function AgentTabStrip({
     const isCancelling =
       activeThread.cancel_requested_at != null && isActiveStatus(activeThread.status);
     const queued = activeThread.pending_message_count ?? 0;
+    const deliverySummary = formatDeliverySummary(activeThread);
     const needsAttention =
       activeThread.status === "awaiting_input" || activeThread.status === "failed";
     const showUnreadDot = shouldShowUnreadDot(activeThread, viewedThreadIds);
@@ -209,6 +240,7 @@ export function AgentTabStrip({
                       {statusLabel}
                       {queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}
                     </div>
+                    {deliverySummary && <div className="text-muted-foreground">{deliverySummary}</div>}
                     {overlap.length > 0 && (
                       <div className="pt-1">
                         <div className="font-medium text-amber-700 dark:text-amber-400">
@@ -276,6 +308,7 @@ export function AgentTabStrip({
                   const overlap = overlapsByThreadId.get(thread.id) ?? [];
                   const isCancelling = thread.cancel_requested_at != null && isActiveStatus(thread.status);
                   const queued = thread.pending_message_count ?? 0;
+                  const deliverySummary = formatDeliverySummary(thread);
                   const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
                   const showArchiveButton = canArchiveThread(thread, tabs.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
@@ -332,6 +365,7 @@ export function AgentTabStrip({
                           <div className="space-y-1">
                             <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">- {agentLabel}</span></div>
                             <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
+                            {deliverySummary && <div className="text-muted-foreground">{deliverySummary}</div>}
                             {overlap.length > 0 && (
                               <div className="pt-1">
                                 <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>

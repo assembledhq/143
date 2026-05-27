@@ -76,6 +76,14 @@ func (a *CodexAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
 	return codexRuntimeProfile
 }
 
+func (a *CodexAdapter) ThreadRuntimeLiveInputProtocol() agent.ThreadRuntimeLiveInputProtocol {
+	return agent.ThreadRuntimeLiveInputProtocol{
+		Mode:                 agent.ThreadRuntimeLiveInputProtocolTurnBoundResume,
+		DeliversToOpenHandle: false,
+		Description:          "Codex CLI follow-up input is delivered through codex exec resume with the captured session id; the current one-shot process is not treated as a live stdin protocol.",
+	}
+}
+
 type codexHumanInputAnswer struct {
 	RequestID         string                         `json:"request_id"`
 	ProviderRequestID string                         `json:"provider_request_id,omitempty"`

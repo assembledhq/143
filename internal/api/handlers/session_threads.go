@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"sort"
@@ -37,6 +38,8 @@ type ThreadService interface {
 	GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionLogFilterOptions) ([]models.SessionLog, error)
 	CancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
+	ListRecoverableInboxEntries(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.ThreadInboxEntry, error)
+	RetryInboxEntry(ctx context.Context, orgID, sessionID, threadID, entryID uuid.UUID, allowUnknownDelivery bool) (models.ThreadInboxEntry, error)
 	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
 	RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (thread.ForkResult, error)
 }
@@ -402,6 +405,74 @@ func (h *SessionThreadHandler) GetThread(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: t})
 }
 
+func (h *SessionThreadHandler) ListRecoverableInboxEntries(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	entries, err := h.svc.ListRecoverableInboxEntries(r.Context(), orgID, sessionID, threadID)
+	if err != nil {
+		if errors.Is(err, thread.ErrThreadNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list recoverable inbox entries", err)
+		return
+	}
+	if entries == nil {
+		entries = []models.ThreadInboxEntry{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ThreadInboxEntry]{Data: entries})
+}
+
+func (h *SessionThreadHandler) RetryInboxEntry(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+	entryID, err := uuid.Parse(chi.URLParam(r, "entry_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid inbox entry ID")
+		return
+	}
+
+	var body struct {
+		ReplayUnknownDelivery bool `json:"replay_unknown_delivery"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+
+	entry, err := h.svc.RetryInboxEntry(r.Context(), orgID, sessionID, threadID, entryID, body.ReplayUnknownDelivery)
+	if err != nil {
+		if errors.Is(err, thread.ErrThreadNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread or inbox entry not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "RETRY_FAILED", "failed to retry inbox entry", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ThreadInboxEntry]{Data: entry})
+}
+
 // SendThreadMessage handles POST /sessions/{id}/threads/{tid}/messages —
 // sends a follow-up message to an idle thread.
 func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +490,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 
 	var body struct {
 		Message                 string                        `json:"message"`
+		ClientMessageID         string                        `json:"client_message_id"`
 		Images                  []string                      `json:"images"`
 		References              models.SessionInputReferences `json:"references"`
 		Commands                models.SessionInputCommands   `json:"commands"`
@@ -455,6 +527,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		SessionID:               sessionID,
 		OrgID:                   orgID,
 		ThreadID:                threadID,
+		ClientMessageID:         strings.TrimSpace(body.ClientMessageID),
 		UserID:                  userID,
 		Message:                 body.Message,
 		Images:                  body.Images,
@@ -480,6 +553,8 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		switch {
 		case errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+		case errors.Is(err, thread.ErrThreadInboxBackpressure):
+			writeError(w, r, http.StatusTooManyRequests, "THREAD_INBOX_BACKPRESSURE", "this tab has too many undelivered messages; wait for delivery to catch up")
 		case errors.Is(err, thread.ErrThreadNotIdle):
 			writeError(w, r, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
 		case errors.Is(err, thread.ErrRunningLimitReached):
@@ -521,7 +596,14 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	// surface.
 	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 
-	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *result.Message})
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SendThreadMessageResponse]{
+		Data: models.SendThreadMessageResponse{
+			Message:       *result.Message,
+			InboxEntry:    result.InboxEntry,
+			ThreadStatus:  result.ThreadStatus,
+			DeliveryState: result.DeliveryState,
+		},
+	})
 }
 
 // GetThreadMessages handles GET /sessions/{id}/threads/{tid}/messages —

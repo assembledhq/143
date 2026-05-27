@@ -94,7 +94,7 @@ var workerSessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -145,6 +145,7 @@ func workerProjectTaskRow(taskID, projectID, orgID uuid.UUID, status models.Proj
 const (
 	workerSessionWorkerNodeIndex      = 15
 	workerSessionReasoningIndex       = 35
+	workerSessionWorkspaceGenIndex    = 38
 	workerSessionBaseCommitSHAIndex   = 62
 	workerSessionDiffCollectedAtIndex = 72
 	workerSessionLatestDiffIndex      = 73
@@ -194,6 +195,18 @@ func workerSessionCurrentOptionalDefaults(values []any, includeReasoning bool, i
 		row = insertWorkerSessionValue(row, workerSessionLatestDiffIndex, nil)
 	}
 	return row
+}
+
+func padWorkerWorkspaceGeneration(row []any) []any {
+	if len(row) <= workerSessionWorkspaceGenIndex {
+		return row
+	}
+	switch row[workerSessionWorkspaceGenIndex].(type) {
+	case int64, int, int32:
+		return row
+	default:
+		return insertWorkerSessionValue(row, workerSessionWorkspaceGenIndex, int64(0))
+	}
 }
 
 func workerSessionLegacyOptionalDefaults(values []any, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []any {
@@ -319,9 +332,10 @@ func workerSessionTestRow(values ...any) []any {
 		row = padWorkerLinearFields(row)
 	}
 	row = padWorkerIdentityNils(row)
-	if len(row) == len(workerSessionColumns)+3 {
+	if len(row) == workerSessionColumnsWithLegacyConfidenceCount || len(row) == len(workerSessionColumns)+3 {
 		row = stripLegacyWorkerSessionResultConfidence(row)
 	}
+	row = padWorkerWorkspaceGeneration(row)
 	return row
 }
 
@@ -496,6 +510,14 @@ type orchestratorServiceStub struct {
 	cancelSessionCalls   int
 	cancelSessionID      uuid.UUID
 	cancelSessionResult  bool
+	cancelThreadCalls    int
+	cancelThreadID       uuid.UUID
+	cancelThreadResult   bool
+	deliverThreadCalls   int
+	deliverThreadOrgID   uuid.UUID
+	deliverThreadSession uuid.UUID
+	deliverThreadID      uuid.UUID
+	deliverThreadFn      func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
@@ -559,6 +581,17 @@ func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *
 	return nil
 }
 
+func (s *orchestratorServiceStub) DeliverThreadInbox(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error {
+	s.deliverThreadCalls++
+	s.deliverThreadOrgID = orgID
+	s.deliverThreadSession = sessionID
+	s.deliverThreadID = threadID
+	if s.deliverThreadFn != nil {
+		return s.deliverThreadFn(ctx, orgID, sessionID, threadID)
+	}
+	return nil
+}
+
 func (s *orchestratorServiceStub) RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error {
 	if s.revertThreadFn != nil {
 		return s.revertThreadFn(ctx, session, thread)
@@ -578,6 +611,12 @@ func (s *orchestratorServiceStub) CancelSessionByID(sessionID uuid.UUID) bool {
 	s.cancelSessionCalls++
 	s.cancelSessionID = sessionID
 	return s.cancelSessionResult
+}
+
+func (s *orchestratorServiceStub) CancelThreadByID(threadID uuid.UUID) bool {
+	s.cancelThreadCalls++
+	s.cancelThreadID = threadID
+	return s.cancelThreadResult
 }
 
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
@@ -634,6 +673,76 @@ func TestCancelSessionHandler_ConsumesDeliveredCancelWithDetachedContext(t *test
 	require.NoError(t, err, "cancel_session should clear delivered cancel intent even after job context cancellation")
 	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should still call the orchestrator")
 	require.NoError(t, mock.ExpectationsWereMet(), "delivered cancel request should be consumed")
+}
+
+func TestDeliverThreadInboxHandler_CallsOrchestrator(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	orch := &orchestratorServiceStub{}
+	handler := newDeliverThreadInboxHandler(&Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"org_id":%q}`, sessionID.String(), threadID.String(), orgID.String()))
+
+	err := handler(context.Background(), "deliver_thread_inbox", payload)
+
+	require.NoError(t, err, "deliver_thread_inbox should succeed when the local orchestrator accepts delivery")
+	require.Equal(t, 1, orch.deliverThreadCalls, "deliver_thread_inbox should call the orchestrator once")
+	require.Equal(t, orgID, orch.deliverThreadOrgID, "deliver_thread_inbox should pass the org id")
+	require.Equal(t, sessionID, orch.deliverThreadSession, "deliver_thread_inbox should pass the session id")
+	require.Equal(t, threadID, orch.deliverThreadID, "deliver_thread_inbox should pass the thread id")
+}
+
+func TestDeliverThreadInboxHandler_RetargetsOwningWorker(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runtimeID := uuid.New()
+	ownerNodeID := "worker-b"
+	orch := &orchestratorServiceStub{
+		deliverThreadFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+			return &agent.ThreadRuntimeOwnedElsewhereError{
+				RuntimeID:   runtimeID,
+				ThreadID:    threadID,
+				OwnerNodeID: ownerNodeID,
+			}
+		},
+	}
+	handler := newDeliverThreadInboxHandler(&Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"org_id":%q}`, sessionID.String(), threadID.String(), orgID.String()))
+
+	err := handler(context.Background(), "deliver_thread_inbox", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "owner mismatch should requeue the delivery job")
+	require.NotNil(t, retryable.TargetNodeID, "owner mismatch should pin the retry to the runtime owner")
+	require.Equal(t, ownerNodeID, *retryable.TargetNodeID, "owner mismatch should retarget to the owning worker")
+}
+
+func TestDeliverThreadInboxHandler_RetriesLostRuntimeLease(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	orch := &orchestratorServiceStub{
+		deliverThreadFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+			return agent.ErrThreadRuntimeLeaseLost
+		},
+	}
+	handler := newDeliverThreadInboxHandler(&Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"org_id":%q}`, sessionID.String(), threadID.String(), orgID.String()))
+
+	err := handler(context.Background(), "deliver_thread_inbox", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "lost runtime leases should retry after the reaper clears stale ownership")
+	require.Nil(t, retryable.TargetNodeID, "lease-loss retries should not pin to a potentially stale worker")
+	require.NotNil(t, retryable.RetryAfter, "lease-loss retries should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "lease-loss retries should use a short delay while lease recovery catches up")
 }
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status models.SessionStatus, currentTurn int, agentSessionID, snapshotKey *string) []any {
@@ -5444,6 +5553,52 @@ func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSandboxPreviewRace must be wrapped as RetryableError so the worker retries against the preview container")
 	require.NotNil(t, retryable.RetryAfter, "preview race retries should use a short deliberate backoff")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxPreviewRace, "the wrapped error must preserve the ErrSandboxPreviewRace sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "thread sibling race should preserve thread execution options")
+			require.NotNil(t, opts.ThreadID, "thread sibling race should be scoped to the requested thread")
+			require.Equal(t, threadID, *opts.ThreadID, "thread sibling race should preserve the requested thread id")
+			return fmt.Errorf("sibling published first: %w", agent.ErrSandboxSiblingRace)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the sibling sandbox race signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxSiblingRace must be wrapped as RetryableError so the worker retries into the winning shared sandbox")
+	require.NotNil(t, retryable.RetryAfter, "sibling sandbox race retries should use a short deliberate backoff")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxSiblingRace, "the wrapped error must preserve the ErrSandboxSiblingRace sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

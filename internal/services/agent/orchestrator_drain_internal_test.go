@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -206,6 +208,9 @@ func (t *drainStubThreads) ClearPendingMessages(_ context.Context, _, threadID u
 	}
 	t.clearedThreadIDs = append(t.clearedThreadIDs, threadID)
 	return nil
+}
+func (t *drainStubThreads) ClaimNextQueuedForSession(context.Context, uuid.UUID, uuid.UUID, int) (models.SessionThread, error) {
+	return models.SessionThread{}, pgx.ErrNoRows
 }
 
 type drainStubHumanInputs struct {
@@ -432,14 +437,35 @@ func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {
 	require.Equal(t, threadA.String(), payload["thread_id"], "thread-scope drain must propagate thread_id")
 }
 
-func TestDrainQueuedMessages_ThreadScopeAnswersPendingHumanInput(t *testing.T) {
+func TestDrainQueuedMessages_ClearsPendingOnlyAfterEnqueueSucceeds(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	processed := &models.SessionMessage{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID}
+
+	messages := &drainStubMessages{messages: []models.SessionMessage{
+		{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID},
+		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID, Content: "queued"},
+	}}
+	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle}}
+	jobs := &drainStubJobs{err: fmt.Errorf("queue unavailable")}
+	threads := &drainStubThreads{}
+	o := newDrainOrchestrator(messages, sessions, jobs, threads)
+
+	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadID, zerolog.Nop())
+
+	require.Empty(t, threads.clearedThreadIDs, "pending_message_count must remain until the resume job is durably enqueued")
+}
+
+func TestDrainQueuedMessages_ThreadScopeCarriesQueuedMessageForHumanInputAnswer(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	userID := uuid.New()
-	requestID := uuid.New()
 	processed := &models.SessionMessage{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadID}
 
 	messages := &drainStubMessages{messages: []models.SessionMessage{
@@ -449,24 +475,15 @@ func TestDrainQueuedMessages_ThreadScopeAnswersPendingHumanInput(t *testing.T) {
 	sessions := &drainStubSessions{session: models.Session{Status: "idle"}}
 	jobs := &drainStubJobs{}
 	threads := &drainStubThreads{}
-	humanInputs := &drainStubHumanInputs{request: models.HumanInputRequest{
-		ID:        requestID,
-		OrgID:     orgID,
-		SessionID: sessionID,
-		ThreadID:  &threadID,
-		Status:    models.HumanInputRequestStatusAnswered,
-	}}
+	humanInputs := &drainStubHumanInputs{request: models.HumanInputRequest{ID: uuid.New()}}
 	o := newDrainOrchestrator(messages, sessions, jobs, threads, humanInputs)
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadID, zerolog.Nop())
 
-	require.Len(t, humanInputs.threadAnswers, 1, "thread-scope drain should answer the pending human-input request with the queued user message")
-	require.Equal(t, threadID, humanInputs.threadAnswers[0].threadID, "thread-scope drain should answer the request for the drained thread")
-	require.Equal(t, "Use the existing table.", humanInputs.threadAnswers[0].answerText, "thread-scope drain should persist the queued message text as the answer")
-	require.Equal(t, userID, humanInputs.threadAnswers[0].answeredBy, "thread-scope drain should attribute the answer to the queued message user")
+	require.Empty(t, humanInputs.threadAnswers, "drain should not answer human-input before the resume job is durably enqueued")
 	require.Len(t, jobs.enqueues, 1, "thread-scope drain should enqueue continue_session")
 	payload := jobs.enqueues[0].payload.(map[string]string)
-	require.Equal(t, requestID.String(), payload["human_input_request_id"], "thread-scope drain should carry the answered request id into the resume job")
+	require.Equal(t, "6", payload["queued_message_id"], "thread-scope drain should carry the queued message id so the worker can answer human input after claiming the job")
 }
 
 func TestDrainQueuedMessages_SkipsNonResumableTerminalSessionStatus(t *testing.T) {

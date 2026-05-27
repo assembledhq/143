@@ -109,7 +109,7 @@ var sessionColumnsForFiles = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -125,13 +125,14 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 	// of them in their landed positions so callers don't have to update
 	// every row literal:
 	//   - 3 policy defaults (origin/interaction_mode/validation_policy) at positions 3-5
+	//   - workspace_generation immediately after sandbox_state
 	//   - 2 nils right after snapshot_key (pending_snapshot_key, pending_snapshot_set_at)
 	//   - 4 linear_* defaults (migration 000103) just before deleted_at
 	//   - 2 git_identity nils between deleted_at and created_at
 	// Callers already supply has_unpushed_changes, so this helper only backfills
-	// policy, pending_snapshot_*, linear_*, and git_identity_*.
-	if len(values) == len(sessionColumnsForFiles)-3-2-4-2 {
-		row := make([]interface{}, 0, len(values)+11)
+	// policy, workspace_generation, pending_snapshot_*, linear_*, and git_identity_*.
+	if len(values) == len(sessionColumnsForFiles)-3-1-2-4-2 {
+		row := make([]interface{}, 0, len(values)+12)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
 		// Legacy values[3..38] = agent_type through snapshot_key (36 values).
@@ -143,6 +144,14 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 		row = append(row, values[len(values)-2]) // deleted_at
 		row = append(row, nil, nil)              // git_identity_source, git_identity_user_id
 		row = append(row, values[len(values)-1]) // created_at
+		row = append(row[:38], append([]interface{}{int64(0)}, row[38:]...)...)
+		return row
+	}
+	if len(values) == len(sessionColumnsForFiles)-1 {
+		row := make([]interface{}, 0, len(values)+1)
+		row = append(row, values[:38]...)
+		row = append(row, int64(0))
+		row = append(row, values[38:]...)
 		return row
 	}
 	return values

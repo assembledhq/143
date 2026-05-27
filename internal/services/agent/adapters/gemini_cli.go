@@ -76,6 +76,14 @@ func (a *GeminiCLIAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
 	return geminiRuntimeProfile
 }
 
+func (a *GeminiCLIAdapter) ThreadRuntimeLiveInputProtocol() agent.ThreadRuntimeLiveInputProtocol {
+	return agent.ThreadRuntimeLiveInputProtocol{
+		Mode:                 agent.ThreadRuntimeLiveInputProtocolTurnBoundResume,
+		DeliversToOpenHandle: false,
+		Description:          "Gemini CLI follow-up input is delivered through gemini --resume with the captured session id; the current stream-json command is one-shot and is not treated as a live stdin protocol.",
+	}
+}
+
 // Execute runs the Gemini CLI inside the sandbox and streams output.
 func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	provider := agent.SandboxProviderFromContext(ctx)

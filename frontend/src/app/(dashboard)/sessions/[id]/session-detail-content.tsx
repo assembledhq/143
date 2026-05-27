@@ -164,6 +164,7 @@ import { deriveCreatePRActionState, derivePushChangesActionState } from "@/lib/s
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
+import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
@@ -430,7 +431,7 @@ type PRActionErrorState = {
 
 type PendingThreadPreview = Pick<
   SessionThread,
-  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override"
+  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override" | "inbox_delivery"
 >;
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
@@ -3029,6 +3030,92 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+  const activeThreadDelivery = activeThread?.inbox_delivery;
+  const activeThreadHasRecoverableInbox =
+    !!activeThreadDelivery &&
+    (activeThreadDelivery.dead_letter_count > 0 || activeThreadDelivery.unknown_delivery_count > 0);
+  const recoverableInboxThreadId =
+    activeThreadHasRecoverableInbox && activeThread && !nonInteractiveThreadIds.has(activeThread.id)
+      ? activeThread.id
+      : null;
+  const recoverableInboxQuery = useQuery({
+    queryKey: recoverableInboxThreadId
+      ? queryKeys.sessions.threadRecoverableInbox(id, recoverableInboxThreadId)
+      : ["session", id, "thread", null, "recoverable-inbox"],
+    queryFn: () => {
+      if (!recoverableInboxThreadId) {
+        throw new Error("Recoverable inbox query requires an active thread");
+      }
+      return api.sessions.listRecoverableThreadInboxEntries(id, recoverableInboxThreadId);
+    },
+    enabled: recoverableInboxThreadId !== null,
+    refetchInterval: recoverableInboxThreadId ? 5000 : false,
+  });
+  const recoverableInboxEntries = useMemo(
+    () => recoverableInboxQuery.data?.data ?? [],
+    [recoverableInboxQuery.data?.data],
+  );
+  const retryRecoverableInboxMutation = useMutation({
+    mutationFn: async ({ threadId, entryIds, replayUnknownDelivery }: { threadId: string; entryIds: string[]; replayUnknownDelivery?: boolean }) => {
+      await Promise.all(entryIds.map((entryId) => api.sessions.retryThreadInboxEntry(id, threadId, entryId, { replayUnknownDelivery })));
+    },
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threads(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadRecoverableInbox(id, variables.threadId) });
+      toast.success(variables.entryIds.length === 1 ? "Message queued for retry" : "Messages queued for retry");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to retry message delivery");
+    },
+  });
+  const handleRetryRecoverableInboxEntry = useCallback((entryId: string, replayUnknownDelivery = false) => {
+    if (!recoverableInboxThreadId) {
+      return;
+    }
+    retryRecoverableInboxMutation.mutate({
+      threadId: recoverableInboxThreadId,
+      entryIds: [entryId],
+      replayUnknownDelivery,
+    });
+  }, [recoverableInboxThreadId, retryRecoverableInboxMutation]);
+  const handleRetryAllRecoverableInbox = useCallback(() => {
+    if (!recoverableInboxThreadId || recoverableInboxEntries.length === 0) {
+      return;
+    }
+    const failedEntryIds = recoverableInboxEntries.filter((entry) => entry.delivery_state === "dead_letter").map((entry) => entry.id);
+    if (failedEntryIds.length === 0) {
+      return;
+    }
+    retryRecoverableInboxMutation.mutate({
+      threadId: recoverableInboxThreadId,
+      entryIds: failedEntryIds,
+      replayUnknownDelivery: false,
+    });
+  }, [recoverableInboxEntries, recoverableInboxThreadId, retryRecoverableInboxMutation]);
+  const renderRecoverableInboxNotice = useCallback(() => {
+    if (!activeThreadDelivery || !activeThreadHasRecoverableInbox) {
+      return null;
+    }
+    return (
+      <RecoverableInboxNotice
+        summary={activeThreadDelivery}
+        entries={recoverableInboxEntries}
+        isLoading={recoverableInboxQuery.isFetching && recoverableInboxEntries.length === 0}
+        isRetrying={retryRecoverableInboxMutation.isPending}
+        onRetryEntry={handleRetryRecoverableInboxEntry}
+        onRetryAll={handleRetryAllRecoverableInbox}
+      />
+    );
+  }, [
+    activeThreadDelivery,
+    activeThreadHasRecoverableInbox,
+    handleRetryAllRecoverableInbox,
+    handleRetryRecoverableInboxEntry,
+    recoverableInboxEntries,
+    recoverableInboxQuery.isFetching,
+    retryRecoverableInboxMutation.isPending,
+  ]);
   const optimisticMessageIDRef = useRef(-1_000_000);
   const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
   const [sessionStopRequest, setSessionStopRequest] = useState<{ sessionId: string; requestedAt: string } | null>(null);
@@ -3155,9 +3242,10 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   type SendMutationArgs = {
     activeThreadId?: string;
-    body: {
-      message: string;
-      images?: string[];
+	    body: {
+	      message: string;
+	      clientMessageID?: string;
+	      images?: string[];
       references?: SessionInputReference[];
       commands?: SessionInputCommand[];
       planMode?: boolean;
@@ -4050,7 +4138,13 @@ export function SessionDetailContent({ id }: { id: string }) {
           ...vars.body,
           resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
         });
-        return { response, resolvedIDs: vars.resolvedIDs };
+        return {
+          response: {
+            ...response,
+            data: response.data.message,
+          },
+          resolvedIDs: vars.resolvedIDs,
+        };
       }
 
       const response = await api.sessions.sendMessage(id, {
@@ -4197,11 +4291,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     setSessionStopOutcome(null);
     const optimisticID = optimisticMessageIDRef.current;
     optimisticMessageIDRef.current -= 1;
+    const clientMessageID =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${id}:${activeThread?.id ?? "session"}:${Date.now()}:${Math.random()}`;
 
     sendMutation.mutate({
       activeThreadId: activeThread?.id,
       body: {
         message: userFacingMessage,
+        clientMessageID,
         images: composerAttachments.length > 0 ? composerAttachments : undefined,
         references: composerReferences.length > 0 ? composerReferences : undefined,
         commands: composerCommands.length > 0 ? composerCommands : undefined,
@@ -5395,6 +5494,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             )}
+            {renderRecoverableInboxNotice()}
             <SessionComposer
               sessionId={session.id}
               message={composerMessage}
@@ -5636,6 +5736,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             ) : null}
+            {renderRecoverableInboxNotice()}
             <SessionComposer
               sessionId={session.id}
               message={composerMessage}

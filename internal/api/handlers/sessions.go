@@ -76,6 +76,8 @@ type SessionHandler struct {
 	linkStore          *db.SessionIssueLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
+	threadInboxStore   *db.ThreadInboxStore
+	sandboxHolders     *db.SessionSandboxHolderStore
 	viewStore          *db.SessionViewStore
 	memberships        sessionMembershipStore
 	prCredentials      githubStatusCredentialStore
@@ -462,6 +464,14 @@ func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRe
 	)
 }
 
+func (h *SessionHandler) SetThreadInboxStore(store *db.ThreadInboxStore) {
+	h.threadInboxStore = store
+}
+
+func (h *SessionHandler) SetSessionSandboxHolderStore(store *db.SessionSandboxHolderStore) {
+	h.sandboxHolders = store
+}
+
 func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
@@ -709,12 +719,58 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if threads == nil {
 			threads = []models.SessionThread{}
 		}
+		if err := h.attachThreadInboxDeliverySummaries(r.Context(), orgID, runID, threads); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", runID.String()).Msg("failed to load thread inbox delivery summaries for session")
+		}
 		detail.Threads = threads
 	} else {
 		detail.Threads = []models.SessionThread{}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) attachThreadInboxDeliverySummaries(ctx context.Context, orgID, sessionID uuid.UUID, threads []models.SessionThread) error {
+	if h.threadInboxStore == nil || len(threads) == 0 {
+		return nil
+	}
+	summaries, err := h.threadInboxStore.ListDeliverySummariesBySession(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("list thread inbox delivery summaries: %w", err)
+	}
+	for i := range threads {
+		summary, ok := summaries[threads[i].ID]
+		if !ok {
+			summary = models.ThreadInboxDeliverySummary{ThreadID: threads[i].ID}
+			summary.Normalize()
+		}
+		threads[i].InboxDelivery = &summary
+	}
+	return nil
+}
+
+func (h *SessionHandler) requireSnapshotQuiescent(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, action string) bool {
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return false
+	}
+	if session.Status == models.SessionStatusRunning {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before "+action)
+		return false
+	}
+	if h.sandboxHolders == nil {
+		return true
+	}
+	active, err := h.sandboxHolders.CountActiveThreadRuntimesBySession(r.Context(), orgID, session.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "QUIESCENCE_CHECK_FAILED", "failed to check active thread runtimes", err)
+		return false
+	}
+	if active > 0 {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_QUIESCENT", "wait for active tabs to finish before "+action)
+		return false
+	}
+	return true
 }
 
 func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
@@ -1537,6 +1593,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a PR") {
+		return
+	}
 
 	switch session.PRCreationState {
 	case models.PRCreationStateQueued, models.PRCreationStatePushing:
@@ -1665,12 +1724,7 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
-		return
-	}
-	if session.Status == models.SessionStatusRunning {
-		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before creating a branch")
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a branch") {
 		return
 	}
 	switch session.BranchCreationState {
@@ -1781,17 +1835,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
-		return
-	}
-	// Defense-in-depth against the frontend's isRunning gate: pushing while a
-	// turn is in flight would race the active sandbox and the snapshot we'd
-	// hydrate could be stale relative to commits the running turn is about
-	// to make. Reject server-side so a racing client (or a stale tab whose
-	// session.status hadn't refreshed) can't slip through.
-	if session.Status == models.SessionStatusRunning {
-		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "pushing changes") {
 		return
 	}
 

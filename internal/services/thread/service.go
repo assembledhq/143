@@ -2,6 +2,7 @@ package thread
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -47,6 +48,16 @@ var (
 	// should surface this as a 400 — the client requested a feature the
 	// server isn't running.
 	ErrReviewCommentsNotConfigured = errors.New("review comment resolution is not configured")
+	ErrThreadInboxBackpressure     = errors.New("too many undelivered thread messages")
+)
+
+const (
+	deliverThreadInboxJobType = "deliver_thread_inbox"
+	deliverThreadInboxQueue   = "agent"
+	cancelThreadJobType       = "cancel_thread"
+	maxThreadInboxPending     = 200
+	maxSessionInboxPending    = 1000
+	maxThreadMessageBytes     = 256 * 1024
 )
 
 // SessionStore defines the session DB operations needed by the thread service.
@@ -114,6 +125,7 @@ type ThreadCanceller interface {
 // MessageStore defines the message DB operations needed by the thread service.
 type MessageStore interface {
 	Create(ctx context.Context, msg *models.SessionMessage) error
+	GetByID(ctx context.Context, orgID uuid.UUID, id int64) (models.SessionMessage, error)
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
 	ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
@@ -128,6 +140,24 @@ type LogStore interface {
 type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
+}
+
+// ThreadInboxStore defines the durable per-thread input log used by the
+// runtime control plane. When wired, every accepted user message gets an inbox
+// entry before any worker enqueue is attempted.
+type ThreadInboxStore interface {
+	AppendForMessage(ctx context.Context, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error)
+	GetByClientMessageID(ctx context.Context, orgID, threadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error)
+	ListDeliverySummariesBySession(ctx context.Context, orgID, sessionID uuid.UUID) (map[uuid.UUID]models.ThreadInboxDeliverySummary, error)
+	GetDeliverySummaryByThread(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadInboxDeliverySummary, error)
+	ListRecoverableByThread(ctx context.Context, orgID, threadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error)
+	RetryRecoverable(ctx context.Context, orgID, threadID, entryID uuid.UUID, allowUnknownDelivery bool) (models.ThreadInboxEntry, error)
+	CountPendingByThread(ctx context.Context, orgID, threadID uuid.UUID) (int, error)
+	CountPendingBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error)
+}
+
+type ThreadRuntimeOwnerStore interface {
+	GetActiveByThread(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadRuntime, error)
 }
 
 // CreateThreadInput holds the input for creating a new thread.
@@ -167,6 +197,7 @@ type SendMessageInput struct {
 	SessionID               uuid.UUID
 	OrgID                   uuid.UUID
 	ThreadID                uuid.UUID
+	ClientMessageID         string
 	UserID                  *uuid.UUID
 	Message                 string
 	Images                  []string
@@ -194,6 +225,9 @@ type SendMessageInput struct {
 // after the tx commits — same shape as the session-level path.
 type SendMessageResult struct {
 	Message            *models.SessionMessage
+	InboxEntry         *models.ThreadInboxEntry
+	ThreadStatus       models.ThreadStatus
+	DeliveryState      models.ThreadInboxDeliveryState
 	ResolvedComments   []models.SessionReviewComment
 	AnsweredQuestion   *models.SessionQuestion
 	AnsweredHumanInput *models.HumanInputRequest
@@ -211,6 +245,8 @@ type Service struct {
 	messageStore       MessageStore
 	logStore           LogStore
 	jobStore           JobStore
+	inboxStore         ThreadInboxStore              // optional — enables durable per-thread input delivery state
+	runtimeOwnerStore  ThreadRuntimeOwnerStore       // optional — pins delivery notifications to the live runtime owner
 	fileEvents         FileEventStore                // optional — enables overlap and attribution surfaces
 	canceller          ThreadCanceller               // optional — enables in-flight SIGINT
 	txStarter          db.TxStarter                  // optional — required for SendMessage with ResolveReviewCommentIDs or awaiting_input answer
@@ -249,6 +285,20 @@ func (s *Service) SetFileEventStore(store FileEventStore) {
 	s.fileEvents = store
 }
 
+// SetThreadInboxStore wires the durable per-thread inbox. The inbox is the
+// platform-owned source of truth for accepted input delivery; session_messages
+// remains the user-facing transcript.
+func (s *Service) SetThreadInboxStore(store ThreadInboxStore, txStarter ...db.TxStarter) {
+	s.inboxStore = store
+	if len(txStarter) > 0 && txStarter[0] != nil {
+		s.txStarter = txStarter[0]
+	}
+}
+
+func (s *Service) SetThreadRuntimeStore(store ThreadRuntimeOwnerStore) {
+	s.runtimeOwnerStore = store
+}
+
 // SetCanceller wires the optional thread canceller. Provided by the agent
 // orchestrator's thread-scoped cancel registry once it is constructed.
 func (s *Service) SetCanceller(c ThreadCanceller) {
@@ -278,8 +328,9 @@ func (s *Service) SetQuestionStore(store QuestionStore) {
 }
 
 // SetHumanInputRequestStore wires the optional durable human-input request
-// store. The txStarter must also be configured through SetReviewCommentResolver
-// because the implicit answer is committed atomically with the message row.
+// store. Configure the transaction starter through SetThreadInboxStore or
+// SetReviewCommentResolver so the implicit answer can commit atomically with
+// the message row.
 func (s *Service) SetHumanInputRequestStore(store HumanInputRequestStore) {
 	s.humanInputStore = store
 }
@@ -450,6 +501,9 @@ func (s *Service) ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) (
 	if err != nil {
 		return nil, fmt.Errorf("list threads: %w", err)
 	}
+	if err := s.attachInboxDeliverySummaries(ctx, orgID, sessionID, threads); err != nil {
+		return nil, err
+	}
 	return threads, nil
 }
 
@@ -459,7 +513,45 @@ func (s *Service) GetThread(ctx context.Context, orgID, sessionID, threadID uuid
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
 	}
-	return visibleThreadInSession(thread, sessionID)
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return models.SessionThread{}, err
+	}
+	if err := s.attachInboxDeliverySummary(ctx, orgID, &thread); err != nil {
+		return models.SessionThread{}, err
+	}
+	return thread, nil
+}
+
+func (s *Service) attachInboxDeliverySummaries(ctx context.Context, orgID, sessionID uuid.UUID, threads []models.SessionThread) error {
+	if s.inboxStore == nil || len(threads) == 0 {
+		return nil
+	}
+	summaries, err := s.inboxStore.ListDeliverySummariesBySession(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("list thread inbox delivery summaries: %w", err)
+	}
+	for i := range threads {
+		summary, ok := summaries[threads[i].ID]
+		if !ok {
+			summary = models.ThreadInboxDeliverySummary{ThreadID: threads[i].ID}
+			summary.Normalize()
+		}
+		threads[i].InboxDelivery = &summary
+	}
+	return nil
+}
+
+func (s *Service) attachInboxDeliverySummary(ctx context.Context, orgID uuid.UUID, thread *models.SessionThread) error {
+	if s.inboxStore == nil || thread == nil {
+		return nil
+	}
+	summary, err := s.inboxStore.GetDeliverySummaryByThread(ctx, orgID, thread.ID)
+	if err != nil {
+		return fmt.Errorf("get thread inbox delivery summary: %w", err)
+	}
+	thread.InboxDelivery = &summary
+	return nil
 }
 
 // threadClaimOutcome enumerates the four possible results of
@@ -516,6 +608,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	if resolvingComments && (s.txStarter == nil || s.reviewCommentStore == nil) {
 		return nil, ErrReviewCommentsNotConfigured
 	}
+	if existing, ok, err := s.findExistingClientMessage(ctx, input); err != nil {
+		return nil, err
+	} else if ok {
+		return &SendMessageResult{Message: &existing}, nil
+	}
+	if err := s.validateInboxAdmission(ctx, input); err != nil {
+		return nil, err
+	}
 
 	thread, preClaimThreadStatus, outcome, err := s.claimThreadForSend(ctx, input, resolvingComments)
 	if err != nil {
@@ -530,7 +630,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// terminal/paused session — same order as sessions.SendMessage. revertStatus
 	// records the pre-claim status so revertAfterSendFailure can put the
 	// session back exactly where it was; an empty string signals "do not
-	// touch the session" (sibling-running case).
+	// touch the session" because a sibling already owns the shared sandbox.
+	// That sibling-owned case is still an execution path for this admitted
+	// thread: the worker job is pinned to the recorded sandbox owner below.
 	// Skipped on the queue-only path: the thread is already running, which
 	// already implies the session is running.
 	var claimedSession models.Session
@@ -541,13 +643,6 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		if claimErr != nil {
 			s.releaseThread(ctx, input.OrgID, input.ThreadID, "parent session claim failure")
 			return nil, claimErr
-		}
-		if revertStatus == "" {
-			if resolvingComments {
-				s.releaseThread(ctx, input.OrgID, input.ThreadID, "sibling-queued thread cannot resolve comments")
-				return nil, ErrThreadNotIdle
-			}
-			return s.queueClaimedThreadBehindSibling(ctx, input, thread, preClaimThreadStatus)
 		}
 	}
 
@@ -592,8 +687,11 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		answeredQuestion   *models.SessionQuestion
 		answeredHumanInput *models.HumanInputRequest
 	)
-	if resolvingComments || answerPendingQuestion || answerPendingHumanInput {
-		resolvedComments, answeredQuestion, answeredHumanInput, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion, answerPendingHumanInput)
+	inboxAppendedInTx := false
+	var inboxEntry *models.ThreadInboxEntry
+	if resolvingComments || answerPendingQuestion || answerPendingHumanInput || (s.inboxStore != nil && s.txStarter != nil) {
+		resolvedComments, answeredQuestion, answeredHumanInput, inboxEntry, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion, answerPendingHumanInput, s.inboxStore != nil)
+		inboxAppendedInTx = err == nil && s.inboxStore != nil
 	} else {
 		err = s.messageStore.Create(ctx, msg)
 	}
@@ -611,6 +709,15 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		}
 		return nil, fmt.Errorf("create message: %w", err)
 	}
+	if !inboxAppendedInTx {
+		inboxEntry, err = s.appendInboxForMessage(ctx, input, msg)
+	}
+	if err != nil {
+		if !queueOnly {
+			s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "inbox append failure")
+		}
+		return nil, fmt.Errorf("append inbox entry: %w", err)
+	}
 
 	// Queue-only path: bump pending_message_count so the UI's "queued (N)"
 	// affordance reflects the buildup, then return without enqueueing a new
@@ -622,18 +729,26 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 				Str("thread_id", input.ThreadID.String()).
 				Msg("failed to increment pending_message_count for queued message")
 		}
+		if err := s.enqueueLiveThreadInboxDelivery(ctx, input); err != nil {
+			s.logger.Warn().Err(err).
+				Str("session_id", input.SessionID.String()).
+				Str("thread_id", input.ThreadID.String()).
+				Msg("failed to enqueue live thread inbox delivery notification")
+		}
 		return &SendMessageResult{
 			Message:          msg,
+			InboxEntry:       inboxEntry,
+			ThreadStatus:     thread.Status,
+			DeliveryState:    deliveryStateForInboxEntry(inboxEntry),
 			ResolvedComments: resolvedComments,
 		}, nil
 	}
 
-	// Reuse the session continuation worker for phase 1. The latest user
-	// message carries thread_id, so the orchestrator attributes assistant
-	// messages and streamed logs back to this tab while still operating on the
-	// single shared sandbox. Dedupe at the thread level so rapid-fire sends to
-	// this tab collapse, while sibling sends that arrive during another tab's
-	// turn are queued without enqueueing a second shared-sandbox job.
+	// Reuse the session continuation worker. The latest user message carries
+	// thread_id, so the orchestrator attributes assistant messages and
+	// streamed logs back to this tab while still operating on the single
+	// shared sandbox. Dedupe at the thread level so rapid-fire sends to this
+	// tab collapse without suppressing independent sibling-tab jobs.
 	dedupeKey := db.ContinueSessionDedupeKey(thread.ID)
 	if input.ContinuationDedupeKeyOverride != nil && *input.ContinuationDedupeKeyOverride != "" {
 		dedupeKey = *input.ContinuationDedupeKeyOverride
@@ -667,6 +782,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 
 	return &SendMessageResult{
 		Message:            msg,
+		InboxEntry:         inboxEntry,
+		ThreadStatus:       thread.Status,
+		DeliveryState:      deliveryStateForInboxEntry(inboxEntry),
 		ResolvedComments:   resolvedComments,
 		AnsweredQuestion:   answeredQuestion,
 		AnsweredHumanInput: answeredHumanInput,
@@ -714,48 +832,28 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 		msg.Attachments = input.Images
 	}
 
-	answeredQuestion, answeredHumanInput, err := s.createQueuedMessage(ctx, msg, input, thread.Status)
-	if err != nil {
-		return nil, fmt.Errorf("create queued message: %w", err)
+	var answeredQuestion *models.SessionQuestion
+	var answeredHumanInput *models.HumanInputRequest
+	var inboxEntry *models.ThreadInboxEntry
+	if s.txStarter != nil && s.inboxStore != nil {
+		answeredQuestion, answeredHumanInput, inboxEntry, err = s.createQueuedMessageAndInboxInTx(ctx, msg, input, thread.Status)
+		if err != nil {
+			return nil, fmt.Errorf("create queued message: %w", err)
+		}
+	} else {
+		answeredQuestion, answeredHumanInput, err = s.createQueuedMessage(ctx, msg, input, thread.Status)
+		if err != nil {
+			return nil, fmt.Errorf("create queued message: %w", err)
+		}
+		inboxEntry, err = s.appendInboxForMessage(ctx, input, msg)
+		if err != nil {
+			return nil, fmt.Errorf("append queued inbox entry: %w", err)
+		}
+		if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+			return nil, fmt.Errorf("increment queued message count: %w", err)
+		}
 	}
-	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
-		return nil, fmt.Errorf("increment queued message count: %w", err)
-	}
-	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion, AnsweredHumanInput: answeredHumanInput}, nil
-}
-
-func (s *Service) queueClaimedThreadBehindSibling(ctx context.Context, input SendMessageInput, thread models.SessionThread, preClaimStatus models.ThreadStatus) (*SendMessageResult, error) {
-	if err := s.threadStore.UpdateStatus(ctx, input.OrgID, input.ThreadID, models.ThreadStatusIdle); err != nil {
-		return nil, fmt.Errorf("release thread for queued sibling message: %w", err)
-	}
-
-	content := input.Message
-	if input.PlanMode {
-		content = "[PLAN_MODE]\n" + content
-	}
-	msg := &models.SessionMessage{
-		SessionID:  thread.SessionID,
-		OrgID:      input.OrgID,
-		ThreadID:   &input.ThreadID,
-		UserID:     input.UserID,
-		TurnNumber: thread.CurrentTurn + 1,
-		Role:       models.MessageRoleUser,
-		Content:    content,
-		References: input.References,
-		Commands:   input.Commands,
-	}
-	if len(input.Images) > 0 {
-		msg.Attachments = input.Images
-	}
-
-	answeredQuestion, answeredHumanInput, err := s.createQueuedMessage(ctx, msg, input, preClaimStatus)
-	if err != nil {
-		return nil, fmt.Errorf("create queued sibling message: %w", err)
-	}
-	if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
-		return nil, fmt.Errorf("increment queued sibling message count: %w", err)
-	}
-	return &SendMessageResult{Message: msg, AnsweredQuestion: answeredQuestion, AnsweredHumanInput: answeredHumanInput}, nil
+	return &SendMessageResult{Message: msg, InboxEntry: inboxEntry, ThreadStatus: thread.Status, DeliveryState: deliveryStateForInboxEntry(inboxEntry), AnsweredQuestion: answeredQuestion, AnsweredHumanInput: answeredHumanInput}, nil
 }
 
 func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, *models.HumanInputRequest, error) {
@@ -768,8 +866,183 @@ func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMe
 	if !answerPendingQuestion {
 		return nil, nil, s.messageStore.Create(ctx, msg)
 	}
-	_, answeredQuestion, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false)
+	_, answeredQuestion, _, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false, false)
 	return answeredQuestion, nil, err
+}
+
+func (s *Service) createQueuedMessageAndInboxInTx(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, *models.HumanInputRequest, *models.ThreadInboxEntry, error) {
+	tx, err := s.txStarter.Begin(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			s.logger.Error().Err(rollbackErr).
+				Str("session_id", input.SessionID.String()).
+				Str("thread_id", input.ThreadID.String()).
+				Msg("failed to rollback queued thread-message transaction")
+		}
+	}()
+
+	txMessageStore := db.NewSessionMessageStore(tx)
+	if err := txMessageStore.Create(ctx, msg); err != nil {
+		return nil, nil, nil, err
+	}
+
+	var answeredQuestion *models.SessionQuestion
+	answerPendingQuestion := threadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
+	if answerPendingQuestion {
+		txQuestionStore := db.NewSessionQuestionStore(tx)
+		question, qerr := txQuestionStore.AnswerLatestPendingBySession(ctx, input.OrgID, input.SessionID, input.Message, *input.UserID)
+		if qerr != nil {
+			if errors.Is(qerr, pgx.ErrNoRows) {
+				s.logger.Warn().
+					Str("session_id", input.SessionID.String()).
+					Msg("queued awaiting_input session resumed without a pending question to answer")
+			} else {
+				return nil, nil, nil, fmt.Errorf("answer pending question: %w", qerr)
+			}
+		} else {
+			answeredQuestion = &question
+		}
+	}
+
+	txInboxStore := db.NewThreadInboxStore(tx)
+	inboxEntry, err := s.appendInboxForMessageWithStore(ctx, txInboxStore, input, msg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("append inbox entry: %w", err)
+	}
+	txThreadStore := db.NewSessionThreadStore(tx)
+	if err := txThreadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+		return nil, nil, nil, fmt.Errorf("increment queued message count: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, nil, fmt.Errorf("commit tx: %w", err)
+	}
+	committed = true
+	return answeredQuestion, nil, inboxEntry, nil
+}
+
+func (s *Service) validateInboxAdmission(ctx context.Context, input SendMessageInput) error {
+	if len(input.Message) > maxThreadMessageBytes {
+		return fmt.Errorf("%w: message is %d bytes, max is %d", ErrThreadInboxBackpressure, len(input.Message), maxThreadMessageBytes)
+	}
+	if s.inboxStore == nil {
+		return nil
+	}
+	pendingThread, err := s.inboxStore.CountPendingByThread(ctx, input.OrgID, input.ThreadID)
+	if err != nil {
+		return fmt.Errorf("count pending thread inbox entries: %w", err)
+	}
+	if pendingThread >= maxThreadInboxPending {
+		return fmt.Errorf("%w: thread has %d undelivered messages", ErrThreadInboxBackpressure, pendingThread)
+	}
+	pendingSession, err := s.inboxStore.CountPendingBySession(ctx, input.OrgID, input.SessionID)
+	if err != nil {
+		return fmt.Errorf("count pending session inbox entries: %w", err)
+	}
+	if pendingSession >= maxSessionInboxPending {
+		return fmt.Errorf("%w: session has %d undelivered messages", ErrThreadInboxBackpressure, pendingSession)
+	}
+	return nil
+}
+
+func (s *Service) findExistingClientMessage(ctx context.Context, input SendMessageInput) (models.SessionMessage, bool, error) {
+	if s.inboxStore == nil || input.ClientMessageID == "" {
+		return models.SessionMessage{}, false, nil
+	}
+	entry, err := s.inboxStore.GetByClientMessageID(ctx, input.OrgID, input.ThreadID, input.ClientMessageID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.SessionMessage{}, false, nil
+		}
+		return models.SessionMessage{}, false, fmt.Errorf("get thread inbox entry by client message id: %w", err)
+	}
+	if entry.MessageID == 0 {
+		return models.SessionMessage{}, false, nil
+	}
+	msg, err := s.messageStore.GetByID(ctx, input.OrgID, entry.MessageID)
+	if err != nil {
+		return models.SessionMessage{}, false, fmt.Errorf("get idempotent thread message: %w", err)
+	}
+	return msg, true, nil
+}
+
+func (s *Service) appendInboxForMessage(ctx context.Context, input SendMessageInput, msg *models.SessionMessage) (*models.ThreadInboxEntry, error) {
+	if s.inboxStore == nil || msg == nil || msg.ID == 0 {
+		return nil, nil
+	}
+	return s.appendInboxForMessageWithStore(ctx, s.inboxStore, input, msg)
+}
+
+func (s *Service) appendInboxForMessageWithStore(ctx context.Context, store ThreadInboxStore, input SendMessageInput, msg *models.SessionMessage) (*models.ThreadInboxEntry, error) {
+	if store == nil || msg == nil || msg.ID == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(map[string]any{
+		"message_id":  msg.ID,
+		"turn_number": msg.TurnNumber,
+		"plan_mode":   input.PlanMode,
+		"content":     msg.Content,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal inbox payload: %w", err)
+	}
+	entry, err := store.AppendForMessage(ctx, input.OrgID, db.AppendThreadInboxEntryParams{
+		SessionID:       input.SessionID,
+		ThreadID:        input.ThreadID,
+		MessageID:       msg.ID,
+		ClientMessageID: input.ClientMessageID,
+		EntryType:       models.ThreadInboxEntryTypeUserMessage,
+		Payload:         payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+func (s *Service) enqueueLiveThreadInboxDelivery(ctx context.Context, input SendMessageInput) error {
+	if s.inboxStore == nil || s.jobStore == nil {
+		return nil
+	}
+	dedupeKey := deliverThreadInboxJobType + ":" + input.ThreadID.String()
+	payload := map[string]string{
+		"session_id": input.SessionID.String(),
+		"thread_id":  input.ThreadID.String(),
+		"org_id":     input.OrgID.String(),
+	}
+	var targetNodeID *string
+	if s.runtimeOwnerStore != nil {
+		runtime, err := s.runtimeOwnerStore.GetActiveByThread(ctx, input.OrgID, input.ThreadID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("get live thread runtime owner: %w", err)
+			}
+		} else if runtime.OwnerNodeID != "" {
+			targetNodeID = &runtime.OwnerNodeID
+		}
+	}
+	_, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
+		Queue:        deliverThreadInboxQueue,
+		JobType:      deliverThreadInboxJobType,
+		Payload:      payload,
+		Priority:     7,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: targetNodeID,
+	})
+	return err
+}
+
+func deliveryStateForInboxEntry(entry *models.ThreadInboxEntry) models.ThreadInboxDeliveryState {
+	if entry == nil {
+		return models.ThreadInboxDeliveryStateAcked
+	}
+	return entry.DeliveryState
 }
 
 func threadStatusCanQueue(status models.ThreadStatus) bool {
@@ -953,14 +1226,15 @@ func (s *Service) createMessageInTx(
 	claimedSession models.Session,
 	answerPendingQuestion bool,
 	answerPendingHumanInput bool,
-) ([]models.SessionReviewComment, *models.SessionQuestion, *models.HumanInputRequest, error) {
+	appendInbox bool,
+) ([]models.SessionReviewComment, *models.SessionQuestion, *models.HumanInputRequest, *models.ThreadInboxEntry, error) {
 	if s.txStarter == nil {
-		return nil, nil, nil, fmt.Errorf("tx starter not configured")
+		return nil, nil, nil, nil, fmt.Errorf("tx starter not configured")
 	}
 
 	tx, err := s.txStarter.Begin(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("begin tx: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("begin tx: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -977,7 +1251,7 @@ func (s *Service) createMessageInTx(
 
 	txMessageStore := db.NewSessionMessageStore(tx)
 	if err := txMessageStore.Create(ctx, msg); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	var resolved []models.SessionReviewComment
@@ -989,7 +1263,7 @@ func (s *Service) createMessageInTx(
 		resolved, err = txCommentStore.ValidateAndResolveByIDs(
 			ctx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&claimedSession))
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 
@@ -1008,7 +1282,7 @@ func (s *Service) createMessageInTx(
 					Str("session_id", input.SessionID.String()).
 					Msg("awaiting_input session resumed without a pending question to answer")
 			} else {
-				return nil, nil, nil, fmt.Errorf("answer pending question: %w", qerr)
+				return nil, nil, nil, nil, fmt.Errorf("answer pending question: %w", qerr)
 			}
 		} else {
 			answered = &question
@@ -1026,18 +1300,27 @@ func (s *Service) createMessageInTx(
 					Str("thread_id", input.ThreadID.String()).
 					Msg("awaiting_input thread resumed without a pending free-text human input request to answer")
 			} else {
-				return nil, nil, nil, fmt.Errorf("answer pending human input request: %w", herr)
+				return nil, nil, nil, nil, fmt.Errorf("answer pending human input request: %w", herr)
 			}
 		} else {
 			answeredHumanInput = &request
 		}
 	}
 
+	var inboxEntry *models.ThreadInboxEntry
+	if appendInbox {
+		txInboxStore := db.NewThreadInboxStore(tx)
+		inboxEntry, err = s.appendInboxForMessageWithStore(ctx, txInboxStore, input, msg)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("append inbox entry: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, nil, fmt.Errorf("commit tx: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("commit tx: %w", err)
 	}
 	committed = true
-	return resolved, answered, answeredHumanInput, nil
+	return resolved, answered, answeredHumanInput, inboxEntry, nil
 }
 
 // revertAfterSendFailure puts the session and thread back to their pre-send

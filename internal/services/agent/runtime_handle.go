@@ -127,6 +127,32 @@ type AgentRuntimeProfile struct {
 	PreferSplitOutput bool
 }
 
+type ThreadRuntimeLiveInputProtocolMode string
+
+const (
+	// ThreadRuntimeLiveInputProtocolUnsupported means the adapter has no
+	// provider-native way to accept follow-up input for an already-running
+	// thread runtime.
+	ThreadRuntimeLiveInputProtocolUnsupported ThreadRuntimeLiveInputProtocolMode = "unsupported"
+	// ThreadRuntimeLiveInputProtocolOpenHandle means the adapter can format
+	// accepted inbox entries and deliver them into the live runtime handle.
+	ThreadRuntimeLiveInputProtocolOpenHandle ThreadRuntimeLiveInputProtocolMode = "open_handle"
+	// ThreadRuntimeLiveInputProtocolTurnBoundResume means the provider-native
+	// continuation contract is an explicit one-shot resume command, not a
+	// write to the currently-running process stdin.
+	ThreadRuntimeLiveInputProtocolTurnBoundResume ThreadRuntimeLiveInputProtocolMode = "turn_bound_resume"
+)
+
+type ThreadRuntimeLiveInputProtocol struct {
+	Mode                 ThreadRuntimeLiveInputProtocolMode
+	DeliversToOpenHandle bool
+	Description          string
+}
+
+type ThreadRuntimeLiveInputProtocolProvider interface {
+	ThreadRuntimeLiveInputProtocol() ThreadRuntimeLiveInputProtocol
+}
+
 // RuntimeProfileProvider is an optional extension on top of AgentAdapter.
 // Adapters implement it to declare their interactive runtime requirements.
 type RuntimeProfileProvider interface {
@@ -181,4 +207,36 @@ func WithInteractiveHandleAttacher(ctx context.Context, attacher InteractiveHand
 func InteractiveHandleAttacherFromContext(ctx context.Context) InteractiveHandleAttacher {
 	a, _ := ctx.Value(interactiveHandleAttacherKey{}).(InteractiveHandleAttacher)
 	return a
+}
+
+type multiInteractiveHandleAttacher struct {
+	attachers []InteractiveHandleAttacher
+}
+
+func NewMultiInteractiveHandleAttacher(attachers ...InteractiveHandleAttacher) InteractiveHandleAttacher {
+	filtered := make([]InteractiveHandleAttacher, 0, len(attachers))
+	for _, attacher := range attachers {
+		if attacher != nil {
+			filtered = append(filtered, attacher)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	if len(filtered) == 1 {
+		return filtered[0]
+	}
+	return &multiInteractiveHandleAttacher{attachers: filtered}
+}
+
+func (a *multiInteractiveHandleAttacher) Attach(handle InteractiveCommandHandle) {
+	for _, attacher := range a.attachers {
+		attacher.Attach(handle)
+	}
+}
+
+func (a *multiInteractiveHandleAttacher) Detach() {
+	for i := len(a.attachers) - 1; i >= 0; i-- {
+		a.attachers[i].Detach()
+	}
 }
