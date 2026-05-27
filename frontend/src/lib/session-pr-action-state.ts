@@ -308,6 +308,16 @@ export function deriveMergeActionState({ health, hasActiveRepair, pendingAction 
     };
   }
 
+  if (health.merge_state === "mergeability_pending" || health.merge_state === "unknown") {
+    return {
+      visible: true,
+      disabled: true,
+      disabledReason: "Waiting for GitHub to check mergeability.",
+      label: "Checking mergeability…",
+      spinning: true,
+    };
+  }
+
   if (health.failing_test_count > 0 || health.can_fix_tests || (health.checks ?? []).some((check) => check.status === "failed")) {
     return {
       visible: true,

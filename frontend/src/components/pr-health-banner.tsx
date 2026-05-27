@@ -67,7 +67,7 @@ export function PRHealthBanner({
   reviewAction,
 }: PRHealthBannerProps) {
   const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId);
-  const isHealthy = activeRepairState.label === null && !health.can_fix_tests && !health.can_resolve_conflicts;
+  const isHealthy = activeRepairState.label === null && health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));

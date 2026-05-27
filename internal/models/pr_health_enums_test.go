@@ -16,6 +16,7 @@ func TestPullRequestMergeStateValidate(t *testing.T) {
 		{name: "clean", state: PullRequestMergeStateClean},
 		{name: "conflicted", state: PullRequestMergeStateConflicted},
 		{name: "behind", state: PullRequestMergeStateBehind},
+		{name: "mergeability pending", state: PullRequestMergeStateMergeabilityPending},
 		{name: "unknown", state: PullRequestMergeStateUnknown},
 		{name: "invalid", state: PullRequestMergeState("broken"), expectErr: true},
 	}

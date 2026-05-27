@@ -17,7 +17,7 @@ import (
 // state on the same head SHA with a transient-blank snapshot.
 func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns []gitHubCheckRun) (mergeStateIndeterminate, testsIndeterminate bool) {
 	state := strings.ToLower(strings.TrimSpace(githubState))
-	mergeStateIndeterminate = mergeable == nil && state != "dirty" && state != "blocked" && state != "draft" && state != "unstable" && state != "has_hooks"
+	mergeStateIndeterminate = mergeable == nil && !isDefinitiveNullMergeabilityState(state)
 	for _, check := range checkRuns {
 		if classifyCheckRunCategory(check.Name) != models.PullRequestCheckCategoryTest {
 			continue
@@ -74,17 +74,26 @@ func shouldSkipIndeterminateSnapshotWrite(
 	return false
 }
 
+func isDefinitiveNullMergeabilityState(githubState string) bool {
+	switch strings.ToLower(strings.TrimSpace(githubState)) {
+	case "behind", "dirty", "blocked", "draft", "unstable", "has_hooks":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeMergeState(mergeable *bool, githubState string) (models.PullRequestMergeState, bool) {
 	state := strings.ToLower(strings.TrimSpace(githubState))
 	switch {
-	case mergeable == nil:
-		return models.PullRequestMergeStateUnknown, false
 	case state == "behind":
 		return models.PullRequestMergeStateBehind, false
 	case state == "dirty":
 		return models.PullRequestMergeStateConflicted, true
 	case state == "blocked" || state == "draft" || state == "unstable" || state == "has_hooks":
 		return models.PullRequestMergeStateBlocked, false
+	case mergeable == nil:
+		return models.PullRequestMergeStateMergeabilityPending, false
 	case mergeable != nil && !*mergeable:
 		return models.PullRequestMergeStateConflicted, true
 	case mergeable != nil && *mergeable:
@@ -217,6 +226,10 @@ func buildPRHealthSummaryText(health models.PullRequestHealthResponse) string {
 		return fmt.Sprintf("PR #%d is blocked by merge conflicts.", health.PullRequestNumber)
 	case health.MergeState == models.PullRequestMergeStateBlocked:
 		return fmt.Sprintf("PR #%d is blocked by GitHub merge requirements.", health.PullRequestNumber)
+	case health.MergeState == models.PullRequestMergeStateMergeabilityPending || health.MergeState == models.PullRequestMergeStateUnknown:
+		return fmt.Sprintf("PR #%d is waiting for GitHub to finish checking mergeability.", health.PullRequestNumber)
+	case health.MergeState == models.PullRequestMergeStateBehind:
+		return fmt.Sprintf("PR #%d needs the base branch updated before merging.", health.PullRequestNumber)
 	case health.FailingTestCount == 1:
 		return fmt.Sprintf("PR #%d has 1 failing test job.", health.PullRequestNumber)
 	case health.FailingTestCount > 1:
