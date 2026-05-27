@@ -5309,7 +5309,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                 SESSION_HEADER_HEIGHT_CLASSNAME,
               )}
             >
-              <div className="min-w-0 flex-1 flex items-center gap-2">
+              <div
+                data-testid="session-header-summary"
+                className="min-w-0 flex-1 overflow-hidden flex items-center gap-2"
+              >
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
                     <Input
@@ -5377,7 +5380,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 <LinkedIssueChips session={session} />
               </div>
-              <div className="flex items-center gap-2" data-testid="session-header-actions">
+              <div className="flex shrink-0 items-center gap-2" data-testid="session-header-actions">
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
                     variant="ghost"
