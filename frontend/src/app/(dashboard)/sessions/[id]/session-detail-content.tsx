@@ -215,6 +215,7 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
+const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = 3000;
 
 const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
   AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
@@ -1946,9 +1947,13 @@ export function flattenThreadMessageWindows(
 export function filterThreadLogsForLoadedMessages(
   logs: SessionLog[],
   messages: SessionMessage[],
+  extraTurnNumbers: number[] = [],
 ): SessionLog[] {
   if (messages.length === 0) return logs;
   const loadedTurns = new Set(messages.map((message) => message.turn_number));
+  for (const turnNumber of extraTurnNumbers) {
+    loadedTurns.add(turnNumber);
+  }
   return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
 
@@ -2082,14 +2087,24 @@ function ChatPanel({
     return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
   }, [threadMessagesQuery.data?.pages]);
   const loadedThreadTurns = useMemo(() => loadedTurnNumbers(threadMessages), [threadMessages]);
-  const loadedThreadTurnsKey = loadedThreadTurns.join(",");
+  const activeThreadLogTurn = activeThread && workingStatusesSet.has(activeThread.status)
+    ? activeThread.current_turn + 1
+    : null;
+  const visibleThreadLogTurns = useMemo(() => {
+    const turns = new Set(loadedThreadTurns);
+    if (activeThreadLogTurn !== null) {
+      turns.add(activeThreadLogTurn);
+    }
+    return Array.from(turns).sort((a, b) => a - b);
+  }, [activeThreadLogTurn, loadedThreadTurns]);
+  const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
 
   const threadLogsQuery = useQuery({
-    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), loadedThreadTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
+    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), visibleThreadLogTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
     queryFn: () => api.sessions.getThreadLogs(
       sessionId,
       activeThreadId!,
-      loadedThreadTurns.length > 0 ? { turnNumbers: loadedThreadTurns } : {},
+      visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
     enabled: !!activeThreadId && threadMessagesQuery.isFetched,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
@@ -2182,6 +2197,7 @@ function ChatPanel({
       const loadedThreadLogs = filterThreadLogsForLoadedMessages(
         threadLogsQuery.data?.data ?? [],
         threadMessages,
+        activeThreadLogTurn !== null ? [activeThreadLogTurn] : [],
       );
       return sortTimelineEntries([...buildTimeline(
         mergePendingMessages(threadMessages, optimisticForCurrentView),
@@ -2207,7 +2223,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
+  }, [activeThreadId, activeThreadLogTurn, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
@@ -2446,7 +2462,10 @@ function ChatPanel({
         return { data: { ...updated, threads: [] } };
       }
       const existingThreads = existing.data.threads ?? [];
-      const threads = updated.threads ?? reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
+      const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
+      const threads = hasThreadPayload
+        ? updated.threads!
+        : reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
       return {
         ...existing,
         data: {
@@ -2480,6 +2499,7 @@ function ChatPanel({
 
       eventSource.onopen = () => {
         reconnectAttempts.current = 0;
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       };
 
       addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
@@ -2507,6 +2527,9 @@ function ChatPanel({
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
         mergeSessionStatusUpdate(updated);
+        if ((!updated.threads || updated.threads.length === 0) && updated.status === "running") {
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+        }
         // When the session transitions out of running (e.g. sandbox creation
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
@@ -2979,6 +3002,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
+      const sessionVolatile = workingStatusesSet.has(s.status);
+      const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
@@ -2996,7 +3021,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       // machine advances without waiting for the user to navigate. Keep
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
-      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer ? 2000 : false;
+      if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
+        return 2000;
+      }
+      return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
     },
   });
 

@@ -201,6 +201,14 @@ describe("thread message windows", () => {
     ).map((item) => item.id)).toEqual([10, 30]);
   });
 
+  it("keeps logs for the current in-flight turn before the assistant message exists", () => {
+    expect(filterThreadLogsForLoadedMessages(
+      [log(10, 0), log(20, 1), log(30, 2)],
+      [message(1, 0)],
+      [1],
+    ).map((item) => item.id)).toEqual([10, 20]);
+  });
+
   it("keeps logs when a legacy thread has no persisted messages", () => {
     expect(filterThreadLogsForLoadedMessages(
       [log(10, 1), log(20, 1)],
