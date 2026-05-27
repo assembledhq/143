@@ -328,6 +328,18 @@ func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {
 	require.Contains(t, deploy, `host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"`, "blocking drain fallback should reuse the released default endpoint without requiring active preview runtime rows to disappear first")
 }
 
+func TestCIDeployConfiguresWorkerBlueGreenPortRange(t *testing.T) {
+	t.Parallel()
+
+	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
+	require.NoError(t, err, "test should read deploy workflow")
+	workflowText := string(workflow)
+
+	require.Contains(t, workflowText, `WORKER_BLUE_GREEN_PORT_START: "8080"`, "CI worker deploy should explicitly enable a worker blue/green port range")
+	require.Contains(t, workflowText, `WORKER_BLUE_GREEN_PORT_END: "8087"`, "CI worker deploy should reserve enough ports for overlapping draining generations")
+	require.Contains(t, workflowText, "generation binds a free port while old worker generations keep serving", "workflow comment should document why the port range is required")
+}
+
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 

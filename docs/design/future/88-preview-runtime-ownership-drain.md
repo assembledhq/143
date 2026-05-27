@@ -65,6 +65,10 @@ are true:
 - No active `preview_runtimes.endpoint_url` equals
   `http://<worker_private_ip>:<port>`.
 
-When no extra blue/green port range is configured, the deploy blocks on old
-worker drain. If runtime ownership still exists after the drain timeout, the
-deploy aborts instead of reusing the endpoint.
+Routine CI worker deploys explicitly configure a small blue/green port range so
+old worker generations keep serving owned previews while the replacement
+generation starts on another reachable port. When no extra blue/green port range
+is configured, the deploy blocks on old worker drain. After Docker releases the
+old worker's host port, the deploy may reuse that same endpoint while stale
+runtime leases expire; previews owned by the stopped generation are unavailable
+and restartable.
