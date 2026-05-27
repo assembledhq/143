@@ -52,12 +52,16 @@ import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { TTLWarning } from "./ttl-warning";
+import {
+  buildPreviewBootstrapSrc,
+  PREVIEW_BOOTSTRAP_READY_EVENT,
+  PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+} from "@/lib/preview-bootstrap";
 
-export const PREVIEW_BOOTSTRAP_READY_EVENT = "preview_bootstrap_ready";
-export const PREVIEW_BOOTSTRAP_TOKEN_EVENT = "preview_bootstrap_token";
+export { PREVIEW_BOOTSTRAP_READY_EVENT, PREVIEW_BOOTSTRAP_TOKEN_EVENT };
 
 export function buildPreviewIframeSrc(previewOrigin: string): string {
-  return `${previewOrigin}/bootstrap`;
+  return buildPreviewBootstrapSrc(previewOrigin);
 }
 
 export interface PreviewPanelProps {

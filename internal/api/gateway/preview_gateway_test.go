@@ -536,6 +536,7 @@ func TestGateway_ServeHTTP_BootstrapPage(t *testing.T) {
 	require.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	require.Contains(t, w.Body.String(), "https://app.143.dev")
 	require.Contains(t, w.Body.String(), "preview_bootstrap_token")
+	require.Contains(t, w.Body.String(), "preview_bootstrap_complete", "bootstrap page should notify the parent after the gateway sets the preview session cookie")
 }
 
 func TestGateway_ServeHTTP_BootstrapExchange_MissingToken(t *testing.T) {
