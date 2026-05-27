@@ -69,6 +69,21 @@ var prTestPullRequestColumns = []string{
 	"health_version", "merged_at", "created_at", "updated_at",
 }
 
+var prTestPreviewTargetColumns = []string{
+	"id", "org_id", "repository_id", "branch", "commit_sha",
+	"preview_config_name", "resolved_config_digest", "source_type", "source_id", "source_url",
+	"created_by_user_id", "request_id", "created_at",
+}
+
+var prTestPreviewLinkColumns = []string{
+	"id", "org_id", "preview_target_id", "link_type", "slug",
+	"repository_id", "pr_number", "created_at", "updated_at",
+}
+
+func ptrInt(v int) *int {
+	return &v
+}
+
 func newPRTestRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo string, now time.Time, body *string) []any {
 	return newPRTestRowWithTitle(prID, sessionID, orgID, repo, now, body, "Fix bug")
 }
@@ -2144,6 +2159,70 @@ func TestFormatPRBody_SessionLinkUsesConfiguredAppBaseURL(t *testing.T) {
 	body := svc.formatPRBody(context.Background(), run, nil)
 	require.Contains(t, body, "https://frontend.example.com/sessions/abcdef01-2345-6789-abcd-ef0123456789", "should use the configured app base URL for the session link")
 	require.NotContains(t, body, "//sessions/", "should trim trailing slashes when building the session link")
+}
+
+func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	targetID := uuid.New()
+	repo := &models.Repository{
+		ID:       repoID,
+		OrgID:    orgID,
+		FullName: "owner/repo",
+	}
+	run := &models.Session{
+		ID:                sessionID,
+		OrgID:             orgID,
+		RepositoryID:      &repoID,
+		TriggeredByUserID: &userID,
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_targets").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPreviewTargetColumns).AddRow(
+				targetID, orgID, repoID, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345",
+				"", "", string(models.PreviewSourceTypePullRequest), "owner/repo#42@abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42",
+				userID, nil, now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPreviewLinkColumns).AddRow(
+				uuid.New(), orgID, targetID, string(models.PreviewLinkTypePullRequest), "github/owner/repo/pull/42",
+				&repoID, ptrInt(42), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+			"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+			"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+			"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+			"preview_holding_container",
+		}))
+
+	svc := &PRService{
+		previews:              db.NewPreviewStore(mock),
+		previewOriginTemplate: "https://{id}.preview.143.dev",
+		logger:                zerolog.Nop(),
+	}
+
+	url := svc.prPreviewURL(context.Background(), run, repo, "owner", "repo", 42, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42")
+
+	require.Equal(t, "https://"+targetID.String()+".preview.143.dev", url, "PR preview URL should point at the durable preview-origin target host")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestFormatPRBody_WithIssueContext(t *testing.T) {

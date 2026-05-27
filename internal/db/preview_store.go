@@ -326,6 +326,53 @@ func (s *PreviewStore) GetActivePreviewForTarget(ctx context.Context, orgID, tar
 	return &row, nil
 }
 
+// GetLatestPreviewForTarget returns the active runtime, or newest runtime
+// history, for a branch preview target.
+func (s *PreviewStore) GetLatestPreviewForTarget(ctx context.Context, orgID, targetID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE org_id = @org_id AND preview_target_id = @preview_target_id
+		ORDER BY
+			CASE WHEN status IN %s THEN 0 ELSE 1 END,
+			created_at DESC
+		LIMIT 1`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":            orgID,
+		"preview_target_id": targetID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query latest preview for target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get latest preview for target: %w", err)
+	}
+	return &row, nil
+}
+
+// GetPreviewForPublicHost returns the active runtime, or newest runtime
+// history, addressable by a public preview host UUID. The host UUID is either a
+// runtime preview ID for legacy session previews or a stable preview target ID
+// for branch/PR previews.
+// lint:allow-no-orgid reason="preview gateway has no org session; the unguessable preview host UUID is the public lookup key"
+func (s *PreviewStore) GetPreviewForPublicHost(ctx context.Context, hostID uuid.UUID) (*models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE id = @host_id OR preview_target_id = @host_id
+		ORDER BY
+			CASE WHEN status IN %s THEN 0 ELSE 1 END,
+			created_at DESC
+		LIMIT 1`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"host_id": hostID})
+	if err != nil {
+		return nil, fmt.Errorf("query preview public host: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("get preview public host: %w", err)
+	}
+	return &row, nil
+}
+
 // AttachPreviewTarget links an existing runtime attempt to a branch preview
 // target. It is used when a live session sandbox already exactly matches the
 // requested branch target and can be reused instead of starting a cold clone.

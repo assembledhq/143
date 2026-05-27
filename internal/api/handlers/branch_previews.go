@@ -140,6 +140,7 @@ type branchPreviewResponse struct {
 	StableURL           string                         `json:"stable_url"`
 	PreviewURL          *string                        `json:"preview_url"`
 	ExpiresAt           *time.Time                     `json:"expires_at"`
+	StoppedAt           *time.Time                     `json:"stopped_at,omitempty"`
 	Services            []models.PreviewService        `json:"services,omitempty"`
 	Infrastructure      []models.PreviewInfrastructure `json:"infrastructure,omitempty"`
 	Logs                []models.PreviewLog            `json:"logs,omitempty"`
@@ -507,7 +508,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 			Branch:          head.Branch,
 			CommitSHA:       head.SHA,
 			SourceType:      models.PreviewSourceTypePullRequest,
-			SourceID:        fmt.Sprintf("%s/%s#%d", owner, repoName, number),
+			SourceID:        fmt.Sprintf("%s/%s#%d@%s", owner, repoName, number, head.SHA),
 			SourceURL:       head.HTMLURL,
 			CreatedByUserID: user.ID,
 		}
@@ -687,11 +688,11 @@ func (h *BranchPreviewHandler) ResolveLink(w http.ResponseWriter, r *http.Reques
 		StableURL:         h.stableURL(link.Slug),
 	}
 	expired := true
-	if active, activeErr := h.previews.GetActivePreviewForTarget(r.Context(), orgID, target.ID); activeErr == nil && active != nil {
-		resp = h.responseForPreview(link.Slug, target, active)
-		expired = previewInstanceExpired(active)
-	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load active preview", activeErr)
+	if latest, latestErr := h.previews.GetLatestPreviewForTarget(r.Context(), orgID, target.ID); latestErr == nil && latest != nil {
+		resp = h.responseForPreview(link.Slug, target, latest)
+		expired = previewInstanceExpired(latest)
+	} else if latestErr != nil && !errors.Is(latestErr, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview runtime", latestErr)
 		return
 	}
 	h.decoratePreviewResponse(r.Context(), orgID, &resp)
@@ -868,10 +869,10 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read this preview")
 				return
 			}
-			if active, activeErr := h.previews.GetActivePreviewForTarget(r.Context(), orgID, target.ID); activeErr == nil && active != nil {
-				resp = h.responseForPreview(target.ID.String(), target, active)
-			} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
-				writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load active preview", activeErr)
+			if latest, latestErr := h.previews.GetLatestPreviewForTarget(r.Context(), orgID, target.ID); latestErr == nil && latest != nil {
+				resp = h.responseForPreview(target.ID.String(), target, latest)
+			} else if latestErr != nil && !errors.Is(latestErr, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview runtime", latestErr)
 				return
 			}
 			h.decoratePreviewResponse(r.Context(), orgID, &resp)
@@ -888,6 +889,7 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 		CurrentPhase: instance.CurrentPhase,
 		StableURL:    h.stableURL(instance.ID.String()),
 		ExpiresAt:    &instance.ExpiresAt,
+		StoppedAt:    instance.StoppedAt,
 	}
 	if instance.PreviewTargetID != nil {
 		resp.StableURL = h.stableURL(instance.PreviewTargetID.String())
@@ -979,10 +981,8 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			StableURL:          h.stableURL(item.TargetID.String()),
 			ExpiresAt:          item.ExpiresAt,
 		}
-		if item.PreviewID != nil {
-			if url := h.previewURL(*item.PreviewID); url != "" {
-				resp.PreviewURL = &url
-			}
+		if url := h.previewURL(item.TargetID); url != "" {
+			resp.PreviewURL = &url
 		}
 		responses = append(responses, resp)
 	}
@@ -1332,11 +1332,16 @@ func (h *BranchPreviewHandler) resolveLatestTarget(ctx context.Context, orgID, u
 		return existing, nil
 	}
 	// PR source URLs point to a specific commit on the original PR; they are
-	// meaningless for a new head SHA, so clear them. The PR link is still
-	// retrievable via GetPullRequest using the stable source_id.
+	// meaningless for a new head SHA, so clear them. The stable preview_links
+	// slug keeps the PR URL stable while each head SHA gets its own target.
 	sourceURL := target.SourceURL
+	sourceID := target.SourceID
 	if target.SourceType == models.PreviewSourceTypePullRequest {
 		sourceURL = ""
+		if sourceID != "" {
+			prefix, _, _ := strings.Cut(sourceID, "@")
+			sourceID = prefix + "@" + head
+		}
 	}
 	latest := &models.PreviewTarget{
 		OrgID:             orgID,
@@ -1345,7 +1350,7 @@ func (h *BranchPreviewHandler) resolveLatestTarget(ctx context.Context, orgID, u
 		CommitSHA:         head,
 		PreviewConfigName: target.PreviewConfigName,
 		SourceType:        target.SourceType,
-		SourceID:          target.SourceID,
+		SourceID:          sourceID,
 		SourceURL:         sourceURL,
 		CreatedByUserID:   userID,
 	}
@@ -1373,9 +1378,10 @@ func (h *BranchPreviewHandler) responseForPreview(slug string, target *models.Pr
 		CurrentPhase:      instance.CurrentPhase,
 		StableURL:         h.stableURL(slug),
 		ExpiresAt:         &instance.ExpiresAt,
+		StoppedAt:         instance.StoppedAt,
 		RequestID:         derefStrPtr(target.RequestID),
 	}
-	if url := h.previewURL(instance.ID); url != "" {
+	if url := h.previewURL(target.ID); url != "" {
 		resp.PreviewURL = &url
 	}
 	return resp
@@ -1384,6 +1390,11 @@ func (h *BranchPreviewHandler) responseForPreview(slug string, target *models.Pr
 func (h *BranchPreviewHandler) decoratePreviewResponse(ctx context.Context, orgID uuid.UUID, resp *branchPreviewResponse) {
 	if resp == nil {
 		return
+	}
+	if resp.TargetID != uuid.Nil {
+		if url := h.previewURL(resp.TargetID); url != "" {
+			resp.PreviewURL = &url
+		}
 	}
 	if resp.RepositoryID != uuid.Nil {
 		if repo, err := h.repos.GetByID(ctx, orgID, resp.RepositoryID); err == nil {

@@ -178,6 +178,67 @@ func TestPreviewStore_GetActivePreviewForTargetScopesByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_GetLatestPreviewForTargetScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	orgID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)
+	row[2] = &targetID
+	row[7] = string(models.PreviewStatusStopped)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+
+	instance, err := store.GetLatestPreviewForTarget(context.Background(), orgID, targetID)
+	require.NoError(t, err, "GetLatestPreviewForTarget should return the newest target preview")
+	require.Equal(t, previewID, instance.ID, "GetLatestPreviewForTarget should return the matching preview instance")
+	require.Equal(t, &targetID, instance.PreviewTargetID, "GetLatestPreviewForTarget should preserve the target ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_GetPreviewForPublicHost(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	orgID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	stoppedAt := now.Add(-5 * time.Minute)
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)
+	row[2] = &targetID
+	row[7] = string(models.PreviewStatusStopped)
+	row[17] = &stoppedAt
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+
+	instance, err := store.GetPreviewForPublicHost(context.Background(), targetID)
+	require.NoError(t, err, "GetPreviewForPublicHost should return the newest runtime for the public host")
+	require.Equal(t, previewID, instance.ID, "GetPreviewForPublicHost should return the matching preview instance")
+	require.Equal(t, &targetID, instance.PreviewTargetID, "GetPreviewForPublicHost should preserve the target ID")
+	require.Equal(t, &stoppedAt, instance.StoppedAt, "GetPreviewForPublicHost should preserve stopped time")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpsertPreviewLink(t *testing.T) {
 	t.Parallel()
 
