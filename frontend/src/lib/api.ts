@@ -437,8 +437,8 @@ export const api = {
       ),
     endSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
-    retry: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`),
+    retry: (sessionId: string, body?: import('./types').RetrySessionRequest) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`, body ?? {}),
     cancelSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`),
     archive: (sessionId: string) =>

@@ -671,6 +671,139 @@ func sessionAnyArgs(count int) []interface{} {
 	return args
 }
 
+type capturingJSONArg struct {
+	dest *[]byte
+}
+
+func (c capturingJSONArg) Match(v interface{}) bool {
+	switch b := v.(type) {
+	case json.RawMessage:
+		*c.dest = append((*c.dest)[:0], b...)
+	case []byte:
+		*c.dest = append((*c.dest)[:0], b...)
+	case string:
+		*c.dest = append((*c.dest)[:0], []byte(b)...)
+	default:
+		return false
+	}
+	return true
+}
+
+var sessionThreadHandlerColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
+	"result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at", "archived_at",
+	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
+func sessionThreadHandlerRow(threadID, sessionID, orgID uuid.UUID, status models.ThreadStatus, turn int, now time.Time) []interface{} {
+	return []interface{}{
+		threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil,
+		"Main", nil, nil, status, nil, turn, &now,
+		nil, nil, nil, nil,
+		nil, nil, now, nil,
+		nil, float64(0), 0, nil,
+	}
+}
+
+func retrySessionRow(sessionID, orgID uuid.UUID, status models.SessionStatus, snapshotKey *string, pendingSnapshotKey *string, sandboxState models.SandboxState, diffStats json.RawMessage, now time.Time) []interface{} {
+	values := map[string]interface{}{
+		"id":                             sessionID,
+		"primary_issue_id":               nil,
+		"org_id":                         orgID,
+		"origin":                         models.SessionOriginManual,
+		"interaction_mode":               models.SessionInteractionModeInteractive,
+		"validation_policy":              models.SessionValidationPolicyOnTurnComplete,
+		"agent_type":                     models.AgentTypeClaudeCode,
+		"status":                         status,
+		"autonomy_level":                 models.SessionAutonomySemi,
+		"token_mode":                     models.SessionTokenModeLow,
+		"complexity_tier":                nil,
+		"container_id":                   nil,
+		"worker_node_id":                 nil,
+		"turn_holding_container":         false,
+		"started_at":                     nil,
+		"completed_at":                   nil,
+		"token_usage":                    nil,
+		"failure_explanation":            nil,
+		"failure_category":               nil,
+		"failure_next_steps":             nil,
+		"failure_retry_advised":          false,
+		"parent_session_id":              nil,
+		"revision_context":               nil,
+		"error":                          nil,
+		"result_summary":                 nil,
+		"diff":                           ptr("diff --git a/file b/file"),
+		"pm_plan_id":                     nil,
+		"title":                          nil,
+		"pm_approach":                    nil,
+		"pm_reasoning":                   nil,
+		"project_task_id":                nil,
+		"model_override":                 nil,
+		"reasoning_effort":               nil,
+		"triggered_by_user_id":           nil,
+		"agent_session_id":               nil,
+		"current_turn":                   1,
+		"last_activity_at":               now,
+		"sandbox_state":                  sandboxState,
+		"snapshot_key":                   snapshotKey,
+		"pending_snapshot_key":           pendingSnapshotKey,
+		"pending_snapshot_set_at":        nil,
+		"runtime_soft_deadline_at":       nil,
+		"runtime_hard_deadline_at":       nil,
+		"runtime_last_progress_at":       nil,
+		"runtime_last_progress_type":     models.RuntimeProgressType(""),
+		"runtime_last_progress_strength": models.RuntimeProgressStrength(""),
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            models.RuntimeStopReason(""),
+		"runtime_graceful_stop_at":       nil,
+		"checkpointed_at":                nil,
+		"checkpoint_kind":                models.CheckpointKind(""),
+		"checkpoint_capability":          models.CheckpointCapability(""),
+		"checkpoint_size_bytes":          int64(0),
+		"checkpoint_error":               nil,
+		"recovery_state":                 models.RecoveryState(""),
+		"recovery_queued_at":             nil,
+		"recovery_started_at":            nil,
+		"recovery_attempt_count":         0,
+		"target_branch":                  nil,
+		"working_branch":                 nil,
+		"base_commit_sha":                nil,
+		"repository_id":                  nil,
+		"diff_stats":                     diffStats,
+		"diff_history":                   json.RawMessage(`[{"files_changed":1}]`),
+		"input_manifest":                 nil,
+		"archived_at":                    nil,
+		"archived_by_user_id":            nil,
+		"automation_run_id":              nil,
+		"pr_creation_state":              models.PRCreationStateIdle,
+		"pr_creation_error":              nil,
+		"pr_push_state":                  models.PRPushStateIdle,
+		"pr_push_error":                  nil,
+		"branch_creation_state":          models.BranchCreationStateIdle,
+		"branch_creation_error":          nil,
+		"branch_url":                     nil,
+		"diff_collected_at":              nil,
+		"latest_diff_snapshot_id":        nil,
+		"has_unpushed_changes":           false,
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         nil,
+		"linear_prepare_state":           models.LinearPrepareStateNone,
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
+	}
+	row := make([]interface{}, len(sessionColumns))
+	for i, column := range sessionColumns {
+		row[i] = values[column]
+	}
+	return row
+}
+
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
@@ -8130,6 +8263,193 @@ func TestSessionHandler_PushChangesToPR_SnapshotNotCaptured(t *testing.T) {
 	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when no snapshot was captured")
 	require.Contains(t, w.Body.String(), "SNAPSHOT_NOT_CAPTURED", "error code should indicate missing checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RetrySession_DefaultsToCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/session.tar"
+	diffStats := json.RawMessage(`{"files_changed":7}`)
+	handler := newSessionHandler(t, mock)
+	handler.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop()))
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusFailed, &snapshotKey, nil, models.SandboxStateSnapshotted, diffStats, now)...))
+	mock.ExpectQuery("session_messages").
+		WithArgs(sessionAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerColumns).AddRow(sessionThreadHandlerRow(threadID, sessionID, orgID, models.ThreadStatusFailed, 2, now)...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusRunning, &snapshotKey, nil, models.SandboxStateSnapshotted, diffStats, now)...))
+	mock.ExpectQuery("UPDATE session_threads").
+		WithArgs(sessionAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerColumns).AddRow(sessionThreadHandlerRow(threadID, sessionID, orgID, models.ThreadStatusRunning, 2, now)...))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(sessionAnyArgs(11)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
+
+	var jobPayload []byte
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&jobPayload), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	var auditDetails []byte
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingJSONArg{dest: &auditDetails},
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "checkpoint retry should return the claimed running session: %s", w.Body.String())
+
+	var resp models.SingleResponse[models.Session]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as a session response")
+	require.Equal(t, models.SessionStatusRunning, resp.Data.Status, "checkpoint retry should mark the session running")
+	require.JSONEq(t, string(diffStats), string(resp.Data.DiffStats), "checkpoint retry should preserve existing diff stats")
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(jobPayload, &payload), "job payload should decode as string map")
+	require.Equal(t, sessionID.String(), payload["session_id"], "continue_session payload should include the session id")
+	require.Equal(t, threadID.String(), payload["thread_id"], "continue_session payload should include the retry thread id")
+
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(auditDetails, &details), "audit details should decode as an object")
+	require.Equal(t, string(models.SessionRetryModeCheckpoint), details["retry_mode"], "audit details should record checkpoint retry mode")
+	require.Equal(t, "continue_session", details["job_type"], "audit details should record continue_session job type")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RetrySession_CheckpointRejectsMissingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	diffStats := json.RawMessage(`{"files_changed":7}`)
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusFailed, nil, nil, models.SandboxStateNone, diffStats, now)...))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"checkpoint"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "checkpoint retry should reject sessions without a saved checkpoint")
+	require.Contains(t, w.Body.String(), "CHECKPOINT_UNAVAILABLE", "error response should explain the missing checkpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "checkpoint retry should not issue any diff-clearing update")
+}
+
+func TestSessionHandler_RetrySession_StartOverUsesRunAgent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	diffStats := json.RawMessage(`{"files_changed":7}`)
+
+	mock.ExpectQuery("SELECT status FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("failed"))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	var jobPayload []byte
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&jobPayload), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusPending, nil, nil, models.SandboxStateNone, nil, now)...))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"start_over"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "start-over retry should succeed for a failed session")
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(jobPayload, &payload), "job payload should decode as string map")
+	require.Equal(t, sessionID.String(), payload["session_id"], "run_agent payload should include the session id")
+	require.Empty(t, payload["thread_id"], "start-over retry should not enqueue a thread-scoped continuation")
+
+	var resp models.SingleResponse[models.Session]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as a session response")
+	require.Nil(t, resp.Data.DiffStats, "start-over retry should return cleared diff stats")
+	require.NotEqual(t, string(diffStats), string(resp.Data.DiffStats), "start-over retry should not preserve prior diff stats")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RetrySession_InvalidMode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"fresh"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "invalid retry mode should return 400")
+	require.Contains(t, w.Body.String(), "INVALID_RETRY_MODE", "error response should identify retry mode validation failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid mode should not hit the database")
 }
 
 func TestSessionHandler_PushChangesToPR_SessionNotFound(t *testing.T) {
