@@ -161,6 +161,13 @@ describe('SessionDetailPage', () => {
     expect(elements.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('protects the conversation workspace from collapsing on compact desktop widths', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-conversation-workspace')).toHaveClass('md:min-w-[440px]');
+  });
+
   it('updates the browser tab title with the session title', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
