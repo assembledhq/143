@@ -41,6 +41,17 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <Button
             asChild
             variant="ghost"
+            className={`${type.button} ${
+              isDark
+                ? "text-white/60 hover:bg-white/5 hover:text-white"
+                : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
+            }`}
+          >
+            <Link href="/docs">Docs</Link>
+          </Button>
+          <Button
+            asChild
+            variant="ghost"
             className={`hidden ${type.button} sm:inline-flex ${
               isDark
                 ? "text-white/60 hover:bg-white/5 hover:text-white"
