@@ -279,10 +279,12 @@ Supported v1 formats should be:
 | Format | Use |
 |---|---|
 | `env` | Render `.env` style `KEY=value` files. |
-| `json` | Render structured config such as `development.conf.json`. |
-| `raw` | Write one complete secret value as a file, useful for certificates or service account JSON. |
+| `json` | Render structured config such as `development.conf.json`, either from structured `content` with `secret:` references or from one managed secret value containing the whole JSON document. The resolved document must parse as JSON before the bundle is accepted. |
+| `raw` | Write one complete secret value as a file, useful for certificates, PEM blocks, or other non-JSON blobs. |
 
 YAML and template rendering can come later. JSON plus env files cover the common cases without making the first version too flexible.
+
+Admins should not need to base64-encode JSON just to survive env or shell quoting. The product stores managed values as strings and the preview runtime writes generated files from bytes; implementation may base64 those bytes internally while crossing a shell boundary, but that is a runtime transport detail, not part of the admin or repo-authored contract. User-provided base64 is still acceptable when the application itself expects base64, but it should not be required for `development.conf.json`.
 
 ## Source Model
 
