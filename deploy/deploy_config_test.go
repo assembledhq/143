@@ -716,6 +716,19 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 
+func TestDetachedWorkerDeployReadsDatabaseEnvFromRemoteEnvFile(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `DB_HOST=$(printf '%q' "$(read_worker_env_value DB_HOST)")`, "detached worker deploy should bake DB_HOST from the refreshed remote .env file")
+	require.Contains(t, deployText, `DB_PASSWORD=$(printf '%q' "$(read_worker_env_value DB_PASSWORD)")`, "detached worker deploy should bake DB_PASSWORD from the refreshed remote .env file")
+	require.NotContains(t, deployText, `DB_HOST='$DB_HOST'`, "detached worker deploy must not expand an unset parent-shell DB_HOST under set -u")
+	require.NotContains(t, deployText, `DB_PASSWORD='$DB_PASSWORD'`, "detached worker deploy must not expand an unset parent-shell DB_PASSWORD under set -u")
+}
+
 func TestWorkerComposeConfiguresSessionExecutorNetwork(t *testing.T) {
 	t.Parallel()
 
