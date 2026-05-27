@@ -142,7 +142,15 @@ func renderPreviewSecretFile(services []string, values map[string]string, output
 	switch format {
 	case "json":
 		var v any
-		if len(output.Content) == 0 {
+		if output.Value != "" {
+			resolvedValue, err := resolvePreviewSecretExpression(output.Value, values)
+			if err != nil {
+				return models.PreviewRuntimeSecretFile{}, err
+			}
+			if err := json.Unmarshal([]byte(resolvedValue), &v); err != nil {
+				return models.PreviewRuntimeSecretFile{}, fmt.Errorf("parse json file value: %w", err)
+			}
+		} else if len(output.Content) == 0 {
 			v = map[string]any{}
 		} else if err := json.Unmarshal(output.Content, &v); err != nil {
 			return models.PreviewRuntimeSecretFile{}, fmt.Errorf("parse json file content: %w", err)

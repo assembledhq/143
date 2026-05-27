@@ -50,7 +50,8 @@ Use `preview.default` to auto-select one config. If there are multiple configs a
 <ConfigField name="preview.services" type="object" description="Map of service name to service config." />
 <ConfigField name="preview.infrastructure" type="object" description="Optional managed sidecars such as Postgres or Redis." />
 <ConfigField name="preview.resources" type="object" description="Optional CPU, memory, and ephemeral-storage requests and limits." />
-<ConfigField name="preview.credentials" type="object" required description='Credential injection policy. Use { "mode": "none" } if no secrets are needed.' />
+<ConfigField name="preview.secrets" type="object | object[]" description="Admin-managed preview secret bundle reference. Use this for secret env vars and generated config files." />
+<ConfigField name="preview.credentials" type="object" description='Legacy env-only credential injection policy. Omit it or use { "mode": "none" } if no legacy credential set is needed.' />
 <ConfigField name="preview.network" type="object" required description='Network policy. Use { "mode": "managed" } for the default sandbox policy.' />
 <ConfigField name="preview.progressive" type="boolean" description="For multi-service previews, allow partial readiness once the primary service is ready." />
 <ConfigField name="preview.command" type="string[]" description="Single-service shorthand command." />
@@ -102,14 +103,46 @@ Supported templates:
 
 Supported `inject_env` placeholders are `{{username}}`, `{{password}}`, `{{host}}`, `{{port}}`, and `{{database}}`.
 
+## Secret bundle fields
+
+New preview configs should prefer `preview.secrets`. The legacy `preview.credentials` shape remains supported for env-var-only credential sets.
+
+<ConfigField name="preview.secrets.bundle" type="string" required description="Name of the admin-managed preview secret bundle." />
+<ConfigField name="preview.secrets.services" type="string[]" required description="Service names that receive env outputs from the bundle. File outputs are workspace-wide and must list every preview service." />
+<ConfigField name="preview.secrets.env" type="string[]" description="Non-secret hint listing required env var names." />
+<ConfigField name="preview.secrets.files" type="string[]" description="Non-secret hint listing generated secret file paths, such as `development.conf.json`." />
+
+`preview.secrets` may be a single object or an array of objects. The repo config never contains secret values. It only declares the bundle name, service scope, and expected output names.
+
+Admin-managed bundle outputs support:
+
+| Output format | Use |
+|---|---|
+| `env` | Inject named env vars into scoped services. |
+| `json` | Generate a JSON file from structured content or from one managed secret value containing the whole JSON document. The resolved value must parse as JSON. |
+| `raw` | Generate a file from one complete secret value, useful for PEM blocks or other non-JSON blobs. |
+
+For a whole JSON file such as `development.conf.json`, store the raw JSON document as the managed secret value and configure the file output as:
+
+```json
+{
+  "type": "file",
+  "path": "development.conf.json",
+  "format": "json",
+  "value": "secret:development_conf_json"
+}
+```
+
+Do not base64-encode JSON just to preserve quotes or newlines. 143 writes generated files as bytes and handles runtime shell transport internally.
+
 ## Credential fields
 
-<ConfigField name="preview.credentials.mode" type="string" required description='Use "none" for no secrets or "managed_env" for a managed credential set.' />
+<ConfigField name="preview.credentials.mode" type="string" description='Use "none" for no legacy credentials or "managed_env" for a legacy managed credential set.' />
 <ConfigField name="preview.credentials.credential_set" type="string" description="Name of the admin-managed credential set to use." />
 <ConfigField name="preview.credentials.env" type="string[]" description="Allowlist of environment variable names to inject from the credential set." />
 <ConfigField name="preview.credentials.inject_into" type="string[]" description="Service names that receive these credential env vars." />
 
-Secret values do not belong in `.143/config.json`. Put public, non-secret values in service `env`; reference secrets with `preview.credentials`.
+Secret values do not belong in `.143/config.json`. Put public, non-secret values in service `env`; reference secrets with `preview.secrets` or legacy `preview.credentials`.
 
 ## Network fields
 
@@ -138,6 +171,6 @@ Every service receives:
 
 Preview config is repository content. For fields that can expose secrets or network access, 143 reads from the base branch rather than an agent diff.
 
-For non-connected previews, service runtime fields can come from the session diff. For connected previews, launch behavior is pinned to the base branch. A preview is connected when `preview.credentials.mode` is not `none` or `preview.network.destinations` is non-empty.
+For non-connected previews, service runtime fields can come from the session diff. For connected previews, launch behavior is pinned to the base branch. A preview is connected when `preview.secrets` is present, `preview.credentials.mode` is not `none`, or `preview.network.destinations` is non-empty.
 
 For task-based examples, see [Preview environments](/docs/guides/previews). For repo-wide setup, see [Repo config](/docs/guides/repo-config).
