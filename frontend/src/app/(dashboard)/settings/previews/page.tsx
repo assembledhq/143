@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, Trash2 } from "lucide-react";
+import { KeyRound, Plus, Save, Trash2 } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -13,9 +13,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
-import type { ListResponse, PreviewAPIToken, Repository } from "@/lib/types";
+import type { ListResponse, PreviewAPIToken, PreviewSecretBundleSummary, Repository } from "@/lib/types";
 
 const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
+
+type SecretEnvRow = {
+  key: string;
+  value: string;
+};
 
 export default function PreviewSettingsPage() {
   const queryClient = useQueryClient();
@@ -23,10 +28,16 @@ export default function PreviewSettingsPage() {
   const [scopes, setScopes] = useState<string[]>([...SCOPES]);
   const [repositoryIDs, setRepositoryIDs] = useState<string[]>([]);
   const [createdToken, setCreatedToken] = useState("");
+  const [bundleName, setBundleName] = useState("");
+  const [envRows, setEnvRows] = useState<SecretEnvRow[]>([{ key: "", value: "" }]);
 
   const tokensQuery = useQuery<ListResponse<PreviewAPIToken>>({
     queryKey: ["preview-api-tokens"],
     queryFn: () => api.previews.apiTokens.list(),
+  });
+  const secretBundlesQuery = useQuery<ListResponse<PreviewSecretBundleSummary>>({
+    queryKey: ["preview-secret-bundles"],
+    queryFn: () => api.previews.secretBundles.list(),
   });
   const repositoriesQuery = useQuery<ListResponse<Repository>>({
     queryKey: ["repositories"],
@@ -49,9 +60,25 @@ export default function PreviewSettingsPage() {
       void queryClient.invalidateQueries({ queryKey: ["preview-api-tokens"] });
     },
   });
+  const upsertSecretBundle = useMutation({
+    mutationFn: () => api.previews.secretBundles.upsert(bundleName.trim(), collectEnvRows(envRows)),
+    onSuccess: () => {
+      setBundleName("");
+      setEnvRows([{ key: "", value: "" }]);
+      void queryClient.invalidateQueries({ queryKey: ["preview-secret-bundles"] });
+    },
+  });
+  const deleteSecretBundle = useMutation({
+    mutationFn: (name: string) => api.previews.secretBundles.delete(name),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["preview-secret-bundles"] });
+    },
+  });
 
   const tokens = tokensQuery.data?.data ?? [];
+  const secretBundles = secretBundlesQuery.data?.data ?? [];
   const repositories = repositoriesQuery.data?.data ?? [];
+  const bundleEnv = collectEnvRows(envRows);
 
   function toggleScope(scope: string) {
     setScopes((current) => current.includes(scope) ? current.filter((item) => item !== scope) : [...current, scope]);
@@ -61,10 +88,83 @@ export default function PreviewSettingsPage() {
     setRepositoryIDs((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }
 
+  function updateEnvRow(index: number, patch: Partial<SecretEnvRow>) {
+    setEnvRows((current) => current.map((row, i) => i === index ? { ...row, ...patch } : row));
+  }
+
+  function removeEnvRow(index: number) {
+    setEnvRows((current) => current.length === 1 ? [{ key: "", value: "" }] : current.filter((_, i) => i !== index));
+  }
+
   return (
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader title="Preview API" description="Manage scoped tokens for branch and pull request previews." />
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <KeyRound className="h-4 w-4" />
+              Secret bundles
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,420px)]">
+              <div className="space-y-3">
+                {secretBundles.map((bundle) => (
+                  <div key={bundle.id || bundle.name} className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-1">
+                      <p className="font-medium text-foreground">{bundle.name}</p>
+                      <div className="flex flex-wrap gap-1">
+                        {bundle.env_names.map((envName) => <Badge key={envName} variant="secondary">{envName}</Badge>)}
+                      </div>
+                      <p className="text-xs text-muted-foreground">Update this bundle by re-entering every value for the env vars it should contain.</p>
+                    </div>
+                    <Button type="button" variant="outline" onClick={() => deleteSecretBundle.mutate(bundle.name)} disabled={deleteSecretBundle.isPending}>
+                      <Trash2 className="h-4 w-4" />
+                      Delete
+                    </Button>
+                  </div>
+                ))}
+                {!secretBundles.length && !secretBundlesQuery.isLoading ? (
+                  <p className="text-sm text-muted-foreground">No preview secret bundles.</p>
+                ) : null}
+              </div>
+
+              <div className="space-y-4 rounded-md border border-border p-3">
+                <div className="space-y-2">
+                  <Label htmlFor="preview-secret-bundle-name">Bundle name</Label>
+                  <Input id="preview-secret-bundle-name" value={bundleName} onChange={(event) => setBundleName(event.target.value)} placeholder="staging" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Environment variables</Label>
+                  <div className="space-y-2">
+                    {envRows.map((row, index) => (
+                      <div key={index} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                        <Input value={row.key} onChange={(event) => updateEnvRow(index, { key: event.target.value.toUpperCase() })} placeholder="API_TOKEN" aria-label="Environment variable name" />
+                        <Input value={row.value} onChange={(event) => updateEnvRow(index, { value: event.target.value })} placeholder="Secret value" type="password" aria-label="Environment variable value" />
+                        <Button type="button" variant="outline" size="icon" onClick={() => removeEnvRow(index)} aria-label="Remove environment variable">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <Button type="button" variant="outline" onClick={() => setEnvRows((current) => [...current, { key: "", value: "" }])}>
+                    <Plus className="h-4 w-4" />
+                    Add variable
+                  </Button>
+                </div>
+                {upsertSecretBundle.isError ? (
+                  <p className="text-sm text-destructive">{upsertSecretBundle.error instanceof Error ? upsertSecretBundle.error.message : "Secret bundle could not be saved."}</p>
+                ) : null}
+                <Button type="button" onClick={() => upsertSecretBundle.mutate()} disabled={!bundleName.trim() || Object.keys(bundleEnv).length === 0 || upsertSecretBundle.isPending}>
+                  <Save className="h-4 w-4" />
+                  Save bundle
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
@@ -148,4 +248,14 @@ export default function PreviewSettingsPage() {
       </div>
     </PageContainer>
   );
+}
+
+function collectEnvRows(rows: SecretEnvRow[]): Record<string, string> {
+  return rows.reduce<Record<string, string>>((acc, row) => {
+    const key = row.key.trim();
+    if (key && row.value) {
+      acc[key] = row.value;
+    }
+    return acc;
+  }, {});
 }

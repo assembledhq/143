@@ -1429,6 +1429,61 @@ func TestRecyclePreview_ReconstructsInputFromStoredState(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRecyclePreview_SecretResolutionFailureMarksFailed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	cfg := validPreviewConfig()
+	cfg.Secrets = []models.PreviewSecretBundleRef{{
+		Bundle:   "repo-dev",
+		Services: []string{"web"},
+		Env:      []string{"DATABASE_URL"},
+	}}
+	recycleConfig, err := json.Marshal(cfg)
+	require.NoError(t, err, "test preview config should marshal")
+
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	row[22] = recycleConfig
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(row...),
+		)
+	// Atomic conditional status transition (UpdatePreviewStatusIfActive).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// RevokeAllForPreview during recycle.
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	expectUpdatePreviewStatusFailed(mock)
+
+	mgr := NewManager(ManagerConfig{
+		Store:          db.NewPreviewStore(mock),
+		Provider:       &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SecretResolver: NewPreviewSecretResolver(&fakePreviewSecretBundleReader{}),
+		Logger:         zerolog.Nop(),
+		WorkerNodeID:   "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "RecyclePreview should fail when secret bundle resolution fails")
+	require.Contains(t, err.Error(), "preview secrets require a repository id", "RecyclePreview should return the secret resolution error")
+	require.NoError(t, mock.ExpectationsWereMet(), "secret resolution failure should mark the preview failed")
+}
+
 func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {
 	t.Parallel()
 

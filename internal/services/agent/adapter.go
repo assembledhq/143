@@ -439,6 +439,14 @@ type SandboxProvider interface {
 	ExecStream(ctx context.Context, sb *Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
 }
 
+// ExecStreamOptions controls a streaming sandbox exec without requiring the
+// caller to encode environment or working-directory details into shell text.
+type ExecStreamOptions struct {
+	Cmd        []string
+	Env        map[string]string
+	WorkingDir string
+}
+
 // DefaultSandboxTimeout is the default maximum wall-clock duration for an
 // agent execution inside a sandbox. Org admins can override this per-org via
 // OrgSettings.MaxSessionDurationSeconds.
