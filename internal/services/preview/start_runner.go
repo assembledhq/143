@@ -64,8 +64,10 @@ type branchPreviewGitHub interface {
 }
 
 func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
-	snapshotCache := previewStartupCache(cfg.SnapshotCache)
-	if snapshotCache == nil && cfg.Manager != nil {
+	var snapshotCache previewStartupCache
+	if cfg.SnapshotCache != nil {
+		snapshotCache = cfg.SnapshotCache
+	} else if cfg.Manager != nil {
 		snapshotCache = cfg.Manager.SnapshotCache()
 	}
 	return &StartRunner{

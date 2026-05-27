@@ -121,6 +121,21 @@ func TestStartRunnerReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	require.Nil(t, cfg, "invalid committed preview config should not return a fallback config")
 }
 
+func TestNewStartRunner_SnapshotCacheDoesNotUseTypedNilInterface(t *testing.T) {
+	t.Parallel()
+
+	withoutCache := NewStartRunner(StartRunnerConfig{Logger: zerolog.Nop()})
+	require.True(t, withoutCache.snapshotCache == nil, "omitted snapshot cache should leave a nil interface")
+
+	cache := &SnapshotCache{}
+	manager := NewManager(ManagerConfig{SnapshotCache: cache, Logger: zerolog.Nop()})
+	withManagerCache := NewStartRunner(StartRunnerConfig{Manager: manager, Logger: zerolog.Nop()})
+
+	got, ok := withManagerCache.snapshotCache.(*SnapshotCache)
+	require.True(t, ok, "runner should receive the manager snapshot cache when config cache is omitted")
+	require.Same(t, cache, got, "runner should use the manager snapshot cache instead of a typed nil interface")
+}
+
 type fakePreviewStartupCache struct {
 	findKey       string
 	findRepoID    uuid.UUID
