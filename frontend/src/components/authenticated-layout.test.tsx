@@ -64,7 +64,7 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/projects");
+    expect(screen.getAllByRole("link", { name: "Projects" }).every((link) => link.getAttribute("href") === "/projects")).toBe(true);
   });
 
   it("shows Autopilot in the primary navigation", () => {
@@ -86,6 +86,39 @@ describe("AuthenticatedLayout", () => {
 
     const sidebar = container.querySelector("[data-testid='app-sidebar']");
     expect(sidebar).toHaveStyle({ "--app-sidebar-w": "236px" });
+  });
+
+  it("collapses the app sidebar to a slim rail between mobile and wide desktop", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const fullSidebar = container.querySelector("[data-testid='app-sidebar']");
+    expect(fullSidebar).toHaveClass("hidden");
+    expect(fullSidebar).toHaveClass("xl:flex");
+
+    const compactRail = container.querySelector("[data-testid='app-sidebar-rail']");
+    expect(compactRail).toHaveClass("hidden");
+    expect(compactRail).toHaveClass("md:flex");
+    expect(compactRail).toHaveClass("xl:hidden");
+    expect(compactRail).toHaveClass("w-14");
+  });
+
+  it("keeps workspace and account actions reachable from the compact rail", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open workspace menu" }));
+
+    expect(await screen.findByText("Workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Log out" })).toBeInTheDocument();
   });
 
   it("restores the app sidebar width from localStorage after mount", async () => {
