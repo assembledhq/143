@@ -426,6 +426,20 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("Preview")).toBeInTheDocument();
   });
 
+  it("marks services active while a preview starts before service rows arrive", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+    });
+
+    const servicesCard = screen.getByText("Services").closest("div");
+    expect(servicesCard).not.toBeNull();
+    expect(servicesCard).toHaveClass("border-primary/30");
+  });
+
   it("does not show duplicated startup guidance or checklist by default", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
 

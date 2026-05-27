@@ -147,8 +147,10 @@ function buildStartupChecklist(
 
   const serviceFailed = services.find((service) => service.status === "failed");
   const serviceStarting = services.find((service) => service.status === "starting");
+  const anyServiceReady = services.some((service) => service.status === "ready");
   const allServicesReady =
     services.length > 0 && services.every((service) => service.status === "ready");
+  const servicesCanStart = infrastructure.length === 0 || allInfraHealthy || anyServiceReady;
 
   const openPreviewState: StartupChecklistStepState =
     status === "failed"
@@ -218,6 +220,9 @@ function buildStartupChecklist(
   } else if (serviceStarting) {
     serviceState = "active";
     serviceDetail = `${serviceStarting.service_name} is starting`;
+  } else if (status === "starting" && servicesCanStart) {
+    serviceState = "active";
+    serviceDetail = "Waiting for services to boot.";
   } else {
     serviceState = "pending";
     serviceDetail = "Waiting for services to boot.";
