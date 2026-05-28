@@ -752,7 +752,7 @@ describe('SessionDetailPage', () => {
 
     expect(screen.getByTestId('session-main-header')).toHaveClass('h-14');
     expect(screen.getByTestId('session-detail-header')).toHaveClass('h-14');
-    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-full');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
   });
 
   it('clips crowded session header metadata before it can overlap the detail toggle', async () => {
@@ -1139,8 +1139,8 @@ describe('SessionDetailPage', () => {
 
     expect(mainHeader).toHaveClass('h-14', 'border-b');
     expect(detailHeader).toHaveClass('h-14', 'border-b');
-    expect(detailHeaderBar).toHaveClass('h-full');
-    expect(detailHeaderBar).not.toHaveClass('h-14');
+    expect(detailHeaderBar).toHaveClass('h-14');
+    expect(detailHeaderBar).not.toHaveClass('h-full');
   });
 
   it('shows the desktop agent tab row as soon as a second tab is being created', async () => {
@@ -4938,6 +4938,38 @@ describe('SessionDetailPage', () => {
     expect(alert).toHaveTextContent("Couldn't create the PR");
     expect(alert).toHaveTextContent('GitHub rejected the branch push.');
     expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('lets the detail header grow when showing a PR error notice', async () => {
+    const sessionWithPRFailure: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'failed',
+      pr_creation_error: 'No changes to push.',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithPRFailure } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't create the PR");
+    expect(screen.getByTestId('session-detail-header')).toHaveClass('min-h-14');
+    expect(screen.getByTestId('session-detail-header')).not.toHaveClass('h-14');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
   });
 
   it('shows the PR authorship modal and falls back to app mode when requested', async () => {
