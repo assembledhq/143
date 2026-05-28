@@ -387,6 +387,19 @@ func TestSessionExecutorStore_ReclaimLostClearsTerminalJobOrphans(t *testing.T) 
 	require.Contains(t, body, "stale.job_status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter')", "ReclaimLost should clear active executor rows for terminal jobs")
 }
 
+func TestSessionExecutorStore_ReclaimLostDefersWhileThreadRuntimeLeaseActive(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("session_executor_store.go")
+	require.NoError(t, err, "test should read session executor store source")
+
+	body := string(src)
+	require.Contains(t, body, "NOT EXISTS (\n\t\t\t\tSELECT 1\n\t\t\t\tFROM thread_runtimes tr", "ReclaimLost should consult active thread runtimes before requeueing a session job")
+	require.Contains(t, body, "tr.thread_id = se.thread_id", "ReclaimLost should gate recovery on the same thread runtime, not unrelated session work")
+	require.Contains(t, body, "tr.lease_expires_at > now()", "ReclaimLost should defer recovery while the thread runtime lease is still valid")
+	require.NotContains(t, body, "tr.lease_expires_at IS NULL OR tr.lease_expires_at > now()", "ReclaimLost should not treat NULL runtime leases as active because runtime reapers consider NULL leases expired")
+}
+
 func TestJobStore_GetRunningForSessionExecutor(t *testing.T) {
 	t.Parallel()
 

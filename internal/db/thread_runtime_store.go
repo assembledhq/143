@@ -3,12 +3,15 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -43,6 +46,8 @@ type ThreadRuntimeReclaimResult struct {
 	ResetInboxEntries      int64
 	UnknownDeliveryEntries int64
 }
+
+var ErrActiveThreadRuntimeExists = errors.New("active thread runtime already exists")
 
 const threadRuntimeColumns = `id, org_id, session_id, thread_id, sandbox_id, container_id,
 	runtime_handle_id, agent_type, model, status, owner_node_id, lease_token,
@@ -138,13 +143,26 @@ func (s *ThreadRuntimeStore) CreateStarting(ctx context.Context, orgID uuid.UUID
 		"lease_seconds":                leaseSeconds,
 	})
 	if err != nil {
+		if isActiveThreadRuntimeUniqueViolation(err) {
+			return models.ThreadRuntime{}, fmt.Errorf("%w: %w", ErrActiveThreadRuntimeExists, err)
+		}
 		return models.ThreadRuntime{}, fmt.Errorf("create thread runtime: %w", err)
 	}
 	runtime, err := pgx.CollectOneRow(rows, scanThreadRuntimeRow)
 	if err != nil {
+		if isActiveThreadRuntimeUniqueViolation(err) {
+			return models.ThreadRuntime{}, fmt.Errorf("%w: %w", ErrActiveThreadRuntimeExists, err)
+		}
 		return models.ThreadRuntime{}, fmt.Errorf("create thread runtime: %w", err)
 	}
 	return runtime, nil
+}
+
+func isActiveThreadRuntimeUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgerrcode.UniqueViolation &&
+		pgErr.ConstraintName == "idx_thread_runtimes_one_active"
 }
 
 func scanThreadRuntimeRow(row pgx.CollectableRow) (models.ThreadRuntime, error) {

@@ -1436,6 +1436,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Msg("run_agent interrupted by system stop; retrying turn")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
+			if errors.Is(err, agent.ErrThreadRuntimeAlreadyActive) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("thread runtime already active; retrying after lease recovery")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
 			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
 				retryAfter := 5 * time.Second
 				targetNodeID := models.SessionWorkerTarget(&run)
@@ -1908,6 +1916,15 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session interrupted by system stop; retrying turn")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
+			if errors.Is(err, agent.ErrThreadRuntimeAlreadyActive) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("thread runtime already active; retrying after lease recovery")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrStalePullRequestHead) {
