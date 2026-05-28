@@ -44,6 +44,14 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
+const (
+	uploadAPIPath               = "/api/v1/uploads"
+	uploadFilesURLPrefix        = "/api/v1/uploads/files"
+	uploadFilesRoutePattern     = uploadFilesURLPrefix + "/*"
+	uploadMaxRequestBodyMiB     = 11
+	uploadMaxRequestBodyBytes   = uploadMaxRequestBodyMiB << 20
+)
+
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
@@ -685,14 +693,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		)
 		if awsErr != nil {
 			logger.Warn().Err(awsErr).Msg("failed to load AWS config for upload S3 — falling back to file uploads")
-			uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+			uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, uploadFilesURLPrefix)
 		} else {
 			s3Client := s3.NewFromConfig(awsCfg)
 			uploadStore = storage.NewS3UploadStore(s3Client, cfg.UploadS3Bucket, cfg.UploadS3Prefix)
 			logger.Info().Str("bucket", cfg.UploadS3Bucket).Str("prefix", cfg.UploadS3Prefix).Msg("upload S3 store configured")
 		}
 	} else {
-		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
+		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, uploadFilesURLPrefix)
 	}
 	uploadHandler := handlers.NewUploadHandler(uploadStore)
 	uploadHandler.SetMembershipStore(membershipStore)
@@ -728,7 +736,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	apiRoutes := chi.NewRouter()
-	apiRoutes.Use(middleware.MaxBodySize(1 << 20)) // 1MB request body limit
+	apiRoutes.Use(middleware.MaxBodySizeForPaths(middleware.DefaultMaxBodyBytes, map[string]int64{
+		uploadAPIPath: uploadMaxRequestBodyBytes,
+	})) // 1MB default request body limit; uploads allow a 10MB file plus multipart overhead.
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
 
 	apiRoutes.Group(func(r chi.Router) {
@@ -908,7 +918,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/pull-requests/stream", pullRequestHandler.StreamUpdates)
 				r.Get("/api/v1/pull-requests/{id}/health", pullRequestHandler.GetHealth)
 				r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
-				r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
+				r.Get(uploadFilesRoutePattern, uploadHandler.ServeUpload)
 				r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
 				r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
@@ -1000,8 +1010,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/users/me/github/disconnect", githubStatusHandler.Disconnect)
 
 				r.Post("/api/v1/issues/{id}/fix", sessionHandler.TriggerFix)
-				// File upload (higher body-size limit for multipart uploads).
-				r.With(middleware.MaxBodySize(11<<20)).Post("/api/v1/uploads", uploadHandler.Upload)
+				r.Post(uploadAPIPath, uploadHandler.Upload)
 
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
