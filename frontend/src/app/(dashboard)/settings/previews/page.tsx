@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
-import { Copy, KeyRound, Pencil, Plus, TestTube2, Trash2 } from "lucide-react";
+import { Copy, HelpCircle, KeyRound, Pencil, Plus, TestTube2, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api, ApiError } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
@@ -69,6 +70,7 @@ type BundleDialogMode =
   | { type: "edit"; bundle: PreviewSecretBundleSummary };
 
 type BundleFormState = {
+  repositoryId: string;
   name: string;
   rows: SecretValueRow[];
   fileOutputsJSON: string;
@@ -79,8 +81,8 @@ function makeRow(overrides?: Partial<Omit<SecretValueRow, "rowId">>): SecretValu
   return { rowId: crypto.randomUUID(), key: "", value: "", exposeAsEnv: true, ...overrides };
 }
 
-function makeEmptyBundleForm(): BundleFormState {
-  return { name: "", rows: [makeRow()], fileOutputsJSON: "" };
+function makeEmptyBundleForm(repositoryId = ""): BundleFormState {
+  return { repositoryId, name: "", rows: [makeRow()], fileOutputsJSON: "" };
 }
 
 export default function PreviewSettingsPage() {
@@ -151,6 +153,8 @@ function PreviewSecretsSection() {
     },
     onSuccess: (_data, { repositoryId }) => {
       toast.success("Preview secret bundle saved");
+      setSelectedRepositoryId(repositoryId);
+      void setRepoParam(repositoryId);
       closeBundleDialog();
       void queryClient.invalidateQueries({ queryKey: queryKeys.repositories.previewSecretBundles(repositoryId) });
     },
@@ -188,7 +192,7 @@ function PreviewSecretsSection() {
 
   function openCreateDialog() {
     setDialogMode({ type: "create" });
-    setForm(makeEmptyBundleForm());
+    setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
     setFormError(null);
   }
 
@@ -197,6 +201,7 @@ function PreviewSecretsSection() {
     const fileOuts = fileOutputsFromBundle(bundle);
     const envRows = envNamesFromBundle(bundle).map((key) => makeRow({ key, exposeAsEnv: true }));
     setForm({
+      repositoryId: bundle.repository_id,
       name: bundle.name,
       rows: envRows.length > 0 ? envRows : [makeRow({ exposeAsEnv: false })],
       fileOutputsJSON: fileOuts.length > 0 ? JSON.stringify(fileOuts, null, 2) : "",
@@ -206,7 +211,7 @@ function PreviewSecretsSection() {
 
   function closeBundleDialog() {
     setDialogMode(null);
-    setForm(makeEmptyBundleForm());
+    setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
     setFormError(null);
   }
 
@@ -238,8 +243,12 @@ function PreviewSecretsSection() {
       setFormError(body.message);
       return;
     }
+    if (!form.repositoryId) {
+      setFormError("Choose a repository for this bundle.");
+      return;
+    }
     setFormError(null);
-    saveMutation.mutate({ mode: dialogMode, body, repositoryId: effectiveSelectedRepositoryId });
+    saveMutation.mutate({ mode: dialogMode, body, repositoryId: form.repositoryId });
   }
 
   return (
@@ -249,14 +258,14 @@ function PreviewSecretsSection() {
           <h2 id="preview-secrets-heading" className="text-sm font-semibold text-foreground">Preview secrets</h2>
           <p className="text-xs text-muted-foreground">Repo-scoped secret bundles used at preview runtime.</p>
         </div>
-        <Button type="button" onClick={openCreateDialog} disabled={!effectiveSelectedRepositoryId}>
+        <Button type="button" onClick={openCreateDialog} disabled={activeRepositories.length === 0}>
           <Plus className="h-4 w-4" />
           New bundle
         </Button>
       </div>
 
       <div className="max-w-md space-y-1.5">
-        <Label htmlFor="preview-repository-select">Repository</Label>
+        <Label htmlFor="preview-repository-select">Filter by repository</Label>
         <Select
           value={effectiveSelectedRepositoryId}
           onValueChange={(value) => {
@@ -301,6 +310,7 @@ function PreviewSecretsSection() {
       <BundleDialog
         mode={dialogMode}
         form={form}
+        repositories={activeRepositories}
         repositoryName={selectedRepository?.full_name ?? ""}
         error={formError}
         saving={saveMutation.isPending}
@@ -470,6 +480,7 @@ function BundleActions({
 function BundleDialog({
   mode,
   form,
+  repositories,
   repositoryName,
   error,
   saving,
@@ -484,6 +495,7 @@ function BundleDialog({
 }: {
   mode: BundleDialogMode | null;
   form: BundleFormState;
+  repositories: Repository[];
   repositoryName: string;
   error: string | null;
   saving: boolean;
@@ -501,11 +513,11 @@ function BundleDialog({
   const editHasFileOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "file") : false;
   const hasFilledValue = form.rows.some((row) => row.key.trim() && row.value);
   const hasOutput = form.rows.some((row) => row.key.trim() && row.value && row.exposeAsEnv) || form.fileOutputsJSON.trim().length > 0;
-  const canSave = Boolean(form.name.trim()) && hasFilledValue && hasOutput;
+  const canSave = Boolean(form.repositoryId) && Boolean(form.name.trim()) && hasFilledValue && hasOutput;
   const saveTooltip = isEdit && !hasFilledValue
     ? "Re-enter at least one secret value to save changes"
     : !hasOutput
-      ? "At least one env or file output is required"
+      ? "Choose at least one delivery method: environment variables or generated files"
       : undefined;
 
   return (
@@ -521,8 +533,25 @@ function BundleDialog({
         <form className="space-y-5" onSubmit={onSubmit}>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label htmlFor="bundle-repository">Repository</Label>
-              <Input id="bundle-repository" value={repositoryName} disabled />
+              <Label htmlFor={isEdit ? "bundle-repository" : "bundle-repository-select"}>Bundle repository</Label>
+              {isEdit ? (
+                <Input id="bundle-repository" value={repositoryName} disabled />
+              ) : (
+                <Select
+                  value={form.repositoryId}
+                  onValueChange={(repositoryId) => onFormChange({ ...form, repositoryId })}
+                  disabled={repositories.length === 0}
+                >
+                  <SelectTrigger id="bundle-repository-select">
+                    <SelectValue placeholder="Choose repository" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {repositories.map((repo) => (
+                      <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="bundle-name">Bundle name</Label>
@@ -537,9 +566,17 @@ function BundleDialog({
           </div>
 
           <div className="space-y-2">
-            <div>
-              <Label>Secret values</Label>
-              <p className="text-xs text-muted-foreground">Editing requires re-entering the values you want this bundle to contain.</p>
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <Label>Stored secrets</Label>
+                <HelpTooltip
+                  label="Stored secrets help"
+                  content="These are the encrypted values 143 stores for this bundle. Previews can receive them as environment variables or use them when 143 generates config files."
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Add the secret names and values once. Values are encrypted and are not shown again after saving.
+              </p>
             </div>
             <div className="space-y-2">
               {form.rows.map((row, index) => (
@@ -548,7 +585,7 @@ function BundleDialog({
                     value={row.key}
                     onChange={(event) => onRowChange(index, { key: normalizeEnvKey(event.target.value) })}
                     placeholder="API_TOKEN"
-                    aria-label={index === 0 ? "Secret key" : `Secret key ${index + 1}`}
+                    aria-label={index === 0 ? "Secret name" : `Secret name ${index + 1}`}
                     autoComplete="off"
                   />
                   <Input
@@ -565,7 +602,7 @@ function BundleDialog({
                       onCheckedChange={(checked) => onRowChange(index, { exposeAsEnv: checked === true })}
                       aria-label={index === 0 ? "Expose as env" : `Expose as env ${index + 1}`}
                     />
-                    Env output
+                    Send as env var
                   </Label>
                   <Button type="button" variant="outline" size="icon" onClick={() => onRowRemove(index)} aria-label={`Remove secret row ${index + 1}`}>
                     <Trash2 className="h-4 w-4" />
@@ -580,12 +617,22 @@ function BundleDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="file-outputs">File outputs JSON</Label>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="file-outputs">Generated files</Label>
+              <HelpTooltip
+                label="Generated files help"
+                content="Use this only when the preview app expects a file such as .env or development.conf.json. The JSON describes files and can reference stored secrets like secret:API_TOKEN."
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Choose at least one delivery method: send stored secrets as environment variables above, or define generated files here. You do not need both.
+            </p>
             <Textarea
               id="file-outputs"
               value={form.fileOutputsJSON}
               onChange={(event) => onFormChange({ ...form, fileOutputsJSON: event.target.value })}
               placeholder={'[{"type":"file","path":"development.conf.json","format":"json","content":{"token":"secret:API_TOKEN"}}]'}
+              aria-label="Generated files JSON"
               className="min-h-24 font-mono text-xs"
               spellCheck={false}
             />
@@ -874,6 +921,23 @@ function LabeledMobileValue({ label, children }: { label: string; children: Reac
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
       <div className="text-sm text-foreground">{children}</div>
     </div>
+  );
+}
+
+function HelpTooltip({ label, content }: { label: string; content: ReactNode }) {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button type="button" variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" aria-label={label}>
+            <HelpCircle className="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={6} className="max-w-80">
+          {content}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
