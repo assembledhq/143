@@ -5086,12 +5086,13 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
 	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
+	diff := o.resultDiffOrWorkspaceFallback(ctx, run, sandbox, result.Diff)
 
 	return &models.SessionResult{
 		TokenUsage:         tokenUsage,
 		ModelUsed:          modelUsed,
 		ResultSummary:      strPtr(result.Summary),
-		Diff:               strPtr(result.Diff),
+		Diff:               strPtr(diff),
 		Error:              strPtr(result.Error),
 		DiffBaseCommitSHA:  run.BaseCommitSHA,
 		DiffHeadCommitSHA:  headSHA,
@@ -5099,6 +5100,30 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		DiffCollectedAt:    timePtr(time.Now().UTC()),
 		DiffSource:         "turn_complete",
 	}
+}
+
+func (o *Orchestrator) resultDiffOrWorkspaceFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, resultDiff string) string {
+	if strings.TrimSpace(resultDiff) != "" || run == nil {
+		return resultDiff
+	}
+	baseCommitSHA := derefString(run.BaseCommitSHA)
+	if baseCommitSHA == "" {
+		return resultDiff
+	}
+	targetBranch := derefString(run.TargetBranch)
+	diff, err := o.collectWorkspaceDiff(ctx, sandbox, baseCommitSHA, targetBranch)
+	if err != nil {
+		if !errors.Is(err, errNoBaseCommitSHA) {
+			o.logger.Warn().
+				Err(err).
+				Str("session_id", run.ID.String()).
+				Str("base_commit_sha", baseCommitSHA).
+				Str("target_branch", targetBranch).
+				Msg("failed to recompute workspace diff after empty agent result diff")
+		}
+		return resultDiff
+	}
+	return diff
 }
 
 func (o *Orchestrator) captureCurrentHeadSHA(ctx context.Context, sandbox *Sandbox) *string {
