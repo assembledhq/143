@@ -4060,11 +4060,13 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		body         string
-		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
-		expectedCode int
-		expectedBody string
+		name            string
+		body            string
+		setupMock       func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		setUserStore    bool
+		withUserContext bool
+		expectedCode    int
+		expectedBody    string
 	}{
 		{
 			name: "creates manual session successfully",
@@ -4166,6 +4168,91 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			},
 			expectedCode: http.StatusCreated,
 			expectedBody: "gemini_cli",
+		},
+		{
+			name: "uses user default model when no model or agent type is specified",
+			body: `{"message":"Fix the login bug"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+				userID := authCoverageUserID
+
+				mock.ExpectQuery("SELECT .+ FROM organizations").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+					)
+
+				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
+					}).AddRow(userID, orgID, "me@example.com", "Me", "admin", nil, nil, nil, nil, now, []byte(`{"coding_agent_model_default":"claude-opus-4-7"}`)))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			setUserStore:    true,
+			withUserContext: true,
+			expectedCode:    http.StatusCreated,
+			expectedBody:    "claude-opus-4-7",
+		},
+		{
+			name: "falls back to org default when user settings query fails",
+			body: `{"message":"Fix the login bug"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+					)
+
+				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("db connection lost"))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			setUserStore:    true,
+			withUserContext: true,
+			expectedCode:    http.StatusCreated,
+			expectedBody:    "gemini_cli",
 		},
 		{
 			name:         "returns bad request for empty message",
@@ -4423,11 +4510,23 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 			orgID := uuid.New()
 			handler := newSessionHandler(t, mock)
+			if tt.setUserStore {
+				handler.SetUserStore(db.NewUserStore(mock))
+			}
 
 			tt.setupMock(mock, orgID)
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(tt.body))
 			ctx := middleware.WithOrgID(req.Context(), orgID)
+			if tt.withUserContext {
+				ctx = middleware.WithUser(ctx, &models.User{
+					ID:    authCoverageUserID,
+					OrgID: orgID,
+					Email: "me@example.com",
+					Name:  "Me",
+					Role:  "admin",
+				})
+			}
 			req = req.WithContext(ctx)
 			w := httptest.NewRecorder()
 
