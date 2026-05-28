@@ -262,11 +262,21 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
+	repoID := uuid.New()
 	now := time.Now()
 	runID := uuid.New()
 	messageID := int64(1)
 	jobID := uuid.New()
 
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
 	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -312,7 +322,7 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	// reference uses a real picker kind ("app") whose display we set to
 	// the Linear key — looksLikeLinearReference scans the display string
 	// regardless of kind.
-	body := `{"message":"","agent_type":"claude_code","references":[{"kind":"app","id":"linear","display":"ACS-1234"}]}`
+	body := `{"message":"","agent_type":"claude_code","repository_id":"` + repoID.String() + `","references":[{"kind":"app","id":"linear","display":"ACS-1234"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
 	ctx := middleware.WithOrgID(req.Context(), orgID)
 	req = req.WithContext(ctx)
@@ -323,6 +333,8 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code, "linker success path should still create the session")
 	require.Equal(t, 1, linker.called, "the handler should call the linker exactly once per create")
 	require.Equal(t, orgID, linker.gotIn.OrgID)
+	require.NotNil(t, linker.gotIn.RepositoryID, "explicit manual repository selection should be passed to the Linear linker")
+	require.Equal(t, repoID, *linker.gotIn.RepositoryID, "Linear linker should receive the user-selected manual session repository")
 	require.Contains(t, linker.gotIn.ReferenceText, "ACS-1234", "the reference text should be threaded through to the linker")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

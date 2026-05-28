@@ -1344,6 +1344,9 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			// Don't start blind. Surface to the user via the recoverable
 			// failure path so they can retry.
 			errMsg := "Linear context could not be loaded. Retry the session to fetch it again."
+			if run.Error != nil && strings.TrimSpace(*run.Error) != "" {
+				errMsg = *run.Error
+			}
 			_ = stores.Sessions.UpdateResult(ctx, orgID, runID, models.SessionStatusFailed, &models.SessionResult{Error: &errMsg})
 			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
 		}
@@ -3588,11 +3591,12 @@ func bootstrapAgentCommand(prompt string) string {
 func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID       string           `json:"org_id"`
-			SessionID   string           `json:"session_id"`
-			Identifiers []string         `json:"identifiers"`
-			Refs        []linear.LinkRef `json:"refs,omitempty"`
-			UserID      string           `json:"user_id,omitempty"`
+			OrgID                   string           `json:"org_id"`
+			SessionID               string           `json:"session_id"`
+			Identifiers             []string         `json:"identifiers"`
+			Refs                    []linear.LinkRef `json:"refs,omitempty"`
+			UserID                  string           `json:"user_id,omitempty"`
+			AllowRepositoryMismatch bool             `json:"allow_repository_mismatch,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal prepare_linear_primary payload: %w", err)
@@ -3624,6 +3628,7 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		if len(refs) == 0 {
 			refs = linearRefsFromIdentifiers(input.Identifiers)
 		}
+		invalidLinkMessage := "Linear issue could not be linked to this session's repository. The Linear issue appears to belong to another repository; choose the matching repository or start a manual session with your intended repository selected."
 		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
 			if err := svc.MarkLinearPrepareFailed(hookCtx, orgID, sessionID); err != nil {
 				logger.Warn().Err(err).
@@ -3631,7 +3636,7 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 					Msg("prepare_linear_primary dead-letter hook failed to mark prepare state failed")
 			}
 		})
-		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
+		if err := svc.PrepareLinearPrimaryRefsWithOptions(ctx, orgID, sessionID, refs, userID, linear.LinkOptions{AllowRepositoryMismatch: input.AllowRepositoryMismatch}); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
 			if errors.Is(err, linear.ErrIntegrationNotFound) {
 				// Integration was disconnected/removed between enqueue and
@@ -3652,6 +3657,14 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 				// don't fire the dead-letter hook minutes after the user
 				// already saw "Reconnect" in settings.
 				return &FatalError{Err: err}
+			}
+			if errors.Is(err, db.ErrInvalidSessionIssueLink) {
+				if markErr := svc.MarkLinearPrepareFailedWithError(ctx, orgID, sessionID, invalidLinkMessage); markErr != nil {
+					logger.Warn().Err(markErr).
+						Str("session_id", sessionID.String()).
+						Msg("prepare_linear_primary failed to persist invalid-link message")
+				}
+				return &FatalError{Err: fmt.Errorf("%s: %w", invalidLinkMessage, err)}
 			}
 			return &RetryableError{Err: err}
 		}

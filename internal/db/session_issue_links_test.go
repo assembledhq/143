@@ -135,6 +135,29 @@ func TestSessionIssueLinkStore_CreateAllowingNullRepo_ReturnsExistingOnConflict(
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionIssueLinkStore_CreateAllowingRepositoryMismatch_SkipsRepoMatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionIssueLinkStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+
+	mock.ExpectQuery(`INSERT INTO session_issue_links[\s\S]+WHERE s\.id = @session_id[\s\S]+AND s\.deleted_at IS NULL\s+ON CONFLICT`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(linkID))
+
+	got, err := store.CreateAllowingRepositoryMismatch(context.Background(), orgID, sessionID, issueID, models.SessionIssueLinkRolePrimary, 0, nil)
+	require.NoError(t, err, "CreateAllowingRepositoryMismatch should allow manual sessions to link issues from a different repo")
+	require.Equal(t, linkID, got, "CreateAllowingRepositoryMismatch should return the inserted link id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionIssueLinkSelectColumns_UsesLinearIdentifierForExternalID(t *testing.T) {
 	t.Parallel()
 
