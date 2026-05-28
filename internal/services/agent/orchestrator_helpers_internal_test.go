@@ -793,6 +793,33 @@ func TestSnapshotSessionOnTurnSuccess_SnapshotsWhenAgentExitedClean(t *testing.T
 	require.Equal(t, int64(len("archive-bytes")), size)
 }
 
+func TestSnapshotSessionOnTurnSuccess_SkipsWhileSiblingRuntimeHolderActive(t *testing.T) {
+	t.Parallel()
+
+	provider := &snapshotSessionStubProvider{
+		snapshotFn: func(ctx context.Context, sb *Sandbox) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("archive-bytes"))), nil
+		},
+	}
+	store := &snapshotSessionRecordingStore{}
+	o := &Orchestrator{
+		provider:       provider,
+		snapshots:      store,
+		sandboxHolders: &fakeSessionSandboxHolderStore{activeThreadRuntimeCount: 1},
+		logger:         zerolog.Nop(),
+	}
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	currentRuntimeID := uuid.New()
+	key, size, err := o.snapshotSessionOnTurnSuccess(context.Background(), session, &Sandbox{ID: "sandbox-1"}, &AgentResult{ExitCode: 0}, zerolog.Nop(), currentRuntimeID)
+
+	require.NoError(t, err, "active sibling holders should defer snapshotting without failing the turn")
+	require.Empty(t, key, "snapshot should be skipped while a sibling runtime can still mutate the shared sandbox")
+	require.Zero(t, size, "skipped snapshots should report zero bytes")
+	require.Equal(t, 0, provider.calls(), "provider.Snapshot must not run while a sibling runtime holder is active")
+	require.Empty(t, store.saves, "skipped snapshots must not write storage")
+}
+
 func TestSnapshotSessionOnTurnSuccess_LogsSnapshotSize(t *testing.T) {
 	t.Parallel()
 
