@@ -5,6 +5,7 @@ import {
   formatDuration,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
+  getVisibleThreadLogTurns,
   hasCleanReviewLoopForSnapshot,
   invalidateSessionHumanInputRequests,
   trackInFlightAgentUpdate,
@@ -214,6 +215,24 @@ describe("thread message windows", () => {
       [log(10, 1), log(20, 1)],
       [],
     ).map((item) => item.id)).toEqual([10, 20]);
+  });
+
+  it("includes the execution turn for completed threads without assistant messages", () => {
+    expect(getVisibleThreadLogTurns(
+      [message(1, 0)],
+      {
+        id: "thread-1",
+        session_id: "session-1",
+        org_id: "org-1",
+        agent_type: "codex",
+        label: "Main",
+        status: "completed",
+        current_turn: 0,
+        created_at: start,
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    )).toEqual([0, 1]);
   });
 });
 
