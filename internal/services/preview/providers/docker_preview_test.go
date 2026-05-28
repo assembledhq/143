@@ -1,12 +1,17 @@
 package providers
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +30,14 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_WANT_PREVIEW_PORT_LISTENER_HELPER") == "1" {
+		runPreviewPortListenerHelper()
+		return
+	}
+	os.Exit(m.Run())
+}
 
 type mockDockerPreviewClient struct {
 	createHostConfig       *container.HostConfig
@@ -1681,6 +1694,65 @@ func TestStopPreview_TerminatesServiceProcessesBeforeCleanup(t *testing.T) {
 	require.Contains(t, strings.Join(calls, "\n"), "4242", "termination command should target the recorded service PID")
 	require.Contains(t, strings.Join(calls, "\n"), ":3000", "termination command should target the ready service port")
 	require.Contains(t, strings.Join(calls, "\n"), ":9000", "termination command should still use the port when PID detection has not populated")
+}
+
+func TestBuildTerminateServiceProcessCmd_IncludesProcFallbackForMissingLsof(t *testing.T) {
+	t.Parallel()
+
+	cmd := buildTerminateServiceProcessCmd(0, 8080)
+
+	require.Contains(t, cmd, "/proc/net/tcp", "termination command should find listening sockets without lsof")
+	require.Contains(t, cmd, "/proc/[0-9]*/fd/*", "termination command should map socket inodes back to owning processes")
+}
+
+func TestBuildTerminateServiceProcessCmd_KillsPortWithoutLsof(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS != "linux" {
+		t.Skip("the /proc socket fallback is Linux-specific")
+	}
+
+	helper := exec.Command(os.Args[0], "-test.run=^$", "--")
+	helper.Env = append(os.Environ(), "GO_WANT_PREVIEW_PORT_LISTENER_HELPER=1")
+	stdout, err := helper.StdoutPipe()
+	require.NoError(t, err, "helper stdout pipe should be created")
+	helper.Stderr = os.Stderr
+	require.NoError(t, helper.Start(), "helper listener should start")
+	defer func() {
+		if helper.Process != nil {
+			_ = helper.Process.Kill()
+		}
+	}()
+
+	scanner := bufio.NewScanner(stdout)
+	require.True(t, scanner.Scan(), "helper should print its listening port")
+	port, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
+	require.NoError(t, err, "helper should print a numeric port")
+
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\nexit 0\n"), 0o755), "fake lsof should be installed")
+	term := exec.Command("sh", "-c", buildTerminateServiceProcessCmd(0, port))
+	term.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"))
+	output, err := term.CombinedOutput()
+	require.NoError(t, err, "termination command should succeed without lsof output: %s", output)
+
+	done := make(chan error, 1)
+	go func() { done <- helper.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "termination command should kill the listener discovered by port")
+	}
+}
+
+func runPreviewPortListenerHelper() {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	fmt.Println(ln.Addr().(*net.TCPAddr).Port)
+	select {}
 }
 
 // TestWaitForReadiness_FailsFastWhenServiceExited verifies that the readiness

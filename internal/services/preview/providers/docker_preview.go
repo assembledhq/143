@@ -549,7 +549,25 @@ func buildTerminateServiceProcessCmd(pid, port int) string {
 
 	var portPIDs string
 	if port > 0 {
-		portPIDs = fmt.Sprintf("if command -v lsof >/dev/null 2>&1; then lsof -ti :%d 2>/dev/null || true; fi", port)
+		portPIDs = fmt.Sprintf(`{
+	if command -v lsof >/dev/null 2>&1; then lsof -ti :%d 2>/dev/null || true; fi
+	port_hex="$(printf '%%04X' %d)"
+	for table in /proc/net/tcp /proc/net/tcp6; do
+		[ -r "$table" ] || continue
+		awk -v p="$port_hex" '$2 ~ ":" p "$" { print $10 }' "$table"
+	done | while IFS= read -r inode; do
+		[ -n "$inode" ] || continue
+		for fd in /proc/[0-9]*/fd/*; do
+			[ -e "$fd" ] || continue
+			target="$(readlink "$fd" 2>/dev/null || true)"
+			if [ "$target" = "socket:[$inode]" ]; then
+				pid="${fd#/proc/}"
+				pid="${pid%%%%/*}"
+				printf '%%s\n' "$pid"
+			fi
+		done
+	done
+}`, port, port)
 	} else {
 		portPIDs = ":"
 	}
