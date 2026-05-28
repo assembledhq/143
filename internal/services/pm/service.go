@@ -118,7 +118,7 @@ type integrationStore interface {
 }
 
 type credentialStore interface {
-	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	GetAllIntegrations(ctx context.Context, orgID uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error)
 }
 
 type sessionLogStore interface {
