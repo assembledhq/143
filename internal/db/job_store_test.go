@@ -756,6 +756,42 @@ func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_ReclaimLostRunningSessionJobsForSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	staleBefore := time.Now().Add(-90 * time.Second)
+	mock.ExpectQuery("WITH dead_nodes AS").
+		WithArgs(orgID, sessionID, staleBefore, 100).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+	reclaimed, err := store.ReclaimLostRunningSessionJobsForSession(context.Background(), orgID, sessionID, staleBefore, 100)
+	require.NoError(t, err, "targeted reclaim should not return an error")
+	require.Equal(t, int64(1), reclaimed, "targeted reclaim should return the number of reclaimed session jobs")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_ReclaimLostRunningSessionJobsForSession_ScopesToSessionAndRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "func (s *JobStore) ReclaimLostRunningSessionJobsForSession", "targeted recovery helper should exist")
+	require.Contains(t, sql, "j.org_id = $1", "targeted recovery must filter by org id")
+	require.Contains(t, sql, "j.payload->>'session_id' = $2::text", "targeted recovery must filter by session payload")
+	require.Contains(t, sql, "runtime_stop_reason = 'worker_recovery'", "targeted recovery must persist worker-recovery stop reason")
+	require.Contains(t, sql, "recovery_state = 'queued'", "targeted recovery must queue session recovery")
+	require.Contains(t, sql, "j.lease_expires_at < now()", "targeted recovery must only reclaim stale running leases")
+}
+
 func TestJobStore_ReclaimLostRunningJobs_IncludesLegacyNullLeaseRows(t *testing.T) {
 	t.Parallel()
 
