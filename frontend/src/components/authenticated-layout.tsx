@@ -353,6 +353,24 @@ function CompactSidebarRail({
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
+              <Link
+                href="/settings"
+                aria-label="Settings"
+                aria-current={pathname.startsWith("/settings") ? "page" : undefined}
+                className={cn(
+                  "flex h-7 w-10 items-center justify-center rounded-md transition-colors duration-150",
+                  pathname.startsWith("/settings")
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Settings className="h-4 w-4" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
@@ -394,25 +412,6 @@ function CompactSidebarRail({
               </Tooltip>
             );
           })}
-          <div data-testid="compact-sidebar-settings-divider" className="my-1 w-7 border-t border-border/50" />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Link
-                href="/settings"
-                aria-label="Settings"
-                aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-                className={cn(
-                  "flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
-                  pathname.startsWith("/settings")
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
-                )}
-              >
-                <Settings className="h-4 w-4" />
-              </Link>
-            </TooltipTrigger>
-            <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
-          </Tooltip>
         </nav>
 
         <Popover>
