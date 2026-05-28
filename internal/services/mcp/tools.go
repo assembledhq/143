@@ -274,6 +274,10 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	if len(tr.integrations.LogProviders()) > 0 {
+		tools = append(tools, logToolDefinitions(tr.integrations.LogProviders())...)
+	}
+
 	for _, pp := range tr.integrations.ProjectProposers() {
 		prefix := pp.Name()
 		tools = append(tools,
@@ -381,6 +385,11 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("pull request creator not registered")
 		}
 		return tr.callPullRequestCreator(ctx, creators[0], "create_pr", args)
+	}
+
+	switch name {
+	case "log_query", "log_context", "log_fields", "log_stats":
+		return tr.callLogTool(ctx, name, args)
 	}
 
 	// Try each integration category. The tool name is prefixed with the
