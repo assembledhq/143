@@ -267,7 +267,7 @@ func (p *MezmoProvider) post(ctx context.Context, path string, body map[string]a
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	req.Header.Set("servicekey", p.cfg.APIKey)
 	return doLogHTTPRequest(p.client, req)
 }
 
@@ -315,6 +315,7 @@ func parseLogHTTPRecords(body []byte) ([]map[string]any, error) {
 	}
 	var records []map[string]any
 	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 4096), logProviderHTTPBodyLimit)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {

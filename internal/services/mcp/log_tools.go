@@ -95,7 +95,7 @@ func logToolDefinitions(providers []integration.LogProvider) []Tool {
 func anyLogProviderSupportsStats(providers []integration.LogProvider) bool {
 	for _, provider := range providers {
 		statsProvider, ok := provider.(integration.LogStatsProvider)
-		if !ok || statsProvider.SupportsStats() {
+		if ok && statsProvider.SupportsStats() {
 			return true
 		}
 	}

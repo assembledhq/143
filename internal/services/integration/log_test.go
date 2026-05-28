@@ -165,6 +165,27 @@ func TestRedactLogPayload(t *testing.T) {
 	require.Equal(t, float64(2), item["count"], "RedactLogPayload should preserve safe fields inside arrays")
 }
 
+func TestIsSensitiveLogField(t *testing.T) {
+	t.Parallel()
+
+	sensitive := []string{
+		"api_key", "signing_key", "auth", "auth_token", "oauth_token",
+		"authorization", "password", "session_id", "secret", "private_key",
+		"cookie", "credential", "access_token",
+	}
+	for _, key := range sensitive {
+		require.True(t, isSensitiveLogField(key), "isSensitiveLogField(%q) should be true", key)
+	}
+
+	safe := []string{
+		"author", "monkey", "turkey", "hockey", "message", "level",
+		"service", "trace_id", "count", "authenticated", "unauthenticated",
+	}
+	for _, key := range safe {
+		require.False(t, isSensitiveLogField(key), "isSensitiveLogField(%q) should be false", key)
+	}
+}
+
 func TestValidateLogTimeBounds(t *testing.T) {
 	t.Parallel()
 

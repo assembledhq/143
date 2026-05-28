@@ -120,8 +120,16 @@ func isSensitiveLogField(key string) bool {
 	if key == "" {
 		return false
 	}
-	for _, pattern := range []string{"token", "secret", "password", "cookie", "authorization", "api_key", "session", "key", "credential", "auth", "private"} {
+	// Substring match is safe for these longer patterns.
+	for _, pattern := range []string{"token", "secret", "password", "cookie", "authorization", "api_key", "session", "credential", "private"} {
 		if strings.Contains(key, pattern) {
+			return true
+		}
+	}
+	// "auth" and "key" are too short for substring match ("author", "monkey").
+	// Require them to appear as a whole word segment separated by _, -, or ..
+	for _, segment := range strings.FieldsFunc(key, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
+		if segment == "auth" || segment == "key" {
 			return true
 		}
 	}

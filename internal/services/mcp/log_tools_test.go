@@ -132,6 +132,35 @@ func TestCallLogStatsUnsupported(t *testing.T) {
 	require.Contains(t, result.Content[0].Text, "not supported", "log_stats unsupported message should be clear")
 }
 
+// bareLogProvider implements LogProvider but NOT LogStatsProvider.
+type bareLogProvider struct{ name models.ProviderName }
+
+func (p *bareLogProvider) Name() models.ProviderName { return p.name }
+func (p *bareLogProvider) QueryLogs(_ context.Context, req integration.LogQueryRequest) (*integration.LogQueryResult, error) {
+	return &integration.LogQueryResult{Provider: p.name}, nil
+}
+func (p *bareLogProvider) GetLogContext(_ context.Context, req integration.LogContextRequest) (*integration.LogContextResult, error) {
+	return &integration.LogContextResult{Provider: p.name}, nil
+}
+func (p *bareLogProvider) ListLogFields(_ context.Context, req integration.LogFieldsRequest) (*integration.LogFieldsResult, error) {
+	return &integration.LogFieldsResult{Provider: p.name}, nil
+}
+func (p *bareLogProvider) QueryLogStats(_ context.Context, req integration.LogStatsRequest) (*integration.LogStatsResult, error) {
+	return nil, integration.ErrLogStatsUnsupported
+}
+
+func TestListToolsOmitsLogStatsWhenNoProviderSupportsIt(t *testing.T) {
+	t.Parallel()
+
+	reg := integration.NewRegistry()
+	reg.RegisterLogProvider(&bareLogProvider{name: models.ProviderMezmo})
+	tr := NewToolRegistry(reg)
+
+	names := toolNames(tr.ListTools())
+	require.Contains(t, names, "log_query", "log_query should be present for any log provider")
+	require.NotContains(t, names, "log_stats", "log_stats should be absent when no provider implements SupportsStats")
+}
+
 func toolNames(tools []Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {

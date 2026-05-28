@@ -274,8 +274,8 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
-	if len(tr.integrations.LogProviders()) > 0 {
-		tools = append(tools, logToolDefinitions(tr.integrations.LogProviders())...)
+	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
+		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
 
 	for _, pp := range tr.integrations.ProjectProposers() {
