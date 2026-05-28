@@ -602,6 +602,10 @@ type orchestratorServiceStub struct {
 	cancelSessionCalls   int
 	cancelSessionID      uuid.UUID
 	cancelSessionResult  bool
+	stopSessionCalls     int
+	stopSessionID        uuid.UUID
+	stopReason           agent.StopReason
+	stopSessionResult    bool
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
@@ -684,6 +688,13 @@ func (s *orchestratorServiceStub) CancelSessionByID(sessionID uuid.UUID) bool {
 	s.cancelSessionCalls++
 	s.cancelSessionID = sessionID
 	return s.cancelSessionResult
+}
+
+func (s *orchestratorServiceStub) RequestSessionStopByID(sessionID uuid.UUID, reason agent.StopReason) bool {
+	s.stopSessionCalls++
+	s.stopSessionID = sessionID
+	s.stopReason = reason
+	return s.stopSessionResult
 }
 
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {

@@ -508,6 +508,7 @@ type orchestratorService interface {
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	RecoverSession(ctx context.Context, session *models.Session) error
 	CancelSessionByID(sessionID uuid.UUID) bool
+	RequestSessionStopByID(sessionID uuid.UUID, reason agent.StopReason) bool
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -1399,6 +1400,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Msg("run_agent recovery exhausted; dead-lettering without another restart")
 				return &FatalError{Err: err}
 			}
+			if errors.Is(err, agent.ErrSessionInterrupted) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent interrupted by system stop; retrying turn")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
 			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
 				retryAfter := 5 * time.Second
 				targetNodeID := models.SessionWorkerTarget(&run)
@@ -1719,6 +1728,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// attempt. The session row is unchanged at this point.
 			if errors.Is(err, agent.ErrSnapshotPending) {
 				return &RetryableError{Err: err}
+			}
+			if errors.Is(err, agent.ErrSessionInterrupted) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session interrupted by system stop; retrying turn")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrStalePullRequestHead) {
 				if input.PullRequestID != "" && services.PR != nil {

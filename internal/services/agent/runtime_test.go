@@ -369,6 +369,7 @@ func TestRuntimeHelpers_MapCheckpointCapabilitiesAndStopReasons(t *testing.T) {
 	require.Equal(t, models.RuntimeStopReasonSoftBudget, stopReasonToRuntime(StopReasonSoftBudget), "soft budget stops should map to the soft-budget runtime reason")
 	require.Equal(t, models.RuntimeStopReasonNoProgress, stopReasonToRuntime(StopReasonNoProgress), "no-progress stops should map to the no-progress runtime reason")
 	require.Equal(t, models.RuntimeStopReasonAbsoluteCeiling, stopReasonToRuntime(StopReasonAbsoluteCeiling), "absolute-ceiling stops should map to the absolute-ceiling runtime reason")
+	require.Equal(t, models.RuntimeStopReasonWorkerDrain, stopReasonToRuntime(StopReasonWorkerDrain), "worker-drain stops should map to the worker-drain runtime reason")
 	require.Equal(t, models.RuntimeStopReasonNone, stopReasonToRuntime(StopReason("unknown")), "unknown stop reasons should map to the empty runtime reason")
 }
 
