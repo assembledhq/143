@@ -229,16 +229,16 @@ export default function NewProjectPage() {
             <span className="w-full border-t" />
           </div>
           <div className="relative flex justify-center text-xs">
-            <span className="bg-background px-3 text-muted-foreground/50">
+            <span className="bg-surface-raised px-3 text-muted-foreground/50">
               project details
             </span>
           </div>
         </div>
 
         {/* ── Main Form ────────────────────────────────────────── */}
-        <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+        <div className="space-y-4 rounded-lg border border-border bg-surface-raised p-5">
           {hasGenerated && (
-            <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2.5 text-xs text-primary flex items-center gap-2">
+            <div className="rounded-md border border-primary/20 bg-surface-selected px-3 py-2.5 text-xs text-primary flex items-center gap-2">
               <Sparkles className="h-3.5 w-3.5 shrink-0" />
               Generated from your description. Review and edit as needed.
             </div>

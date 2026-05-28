@@ -22,6 +22,7 @@ These patterns apply across every page. They are not optional — they define th
 
 - **Dense default rhythm** — Use compact primitives (`h-8` inputs/buttons by default), tighter section spacing (`space-y-6` as a page baseline), and avoid oversized hero padding on app pages.
 - **Neutral-first palette** — Keep surfaces mostly neutral (`background`/`muted`/`border`) and reserve saturated color for primary actions and meaningful state.
+- **Surface-token hierarchy** — App-shell work uses named product surfaces for global navigation, local panes, main canvas, raised controls, and selected states. The goal is a clear hierarchy where global navigation carries the strongest structural contrast and local list panes do not visually overpower it. Detailed design: [91-visual-language-redesign.md](implemented/91-visual-language-redesign.md).
 - **Separator-led hierarchy** — Prefer subtle borders/dividers over heavy shadows for panel structure. Shadows are optional and minimal.
 - **App-shell first layout** — Dashboard pages should feel like a working surface: persistent sidebar, full-width content region, and reduced `max-width` constraints unless readability requires one.
 - **Operator-controlled pane widths** — Desktop shell navigation and two-pane entity list layouts should use draggable resize handles with conservative min/max bounds, default to the current product widths, and restore the user's last chosen widths from `localStorage` on return.

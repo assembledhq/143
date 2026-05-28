@@ -523,7 +523,7 @@ describe('SwipeActionRow', () => {
       touches: [{ clientX: 120, clientY: 24 }],
     });
 
-    expect(surface).toHaveClass('bg-background');
+    expect(surface).toHaveClass('bg-surface-pane');
   });
 
   it('keeps the touch surface opaque before any swipe begins', () => {
@@ -540,7 +540,7 @@ describe('SwipeActionRow', () => {
     const surface = screen.getByText('Row content').closest('[data-swipe-surface="true"]');
     expect(surface).not.toBeNull();
 
-    expect(surface).toHaveClass('bg-background');
+    expect(surface).toHaveClass('bg-surface-pane');
   });
 
   it('keeps the trailing action tray collapsed while closed', () => {

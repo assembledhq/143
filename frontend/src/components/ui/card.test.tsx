@@ -31,6 +31,11 @@ describe("Card", () => {
     render(<Card data-testid="test-card">content</Card>);
     expect(screen.getByTestId("test-card")).toBeInTheDocument();
   });
+
+  it("uses the raised surface token by default", () => {
+    render(<Card data-testid="surface-card">content</Card>);
+    expect(screen.getByTestId("surface-card")).toHaveClass("bg-surface-raised");
+  });
 });
 
 describe("CardHeader", () => {

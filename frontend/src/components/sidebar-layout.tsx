@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 import { cn } from "@/lib/utils";
+import { appShellSurface, paneSurface, strongBoundary } from "@/lib/surfaces";
 import { PanelLeftOpen } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useState, type MouseEvent } from "react";
@@ -59,7 +60,7 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
   };
 
   return (
-    <div className="absolute inset-0 flex overflow-hidden overscroll-none">
+    <div className={cn("absolute inset-0 flex overflow-hidden overscroll-none", appShellSurface)}>
       <div
         data-testid="sidebar-pane"
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
@@ -78,14 +79,16 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
       <div
         data-testid="session-switcher-rail"
         className={cn(
-          "hidden md:flex xl:hidden h-full w-12 shrink-0 items-start justify-center border-r border-border bg-muted/30 px-1 py-3",
+          "hidden md:flex xl:hidden h-full w-12 shrink-0 items-start justify-center border-r px-1 py-3",
+          paneSurface,
+          strongBoundary,
           mobileShow === "sidebar" && "md:hidden",
         )}
       >
         <Button
           variant="ghost"
           size="icon"
-          className="h-9 w-9 rounded-md text-muted-foreground hover:bg-background hover:text-foreground"
+          className="h-9 w-9 rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground"
           aria-label="Open session switcher"
           aria-expanded={sessionSwitcherOpen}
           aria-controls="compact-session-sidebar"
@@ -99,7 +102,9 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
         id="compact-session-sidebar"
         data-testid="compact-sidebar-pane"
         className={cn(
-          "hidden md:block xl:hidden h-full shrink-0 overflow-hidden border-r border-border bg-muted/30 transition-[width] duration-200 ease-out",
+          "hidden md:block xl:hidden h-full shrink-0 overflow-hidden border-r transition-[width] duration-200 ease-out",
+          paneSurface,
+          strongBoundary,
           compactSidebarVisible ? "w-[min(360px,42vw)]" : "w-0 border-r-0",
         )}
         onClickCapture={closeCompactSidebarOnLinkClick}

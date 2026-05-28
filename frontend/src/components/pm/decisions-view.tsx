@@ -100,7 +100,7 @@ function DecisionRow({ decision }: { decision: PMDecisionView }) {
     <div>
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-3 w-full py-2.5 px-4 border-b border-border last:border-b-0 text-xs text-left hover:bg-muted/30 transition-colors"
+        className="flex items-center gap-3 w-full py-2.5 px-4 border-b border-border last:border-b-0 text-xs text-left hover:bg-surface-pane transition-colors"
       >
         <span className="w-16 text-xs text-muted-foreground shrink-0">
           {formatDate(decision.created_at)}
@@ -119,7 +119,7 @@ function DecisionRow({ decision }: { decision: PMDecisionView }) {
         </div>
       </button>
       {expanded && decision.reasoning && (
-        <div className="px-4 py-2.5 bg-muted/20 border-b border-border text-xs text-muted-foreground">
+        <div className="px-4 py-2.5 bg-surface-pane/70 border-b border-border text-xs text-muted-foreground">
           <span className="font-medium text-foreground">Reasoning:</span> {decision.reasoning}
         </div>
       )}
@@ -206,7 +206,7 @@ export function DecisionsView() {
               className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
                 decisionFilter === btn.value
                   ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                  : "text-muted-foreground hover:text-foreground hover:bg-surface-hover"
               }`}
             >
               {btn.label}
@@ -221,7 +221,7 @@ export function DecisionsView() {
               className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
                 outcomeFilter === btn.value
                   ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                  : "text-muted-foreground hover:text-foreground hover:bg-surface-hover"
               }`}
             >
               {btn.label}
@@ -237,7 +237,7 @@ export function DecisionsView() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-muted/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+          <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border bg-surface-pane text-xs font-medium text-muted-foreground uppercase tracking-wider">
             <span className="w-16 shrink-0">Date</span>
             <span className="w-36 shrink-0">Project</span>
             <span className="flex-1 min-w-0">Issue</span>

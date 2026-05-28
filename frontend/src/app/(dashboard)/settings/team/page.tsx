@@ -337,7 +337,7 @@ export default function TeamSettingsPage() {
               </div>
             ) : (
               <div className="divide-y divide-border/50">
-                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+                <div className="hidden items-center gap-4 bg-surface-pane px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
                   <div>Name</div>
                   <div>Email</div>
                   <div>Role</div>
@@ -348,7 +348,7 @@ export default function TeamSettingsPage() {
                   return (
                     <div
                       key={member.id}
-                      className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center hover:bg-muted/40 dark:hover:bg-primary/[0.03] transition-colors"
+                      className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center hover:bg-surface-hover dark:hover:bg-primary/[0.03] transition-colors"
                     >
                       <div className="flex items-center gap-3 min-w-0">
                         {member.avatar_url ? (
@@ -713,7 +713,7 @@ export default function TeamSettingsPage() {
                   </div>
                 </TabsContent>
               </Tabs>
-              <div className="space-y-2 rounded-lg border border-dashed border-border bg-muted/20 p-4">
+              <div className="space-y-2 rounded-lg border border-dashed border-border bg-surface-pane/70 p-4">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <p className="text-sm font-medium text-foreground">
@@ -736,7 +736,7 @@ export default function TeamSettingsPage() {
                   )}
                 </div>
                 {inviteDraftMatchesMode ? (
-                  <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-3">
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-surface-raised px-3 py-3">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                       {inviteDraft.mode === "github" ? (
                         inviteDraft.avatarUrl ? (
@@ -767,7 +767,7 @@ export default function TeamSettingsPage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-background/70 px-3 py-3 text-muted-foreground">
+                  <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-surface-raised/70 px-3 py-3 text-muted-foreground">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted">
                       <UserPlus className="h-4 w-4" />
                     </div>

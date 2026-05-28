@@ -18,6 +18,7 @@ import { api } from "@/lib/api";
 import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
+import { hoverSurface, paneSurface, raisedSurface, strongBoundary } from "@/lib/surfaces";
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
@@ -145,7 +146,7 @@ export function ProjectSidebar() {
   const canManage = canListTeamMembers;
 
   return (
-    <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
+    <div className={cn("w-full h-full border-r flex flex-col", paneSurface, strongBoundary)}>
       {/* Header */}
       <div className="px-4 pt-3 pb-3 space-y-3">
         <div className="flex items-center gap-2">
@@ -170,7 +171,7 @@ export function ProjectSidebar() {
 
         {/* New project button */}
         {canManage && (
-          <Button asChild variant="outline" className="w-full gap-2 bg-background text-xs shadow-sm">
+          <Button asChild variant="outline" className={cn("w-full gap-2 text-xs shadow-sm", raisedSurface)}>
             <Link href="/projects/new">
               <Plus className="h-4 w-4" />
               New project
@@ -210,7 +211,7 @@ export function ProjectSidebar() {
         {canManage && isNewProject && (
           <Link
             href="/projects/new"
-            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
+            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-surface-raised shadow-sm border border-border/60"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
@@ -275,10 +276,10 @@ export function ProjectSidebar() {
               <Link
                 href={`/projects/${project.id}${filterSuffix}`}
                 className={cn(
-                  "block rounded-lg bg-muted/30 px-3 py-2.5 transition-all duration-150",
+                  "block rounded-lg px-3 py-2.5 transition-all duration-150",
                   isSelected
-                    ? "bg-background shadow-sm border border-border/50"
-                    : "hover:bg-background/60"
+                    ? "bg-surface-selected shadow-sm border border-primary/25 ring-1 ring-primary/20"
+                    : cn("bg-transparent", hoverSurface)
                 )}
               >
                 <div className="flex items-start gap-2.5 min-w-0">

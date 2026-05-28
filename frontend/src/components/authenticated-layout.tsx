@@ -57,6 +57,7 @@ import { SidebarSettingsSection } from "@/components/sidebar-settings-section";
 import { CreateSessionDialog } from "@/components/create-session-dialog";
 import { ResizeHandle } from "@/components/resize-handle";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
+import { appShellSurface, navItemActive, navItemBase, navSurface, strongBoundary } from "@/lib/surfaces";
 
 type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
 
@@ -235,9 +236,7 @@ function SidebarBody({
               className={cn(
                 "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-colors duration-150 active:bg-sidebar-accent",
                 navItemClasses,
-                isActive
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+                isActive ? navItemActive : navItemBase
               )}
             >
               <item.icon className="h-4 w-4 shrink-0" />
@@ -259,14 +258,14 @@ function SidebarBody({
       </nav>
 
       {/* Repo context switcher */}
-      <div className="relative px-2 pb-1 border-t border-border/50 pt-2">
+      <div className="relative px-2 pb-1 border-t border-sidebar-border pt-2">
         <RepoContextSwitcher />
       </div>
 
       {/* User menu */}
       <div
         className={cn(
-          "relative px-2 border-t border-border/50 pt-2",
+        "relative px-2 border-t border-sidebar-border pt-2",
           isMobile ? "pb-[max(0.5rem,env(safe-area-inset-bottom))]" : "pb-1"
         )}
       >
@@ -277,7 +276,7 @@ function SidebarBody({
                 variant="ghost"
                 size="sm"
                 className={cn(
-                  "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                  "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-colors duration-150 text-surface-nav-muted hover:bg-surface-nav-hover hover:text-surface-nav-foreground",
                   isMobile ? "h-11 text-sm" : "h-8 text-xs"
                 )}
               >
@@ -333,7 +332,7 @@ function CompactSidebarRail({
     <TooltipProvider>
       <aside
         data-testid="app-sidebar-rail"
-        className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2"
+        className={cn("hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r py-2", navSurface, strongBoundary)}
         aria-label="Primary navigation"
       >
         <div className="flex flex-col items-center gap-1">
@@ -343,7 +342,7 @@ function CompactSidebarRail({
                 variant="ghost"
                 size="icon"
                 onClick={onPaletteOpen}
-                className="h-10 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                className="h-10 w-10 rounded-md text-surface-nav-muted hover:bg-surface-nav-hover hover:text-surface-nav-foreground"
                 aria-label="Search"
               >
                 <Search className="h-4 w-4" />
@@ -357,7 +356,7 @@ function CompactSidebarRail({
                 variant="ghost"
                 size="icon"
                 onClick={onCreateSession}
-                className="h-10 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                className="h-10 w-10 rounded-md text-surface-nav-muted hover:bg-surface-nav-hover hover:text-surface-nav-foreground"
                 aria-label="New session"
               >
                 <PenSquare className="h-4 w-4" />
@@ -379,9 +378,7 @@ function CompactSidebarRail({
                     aria-current={isActive ? "page" : undefined}
                     className={cn(
                       "relative flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
-                      isActive
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                        : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                      isActive ? navItemActive : navItemBase,
                     )}
                   >
                     <item.icon className="h-4 w-4" />
@@ -405,8 +402,8 @@ function CompactSidebarRail({
               className={cn(
                 "flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
                 pathname.startsWith("/settings")
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                  ? navItemActive
+                  : navItemBase,
               )}
             >
               <Settings className="h-4 w-4" />
@@ -422,7 +419,7 @@ function CompactSidebarRail({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="mt-1 h-10 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  className="mt-1 h-10 w-10 rounded-md text-surface-nav-muted hover:bg-surface-nav-hover hover:text-surface-nav-foreground"
                   aria-label="Open workspace menu"
                 >
                   {user?.avatar_url ? (
@@ -433,7 +430,7 @@ function CompactSidebarRail({
                       className="h-5 w-5 rounded-full"
                     />
                   ) : (
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium">
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-surface-nav-hover text-xs font-medium">
                       {user?.name?.[0]?.toUpperCase() ?? "?"}
                     </span>
                   )}
@@ -446,16 +443,16 @@ function CompactSidebarRail({
             side="right"
             align="end"
             sideOffset={8}
-            className="w-72 p-0"
+            className="w-72 p-0 bg-surface-raised"
           >
             <div className="space-y-3 p-3">
               <div className="space-y-1">
                 <p className="px-1 text-xs font-medium text-muted-foreground">Workspace</p>
-                <div className="rounded-md border border-border/60 bg-background px-2 py-1.5">
+                <div className="rounded-md border border-border/60 bg-surface-raised px-2 py-1.5">
                   <OrgSwitcher userEmail={user?.email} />
                 </div>
               </div>
-              <div className="rounded-md border border-border/60 bg-background p-1">
+              <div className="rounded-md border border-border/60 bg-surface-raised p-1">
                 <RepoContextSwitcher />
               </div>
               <div className="border-t border-border/60 pt-2">
@@ -497,14 +494,14 @@ function MobileTopBar({
   menuOpen,
 }: MobileTopBarProps) {
   return (
-    <header className="md:hidden flex h-14 shrink-0 items-center gap-1 border-b border-border/50 bg-background px-2">
+    <header className="md:hidden flex h-14 shrink-0 items-center gap-1 border-b border-border-strong bg-surface-canvas px-2">
       <Button
         variant="ghost"
         size="icon"
         onClick={onOpenMenu}
         aria-label="Open navigation menu"
         aria-expanded={menuOpen}
-        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface-hover"
       >
         <Menu className="h-5 w-5" />
       </Button>
@@ -514,7 +511,7 @@ function MobileTopBar({
         size="icon"
         onClick={onPaletteOpen}
         aria-label="Search"
-        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface-hover"
       >
         <Search className="h-5 w-5" />
       </Button>
@@ -523,7 +520,7 @@ function MobileTopBar({
         size="icon"
         onClick={onCreateSession}
         aria-label="New session"
-        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface-hover"
       >
         <PenSquare className="h-5 w-5" />
       </Button>
@@ -616,7 +613,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       <div
         role="alert"
         aria-live="polite"
-        className="flex h-dvh items-center justify-center bg-background px-6"
+        className="flex h-dvh items-center justify-center bg-surface-canvas px-6"
       >
         <div className="max-w-sm text-center space-y-4">
           <h2 className="text-base font-semibold text-foreground">
@@ -643,14 +640,15 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   if (showLoadingSkeleton) {
     return (
-      <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
+      <div className={cn("fixed inset-0 flex h-dvh overflow-hidden overscroll-none", appShellSurface)}>
         {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
-        <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2" />
+        <div className={cn("hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r py-2", navSurface, strongBoundary)} />
         <aside
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            "hidden xl:flex bg-sidebar flex-col w-[var(--app-sidebar-w)]"
+            "hidden xl:flex flex-col w-[var(--app-sidebar-w)]",
+            navSurface,
           )}
         >
           <div className="px-4 py-4">
@@ -675,12 +673,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
         </div>
         <div className="flex flex-1 min-w-0 flex-col">
-          <header className="md:hidden flex h-14 items-center gap-2 border-b border-border/50 bg-background px-3">
+          <header className="md:hidden flex h-14 items-center gap-2 border-b border-border-strong bg-surface-canvas px-3">
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
             <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
           </header>
-          <main className="flex-1 overflow-auto overscroll-contain bg-background">
+          <main className="flex-1 overflow-auto overscroll-contain bg-surface-canvas">
             <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
               <div className="h-7 w-40 rounded bg-muted animate-pulse" />
               <div className="space-y-3">
@@ -689,7 +687,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {Array.from({ length: 3 }).map((_, i) => (
-                  <div key={i} className="h-24 rounded-lg border border-border bg-muted/30 animate-pulse" />
+                  <div key={i} className="h-24 rounded-lg border border-border bg-surface-pane animate-pulse" />
                 ))}
               </div>
             </div>
@@ -704,7 +702,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
+    <div className={cn("fixed inset-0 flex h-dvh overflow-hidden overscroll-none", appShellSurface)}>
       {/* Desktop sidebar (md and up) */}
       <CompactSidebarRail
         user={user}
@@ -718,7 +716,8 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         data-testid="app-sidebar"
         style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          "hidden xl:flex bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
+          "hidden xl:flex flex-col relative w-[var(--app-sidebar-w)]",
+          navSurface,
         )}
       >
         <SidebarBody
@@ -741,7 +740,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           side="left"
           hideCloseButton
           aria-describedby={undefined}
-          className="w-[min(85vw,320px)] p-0 bg-sidebar border-r border-border/50 flex flex-col gap-0"
+          className={cn("w-[min(85vw,320px)] p-0 border-r flex flex-col gap-0", navSurface, strongBoundary)}
         >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <SidebarBody
@@ -766,7 +765,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             onCreateSession={handleCreateSessionOpen}
           />
         ) : null}
-        <main className="flex-1 overflow-auto overscroll-contain bg-background relative flex flex-col">
+        <main className="flex-1 overflow-auto overscroll-contain bg-surface-canvas relative flex flex-col">
           <div className="relative max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 flex-1 min-h-0">
             {children}
           </div>

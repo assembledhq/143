@@ -109,7 +109,7 @@ export function UsageBreakdownTable({ start, end, dimension, filters, onRowClick
                   return (
                     <TableRow
                       key={row.key}
-                      className={cn(onRowClick && "cursor-pointer hover:bg-muted/50", selectedKey === row.key && "bg-muted/50")}
+                      className={cn(onRowClick && "cursor-pointer hover:bg-surface-hover", selectedKey === row.key && "bg-muted/50")}
                       onClick={() => onRowClick?.({ dimension, key: row.key })}
                     >
                       <TableCell className="pl-4 text-[13px] font-medium">{row.label}</TableCell>

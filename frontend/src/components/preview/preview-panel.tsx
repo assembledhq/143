@@ -1033,8 +1033,8 @@ export function PreviewPanel({
 
       {/* Startup progress */}
       {showStartupCanvas && (
-        <div className="rounded-lg border bg-muted/20 overflow-hidden">
-          <div className="relative bg-background">
+        <div className="rounded-lg border bg-surface-pane/70 overflow-hidden">
+          <div className="relative bg-surface-raised">
             <div className="absolute right-3 top-3 z-10 flex items-center gap-1">
               <TooltipProvider>
                 <Tooltip>
@@ -1057,7 +1057,7 @@ export function PreviewPanel({
               </TooltipProvider>
             </div>
             <div className="flex min-h-[360px] flex-col items-center justify-center px-6 py-14 text-center">
-              <div className="mb-4 rounded-full border bg-card p-3 shadow-sm">
+              <div className="mb-4 rounded-full border bg-surface-raised p-3 shadow-sm">
                 <Loader2 className="size-5 animate-spin text-primary" />
               </div>
               <div className="space-y-1">
@@ -1093,7 +1093,7 @@ export function PreviewPanel({
                     <div
                       key={step.title}
                       className={cn(
-                        "flex min-h-24 flex-col items-center gap-1.5 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
+                        "flex min-h-24 flex-col items-center gap-1.5 rounded-lg border bg-surface-raised/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
                         step.state === "active" &&
                           "border-primary/30 text-foreground shadow-sm",
                         step.state === "complete" &&
@@ -1115,7 +1115,7 @@ export function PreviewPanel({
               </div>
             </div>
           </div>
-          <div className="border-t bg-card/60 px-3 py-2">
+          <div className="border-t bg-surface-raised/60 px-3 py-2">
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="ghost"
@@ -1141,7 +1141,7 @@ export function PreviewPanel({
                 id={previewRuntimeLogsId}
                 aria-label="Preview container logs"
                 className={cn(
-                  "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
+                  "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-surface-raised/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
                   previewLogsQuery.isError && "text-muted-foreground",
                 )}
               >
@@ -1164,7 +1164,7 @@ export function PreviewPanel({
           <CardContent className="space-y-3.5 p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-start gap-2.5">
-                <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-destructive/20 bg-background/80 text-destructive">
+                <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-destructive/20 bg-surface-raised/80 text-destructive">
                   <AlertTriangle className="size-3.5" aria-hidden="true" />
                 </div>
                 <div className="min-w-0">
@@ -1260,7 +1260,7 @@ export function PreviewPanel({
 
       {/* Preview iframe */}
       {isReady && iframeSrc && (
-        <div className="relative rounded-lg border bg-muted/30 overflow-hidden">
+        <div className="relative rounded-lg border bg-surface-pane overflow-hidden">
           <div className="mx-auto w-full">
             <div className="relative" style={{ paddingBottom: "62.5%" }}>
               {/* Sandbox threat model: allow-same-origin is required so the
@@ -1280,7 +1280,7 @@ export function PreviewPanel({
               />
               {/* Loading overlay before bootstrap */}
               {!bootstrapComplete && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/80">
+                <div className="absolute inset-0 flex items-center justify-center bg-surface-raised/80">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="size-4 animate-spin" />
                     Connecting to preview...

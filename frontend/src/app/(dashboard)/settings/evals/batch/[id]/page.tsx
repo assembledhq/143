@@ -144,7 +144,7 @@ export default function BatchDetailPage() {
               <CardContent className="p-0 overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-border bg-muted/30">
+                    <tr className="border-b border-border bg-surface-pane">
                       <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">Task</th>
                       {configLabels.map((label) => (
                         <th key={label} className="text-center px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider min-w-[120px]">
@@ -155,7 +155,7 @@ export default function BatchDetailPage() {
                   </thead>
                   <tbody>
                     {taskNames.map(({ taskId, name }) => (
-                      <tr key={taskId} className="border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors">
+                      <tr key={taskId} className="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors">
                         <td className="px-4 py-3 font-medium">
                           <Link href={`/settings/evals/${taskId}`} className="text-primary hover:underline">
                             {name}
@@ -172,7 +172,7 @@ export default function BatchDetailPage() {
                       </tr>
                     ))}
                     {/* Average row */}
-                    <tr className="bg-muted/30 font-medium">
+                    <tr className="bg-surface-pane font-medium">
                       <td className="px-4 py-3">Average</td>
                       {configLabels.map((label) => {
                         const scores = taskNames
@@ -188,7 +188,7 @@ export default function BatchDetailPage() {
                       })}
                     </tr>
                     {/* Pass rate row */}
-                    <tr className="bg-muted/30">
+                    <tr className="bg-surface-pane">
                       <td className="px-4 py-3 font-medium">Pass rate</td>
                       {configLabels.map((label) => {
                         const runs = taskNames

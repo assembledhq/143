@@ -23,7 +23,7 @@ export function MobileBackButton({ to, label, className }: MobileBackButtonProps
       href={href}
       aria-label={label}
       className={cn(
-        "md:hidden inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground",
+        "md:hidden inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-surface-hover hover:text-foreground",
         className,
       )}
     >

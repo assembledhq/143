@@ -344,7 +344,7 @@ export const ReviewDiffView = memo(function ReviewDiffView({
             <SheetDescription className="px-4 pb-3 text-xs">
               {activeCommentLabel ? `Comment on ${activeCommentLabel}` : "Comment on the selected diff line."}
             </SheetDescription>
-            <div className="border-t border-border/60 bg-muted/10 px-3 py-3">
+            <div className="border-t border-border/60 bg-surface-pane/50 px-3 py-3">
               <CommentInput
                 className="mx-0"
                 initialValue={editingComment?.body ?? ""}

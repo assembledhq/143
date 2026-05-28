@@ -32,7 +32,7 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
   return (
     <div
       className={cn(
-        "sticky top-0 z-10 flex items-center justify-between rounded-t-lg border-b border-border/70 bg-card/95 px-3 py-1.5 shadow-none backdrop-blur supports-[backdrop-filter]:bg-card/85",
+        "sticky top-0 z-10 flex items-center justify-between rounded-t-lg border-b border-border/70 bg-surface-raised/95 px-3 py-1.5 shadow-none backdrop-blur supports-[backdrop-filter]:bg-surface-raised/85",
         className
       )}
     >

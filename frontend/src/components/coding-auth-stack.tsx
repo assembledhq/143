@@ -79,7 +79,7 @@ export function CodingAuthStack({
 
   if (rows.length === 0) {
     return (
-      <div className="overflow-hidden rounded-2xl border border-border bg-card">
+      <div className="overflow-hidden rounded-2xl border border-border bg-surface-raised">
         <EmptyState
           variant="inline"
           icon={KeyRound}
@@ -91,7 +91,7 @@ export function CodingAuthStack({
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card">
+    <div className="overflow-hidden rounded-2xl border border-border bg-surface-raised">
       <div className="divide-y divide-border md:hidden">
         {rows.map((row, index) => (
           <div
@@ -242,7 +242,7 @@ export function CodingAuthStack({
                   )}
                 >
                   <TableCell>
-                    <div className="flex h-9 cursor-grab items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 text-sm font-medium text-foreground active:cursor-grabbing">
+                    <div className="flex h-9 cursor-grab items-center gap-2 rounded-lg border border-border bg-surface-pane px-3 text-sm font-medium text-foreground active:cursor-grabbing">
                       <span>{row.priority}</span>
                       <GripVertical className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                     </div>

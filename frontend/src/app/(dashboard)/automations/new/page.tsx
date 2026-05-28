@@ -225,7 +225,7 @@ export default function NewAutomationPage() {
                   </SelectContent>
                 </Select>
 
-                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1">
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface-raised px-2 py-1">
                   <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
                   <Input
                     id="interval-value"

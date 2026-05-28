@@ -52,7 +52,7 @@ export function RepoContextSwitcher() {
   return (
     <DropdownMenu onOpenChange={(open) => { if (!open) setSearch(""); }}>
       <DropdownMenuTrigger
-        className="flex items-center h-8 w-full gap-2 rounded-md px-2.5 text-xs font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        className="flex items-center h-8 w-full gap-2 rounded-md px-2.5 text-xs font-medium transition-colors duration-150 text-surface-nav-muted hover:bg-surface-nav-hover hover:text-surface-nav-foreground"
         data-testid="repo-context-switcher"
       >
         <GitBranch className="h-4 w-4 shrink-0" />

@@ -36,8 +36,8 @@ export function AutonomySlider({ value, onChange }: AutonomySliderProps) {
             className={cn(
               "flex-1 px-3 py-2.5 text-left transition-colors border-r border-border last:border-r-0",
               value === level.value
-                ? "bg-primary/5 dark:bg-primary/10"
-                : "hover:bg-muted/50"
+                ? "bg-surface-selected dark:bg-primary/10"
+                : "hover:bg-surface-hover"
             )}
           >
             <div className={cn(

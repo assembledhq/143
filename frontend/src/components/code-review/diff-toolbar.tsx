@@ -57,7 +57,7 @@ export function DiffToolbar({
     return (
       <div
         className={cn(
-          "sticky top-0 z-20 shrink-0 border-b border-border/70 bg-background/95 backdrop-blur transition-all duration-200",
+          "sticky top-0 z-20 shrink-0 border-b border-border/70 bg-surface-raised/95 backdrop-blur transition-all duration-200",
           mobileChromeCollapsed && !showSearch && "shadow-sm"
         )}
       >
@@ -162,7 +162,7 @@ export function DiffToolbar({
         </div>
 
         {showSearch && onSearchChange ? (
-          <div className="flex items-center gap-2 border-t border-border/50 bg-muted/20 px-2 py-2">
+          <div className="flex items-center gap-2 border-t border-border/50 bg-surface-pane/70 px-2 py-2">
             <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <Input
               ref={searchInputRef}
@@ -175,7 +175,7 @@ export function DiffToolbar({
                 }
               }}
               placeholder="Search in diff..."
-              className="h-8 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
+              className="h-8 border-border/60 bg-surface-raised text-xs placeholder:text-muted-foreground/60"
             />
             {searchQuery ? (
               <Button
@@ -194,7 +194,7 @@ export function DiffToolbar({
   }
 
   return (
-    <div className="flex flex-col border-b border-border bg-background shrink-0">
+    <div className="flex flex-col border-b border-border bg-surface-raised shrink-0">
       <div className="flex items-center justify-between px-3 py-1.5">
         <Button
           variant="ghost"
@@ -225,13 +225,13 @@ export function DiffToolbar({
             </Button>
           )}
           {/* View mode toggle */}
-          <div className="flex items-center rounded-md border border-border bg-muted/30">
+          <div className="flex items-center rounded-md border border-border bg-surface-pane">
             <button
               onClick={() => onViewModeChange("unified")}
               className={cn(
                 "flex items-center gap-1 px-2 py-1 text-xs rounded-l-md transition-colors",
                 viewMode === "unified"
-                  ? "bg-background text-foreground shadow-sm"
+                  ? "bg-surface-raised text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
@@ -243,7 +243,7 @@ export function DiffToolbar({
               className={cn(
                 "flex items-center gap-1 px-2 py-1 text-xs rounded-r-md transition-colors",
                 viewMode === "split"
-                  ? "bg-background text-foreground shadow-sm"
+                  ? "bg-surface-raised text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
@@ -269,7 +269,7 @@ export function DiffToolbar({
 
       {/* Search bar */}
       {showSearch && onSearchChange && (
-        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-muted/20">
+        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-surface-pane/70">
           <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
           <Input
             ref={searchInputRef}
@@ -282,7 +282,7 @@ export function DiffToolbar({
               }
             }}
             placeholder="Search in diff..."
-            className="h-8 flex-1 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
+            className="h-8 flex-1 border-border/60 bg-surface-raised text-xs placeholder:text-muted-foreground/60"
           />
           {searchQuery && (
             <button

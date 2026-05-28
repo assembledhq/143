@@ -61,19 +61,19 @@ describe("AutonomySlider", () => {
 
     // The selected button should have the primary text color class
     const activeButton = screen.getByText("Act on low-risk work").closest("button")!;
-    expect(activeButton).toHaveClass("bg-primary/5");
+    expect(activeButton).toHaveClass("bg-surface-selected");
 
     // Non-selected buttons should not have the active background
     const inactiveButton = screen.getByText("Suggest").closest("button")!;
-    expect(inactiveButton).not.toHaveClass("bg-primary/5");
+    expect(inactiveButton).not.toHaveClass("bg-surface-selected");
 
     // Re-render with a different value and verify highlight moves
     rerender(<AutonomySlider value="auto_all" onChange={onChange} />);
 
     const newActiveButton = screen.getByText("Operate broadly").closest("button")!;
-    expect(newActiveButton).toHaveClass("bg-primary/5");
+    expect(newActiveButton).toHaveClass("bg-surface-selected");
 
     const nowInactiveButton = screen.getByText("Act on low-risk work").closest("button")!;
-    expect(nowInactiveButton).not.toHaveClass("bg-primary/5");
+    expect(nowInactiveButton).not.toHaveClass("bg-surface-selected");
   });
 });

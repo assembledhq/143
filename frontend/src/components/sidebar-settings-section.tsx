@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { navItemActive, navItemBase } from "@/lib/surfaces";
 import {
   Collapsible,
   CollapsibleTrigger,
@@ -126,16 +127,14 @@ export function SidebarSettingsSection({
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <div className="mt-4 mb-1 mx-0 border-t border-border/50" />
+      <div className="mt-4 mb-1 mx-0 border-t border-sidebar-border" />
       <CollapsibleTrigger asChild>
         <button
           type="button"
           className={cn(
             "flex w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
             isMobile ? "gap-2.5 py-3 text-sm" : "gap-2 py-1.5 text-xs",
-            onSettingsPage
-              ? "bg-sidebar-accent text-sidebar-accent-foreground"
-              : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+            onSettingsPage ? navItemActive : navItemBase
           )}
         >
           <Settings className="h-4 w-4 shrink-0" />
@@ -166,7 +165,7 @@ export function SidebarSettingsSection({
               return (
                 <div key={groupIndex}>
                   {group.label && (
-                    <div className="px-7 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    <div className="px-7 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-surface-nav-muted">
                       {group.label}
                     </div>
                   )}
@@ -198,8 +197,8 @@ export function SidebarSettingsSection({
                         className={cn(
                           "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-xs font-medium transition-colors duration-150",
                           active
-                            ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
-                            : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                            ? "bg-surface-nav-selected text-surface-nav-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
+                            : navItemBase
                         )}
                       >
                         <Icon className="h-3.5 w-3.5 shrink-0" />

@@ -105,14 +105,14 @@ const bgStyles = {
   add: "bg-green-50/60 dark:bg-green-950/20",
   remove: "bg-red-50/60 dark:bg-red-950/20",
   context: "",
-  empty: "bg-muted/20",
+  empty: "bg-surface-pane/70",
 };
 
 const gutterBg = {
   add: "bg-green-100/40 dark:bg-green-950/30",
   remove: "bg-red-100/40 dark:bg-red-950/30",
   context: "",
-  empty: "bg-muted/20",
+  empty: "bg-surface-pane/70",
 };
 
 const SplitLineCell = memo(function SplitLineCell({
@@ -237,7 +237,7 @@ export function SplitDiffHunk({
   return (
     <div>
       {/* Hunk header spans full width */}
-      <div data-hunk-header className="bg-muted/30 border-y border-border/50 px-3 py-1 text-xs text-muted-foreground font-mono select-none">
+      <div data-hunk-header className="bg-surface-pane border-y border-border/50 px-3 py-1 text-xs text-muted-foreground font-mono select-none">
         {hunk.header}
       </div>
       {/* Split rows */}
@@ -302,7 +302,7 @@ export function SplitDiffHunk({
             </div>
             {/* Inline comments/input span full width below the row */}
             {hasInlineContent && (
-              <div className="bg-muted/10 border-y border-border/30">
+              <div className="bg-surface-pane/50 border-y border-border/30">
                 {((leftComments && leftComments.length > 0) ||
                   (rightComments && rightComments.length > 0)) &&
                   onUpdateComment &&

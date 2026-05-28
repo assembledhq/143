@@ -13,4 +13,10 @@ describe("Input", () => {
     expect(input).toHaveClass("text-xs");
     expect(input).not.toHaveClass("text-base");
   });
+
+  it("renders on the raised control surface", () => {
+    renderWithProviders(<Input aria-label="Repository" />);
+
+    expect(screen.getByRole("textbox", { name: "Repository" })).toHaveClass("bg-surface-raised");
+  });
 });

@@ -195,7 +195,7 @@ export function UsageTimeseriesChart({
         </div>
 
         {isLoading ? (
-          <div className="h-64 animate-pulse rounded bg-muted/30" />
+          <div className="h-64 animate-pulse rounded bg-surface-pane" />
         ) : isError ? (
           <div className="flex h-64 items-center justify-center text-sm text-destructive">
             Failed to load usage data. Please try again later.

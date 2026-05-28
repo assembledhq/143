@@ -42,7 +42,7 @@ export function ImageLightbox({ open, src, alt, onOpenChange }: ImageLightboxPro
               variant="secondary"
               size="icon"
               aria-label="Close image preview"
-              className="absolute right-4 top-4 z-10 rounded-full bg-background/90 shadow-lg backdrop-blur-sm hover:bg-background sm:right-6 sm:top-6"
+              className="absolute right-4 top-4 z-10 rounded-full bg-surface-raised/90 shadow-lg backdrop-blur-sm hover:bg-surface-raised sm:right-6 sm:top-6"
             >
               <X className="h-4 w-4" />
             </Button>

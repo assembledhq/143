@@ -83,8 +83,8 @@ const SingleComment = memo(function SingleComment({
       className={cn(
         "border-l-2 px-3 py-2 text-xs",
         comment.resolved
-          ? "border-muted-foreground/20 bg-muted/10"
-          : "border-primary/40 bg-primary/5"
+          ? "border-muted-foreground/20 bg-surface-pane/50"
+          : "border-primary/40 bg-surface-selected"
       )}
     >
       <div className="mb-1 flex flex-wrap items-start gap-x-2 gap-y-1">

@@ -109,7 +109,7 @@ export function ClaudeCodeAuthModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg border bg-background p-6 shadow-lg">
+      <div className="w-full max-w-md rounded-lg border bg-surface-raised p-6 shadow-lg">
         <h3 className="text-lg font-medium">Connect your Claude subscription</h3>
 
         {status === "initiating" && (

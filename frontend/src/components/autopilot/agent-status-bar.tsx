@@ -49,8 +49,8 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
     <div
       className={`flex items-center gap-3 rounded-lg border px-4 py-2.5 transition-colors ${
         isRunning
-          ? "border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10 dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_8%)]"
-          : "border-border bg-muted/30"
+          ? "border-primary/20 bg-surface-selected dark:border-primary/30 dark:bg-primary/10 dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_8%)]"
+          : "border-border bg-surface-pane"
       }`}
     >
       {isRunning ? (

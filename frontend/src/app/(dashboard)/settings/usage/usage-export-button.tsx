@@ -107,7 +107,7 @@ export function UsageExportButton({ start, end, dimension = "user", filters }: U
             role="dialog"
             aria-label="Export options"
             tabIndex={-1}
-            className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border bg-background p-3 shadow-md space-y-3"
+            className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border bg-surface-raised p-3 shadow-md space-y-3"
           >
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Granularity</Label>

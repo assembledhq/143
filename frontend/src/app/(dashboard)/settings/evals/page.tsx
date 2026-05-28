@@ -304,7 +304,7 @@ export default function EvalsSettingsPage() {
       ) : (
         <Card>
           <CardContent className="p-0">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface-pane">
               <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
               </span>
@@ -358,7 +358,7 @@ function BootstrapProgressBanner({
   const statusConfig: Record<EvalBootstrapStatus, { border: string; bg: string; icon: React.ReactNode; text: string }> = {
     pending: {
       border: "border-muted-foreground/30",
-      bg: "bg-muted/30",
+      bg: "bg-surface-pane",
       icon: <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />,
       text: "Bootstrap scan queued...",
     },
@@ -651,7 +651,7 @@ function EvalTaskRow({ task, repoName }: { task: EvalTask; repoName?: string }) 
   return (
     <Link
       href={`/settings/evals/${task.id}`}
-      className="flex items-center justify-between py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors cursor-pointer"
+      className="flex items-center justify-between py-3 px-4 border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors cursor-pointer"
     >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -706,7 +706,7 @@ function BatchHistory() {
             <Link
               key={batch.id}
               href={`/settings/evals/batch/${batch.id}`}
-              className="flex items-center justify-between py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors cursor-pointer"
+              className="flex items-center justify-between py-3 px-4 border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors cursor-pointer"
             >
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">

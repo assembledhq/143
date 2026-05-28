@@ -58,7 +58,7 @@ describe("CommandCheckItem", () => {
 
     expect(indicator).not.toBeNull();
     expect(indicator).toHaveClass("border-border");
-    expect(indicator).toHaveClass("bg-background");
+    expect(indicator).toHaveClass("bg-surface-raised");
     expect(indicator).toHaveClass("text-transparent");
     expect(indicator?.querySelector("svg")).toHaveClass("text-transparent");
   });

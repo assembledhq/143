@@ -89,7 +89,7 @@ function BoardSection({
             const colTasks = tasks.filter((t) => col.statuses.includes(t.status));
             return (
               <div key={col.key} className="space-y-2">
-                <div className={`border-t-2 ${col.accent} rounded-t-md bg-muted/30 px-3 py-2`}>
+                <div className={`border-t-2 ${col.accent} rounded-t-md bg-surface-pane px-3 py-2`}>
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold">{col.label}</span>
                     <Badge variant="outline" className="text-xs px-1 py-0">{colTasks.length}</Badge>

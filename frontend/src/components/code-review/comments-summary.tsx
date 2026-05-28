@@ -22,7 +22,7 @@ export function CommentsSummary({
   const openCount = comments.length - resolvedCount;
 
   return (
-    <div className="mx-4 mt-3 mb-0 border border-border rounded-lg overflow-hidden bg-background">
+    <div className="mx-4 mt-3 mb-0 border border-border rounded-lg overflow-hidden bg-surface-raised">
       <div
         role="button"
         tabIndex={0}
@@ -33,7 +33,7 @@ export function CommentsSummary({
             setExpanded(!expanded);
           }
         }}
-        className="flex items-center justify-between w-full px-3 py-2 text-xs hover:bg-muted/30 transition-colors cursor-pointer"
+        className="flex items-center justify-between w-full px-3 py-2 text-xs hover:bg-surface-pane transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           {expanded ? (
@@ -60,7 +60,7 @@ export function CommentsSummary({
                 key={c.id}
                 onClick={() => onCommentClick(c.file_path)}
                 className={cn(
-                  "flex items-start gap-2 w-full text-left px-2 py-1 rounded text-xs hover:bg-muted/30 transition-colors",
+                  "flex items-start gap-2 w-full text-left px-2 py-1 rounded text-xs hover:bg-surface-pane transition-colors",
                   c.resolved && "text-muted-foreground"
                 )}
               >

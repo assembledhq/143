@@ -77,14 +77,14 @@ export function KeyboardHelpOverlay({ open, onClose }: KeyboardHelpOverlayProps)
         aria-modal="true"
         aria-label="Keyboard shortcuts"
         tabIndex={-1}
-        className="bg-background border border-border rounded-lg shadow-lg w-[360px] max-w-[90vw] outline-none"
+        className="bg-surface-raised border border-border rounded-lg shadow-lg w-[360px] max-w-[90vw] outline-none"
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
           <button
             onClick={onClose}
             aria-label="Close keyboard shortcuts"
-            className="h-6 w-6 flex items-center justify-center rounded hover:bg-muted transition-colors"
+            className="h-6 w-6 flex items-center justify-center rounded hover:bg-surface-hover transition-colors"
           >
             <X className="h-3.5 w-3.5" />
           </button>

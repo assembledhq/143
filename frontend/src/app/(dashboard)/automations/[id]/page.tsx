@@ -61,7 +61,7 @@ const AutomationStatsCard = dynamic(
   () => import("./automation-stats-card").then((m) => ({ default: m.AutomationStatsCard })),
   {
     ssr: false,
-    loading: () => <div className="h-48 bg-muted/20 animate-pulse rounded-lg" />,
+    loading: () => <div className="h-48 bg-surface-pane/70 animate-pulse rounded-lg" />,
   },
 );
 
@@ -157,7 +157,7 @@ function SettingsTab({
   });
 
   return (
-    <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+    <div className="space-y-4 rounded-lg border border-border bg-surface-raised p-5">
       <div
         data-testid="automation-settings-identity-row"
         className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
@@ -662,7 +662,7 @@ export default function AutomationDetailPage() {
                 />
               ) : (
                 <span
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-surface-raised text-lg leading-none"
                   aria-label={`Automation icon for ${automation.name}`}
                 >
                   {automation.icon_value || "⚙️"}
@@ -683,7 +683,7 @@ export default function AutomationDetailPage() {
 
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
           <main className="min-w-0 space-y-6">
-            <section className="rounded-lg border border-border bg-card p-5">
+            <section className="rounded-lg border border-border bg-surface-raised p-5">
               <div className="mb-4">
                 <h2 className="text-sm font-semibold text-foreground">Goal</h2>
               </div>
@@ -728,7 +728,7 @@ function AutomationDetailRail({
   runActions?: ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-border bg-card p-4">
+    <section className="rounded-lg border border-border bg-surface-raised p-4">
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-sm font-semibold text-foreground">Status</h2>
@@ -786,7 +786,7 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
   const latest = data?.data?.[0];
 
   return (
-    <section className="rounded-lg border border-border bg-card p-5">
+    <section className="rounded-lg border border-border bg-surface-raised p-5">
       <h2 className="text-sm font-semibold text-foreground">Latest run</h2>
       {isLoading ? (
         <p className="mt-3 text-sm text-muted-foreground">Loading latest run...</p>

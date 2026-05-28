@@ -112,7 +112,7 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
       </Button>
 
       {expanded && (
-        <div className="absolute top-full left-0 mt-1 z-50 w-[400px] rounded-lg border bg-background shadow-lg">
+        <div className="absolute top-full left-0 mt-1 z-50 w-[400px] rounded-lg border bg-surface-raised shadow-lg">
           <div className="flex items-center justify-between p-2 border-b">
             <span className="text-xs font-medium">
               Console ({messages.length})

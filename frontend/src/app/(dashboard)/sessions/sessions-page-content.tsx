@@ -416,7 +416,7 @@ export function SessionsPageContent() {
 
       {/* ── Data table ─────────────────────────────────────────────── */}
       {!isPendingScope && !showDecisions && !error && counts?.all !== 0 && (
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div className="rounded-lg border border-border bg-surface-raised overflow-hidden">
           {filteredSessions.length === 0 ? (
             <div className="py-12 text-center text-xs text-muted-foreground">
               No sessions match this filter.
@@ -458,7 +458,7 @@ export function SessionsPageContent() {
               </Table>
 
               {/* Footer: "Showing N of M · Show more" */}
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-border/50 bg-muted/20">
+              <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-border/50 bg-surface-pane/70">
                 <span className="text-xs text-muted-foreground/70 tabular-nums">
                   {currentTabTotal !== undefined
                     ? `Showing ${filteredSessions.length} of ${renderCount(currentTabTotal, counts)}`

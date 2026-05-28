@@ -236,7 +236,7 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
           defaultBranch={selectedRepo.default_branch}
           onValueChange={onBranchChange}
           label="Target branch"
-          buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
+          buttonClassName="h-8 rounded-full border-none bg-transparent px-3 text-xs text-muted-foreground shadow-none hover:bg-surface-hover hover:text-foreground"
           contentClassName="w-72"
         />
       )}
@@ -1059,7 +1059,7 @@ export function ManualSessionComposer({
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Repository</Label>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="h-11 w-full justify-between rounded-xl border-border/70 bg-background px-3 text-left">
+              <Button variant="outline" className="h-11 w-full justify-between rounded-xl border-border/70 bg-surface-raised px-3 text-left">
                 <span className="flex items-center gap-2 overflow-hidden">
                   <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <span className="truncate">{selectedRepo ? selectedRepo.full_name : "Select repository"}</span>
@@ -1092,7 +1092,7 @@ export function ManualSessionComposer({
             defaultBranch={selectedRepo.default_branch}
             onValueChange={handleBranchChange}
             label="Target branch"
-            buttonClassName="h-11 w-full justify-between rounded-xl border border-border/70 bg-background px-3 text-left text-sm shadow-none hover:bg-accent/60"
+            buttonClassName="h-11 w-full justify-between rounded-xl border border-border/70 bg-surface-raised px-3 text-left text-sm shadow-none hover:bg-surface-hover"
             contentClassName="w-72"
           />
         </div>
@@ -1101,7 +1101,7 @@ export function ManualSessionComposer({
       <div className="space-y-2">
         <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
         <Select value={selectedModel} onValueChange={handleModelChange}>
-          <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+          <SelectTrigger className="h-11 rounded-xl border-border/70 bg-surface-raised text-sm" aria-label="Model override">
             <SelectValue placeholder="Default model" />
           </SelectTrigger>
           <SelectContent>
@@ -1124,7 +1124,7 @@ export function ManualSessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Reasoning</Label>
           <Select value={effectiveReasoningOverride || "__default__"} onValueChange={handleReasoningChange}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Reasoning override">
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-surface-raised text-sm" aria-label="Reasoning override">
               <SelectValue placeholder="Default reasoning" />
             </SelectTrigger>
             <SelectContent>
@@ -1149,7 +1149,7 @@ export function ManualSessionComposer({
         "relative flex flex-col rounded-[2rem] border border-transparent transition-all duration-200 ease-out",
         "before:pointer-events-none before:absolute before:inset-0 before:rounded-[inherit] before:border before:border-dashed before:opacity-0 before:transition-opacity before:duration-200",
         "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.08),transparent_58%)] after:opacity-0 after:transition-opacity after:duration-200",
-        fileDropzone.isDragActive && "border-primary/20 bg-primary/5 shadow-[0_20px_70px_-40px_rgba(59,130,246,0.45)] before:opacity-100 before:border-primary/40 after:opacity-100",
+        fileDropzone.isDragActive && "border-primary/20 bg-surface-selected shadow-[0_20px_70px_-40px_rgba(59,130,246,0.45)] before:opacity-100 before:border-primary/40 after:opacity-100",
         className,
       )}
       data-testid={dataTestId}
@@ -1162,7 +1162,7 @@ export function ManualSessionComposer({
             className={cn(
               "inline-flex min-h-8 items-center rounded-full border px-3 py-1 text-xs font-medium tracking-[0.02em] text-muted-foreground transition-all duration-200",
               fileDropzone.isDragActive
-                ? "translate-y-0 border-primary/30 bg-background/90 text-foreground opacity-100 shadow-sm"
+                ? "translate-y-0 border-primary/30 bg-surface-raised/90 text-foreground opacity-100 shadow-sm"
                 : "translate-y-1 border-transparent bg-transparent opacity-0",
             )}
           >
@@ -1216,7 +1216,7 @@ export function ManualSessionComposer({
           <Card
             ref={composerCardRef}
             className={cn(
-              "w-full rounded-2xl border-border/60 bg-card shadow-lg transition-all duration-200 ease-out dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]",
+              "w-full rounded-2xl border-border/70 bg-surface-raised shadow-lg transition-all duration-200 ease-out dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]",
               fileDropzone.isDragActive && "-translate-y-0.5 border-primary/25 shadow-[0_24px_70px_-45px_rgba(59,130,246,0.55)]",
               cardClassName,
             )}
@@ -1420,7 +1420,7 @@ export function ManualSessionComposer({
                         variant="ghost"
                         size="sm"
                         aria-label="Session settings"
-                        className="h-8 rounded-full border border-border/60 bg-muted/40 px-3 text-xs text-foreground shadow-sm hover:bg-accent/70"
+                        className="h-8 rounded-full border border-border/60 bg-muted/40 px-3 text-xs text-foreground shadow-sm hover:bg-surface-hover"
                         onClick={() => setMobileSettingsOpen(true)}
                       >
                         <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" />

@@ -29,7 +29,7 @@ export function AutonomyReadiness({ autonomyLevel, decisionSummary, totalCycles 
   // Not enough data to recommend
   if (!decisionSummary || decisionSummary.total_delegated === 0 || totalCycles < 3) {
     return (
-      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+      <div className="rounded-md border border-border bg-surface-pane px-4 py-3 text-xs text-muted-foreground">
         After a few more analysis cycles, readiness signals will appear here.
       </div>
     );
@@ -46,8 +46,8 @@ export function AutonomyReadiness({ autonomyLevel, decisionSummary, totalCycles 
   return (
     <div className={`rounded-md border px-4 py-3 space-y-1.5 ${
       isReady
-        ? "border-primary/30 bg-primary/5 dark:bg-primary/10"
-        : "border-border bg-muted/30"
+        ? "border-primary/30 bg-surface-selected dark:bg-primary/10"
+        : "border-border bg-surface-pane"
     }`}>
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">

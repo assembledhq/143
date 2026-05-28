@@ -23,7 +23,7 @@ function Code({ className, children, ...props }: React.ComponentProps<"code">) {
 
   return (
     <code
-      className="rounded bg-background border border-border px-1 py-0.5 font-mono text-xs"
+      className="rounded bg-surface-raised border border-border px-1 py-0.5 font-mono text-xs"
       {...props}
     >
       {children}
@@ -36,7 +36,7 @@ const components: Components = {
   pre({ children }) {
     return (
       <BlockCodeContext.Provider value={true}>
-        <pre className="my-2 rounded-md border border-border bg-background p-3 overflow-x-auto text-xs">
+        <pre className="my-2 rounded-md border border-border bg-surface-raised p-3 overflow-x-auto text-xs">
           {children}
         </pre>
       </BlockCodeContext.Provider>

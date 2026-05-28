@@ -201,6 +201,28 @@ describe("AuthenticatedLayout", () => {
     expect(main).toHaveClass("overscroll-contain");
   });
 
+  it("uses the visual language surface hierarchy for the app shell", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const appShell = container.firstElementChild;
+    expect(appShell).toHaveClass("bg-surface-canvas");
+
+    const fullSidebar = container.querySelector("[data-testid='app-sidebar']");
+    expect(fullSidebar).toHaveClass("bg-surface-nav");
+    expect(fullSidebar).toHaveClass("text-surface-nav-foreground");
+
+    const compactRail = container.querySelector("[data-testid='app-sidebar-rail']");
+    expect(compactRail).toHaveClass("bg-surface-nav");
+    expect(compactRail).toHaveClass("border-border-strong");
+
+    const main = container.querySelector("main");
+    expect(main).toHaveClass("bg-surface-canvas");
+  });
+
   it("shows settings entries in the collapsible sidebar section", async () => {
     const user = userEvent.setup();
 

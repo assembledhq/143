@@ -109,7 +109,7 @@ export function LinkedIssueChips({ session }: { session: Session }) {
               <Badge
                 asChild
                 variant="secondary"
-                className="bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-accent/80"
+                className="bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-surface-hover/80"
               >
                 <a
                   href={linearIssueURL(linearIdentifierHint)}
@@ -144,8 +144,8 @@ export function LinkedIssueChips({ session }: { session: Session }) {
 
           const chipClasses = isLinear
             ? isPrimary
-              ? "bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-accent/80"
-              : "bg-muted/60 text-muted-foreground border-border/60 [a&]:hover:bg-accent/70 [a&]:hover:text-foreground"
+              ? "bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-surface-hover/80"
+              : "bg-muted/60 text-muted-foreground border-border/60 [a&]:hover:bg-surface-hover [a&]:hover:text-foreground"
             : isPrimary
               ? "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30"
               : "bg-muted text-muted-foreground border-border";

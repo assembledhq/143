@@ -179,7 +179,7 @@ export default function AuditLogPage() {
         </div>
 
         {/* Entries */}
-        <div className="rounded-lg border border-border bg-card shadow-sm">
+        <div className="rounded-lg border border-border bg-surface-raised shadow-sm">
           <div
             className="flex flex-col gap-3 border-b border-border/50 px-6 py-4 sm:flex-row sm:items-center sm:justify-between"
           >

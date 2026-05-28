@@ -314,7 +314,7 @@ export function SwipeActionRow({
   const swipeSurfaceProps = isTouchDevice
     ? {
         className: cn(
-          "relative z-10 bg-background touch-pan-y",
+          "relative z-10 bg-surface-pane touch-pan-y",
           !isDragging && "transition-transform duration-200 ease-out",
         ),
         style: { transform: `translateX(-${offset}px)` },
@@ -385,7 +385,7 @@ export function SwipeActionRow({
         aria-label={actionLabel}
         title={actionLabel}
         className={cn(
-          "absolute right-2 top-2 z-20 hidden border border-border/60 bg-background text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
+          "absolute right-2 top-2 z-20 hidden border border-border/60 bg-surface-raised text-muted-foreground shadow-sm hover:text-foreground md:inline-flex",
           desktopActionVisibility === "hover" &&
             "md:opacity-0 md:transition-opacity md:duration-150 md:group-hover:opacity-100 md:focus-visible:opacity-100",
         )}

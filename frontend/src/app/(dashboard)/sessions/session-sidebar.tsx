@@ -25,6 +25,7 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import type { ListResponse, SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
+import { hoverSurface, paneSurface, raisedSurface, strongBoundary } from "@/lib/surfaces";
 import {
   workingSet,
   filterToStatusParam,
@@ -56,7 +57,7 @@ const filterTabs = [
 
 const newSessionOptionId = "new-session";
 const sessionSidebarOptionFrameClass = "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150";
-const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none";
+const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-surface-raised px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-transparent md:shadow-none";
 
 function SessionSidebarOptionFrame({
   id,
@@ -629,7 +630,7 @@ export function SessionSidebar() {
   }, [filterSuffix, focusSearch, moveActiveSession, router]);
 
   return (
-    <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
+    <div data-testid="session-sidebar-pane" className={cn("w-full h-full border-r flex flex-col", paneSurface, strongBoundary)}>
       {/* Header */}
       <div className="px-4 pt-3 pb-3 space-y-3">
 
@@ -664,7 +665,7 @@ export function SessionSidebar() {
         {/* New session button */}
         <Link
           href={`/sessions/new${filterSuffix}`}
-          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+          className={cn("flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border text-xs font-medium text-foreground transition-colors shadow-sm", raisedSurface, hoverSurface)}
         >
           <Plus className="h-4 w-4" />
           New session
@@ -722,15 +723,15 @@ export function SessionSidebar() {
               id={`session-sidebar-option-${newSessionOptionId}`}
               ariaLabel="New session draft"
               ariaSelected={!currentActiveSessionId}
-              className={!currentActiveSessionId ? "border-primary/20 bg-background shadow-sm ring-1 ring-primary/10" : undefined}
+              className={!currentActiveSessionId ? "border-primary/25 bg-surface-selected shadow-sm ring-1 ring-primary/20" : undefined}
             >
               <SessionSidebarRowSurface
                 href={`/sessions/new${filterSuffix}`}
                 ariaCurrent="page"
                 className={
                   !currentActiveSessionId
-                    ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                    ? "border-transparent bg-surface-selected shadow-none ring-0 md:border-transparent md:bg-surface-selected md:shadow-none"
+                    : "hover:border-border/60 hover:bg-surface-hover md:hover:border-transparent md:hover:bg-surface-hover"
                 }
               >
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -817,8 +818,8 @@ export function SessionSidebar() {
                   }
                 }}
                 className={cn(
-                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
-                  isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
+                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-surface-raised/80 ring-1 ring-ring/20",
+                  isSelected && "cursor-pointer border-primary/25 bg-surface-selected shadow-sm ring-1 ring-primary/20",
                 )}
                 onClick={(event) => {
                   if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
@@ -832,8 +833,8 @@ export function SessionSidebar() {
                   ariaCurrent={isSelected ? "page" : undefined}
                   className={
                     isSelected
-                      ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                      : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                      ? "border-transparent bg-surface-selected shadow-none ring-0 md:border-transparent md:bg-surface-selected md:shadow-none"
+                      : "hover:border-border/60 hover:bg-surface-hover md:hover:border-transparent md:hover:bg-surface-hover"
                   }
                 >
                   <span

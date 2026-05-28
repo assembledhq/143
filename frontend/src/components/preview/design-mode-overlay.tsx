@@ -167,7 +167,7 @@ export function DesignModeOverlay({
       </div>
 
       {/* Toolbar (top-left) */}
-      <div className="absolute top-2 left-2 flex items-center gap-1 rounded-md border bg-background/95 backdrop-blur p-1 shadow-sm pointer-events-auto">
+      <div className="absolute top-2 left-2 flex items-center gap-1 rounded-md border bg-surface-raised/95 backdrop-blur p-1 shadow-sm pointer-events-auto">
         <Button
           size="icon-xs"
           title="Select element"
@@ -196,7 +196,7 @@ export function DesignModeOverlay({
 
       {/* Element info panel (bottom-left) */}
       {primarySelected && (
-        <div className="absolute bottom-2 left-2 w-72 rounded-lg border bg-background/95 backdrop-blur shadow-lg pointer-events-auto">
+        <div className="absolute bottom-2 left-2 w-72 rounded-lg border bg-surface-raised/95 backdrop-blur shadow-lg pointer-events-auto">
           <div className="flex items-center justify-between p-2 border-b">
             <div className="flex items-center gap-1.5">
               <Badge variant="secondary" className="font-mono text-xs">

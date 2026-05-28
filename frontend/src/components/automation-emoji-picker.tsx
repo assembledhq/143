@@ -253,7 +253,7 @@ export function AutomationEmojiPicker({
                     value={item.keywords}
                     aria-label={item.label}
                     className={cn(
-                      "flex h-9 w-9 cursor-pointer items-center justify-center rounded-md p-0 text-lg leading-none transition-colors hover:bg-accent",
+                      "flex h-9 w-9 cursor-pointer items-center justify-center rounded-md p-0 text-lg leading-none transition-colors hover:bg-surface-hover",
                       item.emoji === selected.emoji && "bg-primary text-primary-foreground data-[selected=true]:bg-primary data-[selected=true]:text-primary-foreground",
                     )}
                     onSelect={() => selectEmoji(item.emoji)}

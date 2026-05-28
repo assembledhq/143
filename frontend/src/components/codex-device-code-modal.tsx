@@ -108,7 +108,7 @@ export function CodexDeviceCodeModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg border bg-background p-6 shadow-lg">
+      <div className="w-full max-w-md rounded-lg border bg-surface-raised p-6 shadow-lg">
         <h3 className="text-lg font-medium">Connect your ChatGPT account</h3>
         {status === "initiating" && <p className="mt-4 text-sm text-muted-foreground">Starting authentication...</p>}
         {status === "pending" && deviceAuth && (

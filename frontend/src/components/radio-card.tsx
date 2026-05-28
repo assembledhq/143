@@ -21,8 +21,8 @@ export function RadioCard({
     <label
       className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
         selected
-          ? "border-primary bg-primary/5 ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
-          : "border-input hover:bg-muted/40 hover:border-border"
+          ? "border-primary bg-surface-selected ring-1 ring-primary/20 dark:shadow-[var(--glow-primary-sm)]"
+          : "border-input hover:bg-surface-hover hover:border-border"
       }`}
     >
       <div className="flex items-center gap-2">

@@ -223,7 +223,7 @@ export function SpecsSection({
                 {isEditing ? (
                   <Textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} rows={16} className="font-mono text-xs" />
                 ) : (
-                  <pre className="whitespace-pre-wrap break-words text-xs bg-muted/30 rounded-md p-4 font-mono max-w-full">
+                  <pre className="whitespace-pre-wrap break-words text-xs bg-surface-pane rounded-md p-4 font-mono max-w-full">
                     {spec.content || "(empty)"}
                   </pre>
                 )}
@@ -428,7 +428,7 @@ export function AnalysisSection({ project }: { project: Project }) {
         </div>
 
         {summary && (
-          <div className="text-xs text-muted-foreground bg-muted/30 rounded-md px-3 py-2">{summary}</div>
+          <div className="text-xs text-muted-foreground bg-surface-pane rounded-md px-3 py-2">{summary}</div>
         )}
 
         {suggestions.map((s, i) => (

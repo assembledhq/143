@@ -176,7 +176,7 @@ const ReviewDiffView = dynamic(
   loadReviewDiffView,
   {
     ssr: false,
-    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+    loading: () => <div className="h-full w-full bg-surface-pane/70 animate-pulse rounded-lg" />,
   },
 );
 
@@ -186,7 +186,7 @@ const PreviewPanel = dynamic(
   () => import("@/components/preview/preview-panel").then((m) => ({ default: m.PreviewPanel })),
   {
     ssr: false,
-    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+    loading: () => <div className="h-full w-full bg-surface-pane/70 animate-pulse rounded-lg" />,
   },
 );
 
@@ -1391,7 +1391,7 @@ function SessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent</Label>
           <Select value={editableAgentType} onValueChange={onEditableAgentTypeChange} disabled={agentUpdatePending}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Agent">
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-surface-raised text-sm" aria-label="Agent">
               <SelectValue placeholder="Select agent" />
             </SelectTrigger>
             <SelectContent>
@@ -1409,7 +1409,7 @@ function SessionComposer({
         <div className="space-y-2">
           <Label className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Model</Label>
           <Select value={selectedModel} onValueChange={onSelectedModelChange}>
-            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-background text-sm" aria-label="Model override">
+            <SelectTrigger className="h-11 rounded-xl border-border/70 bg-surface-raised text-sm" aria-label="Model override">
               <SelectValue placeholder="Default model" />
             </SelectTrigger>
             <SelectContent>
@@ -1480,7 +1480,7 @@ function SessionComposer({
       />
 
       <div
-        className="border-t border-border p-3 bg-background shrink-0"
+        className="border-t border-border-strong p-3 bg-surface-canvas shrink-0"
         ref={composerCardRef}
         data-testid="session-composer-shell"
       >
@@ -1506,9 +1506,9 @@ function SessionComposer({
           data-testid="session-composer-input-surface"
           {...fileDropzone.dropzoneProps}
           className={cn(
-            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
+            "rounded-xl border bg-surface-raised transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
             planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
-            fileDropzone.isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
+            fileDropzone.isDragActive && "border-primary/40 bg-surface-selected ring-1 ring-primary/30",
           )}
         >
           {openComments.length > 0 && (
@@ -1518,7 +1518,7 @@ function SessionComposer({
                 return (
                   <div
                     key={c.id}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface-raised px-2 py-1 text-xs"
                   >
                     <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
                     <span className="font-mono text-muted-foreground">
@@ -1709,7 +1709,7 @@ function SessionComposer({
                     variant="ghost"
                     size="sm"
                     aria-label="Session settings"
-                    className="h-8 rounded-full border border-border/60 bg-background/70 px-3 text-xs text-foreground shadow-sm hover:bg-background"
+                    className="h-8 rounded-full border border-border/60 bg-surface-raised/70 px-3 text-xs text-foreground shadow-sm hover:bg-surface-hover"
                     onClick={() => setMobileSettingsOpen(true)}
                   >
                     <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
@@ -2786,7 +2786,7 @@ const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
 
 function FreshThreadShell() {
   return (
-    <Card className="w-full max-w-[92%] border-border/60 bg-muted/20 shadow-none">
+    <Card className="w-full max-w-[92%] border-border/60 bg-surface-pane/70 shadow-none">
       <CardContent className="flex flex-col gap-3 p-4">
         <span className="text-sm font-medium text-foreground">New tab</span>
         <div className="space-y-1">
@@ -5424,7 +5424,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <div
               data-testid="session-main-header"
               className={cn(
-                "hidden border-b border-border bg-background px-4 py-3 md:flex items-center justify-between shrink-0",
+                "hidden border-b border-border bg-surface-raised px-4 py-3 md:flex items-center justify-between shrink-0",
                 SESSION_HEADER_HEIGHT_CLASSNAME,
               )}
             >
@@ -5574,7 +5574,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <div className="h-full animate-in fade-in duration-150 flex flex-col">
               <div className="flex-1 min-h-0">
                 {isDiffDisplayLoading ? (
-                  <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />
+                  <div className="h-full w-full bg-surface-pane/70 animate-pulse rounded-lg" />
                 ) : diffLoadErrorText ? (
                   <div className="flex h-full items-center justify-center p-6">
                     <div className="max-w-sm space-y-3 text-center">
@@ -5689,7 +5689,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           <div
             data-testid="session-detail-panel"
             style={{ width: detailWidth }}
-            className="relative z-10 bg-background flex flex-col shrink-0 overflow-hidden"
+            className="relative z-10 bg-surface-raised flex flex-col shrink-0 overflow-hidden"
           >
             {panelTabsEl}
           </div>
@@ -5702,7 +5702,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           side="bottom"
           id="session-detail-sheet"
           hideCloseButton
-          className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-background"
+          className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-surface-raised"
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
           <SheetDescription className="sr-only">
@@ -5759,7 +5759,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 className="grid gap-2"
                 disabled={startReviewLoopMutation.isPending}
               >
-                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-input p-3 transition-colors hover:bg-muted/40 has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5">
+                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-input p-3 transition-colors hover:bg-surface-hover has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-surface-selected">
                   <RadioGroupItem value="minimal" aria-label="Minimal fixes" className="mt-0.5" />
                   <span className="space-y-1">
                     <span className="block text-xs font-medium text-foreground">Minimal fixes</span>
@@ -5768,7 +5768,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </span>
                   </span>
                 </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-input p-3 transition-colors hover:bg-muted/40 has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5">
+                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-input p-3 transition-colors hover:bg-surface-hover has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-surface-selected">
                   <RadioGroupItem value="exhaustive" aria-label="Fix every finding" className="mt-0.5" />
                   <span className="space-y-1">
                     <span className="block text-xs font-medium text-foreground">Fix every finding</span>

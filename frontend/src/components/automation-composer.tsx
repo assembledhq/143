@@ -42,7 +42,7 @@ export function AutomationComposer({
   const goalLength = automationGoalLengthState(goal);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+    <div className="overflow-hidden rounded-lg border border-border bg-surface-raised shadow-sm">
       <div
         data-testid="automation-identity-row"
         className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-3 border-b border-border px-4 py-3 sm:px-5"

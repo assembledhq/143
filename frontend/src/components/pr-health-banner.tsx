@@ -135,7 +135,7 @@ export function PRHealthBanner({
                                 href={check.details_url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex items-center justify-between gap-3 rounded-sm px-1 py-1 text-xs transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                className="flex items-center justify-between gap-3 rounded-sm px-1 py-1 text-xs transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               >
                                 <div className="flex min-w-0 items-center gap-1.5">
                                   <span className="min-w-0 truncate text-foreground">{check.name}</span>

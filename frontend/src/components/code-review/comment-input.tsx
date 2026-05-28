@@ -61,7 +61,7 @@ export function CommentInput({
     <div
       data-testid="inline-comment-composer"
       className={cn(
-        "my-1.5 w-full overflow-hidden rounded-md border border-border bg-background shadow-sm",
+        "my-1.5 w-full overflow-hidden rounded-md border border-border bg-surface-raised shadow-sm",
         className
       )}
     >
@@ -74,7 +74,7 @@ export function CommentInput({
         aria-label="Review comment"
         className="min-h-[60px] max-h-[160px] resize-none rounded-t-md rounded-b-none border-0 border-b px-3 py-2 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground/50"
       />
-      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/50 bg-muted/20 px-3 py-2 rounded-b-md">
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border/50 bg-surface-pane/70 px-3 py-2 rounded-b-md">
         <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onCancel}>
           Cancel
         </Button>

@@ -23,7 +23,7 @@ export function DiffStatsBadge({ added, removed, onClick, className }: DiffStats
         onClick={onClick}
         className={cn(
           "inline-flex items-center rounded-md border border-border px-2 py-1 transition-colors",
-          "hover:bg-muted/60 hover:border-muted-foreground/30",
+          "hover:bg-surface-hover hover:border-muted-foreground/30",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         )}
         title="View changes"

@@ -109,7 +109,7 @@ export default function AutomationTemplatesPage() {
 
                           <div className="space-y-2">
                             <h3 className="text-sm font-medium text-foreground">Prompt preview</h3>
-                            <div className="rounded-md border border-border bg-muted/30 p-3">
+                            <div className="rounded-md border border-border bg-surface-pane p-3">
                               <p className="whitespace-pre-line text-xs leading-5 text-muted-foreground">
                                 {template.goal}
                               </p>

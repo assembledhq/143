@@ -181,6 +181,20 @@ describe("SidebarLayout", () => {
     expect(content).toHaveClass("overscroll-contain");
   });
 
+  it("uses the local pane and canvas surfaces", () => {
+    const { container, getByTestId } = renderLayout("content");
+
+    const shell = container.firstElementChild;
+    expect(shell).toHaveClass("bg-surface-canvas");
+
+    const compactPane = getByTestId("compact-sidebar-pane");
+    expect(compactPane).toHaveClass("bg-surface-pane");
+    expect(compactPane).toHaveClass("border-border-strong");
+
+    const switcher = getByTestId("session-switcher-rail");
+    expect(switcher).toHaveClass("bg-surface-pane");
+  });
+
   it("keeps the compact session list as a full-height pane on list routes", () => {
     const { getByTestId } = renderLayout("sidebar");
 

@@ -46,7 +46,7 @@ export function DiffHunk({
       {/* Hunk header */}
       <div
         data-hunk-header
-        className="bg-muted/30 border-y border-border/50 px-3 py-1 text-xs text-muted-foreground font-mono select-none"
+        className="bg-surface-pane border-y border-border/50 px-3 py-1 text-xs text-muted-foreground font-mono select-none"
       >
         {hunk.header}
       </div>

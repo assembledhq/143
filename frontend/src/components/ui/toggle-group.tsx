@@ -74,7 +74,7 @@ function ToggleGroupItem({
       data-slot="toggle-group-item"
       className={cn(
         toggleGroupItemVariants({ size }),
-        "text-muted-foreground hover:text-foreground/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm",
+        "text-muted-foreground hover:text-foreground/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=on]:bg-surface-raised data-[state=on]:text-foreground data-[state=on]:shadow-sm",
         className
       )}
       {...props}

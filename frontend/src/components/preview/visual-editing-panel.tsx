@@ -276,7 +276,7 @@ export function VisualEditingPanel({
   });
 
   return (
-    <div className="w-64 rounded-lg border bg-background/95 backdrop-blur shadow-lg overflow-hidden">
+    <div className="w-64 rounded-lg border bg-surface-raised/95 backdrop-blur shadow-lg overflow-hidden">
       <div className="flex items-center justify-between p-2 border-b">
         <span className="text-xs font-medium">Visual Editor</span>
         <Button size="icon-xs" variant="ghost" onClick={onClose}>

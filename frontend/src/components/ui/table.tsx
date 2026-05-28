@@ -1,6 +1,7 @@
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
+import { raisedSurface } from "@/lib/surfaces"
 
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
@@ -18,7 +19,7 @@ function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
   return (
     <thead
       data-slot="table-header"
-      className={cn("sticky top-0 z-10 bg-card [&_tr]:border-b", className)}
+      className={cn("sticky top-0 z-10 [&_tr]:border-b", raisedSurface, className)}
       {...props}
     />
   )
@@ -39,7 +40,7 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
     <tfoot
       data-slot="table-footer"
       className={cn(
-        "bg-muted/50 border-t font-medium [&>tr]:last:border-b-0",
+        "bg-surface-pane border-t font-medium [&>tr]:last:border-b-0",
         className
       )}
       {...props}
@@ -52,7 +53,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b border-border/50 transition-colors hover:bg-muted/40 dark:hover:bg-primary/[0.03] data-[state=selected]:bg-muted",
+        "border-b border-border/50 transition-colors hover:bg-surface-hover data-[state=selected]:bg-surface-selected",
         className
       )}
       {...props}

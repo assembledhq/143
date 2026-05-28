@@ -137,7 +137,7 @@ export function RunsTab({ automationId }: { automationId: string }) {
         <Button
           variant="ghost"
           size="sm"
-          className="w-full rounded-xl border border-dashed border-border/70 bg-muted/10 text-muted-foreground hover:bg-muted/20 hover:text-foreground"
+          className="w-full rounded-xl border border-dashed border-border/70 bg-surface-pane/50 text-muted-foreground hover:bg-surface-pane/70 hover:text-foreground"
           onClick={() => loadMoreMutation.mutate()}
           disabled={loadMoreMutation.isPending}
         >
@@ -166,11 +166,11 @@ function QuietGroup({ group, open, onOpenChange, navigateTo }: QuietGroupProps) 
   const span = `last one ${formatTimeAgo(newest.triggered_at)}`;
 
   return (
-    <Collapsible open={open} onOpenChange={onOpenChange} className="rounded-xl border border-border/70 bg-muted/10">
+    <Collapsible open={open} onOpenChange={onOpenChange} className="rounded-xl border border-border/70 bg-surface-pane/50">
       <CollapsibleTrigger
         className={cn(
           "group flex w-full items-center justify-between gap-3 rounded-xl px-4 py-3 text-xs text-muted-foreground transition-colors",
-          "hover:bg-muted/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
         title={`${group.runs.length} runs from ${new Date(oldest.triggered_at).toLocaleString()} to ${new Date(newest.triggered_at).toLocaleString()}`}
       >
@@ -220,7 +220,7 @@ function SkeletonCard({ tall = false }: { tall?: boolean }) {
   return (
     <div
       className={cn(
-        "rounded-xl border border-border/60 bg-muted/20 p-4",
+        "rounded-xl border border-border/60 bg-surface-pane/70 p-4",
         tall ? "h-[104px]" : "h-[76px]",
         "animate-pulse",
       )}
@@ -229,5 +229,5 @@ function SkeletonCard({ tall = false }: { tall?: boolean }) {
 }
 
 function SkeletonRow() {
-  return <div className="h-12 animate-pulse rounded-xl border border-border/50 bg-muted/20" />;
+  return <div className="h-12 animate-pulse rounded-xl border border-border/50 bg-surface-pane/70" />;
 }

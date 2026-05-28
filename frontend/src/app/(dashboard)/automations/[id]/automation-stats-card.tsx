@@ -121,14 +121,14 @@ function ChartTooltip({ active, payload, label }: TooltipContentProps) {
     // on hover. Returning null here would make the cursor highlight appear
     // without any explanation and read like a broken tooltip.
     return (
-      <div className="rounded-lg border bg-background px-3 py-2 shadow-sm text-xs">
+      <div className="rounded-lg border bg-surface-raised px-3 py-2 shadow-sm text-xs">
         <p className="font-medium text-foreground mb-1">{headerLabel}</p>
         <p className="text-muted-foreground">No runs</p>
       </div>
     );
   }
   return (
-    <div className="rounded-lg border bg-background px-3 py-2 shadow-sm text-xs">
+    <div className="rounded-lg border bg-surface-raised px-3 py-2 shadow-sm text-xs">
       <p className="font-medium text-foreground mb-1">{headerLabel}</p>
       {payload.map((p) => (
         <div key={String(p.dataKey ?? "")} className="flex items-center gap-2">
@@ -201,7 +201,7 @@ export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) 
         </div>
 
         {isLoading ? (
-          <div className="h-40 bg-muted/30 animate-pulse rounded" />
+          <div className="h-40 bg-surface-pane animate-pulse rounded" />
         ) : isError ? (
           <div className="h-40 flex items-center justify-center text-sm text-destructive">
             Failed to load run stats.

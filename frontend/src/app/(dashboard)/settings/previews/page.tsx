@@ -905,7 +905,7 @@ function PreviewAPISection() {
             </div>
 
             {createdToken ? (
-              <div className="space-y-1.5 rounded-md border border-border bg-muted/30 p-3">
+              <div className="space-y-1.5 rounded-md border border-border bg-surface-pane p-3">
                 <p className="text-xs font-medium text-foreground">One-time token</p>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <p className="break-all font-mono text-xs text-foreground">{createdToken}</p>

@@ -407,7 +407,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
           return <div key={section.index}>{hunkEl}</div>;
         })}
         {hasMoreDiffLines ? (
-          <div className="sticky bottom-0 border-t border-border bg-background/95 px-3 py-3 text-center backdrop-blur">
+          <div className="sticky bottom-0 border-t border-border bg-surface-raised/95 px-3 py-3 text-center backdrop-blur">
             <p className="mb-2 text-xs text-muted-foreground">
               Showing first {renderedLineCount} of {totalRenderableLines} diff lines in this file
             </p>

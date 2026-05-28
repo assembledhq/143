@@ -34,7 +34,7 @@ function FileBreadcrumb({
     <div className="flex items-center gap-0.5 text-xs text-muted-foreground overflow-x-auto min-w-0">
       <button
         onClick={() => onNavigate("")}
-        className="shrink-0 hover:text-foreground transition-colors px-1 py-0.5 rounded hover:bg-muted/50"
+        className="shrink-0 hover:text-foreground transition-colors px-1 py-0.5 rounded hover:bg-surface-hover"
       >
         root
       </button>
@@ -51,7 +51,7 @@ function FileBreadcrumb({
             ) : (
               <button
                 onClick={() => onNavigate(partPath)}
-                className="hover:text-foreground transition-colors px-1 py-0.5 rounded hover:bg-muted/50"
+                className="hover:text-foreground transition-colors px-1 py-0.5 rounded hover:bg-surface-hover"
               >
                 {part}
               </button>
@@ -89,7 +89,7 @@ function DirectoryTreeEntry({
         "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
         isActive
           ? "bg-primary/10 text-primary font-medium"
-          : "text-foreground hover:bg-muted/50"
+          : "text-foreground hover:bg-surface-hover"
       )}
     >
       <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -225,7 +225,7 @@ function FileViewer({
               <tr
                 key={lineNum}
                 className={cn(
-                  "hover:bg-muted/30",
+                  "hover:bg-surface-pane",
                   isChanged && "bg-amber-500/5"
                 )}
               >
@@ -358,7 +358,7 @@ export function RepoExplorer({
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-background shrink-0">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-surface-raised shrink-0">
         <Button
           variant="ghost"
           size="sm"
@@ -383,7 +383,7 @@ export function RepoExplorer({
             {currentDir && (
               <button
                 onClick={handleGoUp}
-                className="flex items-center gap-1.5 w-full px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors mb-1"
+                className="flex items-center gap-1.5 w-full px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-surface-hover rounded transition-colors mb-1"
               >
                 <FolderOpen className="h-3 w-3 shrink-0" />
                 <span>..</span>

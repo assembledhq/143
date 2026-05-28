@@ -52,7 +52,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
           {entry.details && Object.keys(entry.details).length > 0 && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Details</h3>
-              <div className="rounded-md bg-muted/30 border border-border/50 p-3 space-y-2">
+              <div className="rounded-md bg-surface-pane border border-border/50 p-3 space-y-2">
                 {Object.entries(entry.details).map(([key, value]) => {
                   if (key === "changes" && isChangesMap(value)) {
                     return <ChangesBlock key={key} changes={value} />;
@@ -74,7 +74,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
           {(entry.ip_address || entry.user_agent || entry.request_id) && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Request info</h3>
-              <div className="rounded-md bg-muted/30 border border-border/50 p-3 space-y-2">
+              <div className="rounded-md bg-surface-pane border border-border/50 p-3 space-y-2">
                 {entry.ip_address && <DetailRow label="IP Address" value={entry.ip_address} mono />}
                 {entry.user_agent && <DetailRow label="User Agent" value={entry.user_agent} />}
                 {entry.request_id && <DetailRow label="Request ID" value={entry.request_id} mono />}
@@ -86,7 +86,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
           {(entry.session_id || entry.project_id) && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Related</h3>
-              <div className="rounded-md bg-muted/30 border border-border/50 p-3 space-y-2">
+              <div className="rounded-md bg-surface-pane border border-border/50 p-3 space-y-2">
                 {entry.session_id && <DetailRow label="Session ID" value={entry.session_id} mono />}
                 {entry.project_id && <DetailRow label="Project ID" value={entry.project_id} mono />}
               </div>

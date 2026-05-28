@@ -1,12 +1,14 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-05-27
+> **Status:** Partially Implemented | **Last reviewed:** 2026-05-28
 
 [143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe code fixes that ship automatically.
 
 It’s an open-source platform that connects customer pain directly to code fixes.
 
 The public homepage positions 143 as shared coding-agent infrastructure for engineering teams: one team-visible workspace for context, integrations, cloud agent execution, previews, review loops, audit logs, and usage analytics. The landing page uses a small shared type scale for product copy so hero, section, feature, body, button, and footer text stay visually consistent. See [implemented/81-homepage-positioning-refresh.md](implemented/81-homepage-positioning-refresh.md).
+
+The authenticated app has a deliberate visual surface hierarchy rather than screen-by-screen color choices. Global navigation is the strongest structural contrast anchor, local panes use a consistent secondary surface, the main canvas stays quiet, and selected/active states use shared semantic tokens instead of one-off muted or primary tints. Detailed design: [implemented/91-visual-language-redesign.md](implemented/91-visual-language-redesign.md).
 
 The public website should add first-party docs at `/docs`, backed by curated repo-authored Markdown/MDX under `docs/public` and implemented inside the existing Next.js frontend with Fumadocs. The docs surface should publish guides, self-hosting material, and references without exposing internal design/production-debugging docs, and should include AI-native affordances such as raw Markdown access and `/llms.txt`. Detailed design: [future/85-public-docs-fumadocs/README.md](future/85-public-docs-fumadocs/README.md).
 

@@ -48,7 +48,7 @@ export function ReviewToolbar({
   }, [showSearch]);
 
   return (
-    <div className="flex flex-col border-b border-border bg-background">
+    <div className="flex flex-col border-b border-border bg-surface-raised">
       <div className="flex items-center justify-between px-3 py-1.5">
         <div className="flex items-center gap-1">
           <Button
@@ -93,13 +93,13 @@ export function ReviewToolbar({
             </Button>
           )}
           {/* View mode toggle */}
-        <div className="flex items-center rounded-md border border-border bg-muted/30">
+        <div className="flex items-center rounded-md border border-border bg-surface-pane">
           <button
             onClick={() => onViewModeChange("unified")}
             className={cn(
               "flex items-center gap-1 px-2 py-1 text-xs rounded-l-md transition-colors",
               viewMode === "unified"
-                ? "bg-background text-foreground shadow-sm"
+                ? "bg-surface-raised text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
             )}
           >
@@ -111,7 +111,7 @@ export function ReviewToolbar({
             className={cn(
               "flex items-center gap-1 px-2 py-1 text-xs rounded-r-md transition-colors",
               viewMode === "split"
-                ? "bg-background text-foreground shadow-sm"
+                ? "bg-surface-raised text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
             )}
           >
@@ -151,7 +151,7 @@ export function ReviewToolbar({
 
       {/* Search bar */}
       {showSearch && onSearchChange && (
-        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-muted/20">
+        <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-surface-pane/70">
           <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
           <Input
             ref={searchInputRef}

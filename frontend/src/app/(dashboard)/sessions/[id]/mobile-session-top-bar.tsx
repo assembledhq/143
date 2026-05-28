@@ -111,7 +111,7 @@ export function MobileSessionTopBar({
 
   return (
     <>
-      <div className="sticky top-0 z-20 flex items-center gap-1 border-b border-border bg-background/95 px-2 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/85 md:hidden">
+      <div className="sticky top-0 z-20 flex items-center gap-1 border-b border-border-strong bg-surface-canvas/95 px-2 py-2 backdrop-blur supports-[backdrop-filter]:bg-surface-canvas/85 md:hidden">
         <MobileBackButton to={backTo} label="Back to sessions" className="h-9 w-9" />
         <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {sessionTitle}
@@ -179,7 +179,7 @@ export function MobileSessionTopBar({
                         variant="ghost"
                         className={cn(
                           "h-auto flex-1 justify-start rounded-xl border px-3 py-3 text-left",
-                          isActive ? "border-primary/30 bg-primary/5" : "border-border bg-background",
+                          isActive ? "border-primary/30 bg-surface-selected" : "border-border bg-surface-raised",
                         )}
                         aria-label={`Switch to ${thread.label}`}
                         disabled={isNonInteractive}
@@ -217,7 +217,7 @@ export function MobileSessionTopBar({
                           type="button"
                           size="icon"
                           variant="ghost"
-                          className="h-10 w-10 rounded-xl border border-border bg-background"
+                          className="h-10 w-10 rounded-xl border border-border bg-surface-raised"
                           aria-label={closeLabel}
                           disabled={archivePendingThreadId === thread.id}
                           onClick={() => {
@@ -234,7 +234,7 @@ export function MobileSessionTopBar({
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-11 w-full justify-start rounded-xl border border-dashed border-border bg-background px-3"
+                  className="h-11 w-full justify-start rounded-xl border border-dashed border-border bg-surface-raised px-3"
                   aria-label="Add agent tab"
                   onClick={() => {
                     onAddThread();
@@ -253,7 +253,7 @@ export function MobileSessionTopBar({
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-11 w-full justify-start rounded-xl border border-border bg-background px-3"
+                  className="h-11 w-full justify-start rounded-xl border border-border bg-surface-raised px-3"
                   aria-label="Rename session"
                   onClick={() => {
                     onRenameSession();
@@ -278,7 +278,7 @@ export function MobileSessionTopBar({
                   <Button
                     type="button"
                     variant="ghost"
-                    className="h-11 w-full justify-start rounded-xl border border-border bg-background px-3"
+                    className="h-11 w-full justify-start rounded-xl border border-border bg-surface-raised px-3"
                     aria-label="Revert this tab's changes"
                     disabled={!canRevert}
                     onClick={() => {

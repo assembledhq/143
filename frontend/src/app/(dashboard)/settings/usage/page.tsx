@@ -20,7 +20,7 @@ const UsageTimeseriesChart = dynamic(
   () => import("./usage-timeseries-chart").then((m) => ({ default: m.UsageTimeseriesChart })),
   {
     ssr: false,
-    loading: () => <div className="h-72 bg-muted/20 animate-pulse rounded-lg" />,
+    loading: () => <div className="h-72 bg-surface-pane/70 animate-pulse rounded-lg" />,
   },
 );
 

@@ -262,7 +262,7 @@ export default function EvalTaskDetailPage() {
           ) : (
             <Card>
               <CardContent className="p-0">
-                <div className="flex items-center px-4 py-2 border-b border-border bg-muted/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                <div className="flex items-center px-4 py-2 border-b border-border bg-surface-pane text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   <span className="w-24">Status</span>
                   <span className="flex-1">Model</span>
                   <span className="w-20 text-right">Score</span>
@@ -285,7 +285,7 @@ export default function EvalTaskDetailPage() {
 function EvalRunRow({ run }: { run: EvalRun }) {
   const statusStyle = evalRunStatusConfig[run.status];
   return (
-    <div className="flex items-center py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors">
+    <div className="flex items-center py-3 px-4 border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors">
       <span className="w-24">
         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle.color}`}>
           {statusStyle.label}

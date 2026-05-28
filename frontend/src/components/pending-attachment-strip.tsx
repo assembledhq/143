@@ -141,7 +141,7 @@ export function PendingAttachmentStrip({
             onClick={() => onRemove(url)}
             aria-label={`Remove ${fileName}`}
             className={cn(
-              "absolute -top-1.5 -right-1.5 rounded-full bg-background p-0 shadow-sm",
+              "absolute -top-1.5 -right-1.5 rounded-full bg-surface-raised p-0 shadow-sm",
               styles.removeButton,
             )}
           >

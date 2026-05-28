@@ -98,6 +98,6 @@ describe("AutopilotPageContent", () => {
 
     const sourceHeader = await screen.findByText("Source");
     const tableHeader = sourceHeader.closest("thead");
-    expect(tableHeader).toHaveClass("sticky", "top-0", "z-10", "bg-card");
+    expect(tableHeader).toHaveClass("sticky", "top-0", "z-10", "bg-surface-raised");
   });
 });

@@ -115,7 +115,7 @@ function FileRow({
         "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
         fileIndex === activeFileIndex
           ? "bg-primary/10 text-primary font-medium"
-          : "text-foreground hover:bg-muted/50"
+          : "text-foreground hover:bg-surface-hover"
       )}
       style={{ paddingLeft: `${depth * 12 + 8}px` }}
     >
@@ -150,7 +150,7 @@ const TreeDirectory = memo(function TreeDirectory({
         <button
           onClick={() => setExpanded(!expanded)}
           aria-expanded={expanded}
-          className="flex items-center gap-1 w-full px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors"
+          className="flex items-center gap-1 w-full px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-surface-hover rounded transition-colors"
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
         >
           {expanded ? (
@@ -272,7 +272,7 @@ export const FileTree = memo(function FileTree({
             placeholder="Filter files..."
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="h-8 border-border/70 bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground/50"
+            className="h-8 border-border/70 bg-surface-raised pl-7 pr-2 text-xs placeholder:text-muted-foreground/50"
           />
         </div>
         {variant === "sheet" ? (
@@ -301,7 +301,7 @@ export const FileTree = memo(function FileTree({
           />
         )}
         {hasMoreFiles ? (
-          <div className="sticky bottom-0 bg-background/95 py-3 backdrop-blur">
+          <div className="sticky bottom-0 bg-surface-raised/95 py-3 backdrop-blur">
             <p className="mb-2 text-center text-xs text-muted-foreground">
               Showing {visibleFiles.length} of {filteredFiles.length} files
             </p>

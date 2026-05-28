@@ -120,7 +120,7 @@ export function RecoverableInboxNotice({
         </div>
 
         {isLoading ? (
-          <div className="rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+          <div className="rounded-md border border-border/70 bg-surface-raised/60 px-3 py-2 text-xs text-muted-foreground">
             Loading recoverable messages...
           </div>
         ) : entries.length > 0 ? (
@@ -128,7 +128,7 @@ export function RecoverableInboxNotice({
             {entries.map((entry) => (
               <div
                 key={entry.id}
-                className="flex flex-col gap-2 rounded-md border border-border/70 bg-background/75 px-3 py-2 sm:flex-row sm:items-start sm:justify-between"
+                className="flex flex-col gap-2 rounded-md border border-border/70 bg-surface-raised/75 px-3 py-2 sm:flex-row sm:items-start sm:justify-between"
               >
                 <div className="min-w-0 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -170,7 +170,7 @@ export function RecoverableInboxNotice({
             ))}
           </div>
         ) : (
-          <div className="rounded-md border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+          <div className="rounded-md border border-border/70 bg-surface-raised/60 px-3 py-2 text-xs text-muted-foreground">
             Recoverable message details are not available yet. Refreshing this session will re-check delivery state.
           </div>
         )}

@@ -121,7 +121,7 @@ const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { t
     <div className="mx-2 min-w-0">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
+        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-surface-hover transition-colors text-xs group"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="text-foreground truncate min-w-0">{label}</span>
@@ -134,14 +134,14 @@ const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { t
       {open && (
         <div className="ml-7 mt-1 mb-2 space-y-1.5 min-w-0">
           {inputDetail && (
-            <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
+            <div className="rounded-md border border-border bg-surface-pane p-2 min-w-0 max-w-full">
               <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80 max-w-full">
                 {inputDetail}
               </pre>
             </div>
           )}
           {toolResult ? (
-            <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
+            <div className="rounded-md border border-border bg-surface-pane p-2 min-w-0 max-w-full">
               <pre className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground max-w-full">
                 {toolResult.message}
               </pre>
@@ -219,7 +219,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
     <div className="mx-2 min-w-0">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
+        className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-surface-hover transition-colors text-xs group"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="text-muted-foreground">
@@ -232,7 +232,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
         />
       </button>
       {open && (
-        <div className="ml-7 mt-1 mb-2 min-w-0 max-w-full rounded-md border border-border bg-muted/30 py-1 max-h-[300px] overflow-y-auto">
+        <div className="ml-7 mt-1 mb-2 min-w-0 max-w-full rounded-md border border-border bg-surface-pane py-1 max-h-[300px] overflow-y-auto">
           {logs.map((log) => (
             <HiddenLogEntry key={log.id} log={log} />
           ))}
@@ -322,7 +322,7 @@ const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachmen
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-md border border-border/50 bg-background/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-border transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border/50 bg-surface-raised/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-border transition-colors"
               >
                 <FileText className="h-3 w-3 shrink-0" />
                 {fileName}
@@ -503,7 +503,7 @@ const CodeDiffSummary = memo(function CodeDiffSummary({
       <Button
         variant="ghost"
         onClick={onClick}
-        className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm hover:bg-muted group text-left h-auto"
+        className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm hover:bg-surface-hover group text-left h-auto"
       >
         <FileCode2 className="h-4 w-4 text-muted-foreground shrink-0" />
         <span className="font-mono text-xs flex items-center gap-1.5">

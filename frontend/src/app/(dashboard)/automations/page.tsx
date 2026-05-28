@@ -5,7 +5,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Plus, Pause, Play, MoreHorizontal, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { formatTimeAgo } from "@/lib/utils";
+import { cn, formatTimeAgo } from "@/lib/utils";
+import { hoverSurface, raisedSurface } from "@/lib/surfaces";
 import type { Automation } from "@/lib/types";
 import { formatRunAtWithTimezone } from "./schedule-time";
 import { Button } from "@/components/ui/button";
@@ -73,12 +74,12 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
     null;
 
   return (
-    <div className="rounded-lg border border-border bg-background transition-colors hover:bg-muted/30">
+    <div className={cn("rounded-lg border border-border/70 transition-colors", raisedSurface, hoverSurface)}>
       <div className="flex items-start gap-3 p-4 sm:gap-4">
         <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
           <div className="flex items-start gap-2.5">
             <span
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface-pane text-lg leading-none"
               aria-label={`Automation icon for ${automation.name}`}
             >
               {automation.icon_value || "⚙️"}

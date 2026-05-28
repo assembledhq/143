@@ -174,7 +174,7 @@ function CommandCheckItem({
           "flex size-4 shrink-0 items-center justify-center rounded-sm border transition-colors",
           checked
             ? "border-primary bg-primary text-primary-foreground"
-            : "border-border bg-background text-transparent",
+            : "border-border bg-surface-raised text-transparent",
           indicatorClassName
         )}
       >

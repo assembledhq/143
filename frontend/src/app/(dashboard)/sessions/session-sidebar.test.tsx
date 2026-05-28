@@ -169,6 +169,29 @@ describe('SessionSidebar', () => {
     expect(screen.getByText('Loading...')).toBeInTheDocument();
   });
 
+  it('uses local pane, raised control, and selected row surfaces', async () => {
+    mockPathname = '/sessions/s1';
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Selected work' }),
+      makeSession({ id: 's2', result_summary: 'Other work' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const sidebarPane = await screen.findByTestId('session-sidebar-pane');
+    expect(sidebarPane).toHaveClass('bg-surface-pane');
+    expect(sidebarPane).toHaveClass('border-border-strong');
+
+    expect(screen.getByRole('link', { name: /New session/ })).toHaveClass('bg-surface-raised');
+
+    const selectedTitle = await screen.findByText('Selected work');
+    const selectedOption = selectedTitle.closest('[role="option"]');
+    expect(selectedOption).not.toBeNull();
+    expect(selectedOption).toHaveClass('bg-surface-selected');
+    expect(selectedOption).toHaveClass('ring-primary/20');
+  });
+
   // -----------------------------------------------------------------------
   // Search filtering
   // -----------------------------------------------------------------------
@@ -349,7 +372,7 @@ describe('SessionSidebar', () => {
     const selectedRow = selectedLink.parentElement;
 
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/20', 'bg-background', 'shadow-sm');
+    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/25', 'bg-surface-selected', 'shadow-sm');
 
     fireEvent.click(selectedRow!);
 
@@ -820,18 +843,18 @@ describe('SessionSidebar', () => {
     const selectedLink = screen.getByText('Selected session').closest('a');
     const unselectedLink = screen.getByText('Other session').closest('a');
     const selectedRow = selectedLink?.parentElement;
-    expect(selectedLink?.className).toContain('bg-primary/5');
-    expect(selectedLink?.className).toContain('md:bg-primary/5');
+    expect(selectedLink?.className).toContain('bg-surface-selected');
+    expect(selectedLink?.className).toContain('md:bg-surface-selected');
     expect(selectedLink?.className).toContain('border-transparent');
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
-    expect(selectedRow?.className).toContain('ring-primary/10');
+    expect(selectedRow?.className).toContain('ring-primary/20');
     expect(selectedRow?.className).toContain('shadow-sm');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(unselectedLink?.className).not.toContain('bg-primary/5');
+    expect(unselectedLink?.className).not.toContain('bg-surface-selected');
   });
 
   it('reserves the same selected-shell layout for unselected rows', async () => {
@@ -848,7 +871,7 @@ describe('SessionSidebar', () => {
     const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
 
     expect(selectedRow).toHaveClass('border', 'p-1');
-    expect(selectedRow).toHaveClass('border-primary/20');
+    expect(selectedRow).toHaveClass('border-primary/25');
     expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
   });
 
@@ -865,15 +888,15 @@ describe('SessionSidebar', () => {
 
     const selectedLink = screen.getByText('Selected via pathname').closest('a');
     const selectedRow = selectedLink?.parentElement;
-    expect(selectedLink?.className).toContain('bg-primary/5');
-    expect(selectedLink?.className).toContain('md:bg-primary/5');
+    expect(selectedLink?.className).toContain('bg-surface-selected');
+    expect(selectedLink?.className).toContain('md:bg-surface-selected');
     expect(selectedLink?.className).toContain('border-transparent');
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
-    expect(selectedRow?.className).toContain('ring-primary/10');
+    expect(selectedRow?.className).toContain('ring-primary/20');
     expect(selectedRow?.className).toContain('shadow-sm');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
@@ -1083,7 +1106,7 @@ describe('SessionSidebar', () => {
 
     const draftOption = screen.getByRole('option', { name: 'New session draft' });
     expect(draftOption).toHaveAttribute('aria-selected', 'false');
-    expect(draftOption.querySelector('a')?.className).not.toContain('ring-primary/10');
+    expect(draftOption.querySelector('a')?.className).not.toContain('ring-primary/20');
     expect(screen.getByText('Keyboard-selected saved session').closest('[role="option"]')).toHaveAttribute(
       'aria-selected',
       'true',

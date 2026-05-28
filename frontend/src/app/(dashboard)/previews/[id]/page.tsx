@@ -157,7 +157,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
         <Card>
           <CardContent className="space-y-4 pt-6">
             <div className="flex items-start gap-3">
-              <div className="rounded-full border border-border bg-card p-2">
+              <div className="rounded-full border border-border bg-surface-raised p-2">
                 <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
               </div>
               <div className="min-w-0 space-y-1">

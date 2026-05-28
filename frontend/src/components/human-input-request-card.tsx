@@ -255,7 +255,7 @@ export function HumanInputRequestCard({
           <CardHeader className="border-b border-amber-200/70 bg-amber-50/80 pb-4 dark:border-amber-900/60 dark:bg-amber-950/20">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="flex min-w-0 items-start gap-3">
-                <div className="rounded-md bg-background p-2 text-amber-700 shadow-sm dark:text-amber-300">
+                <div className="rounded-md bg-surface-raised p-2 text-amber-700 shadow-sm dark:text-amber-300">
                   <Icon className="h-4 w-4" />
                 </div>
                 <div className="min-w-0 flex-1 space-y-1.5">
@@ -303,7 +303,7 @@ export function HumanInputRequestCard({
                   ) : (
                     <div
                       key={choice.id}
-                      className="rounded-md border border-border bg-background/80 px-3 py-2"
+                      className="rounded-md border border-border bg-surface-raised/80 px-3 py-2"
                     >
                       <ChoiceText choice={choice} compact />
                     </div>
@@ -507,8 +507,8 @@ function choiceTileClasses({
   selected: boolean;
 }) {
   return cn(
-    "flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-border bg-background/80 px-3 py-2 text-foreground shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:bg-muted/60 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30",
-    selected && "border-primary bg-primary/5 shadow",
+    "flex min-h-14 cursor-pointer items-center gap-3 rounded-lg border border-border bg-surface-raised/80 px-3 py-2 text-foreground shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:bg-surface-hover focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30",
+    selected && "border-primary bg-surface-selected shadow",
     destructive && "hover:border-destructive/50",
     destructive && selected && "border-destructive bg-destructive/10",
   );
@@ -525,7 +525,7 @@ function ChoiceSelectionMark({
     <span
       aria-hidden="true"
       className={cn(
-        "flex size-5 shrink-0 items-center justify-center rounded-md border border-border bg-background text-transparent transition-colors",
+        "flex size-5 shrink-0 items-center justify-center rounded-md border border-border bg-surface-raised text-transparent transition-colors",
         selected && "border-primary bg-primary text-primary-foreground",
         destructive &&
           selected &&

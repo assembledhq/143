@@ -735,7 +735,7 @@ describe('SessionDetailPage', () => {
 
     expect(detailPanel).toHaveClass('relative');
     expect(detailPanel).toHaveClass('z-10');
-    expect(detailPanel).toHaveClass('bg-background');
+    expect(detailPanel).toHaveClass('bg-surface-raised');
   });
 
   it('shows detail panel tabs for Overview and Changes', async () => {

@@ -61,7 +61,7 @@ export function ContextHealth({ productContext, settingsUpdatedAt, documents }: 
         : "text-muted-foreground";
 
   return (
-    <div className="rounded-md border border-border bg-muted/30 px-4 py-3 space-y-2">
+    <div className="rounded-md border border-border bg-surface-pane px-4 py-3 space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Context health</span>
         <span className={`text-xs font-medium ${scoreColor}`}>{scoreLabel}</span>

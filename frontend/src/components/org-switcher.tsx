@@ -297,11 +297,11 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
         }}
       >
         <DropdownMenuTrigger
-          className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 -ml-1.5 hover:bg-sidebar-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 -ml-1.5 hover:bg-surface-nav-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           data-testid="org-switcher"
           aria-label={`Switch organization${ariaPendingSuffix}`}
         >
-          <div className="relative flex h-5 w-5 items-center justify-center rounded bg-foreground text-background text-xs font-semibold shrink-0">
+          <div className="relative flex h-5 w-5 items-center justify-center rounded bg-surface-nav-foreground text-surface-nav text-xs font-semibold shrink-0">
             {initial}
             {visiblePendingCount > 0 && (
               <span

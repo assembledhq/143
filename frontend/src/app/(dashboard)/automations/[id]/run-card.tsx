@@ -99,7 +99,7 @@ function FullCard({ run, kind, navigateTo }: FullCardProps) {
       onKeyDown={handleKeyDown}
       className={cn(
         "group overflow-hidden border transition-all",
-        navigate && "cursor-pointer hover:border-primary/30 hover:bg-accent/35 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        navigate && "cursor-pointer hover:border-primary/30 hover:bg-surface-hover/35 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         cardSurfaceClass(kind),
       )}
     >
@@ -137,7 +137,7 @@ function cardSurfaceClass(kind: FullCardKind): string {
     case "running":
       return "border-blue-200/80 bg-blue-50/50 dark:border-blue-900/40 dark:bg-blue-950/20";
     default:
-      return "border-border/70 bg-card";
+      return "border-border/70 bg-surface-raised";
   }
 }
 
@@ -410,7 +410,7 @@ function formatDuration(start: string, end: string): string {
 function PendingRow({ run }: { run: AutomationRun }) {
   const triggerLabel = run.triggered_by === "manual" ? "Manual run" : "Scheduled run";
   return (
-    <Card className="border-dashed border-border/70 bg-muted/10">
+    <Card className="border-dashed border-border/70 bg-surface-pane/50">
       <CardContent className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
           <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
@@ -452,8 +452,8 @@ export function QuietRunRow({
         }
       }}
       className={cn(
-        "group border-border/70 bg-muted/10 transition-colors",
-        navigate && "cursor-pointer hover:border-border/90 hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "group border-border/70 bg-surface-pane/50 transition-colors",
+        navigate && "cursor-pointer hover:border-border/90 hover:bg-surface-pane/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
       )}
     >
       <CardContent className="px-4 py-3">
