@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { CircleHelp, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -14,6 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Sheet,
   SheetContent,
@@ -815,6 +816,11 @@ type TokenDialogField = {
   label: string;
   placeholder?: string;
   type?: "text" | "password";
+  help?: ReactNode;
+  tooltip?: {
+    ariaLabel: string;
+    content: ReactNode;
+  };
 };
 
 type TokenDialogProps = {
@@ -851,7 +857,29 @@ function TokenDialog({ open, onOpenChange, title, description, fields, submittin
         <div className="space-y-3">
           {fields.map((f) => (
             <div key={f.id} className="grid gap-1.5">
-              <Label htmlFor={f.id}>{f.label}</Label>
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor={f.id}>{f.label}</Label>
+                {f.tooltip ? (
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-5 w-5 rounded-full text-muted-foreground hover:text-foreground"
+                          aria-label={f.tooltip.ariaLabel}
+                        >
+                          <CircleHelp className="h-3.5 w-3.5" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" sideOffset={6} className="max-w-80">
+                        {f.tooltip.content}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : null}
+              </div>
               <Input
                 id={f.id}
                 type={f.type ?? "password"}
@@ -859,6 +887,7 @@ function TokenDialog({ open, onOpenChange, title, description, fields, submittin
                 value={values[f.id] ?? ""}
                 onChange={(e) => setValues((prev) => ({ ...prev, [f.id]: e.target.value }))}
               />
+              {f.help}
             </div>
           ))}
           {error && <p className="text-xs text-destructive">{error}</p>}
@@ -1109,7 +1138,29 @@ export default function IntegrationsPage() {
         }
         fields={[
           { id: "token", label: "Personal API Token", placeholder: "CCI-..." },
-          { id: "projectSlug", label: "Project Slug", placeholder: "gh/your-org/your-repo", type: "text" },
+          {
+            id: "projectSlug",
+            label: "Project Slug",
+            placeholder: "gh/your-org/your-repo",
+            type: "text",
+            tooltip: {
+              ariaLabel: "Where to find the CircleCI project slug",
+              content: "Use the API project slug from CircleCI. OAuth projects usually look like gh/org/repo; GitHub App projects can use a circleci/... slug.",
+            },
+            help: (
+              <div className="rounded-md border border-border bg-muted/50 px-3 py-2">
+                <p className="text-xs text-muted-foreground">
+                  In CircleCI, open Projects, find your repository, then open Project Settings. Copy the slug from the settings overview.
+                </p>
+                <Button asChild variant="link" size="sm" className="mt-1 h-auto p-0 text-xs">
+                  <a href="https://app.circleci.com/projects" target="_blank" rel="noopener noreferrer">
+                    Open CircleCI projects
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </Button>
+              </div>
+            ),
+          },
         ]}
         submitting={circleciConnectMutation.isPending}
         error={circleciError}
