@@ -829,6 +829,50 @@ func (s *PreviewStore) UpdatePreviewWorkerNodeID(ctx context.Context, orgID, id 
 	return nil
 }
 
+// ReassignPreviewWorker reassigns a starting preview reservation and its active
+// runtime routing row to the worker that actually claimed the start job.
+func (s *PreviewStore) ReassignPreviewWorker(ctx context.Context, orgID, id uuid.UUID, workerNodeID, endpointURL string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin preview worker reassignment: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txStore := s.WithTx(tx)
+	if err := txStore.UpdatePreviewWorkerNodeID(ctx, orgID, id, workerNodeID); err != nil {
+		return err
+	}
+	if endpointURL != "" {
+		if _, err := tx.Exec(ctx,
+			fmt.Sprintf(`UPDATE preview_runtimes
+			 SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), updated_at = now()
+			 WHERE preview_instance_id = @preview_id AND org_id = @org_id AND status IN %s`, activeRuntimeStatusFilter),
+			pgx.NamedArgs{"org_id": orgID, "preview_id": id},
+		); err != nil {
+			return fmt.Errorf("stop previous preview runtimes: %w", err)
+		}
+
+		var nextEpoch int
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(MAX(runtime_epoch), 0) + 1
+			 FROM preview_runtimes
+			 WHERE org_id = @org_id AND preview_instance_id = @preview_id`,
+			pgx.NamedArgs{"org_id": orgID, "preview_id": id},
+		).Scan(&nextEpoch); err != nil {
+			return fmt.Errorf("select next preview runtime epoch: %w", err)
+		}
+
+		runtime := newStartingPreviewRuntime(orgID, id, nextEpoch, workerNodeID, endpointURL)
+		if err := txStore.CreatePreviewRuntime(ctx, runtime); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit preview worker reassignment: %w", err)
+	}
+	return nil
+}
+
 // UpdatePreviewPhase records the current startup phase for status reloads and
 // support diagnostics. The update is scoped to active startup because terminal
 // status transitions own the final phase label.
