@@ -709,24 +709,31 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
+    const diagnosticSurface = screen.getByRole("group", {
+      name: "Preview startup diagnostics",
+    });
     const startupLogRegion = screen.getByLabelText("Preview startup error logs");
+    expect(diagnosticSurface).toContainElement(startupLogRegion);
+    expect(screen.getByText("Startup summary")).toBeInTheDocument();
     expect(startupLogRegion).toHaveTextContent(summary);
-    expect(startupLogRegion).toHaveClass("line-clamp-6");
-    expect(startupLogRegion).toHaveClass("overflow-y-hidden");
+    expect(startupLogRegion).toHaveClass("max-h-28");
+    expect(startupLogRegion).toHaveClass("overflow-hidden");
     expect(startupLogRegion).not.toHaveClass("overflow-auto");
 
-    await user.click(screen.getByRole("button", { name: "Show full error logs" }));
+    await user.click(screen.getByRole("button", { name: "View full error log" }));
 
     await waitFor(() => {
       expect(startupLogRegion).toHaveTextContent(
         /duplicate migration file: 000125_github_installation_repo_claims\.down\.sql/,
       );
     });
-    expect(startupLogRegion).not.toHaveClass("line-clamp-6");
+    expect(screen.getByText("Full error log")).toBeInTheDocument();
+    expect(diagnosticSurface).toContainElement(startupLogRegion);
+    expect(startupLogRegion).not.toHaveClass("max-h-28");
     expect(startupLogRegion).toHaveClass("max-h-[min(56vh,28rem)]");
     expect(startupLogRegion).toHaveClass("overflow-y-auto");
-    expect(startupLogRegion).not.toHaveClass("overflow-y-hidden");
-    expect(screen.getByRole("button", { name: "Show summary" })).toBeInTheDocument();
+    expect(startupLogRegion).not.toHaveClass("overflow-hidden");
+    expect(screen.getByRole("button", { name: "Show startup summary" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1");
   });
 
@@ -848,7 +855,7 @@ describe("PreviewPanel component", () => {
     expect(screen.queryByText("Ready")).not.toBeInTheDocument();
   });
 
-  it("applies destructive color class to failed diagnostics", async () => {
+  it("applies destructive surface styling to failed diagnostics", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "failed", error: "err" }),
     );
@@ -859,8 +866,10 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
-    const heading = screen.getByText("Preview failed to start").closest("[class]")!;
-    expect(heading.className).toContain("text-destructive");
+    const diagnostics = screen.getByRole("alert");
+    expect(diagnostics).toHaveClass("border-destructive/25");
+    expect(diagnostics).toHaveClass("bg-destructive/[0.055]");
+    expect(diagnostics).toHaveTextContent("Preview failed to start");
   });
 
   it("uses one primary startup heading in the startup canvas", async () => {
