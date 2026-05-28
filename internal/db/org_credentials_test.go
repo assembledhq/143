@@ -718,6 +718,20 @@ func TestOrgCredentialStore_GetAllIntegrations(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOrgCredentialStore_GetAllIntegrations_EmptyProviders(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewOrgCredentialStore(mock, nil)
+	creds, err := store.GetAllIntegrations(context.Background(), uuid.New(), nil)
+	require.NoError(t, err, "GetAllIntegrations should not error when no providers are requested")
+	require.Equal(t, map[models.ProviderName]*models.DecryptedCredential{}, creds, "GetAllIntegrations should return an empty credential map")
+	require.NoError(t, mock.ExpectationsWereMet(), "empty provider batch should not issue database queries")
+}
+
 func TestOrgCredentialStore_ListCodingAuths(t *testing.T) {
 	t.Parallel()
 
