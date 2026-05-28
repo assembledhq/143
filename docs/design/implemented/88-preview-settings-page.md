@@ -160,13 +160,14 @@ Fields:
    - Trim whitespace.
 3. Stored secrets
    - Structured key/value rows.
-   - Key input should normalize to a conservative env-style identifier only when the output is env-like; otherwise allow source keys that match existing resolver behavior.
+   - Used only for environment-variable delivery, where each key becomes a preview runtime env var.
+   - Key input should normalize to a conservative env-style identifier.
    - Value input should be `type="password"`.
    - Existing secret values must not be fetched or shown. Editing should require re-entering any changed value.
 4. Delivery outputs
-   - Bundle create/edit uses delivery-method tabs so admins explicitly choose either environment variables or a generated secret file for the same stored secrets.
+   - Bundle create/edit uses delivery-method tabs so admins explicitly choose either environment variables or a generated secret file.
    - Environment-variable delivery maps each stored secret key to a preview runtime env var.
-   - File delivery can start with an advanced JSON editor if a full builder is too large for this pass, but the list row must still render safe output summaries.
+   - File delivery should read like saving a private file, not composing resolver JSON: admins enter the runtime file path, choose `Raw text` or `JSON`, and paste the exact file contents. The frontend translates that into one encrypted managed value plus one generated file output in the existing backend model.
    - Copy should make clear that users need one delivery method, not both.
    - Validate output path rules client-side where possible, but rely on backend validation as source of truth.
 5. Actions
