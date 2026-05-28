@@ -976,7 +976,7 @@ func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, session
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, sessionID uuid.UUID, _ string) (int64, time.Time, error) {
+func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, time.Time, error) {
 	updatedAt := time.Now().UTC()
 	rows, err := s.db.Query(ctx, `
 		UPDATE sessions
@@ -991,14 +991,14 @@ func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, session
 		},
 	)
 	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("bump workspace revision: %w", err)
+		return 0, time.Time{}, fmt.Errorf("bump workspace revision (%s): %w", reason, err)
 	}
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
 		Revision  int64
 		UpdatedAt time.Time
 	}])
 	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("collect workspace revision: %w", err)
+		return 0, time.Time{}, fmt.Errorf("collect workspace revision (%s): %w", reason, err)
 	}
 	return row.Revision, row.UpdatedAt, nil
 }

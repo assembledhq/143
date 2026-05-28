@@ -1049,9 +1049,15 @@ func (h *PreviewHandler) recyclePreviewInstance(ctx context.Context, orgID uuid.
 	if cfgErr != nil {
 		return cfgErr
 	}
+	if h.sessionStore == nil {
+		return newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "session store not configured", nil)
+	}
 	session, err := h.sessionStore.GetByID(ctx, orgID, instance.SessionID)
 	if err != nil {
-		return newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
+		}
+		return newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load session for recycle", err)
 	}
 	if err := h.manager.RecyclePreviewWithConfigAndRevision(ctx, orgID, instance.ID, cfg, session.WorkspaceRevision, session.WorkspaceRevisionUpdatedAt); err != nil {
 		if errors.Is(err, preview.ErrInvalidConfig) {

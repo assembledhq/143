@@ -274,11 +274,14 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	if reservation.Status != models.PreviewStatusStarting {
 		return fmt.Errorf("reserved preview is not starting (status=%s)", reservation.Status)
 	}
-	if payload.WorkspaceRevisionUpdatedAt.IsZero() ||
-		reservation.SourceWorkspaceRevision == nil ||
-		*reservation.SourceWorkspaceRevision != payload.WorkspaceRevision {
-		r.abort(ctx, reservation, "", "preview reservation no longer matches workspace revision")
-		return fmt.Errorf("reserved preview workspace revision mismatch")
+	// Skip revision validation for jobs created before workspace revision tracking
+	// was deployed (backward compatibility for rolling deploys).
+	if !payload.WorkspaceRevisionUpdatedAt.IsZero() {
+		if reservation.SourceWorkspaceRevision == nil ||
+			*reservation.SourceWorkspaceRevision != payload.WorkspaceRevision {
+			r.abort(ctx, reservation, "", "preview reservation no longer matches workspace revision")
+			return fmt.Errorf("reserved preview workspace revision mismatch")
+		}
 	}
 	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
 		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
