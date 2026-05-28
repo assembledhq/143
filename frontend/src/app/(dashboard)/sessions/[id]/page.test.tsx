@@ -752,7 +752,7 @@ describe('SessionDetailPage', () => {
 
     expect(screen.getByTestId('session-main-header')).toHaveClass('h-14');
     expect(screen.getByTestId('session-detail-header')).toHaveClass('h-14');
-    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-full');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
   });
 
   it('clips crowded session header metadata before it can overlap the detail toggle', async () => {
@@ -1139,8 +1139,8 @@ describe('SessionDetailPage', () => {
 
     expect(mainHeader).toHaveClass('h-14', 'border-b');
     expect(detailHeader).toHaveClass('h-14', 'border-b');
-    expect(detailHeaderBar).toHaveClass('h-full');
-    expect(detailHeaderBar).not.toHaveClass('h-14');
+    expect(detailHeaderBar).toHaveClass('h-14');
+    expect(detailHeaderBar).not.toHaveClass('h-full');
   });
 
   it('shows the desktop agent tab row as soon as a second tab is being created', async () => {
