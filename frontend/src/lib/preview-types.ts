@@ -121,10 +121,27 @@ export interface PreviewInstance {
   error?: string;
   created_at: string;
   updated_at: string;
+  source_workspace_revision?: number;
+  source_workspace_revision_updated_at?: string;
   // When set and in the future, the backend has flagged this preview for an
   // imminent restart (recycle grace period). The frontend surfaces a warning
   // so users can save state before the restart.
   recycle_scheduled_at?: string;
+}
+
+export type PreviewFreshnessState =
+  | "current"
+  | "out_of_date"
+  | "updating"
+  | "unknown";
+
+export interface PreviewFreshness {
+  state: PreviewFreshnessState;
+  current_workspace_revision: number;
+  current_workspace_revision_updated_at: string;
+  preview_workspace_revision?: number;
+  preview_workspace_revision_updated_at?: string;
+  reason?: string;
 }
 
 export type PreviewServiceRole = "primary" | "support";
@@ -179,6 +196,7 @@ export interface PreviewStatusResponse {
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
   preview_origin?: string;
+  freshness?: PreviewFreshness;
 }
 
 export interface EnsurePreviewResponse {

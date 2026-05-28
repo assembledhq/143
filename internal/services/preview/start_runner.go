@@ -274,6 +274,15 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	if reservation.Status != models.PreviewStatusStarting {
 		return fmt.Errorf("reserved preview is not starting (status=%s)", reservation.Status)
 	}
+	// Skip revision validation for jobs created before workspace revision tracking
+	// was deployed (backward compatibility for rolling deploys).
+	if !payload.WorkspaceRevisionUpdatedAt.IsZero() {
+		if reservation.SourceWorkspaceRevision == nil ||
+			*reservation.SourceWorkspaceRevision != payload.WorkspaceRevision {
+			r.abort(ctx, reservation, "", "preview reservation no longer matches workspace revision")
+			return fmt.Errorf("reserved preview workspace revision mismatch")
+		}
+	}
 	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
 		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
 			return fmt.Errorf("reassign preview worker: %w", err)
@@ -302,14 +311,16 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	}
 
 	input := StartPreviewInput{
-		SessionID:     payload.SessionID,
-		OrgID:         payload.OrgID,
-		UserID:        payload.UserID,
-		Config:        payload.Config,
-		Sandbox:       acq.Sandbox,
-		RepositoryID:  uuidPointerValue(session.RepositoryID),
-		BaseCommitSHA: payload.BaseCommitSHA,
-		ProfileName:   payload.ProfileName,
+		SessionID:                  payload.SessionID,
+		OrgID:                      payload.OrgID,
+		UserID:                     payload.UserID,
+		Config:                     payload.Config,
+		Sandbox:                    acq.Sandbox,
+		RepositoryID:               uuidPointerValue(session.RepositoryID),
+		BaseCommitSHA:              payload.BaseCommitSHA,
+		ProfileName:                payload.ProfileName,
+		WorkspaceRevision:          payload.WorkspaceRevision,
+		WorkspaceRevisionUpdatedAt: payload.WorkspaceRevisionUpdatedAt,
 	}
 	hydratedID := ""
 	if acq.Hydrated {

@@ -34,7 +34,7 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -108,6 +108,8 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // branch_url
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
+		int64(0),       // workspace_revision
+		now,            // workspace_revision_updated_at
 		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
@@ -664,12 +666,73 @@ func TestSessionStore_PromotePendingSnapshot(t *testing.T) {
 	// Promote must clear both pending_snapshot_key AND pending_snapshot_set_at
 	// in the same statement — otherwise the reaper would see a phantom
 	// timestamp on a row whose pending key has already been promoted.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*pending_snapshot_key = @expected_key").
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), expected).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.PromotePendingSnapshot(context.Background(), orgID, sessionID, expected)
 	require.NoError(t, err, "PromotePendingSnapshot should not error on a clean update")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_PublishCheckpoint_BumpsWorkspaceRevisionForSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	checkpointedAt := time.Now().UTC()
+
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = CASE[\\s\\S]*workspace_revision = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision[\\s\\S]*ELSE workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision_updated_at[\\s\\S]*ELSE @checkpointed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	published, err := store.PublishCheckpoint(
+		context.Background(),
+		orgID,
+		sessionID,
+		uuid.Nil,
+		"agent-session-1",
+		"snapshots/org/session/checkpoint.tar.zst",
+		models.CheckpointKindTurnComplete,
+		models.CheckpointCapabilityFullResume,
+		1024,
+		checkpointedAt,
+		nil,
+		models.RuntimeStopReasonNone,
+	)
+	require.NoError(t, err, "PublishCheckpoint should update checkpoint metadata")
+	require.True(t, published, "PublishCheckpoint should report that the checkpoint row was updated")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_BumpWorkspaceRevision(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	updatedAt := time.Now().UTC()
+
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = @updated_at[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+				AddRow(int64(9), updatedAt),
+		)
+
+	revision, gotUpdatedAt, err := store.BumpWorkspaceRevision(context.Background(), orgID, sessionID, "test")
+	require.NoError(t, err, "BumpWorkspaceRevision should update and return the new revision")
+	require.Equal(t, int64(9), revision, "BumpWorkspaceRevision should return the incremented revision")
+	require.Equal(t, updatedAt, gotUpdatedAt, "BumpWorkspaceRevision should return the revision timestamp")
 	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
 }
 

@@ -35,7 +35,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -98,6 +98,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", previewStringPtr("req-1"), "", now, now, now, nil,
+		(*int64)(nil), (*time.Time)(nil),
 		false,
 	}
 }
@@ -322,18 +323,33 @@ func TestPreviewStore_CreatePreviewInstance(t *testing.T) {
 		RecycleConfig:  json.RawMessage(`{"version":"3"}`),
 		RecycleSandbox: json.RawMessage(`{"id":"sandbox-1"}`),
 	}
+	revision := int64(7)
+	revisionUpdatedAt := now.Add(-time.Minute)
+	p.SourceWorkspaceRevision = &revision
+	p.SourceWorkspaceRevisionUpdatedAt = &revisionUpdatedAt
+	row := newPreviewInstanceRow(generatedID, sessionID, orgID, userID, now)
+	for i, column := range previewInstanceTestCols {
+		switch column {
+		case "source_workspace_revision":
+			row[i] = &revision
+		case "source_workspace_revision_updated_at":
+			row[i] = &revisionUpdatedAt
+		}
+	}
 
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(previewAnyArgs(24)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(generatedID, sessionID, orgID, userID, now)...),
+				AddRow(row...),
 		)
 
 	err = store.CreatePreviewInstance(context.Background(), p)
 	require.NoError(t, err)
 	require.Equal(t, generatedID, p.ID)
 	require.Equal(t, 10240, p.DiskLimitMB)
+	require.Equal(t, &revision, p.SourceWorkspaceRevision)
+	require.Equal(t, &revisionUpdatedAt, p.SourceWorkspaceRevisionUpdatedAt)
 	require.Equal(t, now, p.CreatedAt)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
