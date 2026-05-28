@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type {
@@ -108,16 +109,20 @@ export function SpecsSection({
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Type</Label>
-                <select
+                <Select
                   value={newType}
-                  onChange={(e) => setNewType(e.target.value)}
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                  onValueChange={setNewType}
                 >
-                  <option value="prd">PRD</option>
-                  <option value="technical">Technical Spec</option>
-                  <option value="design">Design Spec</option>
-                  <option value="user_story">User Stories</option>
-                </select>
+                  <SelectTrigger aria-label="Spec type" className="text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="prd">PRD</SelectItem>
+                    <SelectItem value="technical">Technical Spec</SelectItem>
+                    <SelectItem value="design">Design Spec</SelectItem>
+                    <SelectItem value="user_story">User Stories</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div className="space-y-1">
@@ -291,12 +296,17 @@ export function DesignsSection({
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Category</Label>
-                <select value={category} onChange={(e) => setCategory(e.target.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
-                  <option value="screenshot">Screenshot</option>
-                  <option value="mockup">Mockup</option>
-                  <option value="wireframe">Wireframe</option>
-                  <option value="reference">Reference</option>
-                </select>
+                <Select value={category} onValueChange={setCategory}>
+                  <SelectTrigger aria-label="Attachment category" className="text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="screenshot">Screenshot</SelectItem>
+                    <SelectItem value="mockup">Mockup</SelectItem>
+                    <SelectItem value="wireframe">Wireframe</SelectItem>
+                    <SelectItem value="reference">Reference</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div className="space-y-1">
@@ -399,12 +409,17 @@ export function AnalysisSection({ project }: { project: Project }) {
           Analyze your specs, designs, and tasks for gaps and improvements.
         </p>
         <div className="flex items-center gap-3">
-          <select value={target} onChange={(e) => setTarget(e.target.value)} className="flex h-8 rounded-md border border-input bg-transparent px-2 py-1 text-xs">
-            <option value="spec">Specs</option>
-            <option value="design">Designs</option>
-            <option value="tasks">Tasks</option>
-            <option value="all">Everything</option>
-          </select>
+          <Select value={target} onValueChange={setTarget}>
+            <SelectTrigger aria-label="Analysis target" className="h-8 w-32 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="spec">Specs</SelectItem>
+              <SelectItem value="design">Designs</SelectItem>
+              <SelectItem value="tasks">Tasks</SelectItem>
+              <SelectItem value="all">Everything</SelectItem>
+            </SelectContent>
+          </Select>
           <Input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Focus on..." className="h-8 text-xs flex-1" />
           <Button size="sm" className="h-8" onClick={() => analyzeMutation.mutate()} disabled={analyzeMutation.isPending}>
             {analyzeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}

@@ -139,6 +139,7 @@ describe("IntegrationsPage", () => {
     renderWithProviders(<IntegrationsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage GitHub" }));
     await screen.findByText("acme/api");
     await user.click(screen.getByRole("button", { name: "Claim" }));
 
@@ -150,15 +151,52 @@ describe("IntegrationsPage", () => {
     expect(githubConnectMock).toHaveBeenCalledTimes(1);
   });
 
-  it("renders repository claiming controls inside the GitHub integration card", async () => {
+  it("keeps GitHub repository claiming controls inside the manage sidesheet", async () => {
     renderWithProviders(<IntegrationsPage />);
 
-    await screen.findByText("acme/api");
+    expect(await screen.findByText("No repositories connected")).toBeInTheDocument();
+    expect(screen.queryByText("Available")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Claim" })).not.toBeInTheDocument();
 
     const githubCard = screen.getByText("GitHub").closest("[data-testid='integration-card']");
     expect(githubCard).not.toBeNull();
-    expect(within(githubCard as HTMLElement).getByText("acme/api")).toBeInTheDocument();
-    expect(screen.queryByText("GitHub repositories")).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(within(githubCard as HTMLElement).getByRole("button", { name: "Manage GitHub" }));
+
+    expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
+    expect(await screen.findByText("Repository access")).toBeInTheDocument();
+    expect(await screen.findByText("acme/api")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Claim" })).toBeInTheDocument();
+  });
+
+  it("refreshes the card repository summary after claiming a GitHub repository", async () => {
+    claimGitHubRepositoriesMock.mockResolvedValueOnce({ data: { claimed: 1 } });
+    repositoriesListMock
+      .mockResolvedValueOnce({ data: [], meta: {} })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: "repo-1",
+            full_name: "acme/api",
+            status: "active",
+          },
+        ],
+        meta: {},
+      });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage GitHub" }));
+    await user.click(await screen.findByRole("button", { name: "Claim" }));
+
+    await waitFor(() => {
+      const includeDisconnectedCalls = repositoriesListMock.mock.calls.filter(
+        ([opts]) => opts?.includeDisconnected,
+      );
+      expect(includeDisconnectedCalls.length).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it("lays out GitHub repositories in a compact responsive grid", async () => {
@@ -190,6 +228,8 @@ describe("IntegrationsPage", () => {
 
     renderWithProviders(<IntegrationsPage />);
 
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage GitHub" }));
     await screen.findByText("acme/api");
 
     const repoGrid = screen.getByTestId("github-repository-grid");
@@ -212,14 +252,14 @@ describe("IntegrationsPage", () => {
 
     renderWithProviders(<IntegrationsPage />);
 
-    await screen.findByText("acme/api");
+    expect(await screen.findByText("acme/web")).toBeInTheDocument();
 
-    expect(screen.queryByText("acme/web")).not.toBeInTheDocument();
+    expect(screen.queryByText("acme/api")).not.toBeInTheDocument();
     expect(screen.queryByText("Repository access")).not.toBeInTheDocument();
     expect(screen.queryByText(/Choose which repositories this 143 organization owns/)).not.toBeInTheDocument();
   });
 
-  it("renders Linear agent routing settings in the Linear integration card", async () => {
+  it("renders Linear agent routing settings in the Linear manage sidesheet", async () => {
     integrationsListMock.mockResolvedValueOnce({
       data: [
         {
@@ -256,12 +296,18 @@ describe("IntegrationsPage", () => {
 
     renderWithProviders(<IntegrationsPage />);
 
-    const linearCard = (await screen.findByText("Linear agent routing")).closest("[data-testid='integration-card']");
+    expect(await screen.findByText("Default repo: acme/api · 1 team override")).toBeInTheDocument();
+    expect(screen.queryByText("Linear agent routing")).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    const linearCard = screen.getByText("Linear").closest("[data-testid='integration-card']");
     expect(linearCard).not.toBeNull();
-    expect(within(linearCard as HTMLElement).getByText("Linear agent routing")).toBeInTheDocument();
-    expect(await within(linearCard as HTMLElement).findByText("Default repository")).toBeInTheDocument();
-    expect(within(linearCard as HTMLElement).getByText("team-1")).toBeInTheDocument();
-    expect(within(linearCard as HTMLElement).getByText("acme/web")).toBeInTheDocument();
+    await user.click(within(linearCard as HTMLElement).getByRole("button", { name: "Manage Linear" }));
+
+    expect(await screen.findByText("Linear agent routing")).toBeInTheDocument();
+    expect(await screen.findByText("Default repository")).toBeInTheDocument();
+    expect(screen.getByText("team-1")).toBeInTheDocument();
+    expect(screen.getByText("acme/web")).toBeInTheDocument();
   });
 
   it("updates the Linear agent default repository", async () => {
@@ -288,6 +334,7 @@ describe("IntegrationsPage", () => {
     renderWithProviders(<IntegrationsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Linear" }));
     await screen.findByText("Linear agent routing");
     await user.click(await screen.findByRole("combobox", { name: "Default repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/web" }));
@@ -339,6 +386,7 @@ describe("IntegrationsPage", () => {
     renderWithProviders(<IntegrationsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Linear" }));
     await screen.findByText("Linear agent routing");
     await user.click(await screen.findByRole("combobox", { name: "Linear team" }));
     await user.click(await screen.findByRole("option", { name: "Virtuous Cycle (VIR)" }));
@@ -353,5 +401,34 @@ describe("IntegrationsPage", () => {
         repository_id: "repo-143",
       });
     });
+  });
+
+  it("shows Notion workspace and CircleCI project metadata on connected cards", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-notion",
+          org_id: "org-1",
+          provider: "notion",
+          status: "active",
+          notion_workspace_name: "Acme HQ",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "integration-circleci",
+          org_id: "org-1",
+          provider: "circleci",
+          status: "active",
+          circleci_project_slug: "gh/acme/api",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findByText("Workspace: Acme HQ")).toBeInTheDocument();
+    expect(await screen.findByText("Project: gh/acme/api")).toBeInTheDocument();
   });
 });

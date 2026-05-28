@@ -3147,6 +3147,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [sessionStopOutcome, setSessionStopOutcome] = useState<"checkpointed" | null>(null);
 
   useEffect(() => {
+    void queryClient.invalidateQueries({
+      queryKey: ["preview-status", id],
+    });
+  }, [
+    id,
+    queryClient,
+    session?.diff_collected_at,
+    session?.latest_diff_snapshot_id,
+    session?.workspace_revision,
+  ]);
+
+  useEffect(() => {
     setHasResolvedInitialThreadSelection(false);
     setActiveThreadId(null);
     setPendingThreadPreview(null);

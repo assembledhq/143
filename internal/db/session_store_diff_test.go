@@ -81,7 +81,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
-	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id").
+	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
@@ -134,7 +134,7 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
-	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id").
+	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()

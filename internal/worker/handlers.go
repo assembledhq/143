@@ -42,7 +42,7 @@ const failureCategoryStaleSandbox = "stale_sandbox"
 
 var sandboxCapacityDetailPattern = regexp.MustCompile(`sandbox capacity reached:\s*(\d+)/(\d+)\s+sandboxes active or reserved`)
 
-const sandboxCapacityBaseExplanation = "The worker could not acquire local sandbox capacity before the job retry window expired. This can happen during deploys or when other sessions are holding all sandbox slots."
+const sandboxCapacityBaseExplanation = "Sandbox capacity was unavailable before the retry window expired. This can happen during deploys or when other sessions are using available capacity."
 
 func sandboxCapacityFailureExplanation(ctx context.Context, stores *Stores, logger zerolog.Logger, deadLetterErr error) string {
 	var samples []db.WorkerLoadSample
@@ -57,36 +57,50 @@ func sandboxCapacityFailureExplanation(ctx context.Context, stores *Stores, logg
 			samples = loaded
 		}
 	}
+	logSandboxCapacityFailureDetails(logger, deadLetterErr, samples)
 	return formatSandboxCapacityFailureExplanation(deadLetterErr, samples)
 }
 
 func formatSandboxCapacityFailureExplanation(deadLetterErr error, samples []db.WorkerLoadSample) string {
-	parts := []string{sandboxCapacityBaseExplanation}
-	if detail := finalSandboxCapacityCheck(deadLetterErr); detail != "" {
-		parts = append(parts, detail)
-	}
-	if samples != nil {
-		parts = append(parts, formatWorkerLoadForSandboxCapacity(samples))
-	}
-	parts = append(parts, "Sandbox capacity is local to a worker node and is consumed by live session sandboxes, preview-held sandboxes, and in-flight reservations.")
-	return strings.Join(parts, " ")
+	return sandboxCapacityBaseExplanation
 }
 
-func finalSandboxCapacityCheck(err error) string {
+func logSandboxCapacityFailureDetails(logger zerolog.Logger, deadLetterErr error, samples []db.WorkerLoadSample) {
+	event := logger.Warn().Err(deadLetterErr)
+	if current, max, ok := finalSandboxCapacityCheck(deadLetterErr); ok {
+		event = event.Int("final_active_or_reserved_sandboxes", current).Int("final_max_active_sandboxes", max)
+	} else if errors.Is(deadLetterErr, agent.ErrSandboxCapacity) {
+		event = event.Bool("final_sandbox_capacity_full", true)
+	}
+	if samples != nil {
+		runningSessions, sandboxContainers, activePreviews, previewHeldContainers, runningSessionJobs := summarizeWorkerLoadForSandboxCapacity(samples)
+		event = event.
+			Int64("worker_load_running_sessions", runningSessions).
+			Int64("worker_load_session_sandbox_containers", sandboxContainers).
+			Int64("worker_load_active_previews", activePreviews).
+			Int64("worker_load_preview_held_containers", previewHeldContainers).
+			Int64("worker_load_running_session_preview_jobs", runningSessionJobs).
+			Int("worker_load_sample_count", len(samples))
+	}
+	event.Msg("sandbox capacity retry window exhausted")
+}
+
+func finalSandboxCapacityCheck(err error) (int, int, bool) {
 	if err == nil {
-		return ""
+		return 0, 0, false
 	}
 	matches := sandboxCapacityDetailPattern.FindStringSubmatch(err.Error())
 	if len(matches) == 3 {
-		return fmt.Sprintf("Final capacity check: worker reported %s/%s local sandbox slots active or reserved.", matches[1], matches[2])
+		current, currentErr := strconv.Atoi(matches[1])
+		maxActive, maxErr := strconv.Atoi(matches[2])
+		if currentErr == nil && maxErr == nil {
+			return current, maxActive, true
+		}
 	}
-	if errors.Is(err, agent.ErrSandboxCapacity) {
-		return "Final capacity check: worker reported local sandbox capacity was full."
-	}
-	return ""
+	return 0, 0, false
 }
 
-func formatWorkerLoadForSandboxCapacity(samples []db.WorkerLoadSample) string {
+func summarizeWorkerLoadForSandboxCapacity(samples []db.WorkerLoadSample) (int64, int64, int64, int64, int64) {
 	var runningSessions int64
 	var sandboxContainers int64
 	var activePreviews int64
@@ -99,28 +113,7 @@ func formatWorkerLoadForSandboxCapacity(samples []db.WorkerLoadSample) string {
 		previewHeldContainers += sample.PreviewHeldContainers
 		runningSessionJobs += sample.RunningSessionJobs
 	}
-	return fmt.Sprintf(
-		"Current worker load: %d running %s, %d session sandbox %s, %d active %s, %d preview-held %s, and %d running session/preview %s across %d %s.",
-		runningSessions,
-		pluralize("session", runningSessions),
-		sandboxContainers,
-		pluralize("container", sandboxContainers),
-		activePreviews,
-		pluralize("preview", activePreviews),
-		previewHeldContainers,
-		pluralize("sandbox", previewHeldContainers),
-		runningSessionJobs,
-		pluralize("job", runningSessionJobs),
-		len(samples),
-		pluralize("worker", int64(len(samples))),
-	)
-}
-
-func pluralize(singular string, count int64) string {
-	if count == 1 {
-		return singular
-	}
-	return singular + "s"
+	return runningSessions, sandboxContainers, activePreviews, previewHeldContainers, runningSessionJobs
 }
 
 func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool) {
@@ -1400,6 +1393,23 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Err(err).
 					Msg("run_agent recovery exhausted; dead-lettering without another restart")
 				return &FatalError{Err: err}
+			}
+			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
+				retryAfter := 5 * time.Second
+				targetNodeID := models.SessionWorkerTarget(&run)
+				logEvent := logger.Info().
+					Str("session_id", runID.String()).
+					Err(err)
+				if targetNodeID != nil {
+					logEvent = logEvent.Str("target_node_id", *targetNodeID)
+				}
+				logEvent.Msg("run_agent recovery claimed on the wrong node; releasing for the recorded sandbox worker")
+				return &RetryableError{
+					Err:                    err,
+					RetryAfter:             &retryAfter,
+					BypassMaxRetryDuration: true,
+					TargetNodeID:           targetNodeID,
+				}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 				// The orchestrator detected a stale orphan container_id from

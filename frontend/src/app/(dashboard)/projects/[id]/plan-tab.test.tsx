@@ -39,7 +39,10 @@ vi.mock("lucide-react", () => {
     Save: icon("Save"),
     X: icon("X"),
     Loader2: icon("Loader2"),
+    CheckIcon: icon("CheckIcon"),
     ChevronDown: icon("ChevronDown"),
+    ChevronDownIcon: icon("ChevronDownIcon"),
+    ChevronUpIcon: icon("ChevronUpIcon"),
     ChevronRight: icon("ChevronRight"),
     AlertCircle: icon("AlertCircle"),
     CheckCircle2: icon("CheckCircle2"),
@@ -438,9 +441,10 @@ describe("AnalysisSection", () => {
     // Now the Analyze button and target select should be visible
     expect(screen.getByText("Analyze")).toBeInTheDocument();
 
-    // The target select should have the default options
-    const select = screen.getByDisplayValue("Specs");
+    // The target select should use the shared combobox primitive.
+    const select = screen.getByRole("combobox", { name: "Analysis target" });
     expect(select).toBeInTheDocument();
+    expect(select).toHaveClass("max-sm:text-base");
   });
 
   it("shows suggestions after analyze", async () => {

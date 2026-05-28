@@ -214,15 +214,6 @@ export interface PreviewAPIToken {
   created_at: string;
 }
 
-export interface PreviewSecretBundleSummary {
-  id: string;
-  name: string;
-  env_names: string[];
-  created_by?: string;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Integration {
   id: string;
   org_id: string;
@@ -232,6 +223,9 @@ export interface Integration {
   github_account_login?: string;
   github_repo_selection_required?: boolean;
   github_active_repo_count?: number;
+  notion_workspace_id?: string;
+  notion_workspace_name?: string;
+  circleci_project_slug?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -477,6 +471,8 @@ export interface Session {
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
   diff_collected_at?: string;
   latest_diff_snapshot_id?: string;
+  workspace_revision?: number;
+  workspace_revision_updated_at?: string;
   threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
