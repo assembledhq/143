@@ -139,6 +139,52 @@ func (s *SessionIssueLinkStore) CreateAllowingNullRepo(
 	return linkID, nil
 }
 
+// CreateAllowingRepositoryMismatch is the manual-session override path. The
+// session's selected repository remains authoritative for the sandbox, while
+// the linked issue can still provide context even when Linear associates it
+// with a different repository.
+func (s *SessionIssueLinkStore) CreateAllowingRepositoryMismatch(
+	ctx context.Context,
+	orgID, sessionID, issueID uuid.UUID,
+	role models.SessionIssueLinkRole,
+	position int,
+	addedByUserID *uuid.UUID,
+) (uuid.UUID, error) {
+	query := `
+		INSERT INTO session_issue_links (
+			org_id, session_id, issue_id, role, position, added_by_user_id
+		)
+		SELECT @org_id, s.id, i.id, @role, @position, @added_by_user_id
+		FROM sessions s
+		JOIN issues i ON i.id = @issue_id AND i.org_id = @org_id
+		WHERE s.id = @session_id
+		  AND s.org_id = @org_id
+		  AND s.deleted_at IS NULL
+		ON CONFLICT (session_id, issue_id) DO NOTHING
+		RETURNING id`
+
+	var linkID uuid.UUID
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":           orgID,
+		"session_id":       sessionID,
+		"issue_id":         issueID,
+		"role":             role,
+		"position":         position,
+		"added_by_user_id": addedByUserID,
+	}).Scan(&linkID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		existing, lookupErr := s.lookupLinkID(ctx, orgID, sessionID, issueID)
+		if lookupErr == nil {
+			return existing, nil
+		}
+		return uuid.Nil, ErrInvalidSessionIssueLink
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert session issue link (manual repo override): %w", err)
+	}
+	return linkID, nil
+}
+
 func (s *SessionIssueLinkStore) lookupLinkID(ctx context.Context, orgID, sessionID, issueID uuid.UUID) (uuid.UUID, error) {
 	var linkID uuid.UUID
 	err := s.db.QueryRow(ctx, `

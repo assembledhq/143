@@ -405,6 +405,45 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("manual repository override links mismatched linear repo inline", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		now := time.Now().UTC()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		selectedRepoID := uuid.New()
+		linearRepoID := uuid.New()
+		issueID := uuid.New()
+		linkID := uuid.New()
+		fetched := fetchedIssueForTest("ACS-123")
+		fetched.RepositoryID = &linearRepoID
+		provider := newFakeProviderStateStore()
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{"ACS-123": fetched}}, provider)
+
+		expectIssueUpsert(t, mock, issueID, now)
+		mock.ExpectQuery(`INSERT INTO session_issue_links[\s\S]+WHERE s\.id = @session_id[\s\S]+AND s\.deleted_at IS NULL\s+ON CONFLICT`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(linkID))
+		expectPrepareStateUpdate(t, mock, 1)
+
+		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
+			OrgID:        orgID,
+			SessionID:    sessionID,
+			MessageBody:  "please start from https://linear.app/acme/issue/ACS-123",
+			RepositoryID: &selectedRepoID,
+		})
+		require.NoError(t, err, "manual repository selection should override Linear's repository association")
+		require.Equal(t, CreateResult{PrepareInline: true, PrimaryIdentifier: "ACS-123", PrimaryTitle: "Fix ACS-123"}, got, "manual repository override should still return primary metadata")
+		state, err := provider.Get(context.Background(), orgID, linkID)
+		require.NoError(t, err, "provider state should be persisted for the overridden link")
+		require.Equal(t, "manual_repository_override", state.LinkAuditReason, "provider state should record the manual repo override")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("resolved primary enqueues linked milestone", func(t *testing.T) {
 		t.Parallel()
 
