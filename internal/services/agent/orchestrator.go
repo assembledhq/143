@@ -58,6 +58,12 @@ var ErrSessionTimedOut = errors.New("session timed out")
 // cancelled terminal state.
 var ErrSessionCancelled = errors.New("session cancelled")
 
+// ErrSessionInterrupted is returned when a session turn stopped because the
+// platform interrupted execution (for example worker drain or parent context
+// cancellation) without explicit user cancellation. Workers should retry or
+// recover these turns instead of terminally marking the session cancelled.
+var ErrSessionInterrupted = errors.New("session interrupted")
+
 // ErrRecoveryAttemptsExhausted is returned from RecoverSession when repeated
 // worker-loss recovery attempts have already restarted a session without any
 // durable checkpoint. The worker treats this as terminal because another retry
@@ -162,6 +168,23 @@ func logAgentRunFailed(log zerolog.Logger, run *models.Session, err error, outco
 		addFields(event)
 	}
 	event.Msg("agent run failed")
+}
+
+func isUserCancelContext(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrUserCancelCause)
+}
+
+func interruptedStopReason(ctx context.Context, stopReason StopReason) StopReason {
+	if stopReason != StopReasonNone {
+		return stopReason
+	}
+	if errors.Is(context.Cause(ctx), ErrWorkerDrainCause) {
+		return StopReasonWorkerDrain
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return StopReasonWorkerDrain
+	}
+	return StopReasonNone
 }
 
 // diagnoseAcquireHoldRaceLoss decides whether a lost AcquireTurnHold is a
@@ -553,6 +576,16 @@ func (o *Orchestrator) CancelSessionByID(sessionID uuid.UUID) bool {
 		return false
 	}
 	return o.cancels.CancelSession(sessionID)
+}
+
+// RequestSessionStopByID asks the session-scoped cancel registry to interrupt
+// a live agent with a typed non-default stop reason. Worker drain uses this so
+// platform interruption does not masquerade as user cancellation.
+func (o *Orchestrator) RequestSessionStopByID(sessionID uuid.UUID, reason StopReason) bool {
+	if o.cancels == nil {
+		return false
+	}
+	return o.cancels.RequestStop(sessionID, reason, 30*time.Second)
 }
 
 func (o *Orchestrator) honorPendingCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID, log zerolog.Logger) {
@@ -1916,8 +1949,8 @@ func (o *Orchestrator) resolvePromptSeed(ctx context.Context, session *models.Se
 func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	log := o.logger.With().
 		Str("session_id", run.ID.String()).
@@ -2339,16 +2372,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	deregisterSessionCancel := func() {}
 	if o.cancels != nil {
 		if primaryThreadID != nil {
-			o.cancels.RegisterScoped(run.ID, *primaryThreadID, cancel, ResolveCancellationSpec(adapter))
+			o.cancels.RegisterScopedCause(run.ID, *primaryThreadID, cancel, ResolveCancellationSpec(adapter))
 			deregisterSessionCancel = func() { o.cancels.DeregisterScoped(run.ID, *primaryThreadID) }
 		} else {
-			o.cancels.Register(run.ID, cancel, ResolveCancellationSpec(adapter))
+			o.cancels.RegisterCause(run.ID, cancel, ResolveCancellationSpec(adapter))
 			deregisterSessionCancel = func() { o.cancels.Deregister(run.ID) }
 		}
 		defer deregisterSessionCancel()
 	}
 	if o.threadCancels != nil && primaryThreadID != nil {
-		o.threadCancels.RegisterWithSpec(*primaryThreadID, cancel, ResolveCancellationSpec(adapter))
+		o.threadCancels.RegisterWithSpec(*primaryThreadID, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
 		defer o.threadCancels.Deregister(*primaryThreadID)
 	}
 	var threadRuntimeCtl *threadRuntimeControl
@@ -2363,7 +2396,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("start thread runtime: %w", err)
 		}
 		if threadRuntimeCtl != nil {
-			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, cancel)
+			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
 			defer stopHeartbeat()
 			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
 				return o.DeliverThreadInbox(deliverCtx, run.OrgID, run.ID, *primaryThreadID)
@@ -2561,20 +2594,26 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if o.cancels != nil {
 		stopReason = o.cancels.StopReason(run.ID)
 	}
-	wasCancelled := stopReason == StopReasonUserCancel
+	wasCancelled := stopReason == StopReasonUserCancel || isUserCancelContext(ctx)
+	systemStopReason := interruptedStopReason(ctx, stopReason)
+	fallbackStatus := models.SessionStatusPending
+	if models.SessionStatus(run.Status) == models.SessionStatusRunning {
+		fallbackStatus = models.SessionStatusRunning
+	}
 
 	if err != nil {
 		// Distinguish three cases:
-		//   1. User cancellation (wasCancelled or ctx.Err()==Canceled) —
+		//   1. User cancellation (durable/typed user cancel only) —
 		//      snapshot and return to idle so the session can be continued.
 		//      Checked first so an explicit user cancel that races the
 		//      deadline is classified as a cancel, not a timeout.
-		//   2. context.DeadlineExceeded — session hit its wall-clock limit.
+		//   2. System interruption — retry/recover without terminal cancel.
+		//   3. context.DeadlineExceeded — session hit its wall-clock limit.
 		//      Classify explicitly via failTimedOutSession so the category
 		//      is set without relying on text-matching in classifyFailure.
-		//   3. Any other error — fail with the underlying message and defer
+		//   4. Any other error — fail with the underlying message and defer
 		//      classification to the async analyze_failure job.
-		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
+		if wasCancelled {
 			log.Info().Msg("session cancelled by user")
 			deregisterSessionCancel()
 			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
@@ -2582,6 +2621,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
 			})
 			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
+		}
+		if systemStopReason == StopReasonWorkerDrain {
+			log.Info().Str("stop_reason", string(systemStopReason)).Msg("session interrupted by system stop")
+			deregisterSessionCancel()
+			o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, log)
+			logAgentRunFinished(log, run, "system_interrupted", runStartedAt, func(event *zerolog.Event) {
+				event.Str("stop_reason", string(stopReasonToRuntime(systemStopReason)))
+			})
+			return fmt.Errorf("%w: %w", ErrSessionInterrupted, err)
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
@@ -2619,6 +2667,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
 		})
 		return nil
+	}
+	if systemStopReason == StopReasonWorkerDrain {
+		log.Info().Str("stop_reason", string(systemStopReason)).Msg("agent exited after system stop")
+		deregisterSessionCancel()
+		o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, log)
+		logAgentRunFinished(log, run, "system_interrupted", runStartedAt, func(event *zerolog.Event) {
+			event.Str("stop_reason", string(stopReasonToRuntime(systemStopReason)))
+		})
+		return ErrSessionInterrupted
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
@@ -2770,8 +2827,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) error {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	log := o.logger.With().
 		Str("session_id", session.ID.String()).
@@ -3558,10 +3615,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	deregisterSessionCancel := func() {}
 	if o.cancels != nil {
 		if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
-			o.cancels.RegisterScoped(session.ID, *opts.ThreadID, cancel, ResolveCancellationSpec(adapter))
+			o.cancels.RegisterScopedCause(session.ID, *opts.ThreadID, cancel, ResolveCancellationSpec(adapter))
 			deregisterSessionCancel = func() { o.cancels.DeregisterScoped(session.ID, *opts.ThreadID) }
 		} else {
-			o.cancels.Register(session.ID, cancel, ResolveCancellationSpec(adapter))
+			o.cancels.RegisterCause(session.ID, cancel, ResolveCancellationSpec(adapter))
 			deregisterSessionCancel = func() { o.cancels.Deregister(session.ID) }
 		}
 		defer deregisterSessionCancel()
@@ -3570,7 +3627,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// cancel can unwind just this thread's run context. The session-level
 	// registry remains the legacy path for whole-sandbox cancels.
 	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
-		o.threadCancels.RegisterWithSpec(*opts.ThreadID, cancel, ResolveCancellationSpec(adapter))
+		o.threadCancels.RegisterWithSpec(*opts.ThreadID, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
 		defer o.threadCancels.Deregister(*opts.ThreadID)
 	}
 	var threadRuntimeCtl *threadRuntimeControl
@@ -3581,7 +3638,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("start thread runtime: %w", err)
 		}
 		if threadRuntimeCtl != nil {
-			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, cancel)
+			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
 			defer stopHeartbeat()
 			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
 				return o.DeliverThreadInbox(deliverCtx, session.OrgID, session.ID, *opts.ThreadID)
@@ -3926,17 +3983,24 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if o.cancels != nil {
 		stopReason = o.cancels.StopReason(session.ID)
 	}
-	wasCancelled := stopReason == StopReasonUserCancel
+	wasCancelled := stopReason == StopReasonUserCancel || isUserCancelContext(ctx)
+	systemStopReason := interruptedStopReason(ctx, stopReason)
 
 	if err != nil {
 		// User cancel is checked first so an explicit cancel that races the
 		// deadline is classified as a cancel, not a timeout.
-		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
+		if wasCancelled {
 			log.Info().Msg("session cancelled by user during continue")
 			deregisterSessionCancel()
 			o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
 			drainAfterRelease = true
 			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
+		}
+		if systemStopReason == StopReasonWorkerDrain {
+			log.Info().Str("stop_reason", string(systemStopReason)).Msg("session interrupted by system stop during continue")
+			deregisterSessionCancel()
+			o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, log)
+			return fmt.Errorf("%w: %w", ErrSessionInterrupted, err)
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
@@ -3960,6 +4024,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
 		drainAfterRelease = true
 		return nil
+	}
+	if systemStopReason == StopReasonWorkerDrain {
+		log.Info().Str("stop_reason", string(systemStopReason)).Msg("agent exited after system stop during continue")
+		deregisterSessionCancel()
+		o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, log)
+		return ErrSessionInterrupted
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
@@ -5845,6 +5915,54 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 	} else {
 		_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusCancelled)
 		o.updatePrimaryThreadTerminal(bgCtx, session, models.ThreadStatusCancelled, nil, log)
+	}
+}
+
+// handleSystemInterruptedSession preserves the workspace if possible and
+// restores the pre-turn status without advancing current_turn. Unlike user
+// cancellation, this path is recoverable: the worker returns a retryable error
+// so the same accepted turn can run again.
+func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, fallbackStatus models.SessionStatus, reason StopReason, log zerolog.Logger) {
+	bgCtx := context.Background()
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	runtimeReason := stopReasonToRuntime(reason)
+	if runtimeReason == models.RuntimeStopReasonNone {
+		runtimeReason = models.RuntimeStopReasonWorkerRecovery
+	}
+	if fallbackStatus == "" || fallbackStatus.IsTerminal() {
+		fallbackStatus = models.SessionStatusIdle
+	}
+
+	if markErr := o.sessions.MarkRuntimeStopRequested(bgCtx, session.OrgID, session.ID, runtimeReason, time.Now().UTC()); markErr != nil {
+		log.Warn().Err(markErr).Str("runtime_stop_reason", string(runtimeReason)).Msg("failed to persist system interruption reason")
+	}
+
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, nil)
+	if snapshotErr != nil {
+		log.Warn().Err(snapshotErr).Str("runtime_stop_reason", string(runtimeReason)).Msg("failed to snapshot interrupted session")
+	} else if snapshotKey != "" {
+		agentSessionID := ""
+		if result != nil && result.AgentSessionID != "" {
+			agentSessionID = result.AgentSessionID
+		} else if session.AgentSessionID != nil {
+			agentSessionID = *session.AgentSessionID
+		}
+		checkpointedAt := time.Now().UTC()
+		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, runtimeReason); err != nil {
+			log.Warn().Err(err).Str("runtime_stop_reason", string(runtimeReason)).Msg("failed to publish interrupted-session checkpoint metadata")
+		}
+		if updater, ok := o.sessions.(workspaceSnapshotUpdater); ok {
+			if err := updater.UpdateWorkspaceSnapshot(bgCtx, session.OrgID, session.ID, snapshotKey, nil); err != nil {
+				log.Warn().Err(err).Msg("failed to persist interrupted-session workspace snapshot")
+			}
+		} else {
+			log.Warn().Msg("session store does not support interrupted-session workspace snapshot update")
+		}
+		o.warmMentionIndexFromSandboxAsync(bgCtx, session, sandbox, snapshotKey, log)
+	}
+
+	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus); err != nil {
+		log.Warn().Err(err).Str("status", string(fallbackStatus)).Msg("failed to restore session status after system interruption")
 	}
 }
 

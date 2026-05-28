@@ -616,6 +616,10 @@ type orchestratorServiceStub struct {
 	cancelSessionCalls   int
 	cancelSessionID      uuid.UUID
 	cancelSessionResult  bool
+	stopSessionCalls     int
+	stopSessionID        uuid.UUID
+	stopReason           agent.StopReason
+	stopSessionResult    bool
 	cancelThreadCalls    int
 	cancelThreadID       uuid.UUID
 	cancelThreadResult   bool
@@ -717,6 +721,13 @@ func (s *orchestratorServiceStub) CancelSessionByID(sessionID uuid.UUID) bool {
 	s.cancelSessionCalls++
 	s.cancelSessionID = sessionID
 	return s.cancelSessionResult
+}
+
+func (s *orchestratorServiceStub) RequestSessionStopByID(sessionID uuid.UUID, reason agent.StopReason) bool {
+	s.stopSessionCalls++
+	s.stopSessionID = sessionID
+	s.stopReason = reason
+	return s.stopSessionResult
 }
 
 func (s *orchestratorServiceStub) CancelThreadByID(threadID uuid.UUID) bool {

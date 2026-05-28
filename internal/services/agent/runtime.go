@@ -84,6 +84,8 @@ func stopReasonToRuntime(reason StopReason) models.RuntimeStopReason {
 		return models.RuntimeStopReasonNoProgress
 	case StopReasonAbsoluteCeiling:
 		return models.RuntimeStopReasonAbsoluteCeiling
+	case StopReasonWorkerDrain:
+		return models.RuntimeStopReasonWorkerDrain
 	default:
 		return models.RuntimeStopReasonNone
 	}

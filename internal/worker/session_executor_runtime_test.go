@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 type executorRuntimeExecutorStoreStub struct {
@@ -582,7 +584,7 @@ func TestSessionExecutorRuntime_UsesDetachedContextForTerminalJobWrites(t *testi
 	require.False(t, jobs.sawCanceledCtx, "runtime should detach final job writes from executor parent cancellation")
 }
 
-func TestSessionExecutorRuntime_DrainRequestsGracefulSessionCancel(t *testing.T) {
+func TestSessionExecutorRuntime_DrainRequestsTypedSystemStopAndRequeues(t *testing.T) {
 	t.Parallel()
 
 	executorID := uuid.New()
@@ -591,7 +593,7 @@ func TestSessionExecutorRuntime_DrainRequestsGracefulSessionCancel(t *testing.T)
 	jobID := uuid.New()
 	lockToken := uuid.New()
 	handlerStarted := make(chan struct{})
-	orch := &orchestratorServiceStub{cancelSessionResult: true}
+	orch := &orchestratorServiceStub{stopSessionResult: true}
 	executors := &executorRuntimeExecutorStoreStub{
 		executor: models.SessionExecutor{
 			ID:        executorID,
@@ -640,10 +642,80 @@ func TestSessionExecutorRuntime_DrainRequestsGracefulSessionCancel(t *testing.T)
 	cancel()
 
 	err := <-done
-	require.NoError(t, err, "runtime should treat graceful drain cancellation as a handled shutdown")
-	require.Equal(t, 1, orch.cancelSessionCalls, "drain watcher should request graceful session cancellation")
-	require.Equal(t, sessionID, orch.cancelSessionID, "drain watcher should cancel the executor session")
-	require.Equal(t, 0, jobs.retryCalls, "gracefully drained sessions should not retry the original turn")
-	require.Equal(t, 1, jobs.succeededCalls, "gracefully drained sessions should close the accepted job")
-	require.Equal(t, models.SessionExecutorStatusCompleted, executors.terminalStatus, "gracefully drained executors should finish terminally without requeue")
+	require.NoError(t, err, "runtime should persist the drain retry decision successfully")
+	require.Equal(t, 0, orch.cancelSessionCalls, "drain watcher must not route worker drain through the user-cancel API")
+	require.Equal(t, 1, orch.stopSessionCalls, "drain watcher should request a typed system stop")
+	require.Equal(t, sessionID, orch.stopSessionID, "drain watcher should stop the executor session")
+	require.Equal(t, agent.StopReasonWorkerDrain, orch.stopReason, "drain watcher should preserve worker-drain as the stop reason")
+	require.Equal(t, 1, jobs.retryCalls, "drained sessions should retry the original turn instead of closing it as succeeded")
+	require.Equal(t, 0, jobs.succeededCalls, "drained sessions should not close the accepted job as succeeded")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "drained executors should finish as requeued")
+}
+
+func TestSessionExecutorRuntime_DrainPreservesHandlerRetryableError(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	handlerStarted := make(chan struct{})
+	orch := &orchestratorServiceStub{stopSessionResult: true}
+	executors := &executorRuntimeExecutorStoreStub{
+		executor: models.SessionExecutor{
+			ID:        executorID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			JobID:     jobID,
+			JobType:   "run_agent",
+			LockToken: lockToken,
+			Status:    models.SessionExecutorStatusStarting,
+		},
+		markRunningOK: true,
+	}
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "run_agent",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    1,
+			MaxAttempts: 1,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now().Add(-24 * time.Hour),
+		},
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors: executors,
+		Jobs:      jobs,
+		Services:  &Services{Orchestrator: orch},
+		Handlers: map[string]JobHandler{
+			"run_agent": func(ctx context.Context, _ string, _ json.RawMessage) error {
+				close(handlerStarted)
+				<-ctx.Done()
+				return &RetryableError{
+					Err:                    fmt.Errorf("%w: %w", agent.ErrSessionInterrupted, ctx.Err()),
+					BypassMaxRetryDuration: true,
+				}
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Run(ctx, executorID)
+	}()
+	<-handlerStarted
+	cancel()
+
+	err := <-done
+	require.NoError(t, err, "runtime should persist the preserved retryable drain decision")
+	require.Equal(t, 1, jobs.retryCalls, "existing retryable interruption should still requeue on the final attempt")
+	require.Equal(t, 0, jobs.deadLetterCalls, "existing retryable interruption should not be flattened into a final-attempt dead letter")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "existing retryable interruption should preserve requeued executor status")
 }
