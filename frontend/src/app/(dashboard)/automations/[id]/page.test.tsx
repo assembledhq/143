@@ -130,10 +130,12 @@ describe("AutomationDetailPage", () => {
 
     expect(scheduleRow).toHaveClass("flex-wrap");
     expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
-    expect(intervalUnitTrigger).toHaveClass("h-9", "text-base", "sm:text-xs");
-    expect(hourTrigger).toHaveClass("h-9", "text-base", "sm:text-xs");
-    expect(minuteTrigger).toHaveClass("h-9", "text-base", "sm:text-xs");
-    expect(timezoneButton).toHaveClass("h-9", "text-base", "sm:text-xs");
+    expect(intervalUnitTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
+    expect(hourTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
+    expect(minuteTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
+    expect(timezoneButton).toHaveClass("h-9", "text-xs", "max-sm:text-base");
+    expect(intervalUnitTrigger).not.toHaveClass("text-base");
+    expect(timezoneButton).not.toHaveClass("text-base");
     expect(runEveryText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
     expect(atText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();

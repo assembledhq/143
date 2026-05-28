@@ -9,7 +9,8 @@ describe("Textarea", () => {
     renderWithProviders(<Textarea aria-label="Notes" />);
 
     const textarea = screen.getByRole("textbox", { name: "Notes" });
-    expect(textarea).toHaveClass("text-base");
-    expect(textarea).toHaveClass("sm:text-xs");
+    expect(textarea).toHaveClass("max-sm:text-base");
+    expect(textarea).toHaveClass("text-xs");
+    expect(textarea).not.toHaveClass("text-base");
   });
 });
