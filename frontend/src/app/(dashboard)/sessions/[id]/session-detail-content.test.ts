@@ -8,6 +8,8 @@ import {
   getVisibleThreadLogTurns,
   hasCleanReviewLoopForSnapshot,
   invalidateSessionHumanInputRequests,
+  applyThreadInboxEventToThreads,
+  applyThreadRuntimeEventToThreads,
   trackInFlightAgentUpdate,
 } from "./session-detail-content";
 import type { SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
@@ -80,6 +82,64 @@ describe("getPendingEditableThreadUpdate", () => {
       label: "Codex 2",
       model: "gpt-5.4-mini",
     });
+  });
+});
+
+describe("thread SSE event reducers", () => {
+  const threads: SessionThread[] = [
+    {
+      id: "thread-1",
+      session_id: "session-1",
+      org_id: "org-1",
+      agent_type: "codex",
+      label: "Main",
+      status: "running",
+      current_turn: 1,
+      created_at: "2026-01-01T00:00:00.000Z",
+      cost_cents: 0,
+      pending_message_count: 0,
+    },
+    {
+      id: "thread-2",
+      session_id: "session-1",
+      org_id: "org-1",
+      agent_type: "claude_code",
+      label: "Review",
+      status: "idle",
+      current_turn: 0,
+      created_at: "2026-01-01T00:00:00.000Z",
+      cost_cents: 0,
+      pending_message_count: 0,
+    },
+  ];
+
+  it("updates only the matching thread inbox count", () => {
+    const next = applyThreadInboxEventToThreads(threads, {
+      session_id: "session-1",
+      thread_id: "thread-2",
+      org_id: "org-1",
+      pending_message_count: 3,
+    });
+
+    expect(next[0]).toBe(threads[0]);
+    expect(next[1].pending_message_count).toBe(3);
+  });
+
+  it("updates only the matching thread runtime fields", () => {
+    const next = applyThreadRuntimeEventToThreads(threads, {
+      session_id: "session-1",
+      thread_id: "thread-1",
+      org_id: "org-1",
+      status: "idle",
+      current_turn: 2,
+      pending_message_count: 0,
+      last_activity_at: "2026-01-01T00:05:00.000Z",
+    });
+
+    expect(next[0].status).toBe("idle");
+    expect(next[0].current_turn).toBe(2);
+    expect(next[0].last_activity_at).toBe("2026-01-01T00:05:00.000Z");
+    expect(next[1]).toBe(threads[1]);
   });
 });
 

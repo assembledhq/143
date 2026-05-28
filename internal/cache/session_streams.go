@@ -19,6 +19,7 @@ import (
 const (
 	logStreamMaxLen          = 10000
 	statusStreamMaxLen       = 100
+	eventStreamMaxLen        = 1000
 	logRingBufferSize        = 1000
 	perClientBufferSize      = 256
 	maxRedisLogPayloadBytes  = 4 * 1024
@@ -42,6 +43,11 @@ type logSubscriber struct {
 
 type statusSubscriber struct {
 	ch     chan models.Session
+	reason atomic.Value
+}
+
+type eventSubscriber struct {
+	ch     chan models.SessionStreamEvent
 	reason atomic.Value
 }
 
@@ -142,6 +148,19 @@ type statusFanout struct {
 	clients map[*statusSubscriber]struct{}
 }
 
+type eventFanout struct {
+	sessionID uuid.UUID
+	streamKey string
+	client    *Client
+	logger    zerolog.Logger
+
+	ctx     context.Context
+	cancel  context.CancelFunc
+	onExit  func()
+	mu      sync.Mutex
+	clients map[*eventSubscriber]struct{}
+}
+
 type LogSubscription struct {
 	C       <-chan StreamedLog
 	client  *logSubscriber
@@ -188,6 +207,29 @@ func (s *StatusSubscription) Close() {
 	}
 }
 
+type EventSubscription struct {
+	C       <-chan models.SessionStreamEvent
+	client  *eventSubscriber
+	closeFn func()
+}
+
+func (s *EventSubscription) CloseReason() string {
+	if s == nil || s.client == nil {
+		return ""
+	}
+	v := s.client.reason.Load()
+	if msg, ok := v.(string); ok {
+		return msg
+	}
+	return ""
+}
+
+func (s *EventSubscription) Close() {
+	if s != nil && s.closeFn != nil {
+		s.closeFn()
+	}
+}
+
 type SessionStreams struct {
 	client  *Client
 	logger  zerolog.Logger
@@ -198,6 +240,9 @@ type SessionStreams struct {
 
 	statusMu      sync.Mutex
 	statusFanouts map[uuid.UUID]*statusFanout
+
+	eventMu      sync.Mutex
+	eventFanouts map[uuid.UUID]*eventFanout
 }
 
 func NewSessionStreams(client *Client, logger zerolog.Logger, metrics *Metrics) *SessionStreams {
@@ -210,6 +255,7 @@ func NewSessionStreams(client *Client, logger zerolog.Logger, metrics *Metrics) 
 		metrics:       metrics,
 		logFanouts:    make(map[uuid.UUID]*logFanout),
 		statusFanouts: make(map[uuid.UUID]*statusFanout),
+		eventFanouts:  make(map[uuid.UUID]*eventFanout),
 	}
 }
 
@@ -287,6 +333,36 @@ func (s *SessionStreams) PublishStatus(ctx context.Context, session *models.Sess
 	return nil
 }
 
+func (s *SessionStreams) PublishEvent(ctx context.Context, event models.SessionStreamEvent) error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	if event.SessionID == uuid.Nil {
+		return errors.New("session stream event missing session id")
+	}
+	if err := event.Type.Validate(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	args := &redis.XAddArgs{
+		Stream: maxLenStreamKey(eventStreamKey(event.SessionID), eventStreamMaxLen),
+		Values: map[string]any{"json": string(encoded)},
+		MaxLen: eventStreamMaxLen,
+		Approx: true,
+	}
+	err = s.client.doCommand(ctx, "xadd", func() error {
+		return s.client.raw().XAdd(ctx, args).Err()
+	})
+	if err != nil {
+		s.client.logger.Warn().Err(err).Str("stream", eventStreamKey(event.SessionID)).Msg("XADD failed: session events")
+		return err
+	}
+	return nil
+}
+
 func (s *SessionStreams) ScheduleExpiry(ctx context.Context, sessionID uuid.UUID, expiry time.Time) error {
 	if s == nil || s.client == nil {
 		return nil
@@ -295,6 +371,7 @@ func (s *SessionStreams) ScheduleExpiry(ctx context.Context, sessionID uuid.UUID
 		pipe := s.client.raw().Pipeline()
 		pipe.ExpireAt(ctx, logStreamKey(sessionID), expiry)
 		pipe.ExpireAt(ctx, statusStreamKey(sessionID), expiry)
+		pipe.ExpireAt(ctx, eventStreamKey(sessionID), expiry)
 		_, pipeErr := pipe.Exec(ctx)
 		return pipeErr
 	})
@@ -309,7 +386,7 @@ func (s *SessionStreams) DeleteSessionStreams(ctx context.Context, sessionID uui
 		return nil
 	}
 	return s.client.doCommand(ctx, "del", func() error {
-		return s.client.raw().Del(ctx, logStreamKey(sessionID), statusStreamKey(sessionID)).Err()
+		return s.client.raw().Del(ctx, logStreamKey(sessionID), statusStreamKey(sessionID), eventStreamKey(sessionID)).Err()
 	})
 }
 
@@ -392,6 +469,27 @@ func (s *SessionStreams) SubscribeStatus(sessionID uuid.UUID) (*StatusSubscripti
 	f.mu.Unlock()
 
 	return &StatusSubscription{
+		C:      sub.ch,
+		client: sub,
+		closeFn: func() {
+			f.removeClient(sub, "client_closed")
+		},
+	}, nil
+}
+
+func (s *SessionStreams) SubscribeEvents(sessionID uuid.UUID) (*EventSubscription, error) {
+	if s == nil || s.client == nil {
+		return nil, errors.New("redis unavailable")
+	}
+	f := s.ensureEventFanout(sessionID)
+	sub := &eventSubscriber{ch: make(chan models.SessionStreamEvent, perClientBufferSize)}
+	sub.reason.Store("")
+
+	f.mu.Lock()
+	f.clients[sub] = struct{}{}
+	f.mu.Unlock()
+
+	return &EventSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
@@ -493,6 +591,32 @@ func (s *SessionStreams) ensureStatusFanout(sessionID uuid.UUID) *statusFanout {
 		},
 	}
 	s.statusFanouts[sessionID] = f
+	go f.run()
+	return f
+}
+
+func (s *SessionStreams) ensureEventFanout(sessionID uuid.UUID) *eventFanout {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if f := s.eventFanouts[sessionID]; f != nil {
+		return f
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &eventFanout{
+		sessionID: sessionID,
+		streamKey: eventStreamKey(sessionID),
+		client:    s.client,
+		logger:    s.logger,
+		ctx:       ctx,
+		cancel:    cancel,
+		clients:   make(map[*eventSubscriber]struct{}),
+		onExit: func() {
+			s.eventMu.Lock()
+			delete(s.eventFanouts, sessionID)
+			s.eventMu.Unlock()
+		},
+	}
+	s.eventFanouts[sessionID] = f
 	go f.run()
 	return f
 }
@@ -613,6 +737,63 @@ func (f *statusFanout) run() {
 	}
 }
 
+func (f *eventFanout) run() {
+	defer f.onExit()
+	lastID := "$"
+	for {
+		select {
+		case <-f.ctx.Done():
+			f.closeAll("retry")
+			return
+		default:
+		}
+
+		streams, err := f.client.raw().XRead(f.ctx, &redis.XReadArgs{
+			Streams: []string{f.streamKey, lastID},
+			Block:   30 * time.Second,
+			Count:   64,
+		}).Result()
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				f.closeAll("retry")
+				return
+			}
+			if errors.Is(err, redis.Nil) {
+				continue
+			}
+			f.client.breaker.ForceOpen()
+			f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("Redis event fan-out reader failed")
+			f.closeAll("retry")
+			return
+		}
+
+		for _, stream := range streams {
+			for _, msg := range stream.Messages {
+				lastID = msg.ID
+				event, decodeErr := decodeEventEntry(msg)
+				if decodeErr != nil {
+					f.logger.Warn().Err(decodeErr).Str("session_id", f.sessionID.String()).Str("stream_id", msg.ID).Msg("failed to decode Redis event stream entry")
+					continue
+				}
+				f.mu.Lock()
+				for sub := range f.clients {
+					select {
+					case sub.ch <- event:
+					default:
+						f.closeClientLocked(sub, "slow_consumer")
+					}
+				}
+				empty := len(f.clients) == 0
+				f.mu.Unlock()
+				if empty {
+					f.cancel()
+					return
+				}
+			}
+		}
+	}
+}
+
 func (f *logFanout) closeAll(reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -622,6 +803,14 @@ func (f *logFanout) closeAll(reason string) {
 }
 
 func (f *statusFanout) closeAll(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for sub := range f.clients {
+		f.closeClientLocked(sub, reason)
+	}
+}
+
+func (f *eventFanout) closeAll(reason string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for sub := range f.clients {
@@ -653,6 +842,18 @@ func (f *statusFanout) removeClient(sub *statusSubscriber, reason string) {
 	}
 }
 
+func (f *eventFanout) removeClient(sub *eventSubscriber, reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.clients[sub]; !ok {
+		return
+	}
+	f.closeClientLocked(sub, reason)
+	if len(f.clients) == 0 {
+		f.cancel()
+	}
+}
+
 func (f *logFanout) closeClientLocked(sub *logSubscriber, reason string) {
 	delete(f.clients, sub)
 	sub.reason.Store(reason)
@@ -660,6 +861,12 @@ func (f *logFanout) closeClientLocked(sub *logSubscriber, reason string) {
 }
 
 func (f *statusFanout) closeClientLocked(sub *statusSubscriber, reason string) {
+	delete(f.clients, sub)
+	sub.reason.Store(reason)
+	close(sub.ch)
+}
+
+func (f *eventFanout) closeClientLocked(sub *eventSubscriber, reason string) {
 	delete(f.clients, sub)
 	sub.reason.Store(reason)
 	close(sub.ch)
@@ -703,6 +910,60 @@ func decodeStatusEntry(entry redis.XMessage) (models.Session, error) {
 	return session, nil
 }
 
+func decodeEventEntry(entry redis.XMessage) (models.SessionStreamEvent, error) {
+	raw, ok := entry.Values["json"]
+	if !ok {
+		return models.SessionStreamEvent{}, fmt.Errorf("missing json field")
+	}
+	var text string
+	switch v := raw.(type) {
+	case string:
+		text = v
+	default:
+		text = fmt.Sprint(v)
+	}
+	var envelope struct {
+		Type      models.SessionStreamEventType `json:"type"`
+		SessionID uuid.UUID                     `json:"session_id"`
+		OrgID     uuid.UUID                     `json:"org_id"`
+		Data      json.RawMessage               `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
+		return models.SessionStreamEvent{}, err
+	}
+	if err := envelope.Type.Validate(); err != nil {
+		return models.SessionStreamEvent{}, err
+	}
+	event := models.SessionStreamEvent{
+		Type:      envelope.Type,
+		SessionID: envelope.SessionID,
+		OrgID:     envelope.OrgID,
+	}
+	switch envelope.Type {
+	case models.SessionStreamEventThreadInboxQueued, models.SessionStreamEventThreadInboxCleared:
+		var payload models.ThreadInboxEvent
+		if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+			return models.SessionStreamEvent{}, err
+		}
+		event.Data = payload
+	case models.SessionStreamEventThreadRuntimeUpdated:
+		var payload models.ThreadRuntimeEvent
+		if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+			return models.SessionStreamEvent{}, err
+		}
+		event.Data = payload
+	case models.SessionStreamEventWorkspaceGenerationChanged:
+		var payload models.SessionWorkspaceGenerationChangedEvent
+		if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+			return models.SessionStreamEvent{}, err
+		}
+		event.Data = payload
+	default:
+		return models.SessionStreamEvent{}, fmt.Errorf("unsupported session event type: %s", envelope.Type)
+	}
+	return event, nil
+}
+
 func clampLogPayload(log models.SessionLog) ([]byte, error) {
 	encoded, err := json.Marshal(log)
 	if err != nil {
@@ -743,6 +1004,10 @@ func logStreamKey(sessionID uuid.UUID) string {
 
 func statusStreamKey(sessionID uuid.UUID) string {
 	return fmt.Sprintf("143:stream:{ses:%s}:status", sessionID.String())
+}
+
+func eventStreamKey(sessionID uuid.UUID) string {
+	return fmt.Sprintf("143:stream:{ses:%s}:events", sessionID.String())
 }
 
 func terminalExpiryAt(session *models.Session) time.Time {

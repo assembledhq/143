@@ -131,7 +131,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -388,6 +388,36 @@ function reconcileThreadsForOmittedStatusUpdate(
         threadStatus === "failed" ||
         threadStatus === "cancelled"
       ) ? updated.completed_at ?? thread.completed_at : thread.completed_at,
+    };
+  });
+}
+
+export function applyThreadInboxEventToThreads(
+  threads: SessionThread[],
+  event: ThreadInboxEvent,
+): SessionThread[] {
+  return threads.map((thread) => (
+    thread.id === event.thread_id
+      ? { ...thread, pending_message_count: event.pending_message_count }
+      : thread
+  ));
+}
+
+export function applyThreadRuntimeEventToThreads(
+  threads: SessionThread[],
+  event: ThreadRuntimeEvent,
+): SessionThread[] {
+  return threads.map((thread) => {
+    if (thread.id !== event.thread_id) return thread;
+    return {
+      ...thread,
+      status: event.status,
+      agent_session_id: event.agent_session_id ?? thread.agent_session_id,
+      current_turn: event.current_turn,
+      pending_message_count: event.pending_message_count,
+      last_activity_at: event.last_activity_at ?? thread.last_activity_at,
+      started_at: event.started_at ?? thread.started_at,
+      completed_at: event.completed_at ?? thread.completed_at,
     };
   });
 }
@@ -2466,6 +2496,47 @@ function ChatPanel({
     });
   }, [queryClient, sessionId]);
 
+  const mergeThreadInboxUpdate = useCallback((event: ThreadInboxEvent) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing || existing.data.id !== event.session_id) return existing;
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          threads: applyThreadInboxEventToThreads(existing.data.threads ?? [], event),
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
+  const mergeThreadRuntimeUpdate = useCallback((event: ThreadRuntimeEvent) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing || existing.data.id !== event.session_id) return existing;
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          threads: applyThreadRuntimeEventToThreads(existing.data.threads ?? [], event),
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
+  const mergeWorkspaceGenerationUpdate = useCallback((event: SessionWorkspaceGenerationChangedEvent) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing || existing.data.id !== event.session_id) return existing;
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          workspace_revision: event.workspace_revision,
+          workspace_revision_updated_at: event.workspace_revision_updated_at,
+        },
+      };
+    });
+    queryClient.invalidateQueries({ queryKey: ["preview-status", sessionId] });
+  }, [queryClient, sessionId]);
+
   useEffect(() => {
     // Pause the SSE stream while the tab is hidden. EventSource handlers fire
     // even in a hidden tab and trigger setState/re-renders on this large
@@ -2532,6 +2603,11 @@ function ChatPanel({
         }
       });
 
+      addSSEListener(eventSource, SSE_EVENT.THREAD_INBOX_QUEUED, mergeThreadInboxUpdate);
+      addSSEListener(eventSource, SSE_EVENT.THREAD_INBOX_CLEARED, mergeThreadInboxUpdate);
+      addSSEListener(eventSource, SSE_EVENT.THREAD_RUNTIME_UPDATED, mergeThreadRuntimeUpdate);
+      addSSEListener(eventSource, SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED, mergeWorkspaceGenerationUpdate);
+
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
@@ -2570,7 +2646,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
