@@ -288,23 +288,27 @@ type integrationCredentials struct {
 	circleci *models.DecryptedCredential
 }
 
+var integrationCredentialProviders = []models.ProviderName{
+	models.ProviderSentry,
+	models.ProviderLinear,
+	models.ProviderNotion,
+	models.ProviderCircleCI,
+}
+
 // fetchIntegrationCredentials fetches all integration credentials for an org in one pass.
 func (s *Service) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
 	if s.credentials == nil {
 		return integrationCredentials{}
 	}
-	var creds integrationCredentials
-	if c, err := s.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil {
-		creds.sentry = c
+	rows, err := s.credentials.GetAllIntegrations(ctx, orgID, integrationCredentialProviders)
+	if err != nil {
+		return integrationCredentials{}
 	}
-	if c, err := s.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil {
-		creds.linear = c
-	}
-	if c, err := s.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil {
-		creds.notion = c
-	}
-	if c, err := s.credentials.Get(ctx, orgID, models.ProviderCircleCI); err == nil {
-		creds.circleci = c
+	creds := integrationCredentials{
+		sentry:   rows[models.ProviderSentry],
+		linear:   rows[models.ProviderLinear],
+		notion:   rows[models.ProviderNotion],
+		circleci: rows[models.ProviderCircleCI],
 	}
 	return creds
 }

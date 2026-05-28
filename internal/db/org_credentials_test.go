@@ -668,6 +668,56 @@ func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 	}
 }
 
+func TestOrgCredentialStore_GetAllIntegrations(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sentryID := uuid.New()
+	linearID := uuid.New()
+	now := time.Now().UTC()
+	sentryData := crypto.DevEncrypt([]byte(`{"access_token":"sentry-token","org_slug":"acme"}`))
+	linearData := crypto.DevEncrypt([]byte(`{"access_token":"linear-token"}`))
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials .* org_id = @org_id .* provider = ANY\(@providers\) .* label = '' .* status != 'disabled'`).
+		WithArgs(orgID, []string{"sentry", "linear", "notion"}).
+		WillReturnRows(pgxmock.NewRows(credColumns).
+			AddRow(sentryID, orgID, "sentry", "", sentryData, "active", nil, nil, nil, now, now).
+			AddRow(linearID, orgID, "linear", "", linearData, "active", nil, nil, nil, now, now))
+
+	store := NewOrgCredentialStore(mock, nil)
+	creds, err := store.GetAllIntegrations(context.Background(), orgID, []models.ProviderName{
+		models.ProviderSentry,
+		models.ProviderLinear,
+		models.ProviderNotion,
+	})
+	require.NoError(t, err, "GetAllIntegrations should not return an error")
+	require.Equal(t, map[models.ProviderName]*models.DecryptedCredential{
+		models.ProviderSentry: {
+			ID:        sentryID,
+			OrgID:     orgID,
+			Provider:  models.ProviderSentry,
+			Config:    models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "acme"},
+			Status:    models.CredentialStatusActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		models.ProviderLinear: {
+			ID:        linearID,
+			OrgID:     orgID,
+			Provider:  models.ProviderLinear,
+			Config:    models.LinearConfig{AccessToken: "linear-token"},
+			Status:    models.CredentialStatusActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}, creds, "GetAllIntegrations should return credentials keyed by provider")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOrgCredentialStore_ListCodingAuths(t *testing.T) {
 	t.Parallel()
 
