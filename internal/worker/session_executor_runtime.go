@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 var (
@@ -141,11 +142,19 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 		return ErrExecutorLostLease
 	}
 	if drainHandled.Load() && errors.Is(runErr, context.Canceled) {
-		r.loggerPtr().Info().
-			Str("executor_id", executor.ID.String()).
-			Str("job_id", job.ID.String()).
-			Msg("session executor drain cancellation handled; closing job without retry")
-		return r.finishAttempt(ctx, handlerCtx, executor, job, nil)
+		var retryable *RetryableError
+		if errors.As(runErr, &retryable) {
+			r.loggerPtr().Info().
+				Str("executor_id", executor.ID.String()).
+				Str("job_id", job.ID.String()).
+				Msg("session executor drain interrupted handler; preserving retryable decision")
+		} else {
+			r.loggerPtr().Info().
+				Str("executor_id", executor.ID.String()).
+				Str("job_id", job.ID.String()).
+				Msg("session executor drain interrupted handler; retrying job")
+			runErr = fmt.Errorf("%w: %w", agent.ErrSessionInterrupted, runErr)
+		}
 	}
 
 	return r.finishAttempt(ctx, handlerCtx, executor, job, runErr)
@@ -274,7 +283,7 @@ func (r *SessionExecutorRuntime) startDrainWatcher(ctx context.Context, executor
 		defer close(done)
 		<-ctx.Done()
 		if r.Services != nil && r.Services.Orchestrator != nil {
-			if r.Services.Orchestrator.CancelSessionByID(executor.SessionID) && drainHandled != nil {
+			if r.Services.Orchestrator.RequestSessionStopByID(executor.SessionID, agent.StopReasonWorkerDrain) && drainHandled != nil {
 				drainHandled.Store(true)
 			}
 		}
