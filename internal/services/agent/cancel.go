@@ -20,6 +20,12 @@ const (
 	StopReasonSoftBudget      StopReason = "soft_budget"
 	StopReasonNoProgress      StopReason = "no_progress"
 	StopReasonAbsoluteCeiling StopReason = "absolute_ceiling"
+	StopReasonWorkerDrain     StopReason = "worker_drain"
+)
+
+var (
+	ErrUserCancelCause  = errors.New("user requested session cancellation")
+	ErrWorkerDrainCause = errors.New("worker drain interrupted session")
 )
 
 // cancelEntry holds the cancellation state for a single running session.
@@ -30,8 +36,8 @@ const (
 // — until that point, RequestStop falls through to ctxCancel because there
 // is nothing more specific to interrupt.
 type cancelEntry struct {
+	ctxCancel context.CancelCauseFunc
 	scopeID   uuid.UUID
-	ctxCancel context.CancelFunc
 	cancel    CancellationSpec
 
 	mu     sync.Mutex
@@ -64,13 +70,25 @@ func NewCancelRegistry(logger zerolog.Logger) *CancelRegistry {
 // Register stores the per-session cancellation state. The handle is attached
 // later via AttachHandle once the adapter starts the live command.
 func (r *CancelRegistry) Register(sessionID uuid.UUID, ctxCancel context.CancelFunc, cancelSpec CancellationSpec) {
-	r.RegisterScoped(sessionID, sessionID, ctxCancel, cancelSpec)
+	r.RegisterCause(sessionID, func(error) { ctxCancel() }, cancelSpec)
+}
+
+// RegisterCause stores per-session cancellation state with a cancel-cause
+// function so downstream code can distinguish user cancellation from system
+// shutdown/drain cancellation.
+func (r *CancelRegistry) RegisterCause(sessionID uuid.UUID, ctxCancel context.CancelCauseFunc, cancelSpec CancellationSpec) {
+	r.RegisterScopedCause(sessionID, sessionID, ctxCancel, cancelSpec)
 }
 
 // RegisterScoped stores cancellation state for one independently running
 // process under a shared session. Session-level cancellation fans out to every
 // scope; handle attach/detach can still address one tab/runtime precisely.
 func (r *CancelRegistry) RegisterScoped(sessionID, scopeID uuid.UUID, ctxCancel context.CancelFunc, cancelSpec CancellationSpec) {
+	r.RegisterScopedCause(sessionID, scopeID, func(error) { ctxCancel() }, cancelSpec)
+}
+
+// RegisterScopedCause stores one scoped process with a cancel-cause function.
+func (r *CancelRegistry) RegisterScopedCause(sessionID, scopeID uuid.UUID, ctxCancel context.CancelCauseFunc, cancelSpec CancellationSpec) {
 	if cancelSpec.Method == "" {
 		cancelSpec = DefaultCancellationSpec
 	}
@@ -319,7 +337,7 @@ func (r *CancelRegistry) doCancel(sessionID, scopeID uuid.UUID, entry *cancelEnt
 			Str("session_id", sessionID.String()).
 			Str("cancel_scope_id", scopeID.String()).
 			Msg("no live handle attached, falling back to context cancel")
-		entry.ctxCancel()
+		entry.ctxCancel(cancelCauseForStopReason(entryReason(entry)))
 		return
 	}
 
@@ -337,7 +355,7 @@ func (r *CancelRegistry) doCancel(sessionID, scopeID uuid.UUID, entry *cancelEnt
 				Str("session_id", sessionID.String()).
 				Str("cancel_scope_id", scopeID.String()).
 				Msg("failed to deliver graceful interrupt, falling back to context cancel")
-			entry.ctxCancel()
+			entry.ctxCancel(cancelCauseForStopReason(entryReason(entry)))
 			return
 		}
 	}
@@ -369,7 +387,24 @@ func (r *CancelRegistry) doCancel(sessionID, scopeID uuid.UUID, entry *cancelEnt
 			Str("cancel_scope_id", scopeID.String()).
 			Msg("failed to force-stop interactive handle")
 	}
-	entry.ctxCancel()
+	entry.ctxCancel(cancelCauseForStopReason(entryReason(entry)))
+}
+
+func entryReason(entry *cancelEntry) StopReason {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.reason
+}
+
+func cancelCauseForStopReason(reason StopReason) error {
+	switch reason {
+	case StopReasonUserCancel:
+		return ErrUserCancelCause
+	case StopReasonWorkerDrain:
+		return ErrWorkerDrainCause
+	default:
+		return context.Canceled
+	}
 }
 
 func (r *CancelRegistry) scopeStillRegistered(sessionID, scopeID uuid.UUID) bool {

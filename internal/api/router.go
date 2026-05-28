@@ -45,11 +45,11 @@ import (
 )
 
 const (
-	uploadAPIPath               = "/api/v1/uploads"
-	uploadFilesURLPrefix        = "/api/v1/uploads/files"
-	uploadFilesRoutePattern     = uploadFilesURLPrefix + "/*"
-	uploadMaxRequestBodyMiB     = 11
-	uploadMaxRequestBodyBytes   = uploadMaxRequestBodyMiB << 20
+	uploadAPIPath             = "/api/v1/uploads"
+	uploadFilesURLPrefix      = "/api/v1/uploads/files"
+	uploadFilesRoutePattern   = uploadFilesURLPrefix + "/*"
+	uploadMaxRequestBodyMiB   = 11
+	uploadMaxRequestBodyBytes = uploadMaxRequestBodyMiB << 20
 )
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
