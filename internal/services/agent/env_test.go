@@ -21,6 +21,9 @@ type envCredentialProvider struct {
 	listCreds map[models.ProviderName][]models.DecryptedCredential
 	errs      map[models.ProviderName]error
 	listErrs  map[models.ProviderName]error
+	getCalls  []models.ProviderName
+	batch     []models.ProviderName
+	batchErr  error
 }
 
 // defaultActiveStatus returns the credential with Status="active" when the
@@ -52,6 +55,7 @@ func (envCredentialProvider) defaultActiveStatuses(creds []models.DecryptedCrede
 }
 
 func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	m.getCalls = append(m.getCalls, provider)
 	if err, ok := m.errs[provider]; ok {
 		return nil, err
 	}
@@ -59,6 +63,20 @@ func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider mod
 		return m.defaultActiveStatus(cred), nil
 	}
 	return nil, nil
+}
+
+func (m *envCredentialProvider) GetAllIntegrations(_ context.Context, _ uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error) {
+	m.batch = append([]models.ProviderName(nil), providers...)
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	out := make(map[models.ProviderName]*models.DecryptedCredential, len(providers))
+	for _, provider := range providers {
+		if cred, ok := m.creds[provider]; ok && cred != nil {
+			out[provider] = m.defaultActiveStatus(cred)
+		}
+	}
+	return out, nil
 }
 
 func (m *envCredentialProvider) ListByProvider(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
@@ -460,6 +478,37 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
+	t.Parallel()
+
+	orgCreds := &envCredentialProvider{
+		creds: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSentry:   {Config: models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "assembled"}},
+			models.ProviderLinear:   {Config: models.LinearConfig{AccessToken: "linear-token"}},
+			models.ProviderNotion:   {Config: models.NotionConfig{AccessToken: "notion-token"}},
+			models.ProviderCircleCI: {Config: models.CircleCIConfig{AuthToken: "circle-token", ProjectSlug: "gh/acme/repo"}},
+		},
+	}
+	env := NewAgentEnv(AgentEnvDeps{
+		Credentials: orgCreds,
+		Provider:    &envSandboxProvider{},
+		Logger:      zerolog.Nop(),
+	})
+
+	creds := env.fetchIntegrationCredentials(context.Background(), uuid.New())
+	require.Equal(t, []models.ProviderName{
+		models.ProviderSentry,
+		models.ProviderLinear,
+		models.ProviderNotion,
+		models.ProviderCircleCI,
+	}, orgCreds.batch, "fetchIntegrationCredentials should request all integrations in one batch")
+	require.Empty(t, orgCreds.getCalls, "fetchIntegrationCredentials should not issue per-provider Get calls")
+	require.NotNil(t, creds.Sentry, "fetchIntegrationCredentials should decode Sentry from batch results")
+	require.NotNil(t, creds.Linear, "fetchIntegrationCredentials should decode Linear from batch results")
+	require.NotNil(t, creds.Notion, "fetchIntegrationCredentials should decode Notion from batch results")
+	require.NotNil(t, creds.CircleCI, "fetchIntegrationCredentials should decode CircleCI from batch results")
 }
 
 // fakeLinearTokens implements LinearTokenResolver for env tests. The

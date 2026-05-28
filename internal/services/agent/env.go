@@ -467,37 +467,72 @@ type integrationCredentials struct {
 	CircleCI *models.CircleCIConfig
 }
 
-// fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
-// for an org from the credential provider. Returns zero-value configs (nil
-// pointers inside the returned struct) when a credential is unavailable —
-// callers should nil-check each pointer before use.
+type integrationCredentialProvider interface {
+	GetAllIntegrations(ctx context.Context, orgID uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error)
+}
+
+var integrationProviderNames = []models.ProviderName{
+	models.ProviderSentry,
+	models.ProviderLinear,
+	models.ProviderNotion,
+	models.ProviderCircleCI,
+}
+
+// fetchIntegrationCredentials retrieves integration configs for an org from
+// the credential provider. Returns zero-value configs (nil pointers inside the
+// returned struct) when a credential is unavailable — callers should nil-check
+// each pointer before use.
 func (e *AgentEnv) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
 	var ic integrationCredentials
 	if e.credentials == nil {
 		return ic
 	}
 
-	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
+	batch, ok := e.credentials.(integrationCredentialProvider)
+	if !ok {
+		return e.fetchIntegrationCredentialsLegacy(ctx, orgID)
+	}
+	creds, err := batch.GetAllIntegrations(ctx, orgID, integrationProviderNames)
+	if err != nil {
+		return ic
+	}
+	ic.apply(creds)
+	return ic
+}
+
+func (e *AgentEnv) fetchIntegrationCredentialsLegacy(ctx context.Context, orgID uuid.UUID) integrationCredentials {
+	creds := make(map[models.ProviderName]*models.DecryptedCredential, len(integrationProviderNames))
+	for _, provider := range integrationProviderNames {
+		if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil {
+			creds[provider] = cred
+		}
+	}
+	var ic integrationCredentials
+	ic.apply(creds)
+	return ic
+}
+
+func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.DecryptedCredential) {
+	if cred := creds[models.ProviderSentry]; cred != nil {
 		if cfg, ok := cred.Config.(models.SentryConfig); ok {
 			ic.Sentry = &cfg
 		}
 	}
-	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
+	if cred := creds[models.ProviderLinear]; cred != nil {
 		if cfg, ok := cred.Config.(models.LinearConfig); ok {
 			ic.Linear = &cfg
 		}
 	}
-	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil && cred != nil {
+	if cred := creds[models.ProviderNotion]; cred != nil {
 		if cfg, ok := cred.Config.(models.NotionConfig); ok {
 			ic.Notion = &cfg
 		}
 	}
-	if cred, err := e.credentials.Get(ctx, orgID, models.ProviderCircleCI); err == nil && cred != nil {
+	if cred := creds[models.ProviderCircleCI]; cred != nil {
 		if cfg, ok := cred.Config.(models.CircleCIConfig); ok {
 			ic.CircleCI = &cfg
 		}
 	}
-	return ic
 }
 
 // Resolve builds the sandbox env vars for the given agent type. It checks
