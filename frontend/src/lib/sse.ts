@@ -5,6 +5,7 @@ import type {
   SessionDetail,
   SessionLog,
 } from "./types";
+import { normalizeAPIResponse } from "./api-normalize";
 import { captureError } from "./errors";
 
 // EventSource cannot send custom headers like X-Active-Org-ID. The backend
@@ -117,7 +118,7 @@ export function addSSEListener<K extends keyof SSEEventPayloads>(
   if (event === SSE_EVENT.LOG) {
     source.onmessage = (e: MessageEvent) => {
       try {
-        handler(JSON.parse(e.data));
+        handler(normalizeAPIResponse(JSON.parse(e.data)) as SSEEventPayloads[K]);
       } catch (err) {
         captureError(err, { feature: "sse" });
       }
@@ -125,7 +126,7 @@ export function addSSEListener<K extends keyof SSEEventPayloads>(
   } else {
     source.addEventListener(event, ((e: MessageEvent) => {
       try {
-        handler(JSON.parse(e.data));
+        handler(normalizeAPIResponse(JSON.parse(e.data)) as SSEEventPayloads[K]);
       } catch (err) {
         captureError(err, { feature: "sse" });
       }

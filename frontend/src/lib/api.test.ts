@@ -160,6 +160,47 @@ describe('api client', () => {
       expect(url.searchParams.get('triggered_by_user_ids')).toBe('user-1,user-2');
     });
 
+    it('normalizes timeline payloads at the API boundary', async () => {
+      server.use(
+        http.get('/api/v1/sessions/:id/timeline', () => {
+          return HttpResponse.json({
+            data: [
+              {
+                kind: 'message',
+                created_at: '2026-01-01T00:00:01Z',
+                message: {
+                  id: 1,
+                  session_id: 'session-1',
+                  org_id: 'org-1',
+                  turn_number: 1,
+                  role: 'user',
+                  content: 'hello',
+                },
+              },
+              {
+                kind: 'log',
+                created_at: '2026-01-01T00:00:02Z',
+                log: {
+                  id: 2,
+                  session_id: 'session-1',
+                  level: 'info',
+                  message: 'working',
+                  metadata: null,
+                  turn_number: 1,
+                },
+              },
+            ],
+            meta: {},
+          });
+        }),
+      );
+
+      const result = await api.sessions.getTimeline('session-1');
+
+      expect(result.data[0].message?.created_at).toBe('2026-01-01T00:00:01Z');
+      expect(result.data[1].log?.created_at).toBe('2026-01-01T00:00:02Z');
+    });
+
     it('fetches single session', async () => {
       const mockSession = {
         data: {
