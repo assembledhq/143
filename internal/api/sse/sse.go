@@ -22,6 +22,14 @@ const (
 	EventHumanInputCreated EventType = "session_human_input.created"
 	// EventHumanInputUpdated is sent when a durable human-input request is answered or cancelled.
 	EventHumanInputUpdated EventType = "session_human_input.updated"
+	// EventThreadInboxQueued is sent when a thread has queued inbox input waiting for runtime delivery.
+	EventThreadInboxQueued EventType = "thread.inbox.queued"
+	// EventThreadInboxCleared is sent when a thread drains queued inbox input.
+	EventThreadInboxCleared EventType = "thread.inbox.cleared"
+	// EventThreadRuntimeUpdated is sent when a thread runtime-visible state changes.
+	EventThreadRuntimeUpdated EventType = "thread.runtime.updated"
+	// EventSessionWorkspaceGenerationChanged is sent when a session workspace generation advances.
+	EventSessionWorkspaceGenerationChanged EventType = "session.workspace.generation_changed"
 )
 
 // Writer wraps an http.ResponseWriter that supports SSE streaming.
