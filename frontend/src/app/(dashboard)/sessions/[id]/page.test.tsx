@@ -7759,7 +7759,7 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/environment has expired/i)).toBeVisible();
   });
 
-  it('keeps the no-headless-resume warning visible in review mode with the shared composer', async () => {
+  it('does not show the no-headless-resume warning for Amp in review mode', async () => {
     const ampSessionWithDiff: Session = {
       ...mockSessions[0],
       agent_type: 'amp',
@@ -7774,12 +7774,13 @@ describe('SessionDetailPage', () => {
     mockSessionDetailWithLazyDiff(ampSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText(/doesn't support headless conversation resume/i);
+    expect(await screen.findAllByText('Fixed TypeError by adding null check')).not.toHaveLength(0);
+    expect(screen.queryByText(/doesn't support headless conversation resume/i)).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getAllByTitle('View changes')[0]);
 
-    expect(await screen.findByText(/doesn't support headless conversation resume/i)).toBeVisible();
+    expect(screen.queryByText(/doesn't support headless conversation resume/i)).not.toBeInTheDocument();
   });
 
   it('shares composer draft state and review comment attachments between chat and review mode', async () => {

@@ -45,10 +45,9 @@ func (a *PiAdapter) RuntimeProfile() agent.AgentRuntimeProfile {
 	}
 }
 
-// ResumeMode reports that Pi has no headless resume mechanism. Continuation
-// turns rely on the restored sandbox filesystem state.
+// ResumeMode reports that Pi can continue an upstream session by ID/path.
 func (a *PiAdapter) ResumeMode() agent.SessionResumeMode {
-	return agent.ResumeUnsupported
+	return agent.ResumeBySessionID
 }
 
 // PreparePrompt constructs the prompts for Pi based on the issue context.
@@ -75,9 +74,7 @@ func (a *PiAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 	}, nil
 }
 
-// Execute runs the Pi CLI inside the sandbox and streams output. See
-// runStreamingAgent for the shared continuation handling (Pi has no headless
-// resume flag, same as Amp).
+// Execute runs the Pi CLI inside the sandbox and streams output.
 func (a *PiAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return runStreamingAgent(ctx, piStreamingConfig, a.logger, sandbox, prompt, logCh)
 }
@@ -97,10 +94,19 @@ var piStreamingConfig = streamingAgentConfig{
 			models.PiModelClaudeOpus47,
 		)
 	},
+	BuildResumeCmd: func(escapedPromptPath, escapedResumeSessionID string) string {
+		return fmt.Sprintf(
+			"pi -p \"$(cat '%s')\" --mode json --api-key \"${PI_API_KEY}\" --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\" --session '%s'",
+			escapedPromptPath,
+			models.PiModelClaudeOpus47,
+			escapedResumeSessionID,
+		)
+	},
 	ParseConfig: streamParseConfig{
 		MessageAsAssistant: true,
 		DoneAsResult:       true,
 		CaptureToolModel:   true,
+		CaptureSessionID:   true,
 	},
 	Profile: agent.AgentRuntimeProfile{
 		Cancellation:      agent.CancellationSpec{Method: agent.CancellationMethodEscape},

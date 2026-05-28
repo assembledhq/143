@@ -58,6 +58,7 @@ const (
 	RuntimeStopReasonAbsoluteCeiling RuntimeStopReason = "absolute_ceiling"
 	RuntimeStopReasonForceKill       RuntimeStopReason = "force_kill"
 	RuntimeStopReasonWorkerRecovery  RuntimeStopReason = "worker_recovery"
+	RuntimeStopReasonWorkerDrain     RuntimeStopReason = "worker_drain"
 )
 
 func (r RuntimeStopReason) Validate() error {
@@ -68,7 +69,8 @@ func (r RuntimeStopReason) Validate() error {
 		RuntimeStopReasonNoProgress,
 		RuntimeStopReasonAbsoluteCeiling,
 		RuntimeStopReasonForceKill,
-		RuntimeStopReasonWorkerRecovery:
+		RuntimeStopReasonWorkerRecovery,
+		RuntimeStopReasonWorkerDrain:
 		return nil
 	default:
 		return fmt.Errorf("invalid RuntimeStopReason: %q", r)

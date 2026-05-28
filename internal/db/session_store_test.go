@@ -666,9 +666,9 @@ func TestSessionStore_PromotePendingSnapshot(t *testing.T) {
 	// Promote must clear both pending_snapshot_key AND pending_snapshot_set_at
 	// in the same statement — otherwise the reaper would see a phantom
 	// timestamp on a row whose pending key has already been promoted.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), expected).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(4), time.Now()))
 
 	err = store.PromotePendingSnapshot(context.Background(), orgID, sessionID, expected)
 	require.NoError(t, err, "PromotePendingSnapshot should not error on a clean update")
@@ -687,9 +687,9 @@ func TestSessionStore_PublishCheckpoint_BumpsWorkspaceRevisionForSnapshot(t *tes
 	sessionID := uuid.New()
 	checkpointedAt := time.Now().UTC()
 
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = CASE[\\s\\S]*workspace_revision = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision[\\s\\S]*ELSE workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision_updated_at[\\s\\S]*ELSE @checkpointed_at").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = CASE[\\s\\S]*workspace_revision = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision[\\s\\S]*ELSE workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision_updated_at[\\s\\S]*ELSE @checkpointed_at[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(3), checkpointedAt))
 
 	published, err := store.PublishCheckpoint(
 		context.Background(),

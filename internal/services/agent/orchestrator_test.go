@@ -6007,6 +6007,74 @@ func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
 	require.Equal(t, 2, completedTurns[0].turn, "cancelled continue_session should advance the triggering thread turn")
 }
 
+func TestContinueSession_ContextCanceledWithoutUserCancelIsInterruptedNotCancelled(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.cancels = agent.NewCancelRegistry(zerolog.Nop())
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue this interrupted turn.",
+		},
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return nil, errors.New("snapshot unavailable")
+	}
+
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:  "partial work from a system interruption",
+			ExitCode: 1,
+		}, ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- buildOrchestrator(d).ContinueSession(ctx, session, &agent.ContinueSessionOptions{ThreadID: &threadID})
+	}()
+
+	<-adapterStarted
+	cancel()
+
+	err := <-done
+	require.ErrorIs(t, err, agent.ErrSessionInterrupted, "plain parent context cancellation should be a system interruption")
+	require.NotErrorIs(t, err, agent.ErrSessionCancelled, "plain parent context cancellation should not be classified as user cancellation")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusCancelled), "system interruptions must not mark the session cancelled")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "system interruptions without a checkpoint should restore the pre-turn status")
+}
+
 // TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
 // regression test for the multi-tab dispatch bug: a sibling thread further
 // along in turns (Main on turn 9 with assistant replies through turn 11) used
