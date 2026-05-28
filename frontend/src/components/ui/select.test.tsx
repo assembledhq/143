@@ -18,7 +18,8 @@ describe("SelectTrigger", () => {
     );
 
     const trigger = screen.getByRole("combobox", { name: "Schedule" });
-    expect(trigger).toHaveClass("text-base");
-    expect(trigger).toHaveClass("sm:text-xs");
+    expect(trigger).toHaveClass("max-sm:text-base");
+    expect(trigger).toHaveClass("text-xs");
+    expect(trigger).not.toHaveClass("text-base");
   });
 });
