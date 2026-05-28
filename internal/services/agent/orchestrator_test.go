@@ -4511,6 +4511,128 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 	require.Equal(t, "fixed", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
 }
 
+func TestContinueSession_FallsBackToFreshCodexExecWhenSnapshotRolloutIsMissing(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeCodex
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = nil
+	staleThreadRolloutID := "019e6f1f-7207-7df0-b96e-5a6eccd86dd6"
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeCodex,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.codexAuth = &mockCodexAuthProvider{
+		cfg: &models.OpenAIChatGPTConfig{
+			AccessToken:  "chatgpt-access-token",
+			RefreshToken: "chatgpt-refresh-token",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review my changes.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "I found one gap in the log provider implementation.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please finish the missing provider work",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "codex CLI exited with code 1: Error: thread/resume: thread/resume failed: no rollout found for thread id 019e6f1f-7207-7df0-b96e-5a6eccd86dd6 (code -32600)",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:        "finished",
+			ExitCode:       0,
+			AgentSessionID: "fresh-codex-rollout",
+		}, nil
+	}
+
+	var resultAgentSessionID string
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType:            models.AgentTypeCodex,
+		ThreadAgentSessionID: &staleThreadRolloutID,
+		ResultAgentSessionID: &resultAgentSessionID,
+		ThreadID:             &threadID,
+	})
+	require.NoError(t, err, "ContinueSession should recover from a missing Codex rollout by retrying with reconstructed context")
+	require.Len(t, prompts, 2, "the Codex adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.True(t, prompts[0].Continuation, "the first attempt should use deterministic Codex resume")
+	require.Equal(t, "019e6f1f-7207-7df0-b96e-5a6eccd86dd6", prompts[0].ResumeSessionID, "the first attempt should use the persisted Codex rollout id")
+	require.False(t, prompts[1].Continuation, "the fallback should run a fresh exec against the restored workspace")
+	require.Empty(t, prompts[1].ResumeSessionID, "the fallback must not retry the same missing Codex rollout id")
+	require.Contains(t, prompts[1].UserPrompt, "Previous conversation history", "the fallback should reconstruct prior conversation context")
+	require.Contains(t, prompts[1].UserPrompt, "Please review my changes.", "the fallback should include the earlier user turn")
+	require.Contains(t, prompts[1].UserPrompt, "log provider implementation", "the fallback should include the earlier assistant summary")
+	require.Contains(t, prompts[1].UserPrompt, "please finish the missing provider work", "the fallback should end with the new user message")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should still persist a single completed turn")
+	require.Empty(t, updates[0].agentSessionID, "thread fallback should not overwrite the parent session agent session id")
+	require.Equal(t, "fresh-codex-rollout", resultAgentSessionID, "successful fallback should report the fresh Codex rollout id to the thread caller")
+	require.Len(t, d.sessions.checkpoints, 1, "successful fallback should publish a checkpoint")
+	require.Empty(t, d.sessions.checkpoints[0].agentSessionID, "thread fallback checkpoint should not overwrite the parent session agent session id")
+
+	messages := d.messages.getMessages()
+	var assistantMessages []models.SessionMessage
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleAssistant {
+			assistantMessages = append(assistantMessages, msg)
+		}
+	}
+	require.Len(t, assistantMessages, 2, "only the original assistant message and the successful fallback reply should exist")
+	require.Equal(t, "finished", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
+}
+
 func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale_ScopesHistoryToRequestedThread(t *testing.T) {
 	t.Parallel()
 
