@@ -1435,7 +1435,11 @@ describe('SessionDetailPage', () => {
       // coupled to crypto.randomUUID output.
       expect(postedMessageBody).toMatchObject({ message: 'Use the selected model.' });
     });
-    expect(postedMessageBody?.client_message_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    // TS narrows postedMessageBody to `null` outside the msw closure (it
+    // doesn't follow the closure assignment), so refer to the captured
+    // value through a typed local that preserves the declared shape.
+    const sentBody = postedMessageBody as { message: string; client_message_id?: string } | null;
+    expect(sentBody?.client_message_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it('shows the agent selector before model override on a new blank tab composer', async () => {
