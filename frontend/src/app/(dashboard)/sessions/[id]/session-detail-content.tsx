@@ -5116,11 +5116,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     >
       <div
         data-testid="session-detail-header"
-        className={cn("border-b border-border shrink-0", SESSION_HEADER_HEIGHT_CLASSNAME)}
+        className={cn(
+          "border-b border-border shrink-0",
+          prErrorNotice ? "min-h-14" : SESSION_HEADER_HEIGHT_CLASSNAME,
+        )}
       >
         <div
           data-testid="session-detail-header-bar"
-          className="flex h-full items-center gap-2 min-w-0 px-2"
+          className={cn("flex items-center gap-2 min-w-0 px-2", SESSION_HEADER_HEIGHT_CLASSNAME)}
         >
           <div
             ref={detailTabsRef}
