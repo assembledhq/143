@@ -431,4 +431,26 @@ describe("IntegrationsPage", () => {
     expect(await screen.findByText("Workspace: Acme HQ")).toBeInTheDocument();
     expect(await screen.findByText("Project: gh/acme/api")).toBeInTheDocument();
   });
+
+  it("helps users find the CircleCI project slug while connecting", async () => {
+    integrationsListMock.mockResolvedValueOnce({ data: [], meta: {} });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Connect CircleCI" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Connect CircleCI" });
+    expect(within(dialog).getByRole("link", { name: "Open CircleCI projects" })).toHaveAttribute(
+      "href",
+      "https://app.circleci.com/projects",
+    );
+    expect(within(dialog).getByText("In CircleCI, open Projects, find your repository, then open Project Settings. Copy the slug from the settings overview.")).toBeInTheDocument();
+
+    await user.hover(within(dialog).getByRole("button", { name: "Where to find the CircleCI project slug" }));
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Use the API project slug from CircleCI. OAuth projects usually look like gh/org/repo; GitHub App projects can use a circleci/... slug.",
+    );
+  });
 });
