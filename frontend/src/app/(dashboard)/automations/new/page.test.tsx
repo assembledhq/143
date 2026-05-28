@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import NewAutomationPage from "./page";
 import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
@@ -72,6 +72,66 @@ describe("NewAutomationPage", () => {
     expect(runEveryText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
     expect(atText).toHaveClass("text-sm", "font-medium", "leading-none", "text-muted-foreground");
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps timezone in the primary schedule controls and moves execution defaults into advanced settings", async () => {
+    const user = userEvent.setup();
+    const expectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
+        data: [{ provider: "openai", source: "org" }],
+        meta: {},
+      })),
+      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    expect(await screen.findByTitle(expectedTimezone)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Run as" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Model" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Reasoning" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Advanced options"));
+
+    const sheet = screen.getByRole("dialog", { name: "Advanced settings" });
+    expect(within(sheet).getByRole("combobox", { name: "Run as" })).toBeInTheDocument();
+    expect(within(sheet).getByRole("combobox", { name: "Model" })).toBeInTheDocument();
+    expect(within(sheet).getByRole("combobox", { name: "Reasoning" })).toBeInTheDocument();
+    expect(within(sheet).queryByText("Timezone")).not.toBeInTheDocument();
   });
 
   it("prefills the form from the selected template and links to the full library", async () => {
@@ -558,6 +618,7 @@ describe("NewAutomationPage", () => {
       expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
     });
 
+    await user.click(screen.getByText("Advanced options"));
     await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
     await user.click(await screen.findByText("Extra High"));
     await user.click(screen.getByRole("button", { name: "Create automation" }));
