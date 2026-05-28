@@ -718,11 +718,12 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
-    const diagnosticSurface = screen.getByRole("group", {
-      name: "Preview startup diagnostics",
-    });
+    const diagnosticSurface = screen.getByRole("alert");
     const startupLogRegion = screen.getByLabelText("Preview startup error logs");
     expect(diagnosticSurface).toContainElement(startupLogRegion);
+    expect(
+      screen.queryByRole("group", { name: "Preview startup diagnostics" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Startup summary")).toBeInTheDocument();
     expect(startupLogRegion).toHaveTextContent(summary);
     expect(startupLogRegion).toHaveClass("max-h-28");
