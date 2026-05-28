@@ -527,6 +527,34 @@ export interface SessionThread {
   cancel_requested_at?: string;
 }
 
+export interface ThreadInboxEvent {
+  session_id: string;
+  thread_id: string;
+  org_id: string;
+  pending_message_count: number;
+}
+
+export interface ThreadRuntimeEvent {
+  session_id: string;
+  thread_id: string;
+  org_id: string;
+  status: ThreadStatus;
+  agent_session_id?: string;
+  current_turn: number;
+  pending_message_count: number;
+  last_activity_at?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface SessionWorkspaceGenerationChangedEvent {
+  session_id: string;
+  org_id: string;
+  workspace_revision: number;
+  workspace_revision_updated_at: string;
+  reason?: string;
+}
+
 export interface SessionThreadFileEvent {
   id: number;
   org_id: string;

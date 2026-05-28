@@ -244,6 +244,11 @@ type diffStatsPayload struct {
 	FilesChanged int `json:"files_changed"`
 }
 
+type workspaceRevisionUpdate struct {
+	Revision  int64
+	UpdatedAt time.Time
+}
+
 func parseDiffStatsPayload(raw json.RawMessage) diffStatsPayload {
 	if len(raw) == 0 {
 		return diffStatsPayload{}
@@ -1000,6 +1005,7 @@ func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, session
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("collect workspace revision (%s): %w", reason, err)
 	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, reason)
 	return row.Revision, row.UpdatedAt, nil
 }
 
@@ -1065,11 +1071,27 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		args["lock_token"] = lockToken
 	}
 
-	tag, err := s.db.Exec(ctx, query, args)
+	query += `
+		RETURNING workspace_revision, workspace_revision_updated_at`
+
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return false, fmt.Errorf("publish checkpoint: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("collect published checkpoint: %w", err)
+	}
+	if snapshotKey != "" {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, "checkpoint")
+	}
+	return true, nil
 }
 
 func (s *SessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error {
@@ -1168,10 +1190,15 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats); err != nil {
 		return err
 	}
-	if err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats); err != nil {
+	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
+	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	return nil
 }
 
 func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult, diffStats json.RawMessage) error {
@@ -1238,6 +1265,27 @@ func (s *SessionStore) publishStatus(ctx context.Context, session *models.Sessio
 	}
 	if err := s.streams.PublishStatus(ctx, session); err != nil {
 		s.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to publish session status to Redis")
+	}
+}
+
+func (s *SessionStore) publishWorkspaceGenerationChanged(ctx context.Context, orgID, sessionID uuid.UUID, revision int64, updatedAt time.Time, reason string) {
+	if s.streams == nil {
+		return
+	}
+	event := models.SessionWorkspaceGenerationChangedEvent{
+		SessionID:                  sessionID,
+		OrgID:                      orgID,
+		WorkspaceRevision:          revision,
+		WorkspaceRevisionUpdatedAt: updatedAt.UTC(),
+		Reason:                     reason,
+	}
+	if err := s.streams.PublishEvent(ctx, models.SessionStreamEvent{
+		Type:      models.SessionStreamEventWorkspaceGenerationChanged,
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Data:      event,
+	}); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("reason", reason).Msg("failed to publish workspace generation event to Redis")
 	}
 }
 
@@ -1582,10 +1630,15 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
 		return err
 	}
-	if err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats); err != nil {
+	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
+	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	return nil
 }
 
 func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {
@@ -1647,7 +1700,7 @@ func shouldPersistDiffSnapshot(result *models.SessionResult) bool {
 	return result != nil && result.Diff != nil && result.DiffBaseCommitSHA != nil && *result.DiffBaseCommitSHA != ""
 }
 
-func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) error {
+func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) (workspaceRevisionUpdate, error) {
 	stats := parseDiffStatsPayload(diffStats)
 	source := result.DiffSource
 	if source == "" {
@@ -1687,16 +1740,17 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		"lines_removed":   stats.Removed,
 		"captured_at":     capturedAt,
 	}).Scan(&snapshotID); err != nil {
-		return fmt.Errorf("insert session diff snapshot: %w", err)
+		return workspaceRevisionUpdate{}, fmt.Errorf("insert session diff snapshot: %w", err)
 	}
 
-	_, err := db.Exec(ctx, `
+	rows, err := db.Query(ctx, `
 		UPDATE sessions
 		SET latest_diff_snapshot_id = @snapshot_id,
 		    diff_collected_at = @captured_at,
 		    workspace_revision = workspace_revision + 1,
 		    workspace_revision_updated_at = @captured_at
-		WHERE id = @session_id AND org_id = @org_id`,
+		WHERE id = @session_id AND org_id = @org_id
+		RETURNING workspace_revision, workspace_revision_updated_at`,
 		pgx.NamedArgs{
 			"snapshot_id": snapshotID,
 			"captured_at": capturedAt,
@@ -1705,9 +1759,16 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("update session latest diff snapshot: %w", err)
+		return workspaceRevisionUpdate{}, fmt.Errorf("update session latest diff snapshot: %w", err)
 	}
-	return nil
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if err != nil {
+		return workspaceRevisionUpdate{}, fmt.Errorf("collect session workspace revision: %w", err)
+	}
+	return workspaceRevisionUpdate{Revision: updated.Revision, UpdatedAt: updated.UpdatedAt}, nil
 }
 
 // MarkLatestDiffSnapshotPushed normalizes the latest persisted diff snapshot
@@ -2117,13 +2178,28 @@ func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessio
 		    sandbox_state = 'snapshotted',
 		    workspace_revision = workspace_revision + 1,
 		    workspace_revision_updated_at = NOW()
-		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key
+		RETURNING workspace_revision, workspace_revision_updated_at`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,
 		"org_id":       orgID,
 		"expected_key": expectedKey,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "promote_pending_snapshot")
+	return nil
 }
 
 // ClearPendingSnapshot NULLs pending_snapshot_key (and pending_snapshot_set_at

@@ -1523,6 +1523,13 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 	}
 	defer statusSub.Close()
 
+	eventSub, err := h.streams.SubscribeEvents(run.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to subscribe to Redis session event stream")
+		return false
+	}
+	defer eventSub.Close()
+
 	logs, err := h.catchUpLogs(ctx, orgID, run.ID, lastEventID)
 	if err != nil {
 		logger.Warn().Err(err).Str("session_id", run.ID.String()).Str("last_event_id", lastEventID).Msg("failed to catch up logs from Redis-backed stream")
@@ -1608,6 +1615,21 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				sw.Flush()
 				return true
 			}
+		case event, ok := <-eventSub.C:
+			if !ok {
+				closeReason := eventSub.CloseReason()
+				logger.Warn().Str("session_id", run.ID.String()).Str("reason", closeReason).Msg("Redis event subscription closed; client should reconnect")
+				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
+					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis event subscription closed")
+				}
+				sw.Flush()
+				return true
+			}
+			if err := writeSessionStreamSSEEvent(sw, event); err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Str("event_type", string(event.Type)).Msg("failed to write Redis session event to SSE stream")
+				return true
+			}
+			sw.Flush()
 		}
 	}
 }
@@ -1699,6 +1721,21 @@ func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.S
 		}
 	}
 	return nil
+}
+
+func writeSessionStreamSSEEvent(sw *sse.Writer, event models.SessionStreamEvent) error {
+	switch event.Type {
+	case models.SessionStreamEventThreadInboxQueued:
+		return sw.WriteEvent(sse.EventThreadInboxQueued, event.Data)
+	case models.SessionStreamEventThreadInboxCleared:
+		return sw.WriteEvent(sse.EventThreadInboxCleared, event.Data)
+	case models.SessionStreamEventThreadRuntimeUpdated:
+		return sw.WriteEvent(sse.EventThreadRuntimeUpdated, event.Data)
+	case models.SessionStreamEventWorkspaceGenerationChanged:
+		return sw.WriteEvent(sse.EventSessionWorkspaceGenerationChanged, event.Data)
+	default:
+		return fmt.Errorf("unsupported session stream event type: %s", event.Type)
+	}
 }
 
 func humanInputSSEEventType(log models.SessionLog) (sse.EventType, bool) {

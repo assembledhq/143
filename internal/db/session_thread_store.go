@@ -7,18 +7,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
 )
 
 type SessionThreadStore struct {
-	db DBTX
+	db      DBTX
+	streams *cache.SessionStreams
+	logger  zerolog.Logger
 }
 
 func NewSessionThreadStore(db DBTX) *SessionThreadStore {
-	return &SessionThreadStore{db: db}
+	return &SessionThreadStore{db: db, logger: zerolog.Nop()}
+}
+
+// SetStreams injects the Redis stream helper used for live thread event fan-out.
+// lint:allow-no-orgid reason="process-wide dependency injection for Redis session event streaming"
+func (s *SessionThreadStore) SetStreams(streams *cache.SessionStreams) {
+	s.streams = streams
+}
+
+// SetLogger injects the structured logger used for best-effort stream publishing.
+// lint:allow-no-orgid reason="process-wide dependency injection for store logging"
+func (s *SessionThreadStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
@@ -219,6 +235,7 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -283,6 +300,7 @@ func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -333,6 +351,7 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -592,6 +611,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		}
 		return models.SessionThread{}, err
 	}
+	s.publishThreadRuntime(ctx, thread)
 	return thread, nil
 }
 
@@ -685,6 +705,9 @@ func (s *SessionThreadStore) IncrementPendingMessages(ctx context.Context, orgID
 		`UPDATE session_threads SET pending_message_count = pending_message_count + 1 WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID},
 	)
+	if err == nil {
+		s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxQueued)
+	}
 	return err
 }
 
@@ -696,6 +719,9 @@ func (s *SessionThreadStore) ClearPendingMessages(ctx context.Context, orgID, th
 		`UPDATE session_threads SET pending_message_count = 0 WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID},
 	)
+	if err == nil {
+		s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxCleared)
+	}
 	return err
 }
 
@@ -737,5 +763,53 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
+}
+
+func (s *SessionThreadStore) publishThreadRuntimeByID(ctx context.Context, orgID, threadID uuid.UUID) {
+	if s.streams == nil {
+		return
+	}
+	thread, err := s.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to load thread for runtime event")
+		return
+	}
+	s.publishThreadRuntime(ctx, thread)
+}
+
+func (s *SessionThreadStore) publishThreadRuntime(ctx context.Context, thread models.SessionThread) {
+	if s.streams == nil {
+		return
+	}
+	event := models.SessionStreamEvent{
+		Type:      models.SessionStreamEventThreadRuntimeUpdated,
+		SessionID: thread.SessionID,
+		OrgID:     thread.OrgID,
+		Data:      models.NewThreadRuntimeEvent(thread),
+	}
+	if err := s.streams.PublishEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", thread.ID.String()).Msg("failed to publish thread runtime event")
+	}
+}
+
+func (s *SessionThreadStore) publishThreadInboxByID(ctx context.Context, orgID, threadID uuid.UUID, eventType models.SessionStreamEventType) {
+	if s.streams == nil {
+		return
+	}
+	thread, err := s.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to load thread for inbox event")
+		return
+	}
+	event := models.SessionStreamEvent{
+		Type:      eventType,
+		SessionID: thread.SessionID,
+		OrgID:     thread.OrgID,
+		Data:      models.NewThreadInboxEvent(thread),
+	}
+	if err := s.streams.PublishEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", thread.ID.String()).Str("event_type", string(eventType)).Msg("failed to publish thread inbox event")
+	}
 }

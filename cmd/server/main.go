@@ -398,10 +398,12 @@ func main() {
 		sessionLogStore := db.NewSessionLogStore(pool)
 		sessionStore.SetLogger(logger)
 		sessionLogStore.SetLogger(logger)
+		sessionThreadStore.SetLogger(logger)
 		jobStore.SetLogger(logger)
 		if sessionStreams != nil {
 			sessionStore.SetStreams(sessionStreams)
 			sessionLogStore.SetStreams(sessionStreams)
+			sessionThreadStore.SetStreams(sessionStreams)
 			sessionStreams.StartCleanup(ctx, sessionStore)
 		}
 		if jobNotifier != nil {
@@ -446,7 +448,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, fileReader)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
@@ -1063,6 +1065,7 @@ func buildServices(
 	orgSettingsCache *agent.OrgSettingsCache,
 	sandboxCapacity *agent.SandboxCapacityGate,
 	redisClient *cache.Client,
+	sessionStreams *cache.SessionStreams,
 	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -1173,6 +1176,10 @@ func buildServices(
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionThreadStore.SetLogger(logger)
+	if sessionStreams != nil {
+		sessionThreadStore.SetStreams(sessionStreams)
+	}
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)

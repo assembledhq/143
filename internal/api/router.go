@@ -217,6 +217,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionThreadStore.SetLogger(logger)
+	if sessionStreams != nil {
+		sessionThreadStore.SetStreams(sessionStreams)
+	}
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
