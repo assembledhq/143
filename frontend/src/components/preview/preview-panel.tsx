@@ -28,6 +28,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
+import { errorSurfaceClassNames } from "@/components/ui/error-styles";
 import {
   Tooltip,
   TooltipContent,
@@ -1074,71 +1076,111 @@ export function PreviewPanel({
 
       {/* Failure diagnostics */}
       {status === "failed" && instance && (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-2">
-          <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-            <AlertTriangle className="size-4" />
-            Preview failed to start
-          </div>
-          {visibleStartupErrorLogs && (
-            <pre
-              id={startupErrorLogsId}
-              aria-label="Preview startup error logs"
-              className={cn(
-                "overflow-y-hidden whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
-                showFullStartupLogs
-                  ? "max-h-[min(56vh,28rem)] overflow-y-auto text-foreground"
-                  : "line-clamp-6",
-                previewLogsQuery.isError &&
-                  showFullStartupLogs &&
-                  "text-muted-foreground",
-              )}
-            >
-              {visibleStartupErrorLogs}
-            </pre>
+        <Card
+          role="alert"
+          className={cn(
+            "rounded-lg shadow-sm hover:border-destructive/25",
+            errorSurfaceClassNames.container,
           )}
-          <div className="flex flex-wrap items-center gap-2">
-            {(startupErrorLogs ||
-              previewLogsQuery.isLoading ||
-              previewLogsQuery.isError) && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-xs text-muted-foreground"
-                aria-expanded={showFullStartupLogs}
-                aria-controls={startupErrorLogsId}
-                onClick={() => setShowFullStartupLogs((open) => !open)}
+        >
+          <CardContent className="space-y-3 p-3">
+            <div className="flex items-start gap-2.5">
+              <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-destructive/20 bg-background/80 text-destructive">
+                <AlertTriangle className="size-3.5" aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium leading-5 text-foreground">
+                  Preview failed to start
+                </div>
+                <div className="text-xs leading-5 text-muted-foreground">
+                  The app never became reachable during startup.
+                </div>
+              </div>
+            </div>
+
+            {visibleStartupErrorLogs && (
+              <div
+                role="group"
+                aria-label="Preview startup diagnostics"
+                className="overflow-hidden rounded-md border border-destructive/15 bg-background/80 shadow-sm"
               >
-                {showFullStartupLogs ? "Show summary" : "Show full error logs"}
-                <ChevronDown
-                  className={cn(
-                    "size-3.5 transition-transform duration-200",
-                    showFullStartupLogs && "rotate-180",
-                  )}
-                />
-              </Button>
-            )}
-          </div>
-          {hasStartupRows && startupChecklist.length > 0 && (
-            <div className="space-y-1.5 pt-1">
-              {startupChecklist.map((step) => (
-                <div
-                  key={step.title}
-                  className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
-                >
-                  <div className="mt-0.5">{startupStepIcon(step.state)}</div>
-                  <div className="min-w-0">
-                    <div className="font-medium text-foreground">
-                      {step.title}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {step.detail}
+                <div className="flex min-h-9 items-center justify-between gap-2 border-b border-border/60 px-3 py-1.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-destructive"
+                      aria-hidden="true"
+                    />
+                    <div className="truncate text-xs font-medium text-foreground">
+                      {showFullStartupLogs ? "Full error log" : "Startup summary"}
                     </div>
                   </div>
+                  {(startupErrorLogs ||
+                    previewLogsQuery.isLoading ||
+                    previewLogsQuery.isError) && (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-6 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      aria-expanded={showFullStartupLogs}
+                      aria-controls={startupErrorLogsId}
+                      onClick={() => setShowFullStartupLogs((open) => !open)}
+                    >
+                      {showFullStartupLogs
+                        ? "Show startup summary"
+                        : "View full error log"}
+                      <ChevronDown
+                        className={cn(
+                          "size-3 transition-transform duration-200",
+                          showFullStartupLogs && "rotate-180",
+                        )}
+                        aria-hidden="true"
+                      />
+                    </Button>
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+                <pre
+                  id={startupErrorLogsId}
+                  aria-label="Preview startup error logs"
+                  className={cn(
+                    "whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs leading-5 text-foreground/85",
+                    showFullStartupLogs
+                      ? "max-h-[min(56vh,28rem)] overflow-y-auto"
+                      : "max-h-28 overflow-hidden [mask-image:linear-gradient(to_bottom,black_75%,transparent_100%)]",
+                    previewLogsQuery.isError &&
+                      showFullStartupLogs &&
+                      "text-muted-foreground",
+                  )}
+                >
+                  {visibleStartupErrorLogs}
+                </pre>
+              </div>
+            )}
+
+            {hasStartupRows && startupChecklist.length > 0 && (
+              <div className="space-y-1 border-t border-destructive/10 pt-2">
+                <div className="px-1 text-xs font-medium text-muted-foreground">
+                  Startup status
+                </div>
+                {startupChecklist.map((step) => (
+                  <div
+                    key={step.title}
+                    className="flex items-start gap-2 rounded-md px-1 py-1 text-sm"
+                  >
+                    <div className="mt-0.5">{startupStepIcon(step.state)}</div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium leading-5 text-foreground">
+                        {step.title}
+                      </div>
+                      <div className="text-xs leading-5 text-muted-foreground">
+                        {step.detail}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Preview iframe */}
