@@ -970,11 +970,11 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     query="SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now();"
-    if ! count="$(printf '%s\n' "$query" | docker run -i --rm -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \
+    if ! count="$(printf '%s\n' "$query" | docker run -i --rm --network host -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \
       psql -h "$DB_HOST" -U onefortythree -d onefortythree \
       -v ON_ERROR_STOP=1 \
       -v endpoint="$endpoint" \
-      -tA 2>/dev/null)"; then
+      -tA)"; then
       echo "ERROR: could not verify preview runtime endpoint reuse safety for ${endpoint}; refusing to reuse it." >&2
       return 0
     fi
