@@ -2,11 +2,6 @@
 
 import { ResizeHandle } from "@/components/resize-handle";
 import { Button } from "@/components/ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 import { cn } from "@/lib/utils";
@@ -24,9 +19,9 @@ interface SidebarLayoutProps {
   children: React.ReactNode;
   /**
    * Below the `md` breakpoint only one pane is visible. Above `xl` both panes
-   * are rendered side-by-side regardless of this prop. Between `md` and `xl`
-   * (compact desktop), the sidebar is hidden and only the session-switcher rail
-   * and its popover are available.
+   * are rendered side-by-side regardless of this prop. Between `md` and `xl`,
+   * compact desktop keeps the detail pane mounted while the session list can
+   * expand into a full-height pane from the switcher rail.
    */
   mobileShow?: "sidebar" | "content";
 }
@@ -48,11 +43,12 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
   const sidebarHiddenOnMobile = mobileShow === "content";
   const contentHiddenOnMobile = mobileShow === "sidebar";
   const sessionSwitcherOpen = sessionSwitcherState.pathname === pathname && sessionSwitcherState.open;
+  const compactSidebarVisible = mobileShow === "sidebar" || sessionSwitcherOpen;
   const setSessionSwitcherOpen = (open: boolean) => {
     setSessionSwitcherState({ open, pathname });
   };
 
-  const closeSessionSwitcherOnLinkClick = (event: MouseEvent<HTMLDivElement>) => {
+  const closeCompactSidebarOnLinkClick = (event: MouseEvent<HTMLDivElement>) => {
     if (!(event.target instanceof Element)) {
       return;
     }
@@ -81,35 +77,42 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
 
       <div
         data-testid="session-switcher-rail"
-        className="hidden md:flex xl:hidden h-full w-12 shrink-0 items-start justify-center border-r border-border bg-muted/30 px-1 py-3"
+        className={cn(
+          "hidden md:flex xl:hidden h-full w-12 shrink-0 items-start justify-center border-r border-border bg-muted/30 px-1 py-3",
+          mobileShow === "sidebar" && "md:hidden",
+        )}
       >
-        <Popover open={sessionSwitcherOpen} onOpenChange={setSessionSwitcherOpen}>
-          <PopoverTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-9 w-9 rounded-md text-muted-foreground hover:bg-background hover:text-foreground"
-              aria-label="Open session switcher"
-            >
-              <PanelLeftOpen className="h-4 w-4" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            side="right"
-            align="start"
-            sideOffset={8}
-            className="h-[min(720px,calc(100vh-2rem))] w-[360px] overflow-hidden p-0"
-            onClickCapture={closeSessionSwitcherOnLinkClick}
-          >
-            {isCompactDesktop ? sidebar : null}
-          </PopoverContent>
-        </Popover>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-9 w-9 rounded-md text-muted-foreground hover:bg-background hover:text-foreground"
+          aria-label="Open session switcher"
+          aria-expanded={sessionSwitcherOpen}
+          aria-controls="compact-session-sidebar"
+          onClick={() => setSessionSwitcherOpen(!sessionSwitcherOpen)}
+        >
+          <PanelLeftOpen className="h-4 w-4" />
+        </Button>
+      </div>
+
+      <div
+        id="compact-session-sidebar"
+        data-testid="compact-sidebar-pane"
+        className={cn(
+          "hidden md:block xl:hidden h-full shrink-0 overflow-hidden border-r border-border bg-muted/30 transition-[width] duration-200 ease-out",
+          compactSidebarVisible ? "w-[min(360px,42vw)]" : "w-0 border-r-0",
+        )}
+        onClickCapture={closeCompactSidebarOnLinkClick}
+      >
+        <div className="h-full w-[min(360px,42vw)] overflow-hidden">
+          {isCompactDesktop && compactSidebarVisible ? sidebar : null}
+        </div>
       </div>
 
       <div
         className={cn(
           "flex-1 min-w-0 overflow-auto overscroll-contain",
-          contentHiddenOnMobile && "hidden md:block",
+          contentHiddenOnMobile && "hidden xl:block",
         )}
       >
         {children}

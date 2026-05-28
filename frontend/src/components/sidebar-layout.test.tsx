@@ -144,15 +144,15 @@ describe("SidebarLayout", () => {
 
   it('hides the content pane on mobile when mobileShow="sidebar"', () => {
     const { getByTestId } = renderLayout("sidebar");
-    // Both panes are mounted. The sidebar pane is visible on mobile and at xl+;
-    // it is hidden between md and xl (compact desktop) where the switcher rail takes over.
+    // Both panes are mounted. The sidebar pane is visible on mobile, compact
+    // desktop list routes, and at xl+; route content comes back at xl+.
     const sidebar = getByTestId("sidebar").closest("div[style]");
     const content = getByTestId("content").parentElement;
     expect(sidebar).toHaveClass("block");
     expect(sidebar).toHaveClass("md:hidden");
     expect(sidebar).toHaveClass("xl:block");
     expect(content?.className).toContain("hidden");
-    expect(content?.className).toContain("md:block");
+    expect(content?.className).toContain("xl:block");
   });
 
   it('hides the sidebar pane on mobile when mobileShow="content"', () => {
@@ -181,12 +181,31 @@ describe("SidebarLayout", () => {
     expect(content).toHaveClass("overscroll-contain");
   });
 
-  it("collapses the persistent session list between mobile and wide desktop", () => {
+  it("keeps the compact session list as a full-height pane on list routes", () => {
+    const { getByTestId } = renderLayout("sidebar");
+
+    const compactPane = getByTestId("compact-sidebar-pane");
+    expect(compactPane).toHaveClass("hidden");
+    expect(compactPane).toHaveClass("md:block");
+    expect(compactPane).toHaveClass("xl:hidden");
+    expect(compactPane).not.toHaveClass("w-0");
+
+    const switcher = getByTestId("session-switcher-rail");
+    expect(switcher).toHaveClass("hidden");
+  });
+
+  it("collapses the compact session list to a rail on detail routes", () => {
     const { getByTestId } = renderLayout("content");
 
     const sidebar = getByTestId("sidebar").closest("[data-testid='sidebar-pane']");
     expect(sidebar).toHaveClass("xl:block");
     expect(sidebar).toHaveClass("hidden");
+
+    const compactPane = getByTestId("compact-sidebar-pane");
+    expect(compactPane).toHaveClass("hidden");
+    expect(compactPane).toHaveClass("md:block");
+    expect(compactPane).toHaveClass("xl:hidden");
+    expect(compactPane).toHaveClass("w-0");
 
     const switcher = getByTestId("session-switcher-rail");
     expect(switcher).toHaveClass("hidden");
@@ -203,7 +222,7 @@ describe("SidebarLayout", () => {
     expect(sidebar).toHaveClass("xl:block");
   });
 
-  it("closes the compact session switcher after a session link is selected", async () => {
+  it("opens the compact session list as a pane and closes it after a session link is selected", async () => {
     const restoreMatchMedia = setCompactDesktopViewport(true);
     try {
       render(
@@ -216,12 +235,13 @@ describe("SidebarLayout", () => {
       );
 
       fireEvent.click(screen.getByRole("button", { name: "Open session switcher" }));
+      expect(screen.getByTestId("compact-sidebar-pane")).not.toHaveClass("w-0");
       expect(await screen.findByRole("link", { name: "Session one" })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("link", { name: "Session one" }));
 
       await waitFor(() => {
-        expect(screen.queryByRole("link", { name: "Session one" })).not.toBeInTheDocument();
+        expect(screen.getByTestId("compact-sidebar-pane")).toHaveClass("w-0");
       });
     } finally {
       restoreMatchMedia();
