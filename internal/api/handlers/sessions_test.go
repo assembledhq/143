@@ -139,6 +139,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 	// scoped instances are created on demand inside the handler.
 	h.SetReviewCommentStore(db.NewSessionReviewCommentStore(mock))
 	h.SetReviewLoopStore(db.NewSessionReviewLoopStore(mock))
+	h.SetTxStarter(mock)
 	return h
 }
 
@@ -4332,9 +4333,17 @@ func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 				now,
 			),
 		)
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     "snapshots/test.tar",
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -4421,12 +4430,17 @@ func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 			),
 		)
 	// Expect open_pr job instead of validate.
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     "snapshots/test.tar",
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -6509,13 +6523,38 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
-	// Mock job enqueue.
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                               // triggered_by_user_id
+				nil, 0, now, "none", &snapshotKey, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"queued",       // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6527,7 +6566,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 
 	handler.CreatePR(w, req)
 
-	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted")
+	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted: %s", w.Body.String())
 	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -6629,12 +6668,33 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 					WillReturnRows(tt.reviewRows)
 			}
 			if tt.expectEnqueue {
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 0, now, "none", &snapshotKey,
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							"queued", (*string)(nil),
+							nil,
+							now,
+						),
+					)
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-				mock.ExpectQuery("UPDATE sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectCommit()
 			}
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
@@ -6701,14 +6761,37 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				"queued", (*string)(nil),
+				nil,
+				now,
+			),
+		)
 	// ON CONFLICT DO NOTHING fires because the dedupe_key already matches a
-	// pending job — pgx surfaces this as ErrNoRows.
+	// pending job. EnqueueInTx returns uuid.Nil without an error, and the
+	// queued state repairs any legacy request that inserted the job before
+	// marking the action.
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -7026,12 +7109,17 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     snapshotKey,
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	body := strings.NewReader(`{"author_mode":"app"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", body)
@@ -7177,12 +7265,17 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 			AddRow(orgID, "Acme", json.RawMessage(`{"pr_authorship":"user_preferred"}`), now, now))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     snapshotKey,
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"auto"}`))
 	rctx := chi.NewRouteContext()
@@ -7513,7 +7606,7 @@ func TestSessionHandler_CreatePR_InFlightRejectsDuplicateSubmit(t *testing.T) {
 	}
 }
 
-func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
+func TestSessionHandler_CreatePR_UpdateStateErrorRollsBackAndReturns500(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -7525,7 +7618,6 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
-	jobID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -7554,12 +7646,11 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("write failed"))
+	mock.ExpectRollback()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -7571,8 +7662,8 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 
 	handler.CreatePR(w, req)
 
-	require.Equal(t, http.StatusAccepted, w.Code, "CreatePR should still accept the request when the best-effort state update fails")
-	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should still indicate queued status")
+	require.Equal(t, http.StatusInternalServerError, w.Code, "CreatePR should fail when the queued state cannot be committed")
+	require.Contains(t, w.Body.String(), "INTERNAL_ERROR", "response should identify state transition failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -7800,7 +7891,9 @@ type pushSessionRowOpts struct {
 	pendingSnapshotKey string // explicit pending upload key; empty means NULL
 	nilSnapshot        bool   // if true, snapshot_key is NULL
 	sandboxState       string // defaults to "none"
+	prCreationState    string // defaults to "idle"
 	pushState          string // defaults to "idle"
+	branchState        string // defaults to "idle"
 	status             string // defaults to "completed"
 	diff               *string
 	diffHistory        any
@@ -7834,6 +7927,14 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 	pushState := opts.pushState
 	if pushState == "" {
 		pushState = "idle"
+	}
+	prCreationState := opts.prCreationState
+	if prCreationState == "" {
+		prCreationState = "idle"
+	}
+	branchState := opts.branchState
+	if branchState == "" {
+		branchState = "idle"
 	}
 	status := opts.status
 	if status == "" {
@@ -7910,11 +8011,11 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"archived_at":                    nil,
 		"archived_by_user_id":            nil,
 		"automation_run_id":              nil,
-		"pr_creation_state":              "idle",
+		"pr_creation_state":              prCreationState,
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  pushState,
 		"pr_push_error":                  (*string)(nil),
-		"branch_creation_state":          "idle",
+		"branch_creation_state":          branchState,
 		"branch_creation_error":          (*string)(nil),
 		"branch_url":                     (*string)(nil),
 		"diff_collected_at":              nil,
@@ -7962,9 +8063,7 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
 		)
 
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectBegin()
 	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id). RETURNING +
 	// publishStatus replaced bare Exec so the SSE detail page sees the
 	// transition immediately; the test returns the post-CAS row (pr_push_state
@@ -7972,6 +8071,10 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()
@@ -8064,15 +8167,17 @@ func TestSessionHandler_PushChangesToPR_BuilderRequiresCleanReviewLoopForCurrent
 					WillReturnRows(tt.reviewRows)
 			}
 			if tt.expectEnqueue {
-				mock.ExpectQuery("INSERT INTO jobs").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 						snapshotKey: "snap-push-current",
 						pushState:   "queued",
 					}))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+				mock.ExpectCommit()
 			}
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
@@ -8110,7 +8215,6 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 	sessionID := uuid.New()
 	issueID := uuid.New()
 	prID := uuid.New()
-	jobID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -8124,16 +8228,14 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
 		)
 
-	// The job enqueue still runs (deduped by dedupeKey on the worker side).
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectBegin()
 	// CAS UPDATE matches no rows because a concurrent winner already moved
 	// pr_push_state to 'queued'. RETURNING with empty rows triggers
 	// pgx.ErrNoRows in TryMarkPRPushQueued, which surfaces as (false, nil).
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectRollback()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()
@@ -8147,6 +8249,98 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 
 	require.Equal(t, http.StatusConflict, w.Code, "CAS losing the race should produce a 409")
 	require.Contains(t, w.Body.String(), "PR_PUSH_IN_FLIGHT", "loser of the CAS race should see the in-flight code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_EnqueueFailureRollsBackQueuedState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionPullRequestColumns).
+				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
+		)
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("database unavailable"))
+	mock.ExpectRollback()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "enqueue failure should not return success")
+	require.Contains(t, w.Body.String(), "ENQUEUE_FAILED", "response should identify enqueue failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed enqueue should roll back the queued action state")
+}
+
+func TestSessionHandler_CreateBranch_QueuesActionAndJobInOneTransaction(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{branchState: "queued"}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/branch", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateBranch(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "branch creation should return 202 Accepted")
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate branch job was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
