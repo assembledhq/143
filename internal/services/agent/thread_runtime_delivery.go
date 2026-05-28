@@ -34,11 +34,8 @@ type ThreadRuntimeStore interface {
 
 type ThreadInboxStore interface {
 	AppendForMessage(ctx context.Context, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error)
-	ListDeliverableAfter(ctx context.Context, orgID, threadID uuid.UUID, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error)
 	ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error)
-	MarkDeliveredThrough(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, sequenceNo int64) (int64, error)
 	MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error)
-	MarkAckedThrough(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, sequenceNo int64) (int64, error)
 	MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
 	MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error)
 	MarkDeadLetter(ctx context.Context, orgID, threadID, entryID uuid.UUID, reason string) (models.ThreadInboxEntry, error)
@@ -329,6 +326,25 @@ func (c *threadRuntimeControl) Close(ctx context.Context, status models.ThreadRu
 	}
 }
 
+// keepSessionRunningIfSiblingRuntimesActive is a one-way "stay running"
+// nudge: when a thread runtime closes but other thread runtimes for the same
+// session are still active, it re-stamps the session as running so a stale
+// idle write from the closing thread's UpdateTurnComplete doesn't make the
+// session look done while siblings are still mutating the shared workspace.
+//
+// It deliberately never writes idle/completed. When no sibling holders
+// remain, the function returns without touching the row, because the caller
+// has already chosen the correct terminal state through one of the normal
+// completion paths (UpdateTurnComplete → idle on success, handleCancelledSession
+// / handlePolicyStoppedSession / failRun on stop/fail). Writing idle here
+// would race those paths and could either clobber a richer terminal state
+// (e.g. completed/failed/cancelled) or revert a session whose last turn
+// hasn't finished yet.
+//
+// Invariant: every caller must already have committed the closing runtime's
+// terminal status via the normal completion paths before invoking this
+// function — it only adjusts for "sibling still running", never for "I just
+// finished".
 func keepSessionRunningIfSiblingRuntimesActive(ctx context.Context, sessions sessionStatusUpdater, holders SessionSandboxHolderStore, orgID, sessionID uuid.UUID, log zerolog.Logger) {
 	if sessions == nil || holders == nil {
 		return
@@ -341,6 +357,8 @@ func keepSessionRunningIfSiblingRuntimesActive(ctx context.Context, sessions ses
 		return
 	}
 	if active == 0 {
+		// No siblings left — defer to the closing turn's terminal status
+		// write rather than touching the row here.
 		return
 	}
 	// Use the combined update so status and sandbox_state move together. The
@@ -439,6 +457,32 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 	if o == nil || o.threadRuntimes == nil || o.threadInbox == nil || o.threadCancels == nil {
 		return nil
 	}
+
+	// Pre-check ownership *before* acquiring the per-thread delivery lock.
+	// The lock exists to serialize delivery attempts on the owning worker;
+	// non-owning workers (stray notifications, mis-routed jobs) must not
+	// populate o.threadDeliveryLocks because they have no Close() path to
+	// clean it up — forgetThreadDeliveryLock only runs from
+	// RunAgent/ContinueSession on the owner, so any lock created here on a
+	// non-owner would leak for the life of the worker process. The fresh
+	// runtime read used to drive delivery happens again below under the
+	// lock so a concurrent commit on this same worker can't leave us
+	// chasing stale delivery cursors.
+	if runtime, err := o.threadRuntimes.GetActiveByThread(ctx, orgID, threadID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("get active thread runtime: %w", err)
+	} else if runtime.SessionID != sessionID {
+		return fmt.Errorf("active thread runtime session mismatch: runtime session %s != payload session %s", runtime.SessionID, sessionID)
+	} else if runtime.OwnerNodeID != "" && o.nodeID != "" && runtime.OwnerNodeID != o.nodeID {
+		return &ThreadRuntimeOwnedElsewhereError{
+			RuntimeID:   runtime.ID,
+			ThreadID:    threadID,
+			OwnerNodeID: runtime.OwnerNodeID,
+		}
+	}
+
 	lock := o.threadDeliveryLock(threadID)
 	lock.Lock()
 	defer lock.Unlock()

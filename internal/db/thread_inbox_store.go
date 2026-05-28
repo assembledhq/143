@@ -231,24 +231,6 @@ func scanThreadInboxDeliverySummaryRow(row pgx.CollectableRow) (models.ThreadInb
 	return summary, nil
 }
 
-func (s *ThreadInboxStore) MarkDeliveredThrough(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, sequenceNo int64) (int64, error) {
-	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_inbox_entries
-		SET delivery_state = 'delivered',
-			runtime_id = $3,
-			owner_node_id = $4,
-			delivered_at = COALESCE(delivered_at, now()),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND thread_id = $2
-		  AND sequence_no <= $5
-		  AND delivery_state IN ('pending', 'delivering')`, orgID, threadID, runtimeID, ownerNodeID, sequenceNo)
-	if err != nil {
-		return 0, fmt.Errorf("mark thread inbox delivered: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
-
 func (s *ThreadInboxStore) MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE thread_inbox_entries
@@ -265,23 +247,6 @@ func (s *ThreadInboxStore) MarkDeliveredForEntry(ctx context.Context, orgID, thr
 		  AND delivery_state = 'delivering'`, orgID, threadID, runtimeID, ownerNodeID, entryID, sequenceNo)
 	if err != nil {
 		return 0, fmt.Errorf("mark thread inbox entry delivered: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
-
-func (s *ThreadInboxStore) MarkAckedThrough(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, sequenceNo int64) (int64, error) {
-	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_inbox_entries
-		SET delivery_state = 'acked',
-			runtime_id = $3,
-			acked_at = COALESCE(acked_at, now()),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND thread_id = $2
-		  AND sequence_no <= $4
-		  AND delivery_state IN ('pending', 'delivering', 'delivered')`, orgID, threadID, runtimeID, sequenceNo)
-	if err != nil {
-		return 0, fmt.Errorf("mark thread inbox acked: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }

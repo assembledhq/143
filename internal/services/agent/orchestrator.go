@@ -2960,10 +2960,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		humanInputAnswer = humanInputAnswerFromRequest(request)
 	}
 
+	// Two distinct turn counters in one ContinueSession run:
+	//   sessionTurnNumber  — shared session counter, drives UpdateTurnComplete
+	//                        and any session-wide turn artifacts (issue
+	//                        snapshot, diff history append).
+	//   messageTurnNumber  — per-message thread-local turn used for transcript
+	//                        ordering, log streaming, retry helpers, and
+	//                        assistant-message creation. Falls back to the
+	//                        session counter when this isn't a thread-scoped
+	//                        continuation.
 	sessionTurnNumber := session.CurrentTurn + 1
-	turnNumber := sessionTurnNumber
+	messageTurnNumber := sessionTurnNumber
 	if threadID != nil && latestMsg.TurnNumber > 0 {
-		turnNumber = latestMsg.TurnNumber
+		messageTurnNumber = latestMsg.TurnNumber
 	}
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, sessionTurnNumber)
 	if err != nil {
@@ -3601,7 +3610,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var prompt *AgentPrompt
 	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
-	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, turnNumber, pendingMsgs, log)
+	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, pendingMsgs, log)
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
@@ -3835,7 +3844,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, messageTurnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -3890,12 +3899,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, messageTurnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, messageTurnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 	}
@@ -3912,20 +3921,20 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user during continue")
 			deregisterSessionCancel()
-			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+			o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
 			drainAfterRelease = true
 			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
 			deregisterSessionCancel()
-			o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
+			o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, log)
 			return nil
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(turnStartedAt).Round(time.Second)
-			o.failTimedOutSession(session, elapsed, turnNumber, err, log)
-			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, turnNumber, elapsed, err)
+			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log)
+			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
 		}
 		o.failRun(ctx, session, err.Error())
 		return fmt.Errorf("execute agent on continue: %w", err)
@@ -3935,26 +3944,26 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
 		deregisterSessionCancel()
-		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+		o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
 		drainAfterRelease = true
 		return nil
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
 		deregisterSessionCancel()
-		o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
+		o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, log)
 		return nil
 	}
 	if result != nil && result.RequiresHumanInput {
 		log.Info().Msg("agent requested human input during continue, snapshotting and pausing session")
-		if err := o.handleHumanInputPause(ctx, session, sandbox, result, turnNumber, threadID, log); err != nil {
+		if err := o.handleHumanInputPause(ctx, session, sandbox, result, messageTurnNumber, threadID, log); err != nil {
 			return err
 		}
 		return nil
 	}
 
 	// 7. Create assistant message with result summary.
-	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
+	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, messageTurnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 	if opts != nil && opts.ResultAgentSessionID != nil {
@@ -4016,7 +4025,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	drainAfterRelease = true
 
-	log.Info().Int("turn", sessionTurnNumber).Int("message_turn", turnNumber).Msg("session turn completed, now idle")
+	log.Info().Int("turn", sessionTurnNumber).Int("message_turn", messageTurnNumber).Msg("session turn completed, now idle")
 	return nil
 }
 

@@ -169,8 +169,7 @@ func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenHandleUnavailable(t *te
 
 	require.NoError(t, err, "DeliverThreadInbox should leave input pending when the local handle is not yet attached")
 	require.Empty(t, inbox.deliveredEntries, "DeliverThreadInbox should not mark delivered entries without a handle write")
-	require.Empty(t, inbox.ackedThrough, "DeliverThreadInbox should not ack entries without a handle write")
-	require.Empty(t, runtimes.commitCalls, "DeliverThreadInbox should not advance cursors when nothing was delivered")
+	require.Empty(t, runtimes.commitCalls, "DeliverThreadInbox should not advance cursors when nothing was delivered (commit is what advances last_acked_sequence)")
 }
 
 func TestOrchestrator_DeliverThreadInboxUsesDefaultFormatterWhenAdapterDoesNotOverride(t *testing.T) {
@@ -569,7 +568,11 @@ func TestKeepSessionRunningIfSiblingRuntimesActiveIgnoresPreviewHolders(t *testi
 	t.Parallel()
 
 	sessions := &fakeSessionStatusUpdater{}
-	holders := &fakeSessionSandboxHolderStore{activeCount: 1}
+	// The fake's CountActiveThreadRuntimesBySession only returns the runtime
+	// count; the function under test never reads the broader sandbox-holder
+	// count, so leaving activeThreadRuntimeCount at zero pins the contract
+	// "non-runtime holders alone do not keep the session running".
+	holders := &fakeSessionSandboxHolderStore{activeThreadRuntimeCount: 0}
 
 	keepSessionRunningIfSiblingRuntimesActive(context.Background(), sessions, holders, uuid.New(), uuid.New(), zerolog.Nop())
 
@@ -719,9 +722,7 @@ func (s *fakeThreadRuntimeStore) MarkTerminalWithLease(_ context.Context, _ uuid
 
 type fakeThreadInboxStore struct {
 	deliverable                []models.ThreadInboxEntry
-	deliveredThrough           []int64
 	deliveredEntries           []markDeliveredEntryCall
-	ackedThrough               []int64
 	ackForMessagesCalls        []ackForMessagesCall
 	deliveringForMessagesCalls []deliveringForMessagesCall
 	deadLetterCalls            []deadLetterCall
@@ -751,15 +752,6 @@ func (s *fakeThreadInboxStore) AppendForMessage(context.Context, uuid.UUID, db.A
 	return models.ThreadInboxEntry{}, nil
 }
 
-func (s *fakeThreadInboxStore) ListDeliverableAfter(context.Context, uuid.UUID, uuid.UUID, int64, int) ([]models.ThreadInboxEntry, error) {
-	if s.listFn != nil {
-		s.listFn()
-	}
-	out := make([]models.ThreadInboxEntry, len(s.deliverable))
-	copy(out, s.deliverable)
-	return out, nil
-}
-
 func (s *fakeThreadInboxStore) ClaimDeliverableAfter(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int) ([]models.ThreadInboxEntry, error) {
 	if s.listFn != nil {
 		s.listFn()
@@ -769,18 +761,8 @@ func (s *fakeThreadInboxStore) ClaimDeliverableAfter(context.Context, uuid.UUID,
 	return out, nil
 }
 
-func (s *fakeThreadInboxStore) MarkDeliveredThrough(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ string, sequenceNo int64) (int64, error) {
-	s.deliveredThrough = append(s.deliveredThrough, sequenceNo)
-	return 1, nil
-}
-
 func (s *fakeThreadInboxStore) MarkDeliveredForEntry(_ context.Context, _ uuid.UUID, threadID, runtimeID uuid.UUID, _ string, entryID uuid.UUID, sequenceNo int64) (int64, error) {
 	s.deliveredEntries = append(s.deliveredEntries, markDeliveredEntryCall{threadID: threadID, runtimeID: runtimeID, entryID: entryID, sequenceNo: sequenceNo})
-	return 1, nil
-}
-
-func (s *fakeThreadInboxStore) MarkAckedThrough(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, sequenceNo int64) (int64, error) {
-	s.ackedThrough = append(s.ackedThrough, sequenceNo)
 	return 1, nil
 }
 
@@ -831,7 +813,6 @@ type fakeSessionSandboxHolderStore struct {
 	createCalls              []db.CreateSessionSandboxHolderParams
 	releaseCalls             []releaseHolderCall
 	heartbeatOK              bool
-	activeCount              int
 	activeThreadRuntimeCount int
 }
 
@@ -859,10 +840,6 @@ func (s *fakeSessionSandboxHolderStore) ReleaseWithLease(_ context.Context, _ uu
 
 func (s *fakeSessionSandboxHolderStore) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, models.SessionSandboxHolderKind, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
 	return s.heartbeatOK, nil
-}
-
-func (s *fakeSessionSandboxHolderStore) CountActiveBySession(context.Context, uuid.UUID, uuid.UUID) (int, error) {
-	return s.activeCount, nil
 }
 
 func (s *fakeSessionSandboxHolderStore) CountActiveThreadRuntimesBySession(context.Context, uuid.UUID, uuid.UUID) (int, error) {

@@ -377,6 +377,14 @@ func (s *ThreadRuntimeStore) MarkTerminalWithLease(ctx context.Context, orgID, r
 // delivered entries as 'unknown_delivery' so an operator can choose between
 // replay-with-dual-delivery-risk and drop.
 //
+// SCOPE: this call intentionally scans *all* expired runtime leases across
+// every org and writes their lost/holder/inbox state. It must only be
+// invoked from a trusted system path — the session reaper goroutine wired
+// up in cmd/server/main.go via WithThreadRuntimeLeaseReclaimer. Do not
+// expose this from request-scoped handlers or per-org service code; if a
+// future caller needs per-org reclaim it should be a separate method that
+// takes orgID and filters in SQL.
+//
 // lint:allow-no-orgid reason="system-wide runtime lease recovery scans expired runtime leases across orgs"
 func (s *ThreadRuntimeStore) ReclaimExpiredLeases(ctx context.Context, expiredBefore time.Time, limit int) (ThreadRuntimeReclaimResult, error) {
 	if limit <= 0 {

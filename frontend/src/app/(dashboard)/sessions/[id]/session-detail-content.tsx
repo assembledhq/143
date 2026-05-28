@@ -3161,7 +3161,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       return api.sessions.listRecoverableThreadInboxEntries(id, recoverableInboxThreadId);
     },
     enabled: recoverableInboxThreadId !== null,
-    refetchInterval: recoverableInboxThreadId ? 5000 : false,
+    // Recoverable entries don't change without either (a) user action, which
+    // already invalidates the query in the retry mutation's onSuccess, or
+    // (b) backend state changes (new failure, reaper marking unknown
+    // delivery). Poll slowly to catch (b), and pause completely when the
+    // tab is hidden — refetchIntervalInBackground=false (the default) stops
+    // the interval; refetchOnWindowFocus=true (the default) picks up any
+    // changes when the user returns.
+    refetchInterval: recoverableInboxThreadId ? 30_000 : false,
+    refetchIntervalInBackground: false,
   });
   const recoverableInboxEntries = useMemo(
     () => recoverableInboxQuery.data?.data ?? [],

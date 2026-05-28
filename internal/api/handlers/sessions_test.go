@@ -146,6 +146,17 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 // sessionColumns is the standard column set for sessions queries.
 // Must match sessionSelectColumns in session_store.go. Update all inline
 // AddRow calls in this file when adding/removing/reordering columns.
+//
+// Note on positional fixtures: every new column on `sessions` ripples
+// through several helpers — sessionTestRow, padSessionIdentityColumns,
+// padLinearFields, padSessionWorkspaceGeneration, and the row literals in
+// internal/db/auth_session_store_test.go and
+// internal/api/handlers/session_files_test.go. Each helper has to be taught
+// where the new column lives relative to landmarks like pending_snapshot_*,
+// linear_*, git_identity_*, and deleted_at. If you add a column, search
+// repo-wide for sessionColumns and update every fixture so the positional
+// indexes stay coherent — or replace this scaffolding with a named-column
+// row builder so future additions stop requiring this dance.
 var sessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier",

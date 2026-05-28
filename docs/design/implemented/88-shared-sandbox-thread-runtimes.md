@@ -127,6 +127,9 @@ Follow-up hardening after this implementation:
   deeper conflict analytics.
 - Add proactive owner-loss orchestration for restoring runtimes from checkpoint
   before a user manually retries uncertain input.
+- Add the dedicated `thread.inbox.*` / `thread.runtime.*` / `session.workspace.generation_changed`
+  SSE events so clients can update one tab without polling and without
+  refetching the whole session payload.
 
 ## Current State
 
@@ -783,7 +786,7 @@ Per-session:
 
 ### SSE Events
 
-Events should be scoped enough for clients to update one tab without refetching
+Target events, scoped enough for clients to update one tab without refetching
 the whole session:
 
 - `thread.message.accepted`
@@ -797,6 +800,13 @@ the whole session:
 - `session.sandbox.status_changed`
 - `session.workspace.generation_changed`
 - `session.file_activity.changed`
+
+**Implementation status:** none of these dedicated thread-runtime / inbox
+events ship in the initial implementation. The frontend reads delivery
+state through the regular session-detail and thread-list payloads and uses
+slow query polling for the recoverable-inbox surface; the existing
+session-level SSE stream covers transcript and status updates. Adding these
+events is tracked under follow-up hardening.
 
 ## Developer Model
 

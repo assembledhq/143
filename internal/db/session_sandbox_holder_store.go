@@ -163,21 +163,6 @@ func (s *SessionSandboxHolderStore) HeartbeatWithLease(ctx context.Context, orgI
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *SessionSandboxHolderStore) CountActiveBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {
-	var count int
-	err := s.db.QueryRow(ctx, `
-		SELECT count(*)
-		FROM session_sandbox_holders
-		WHERE org_id = $1
-		  AND session_id = $2
-		  AND status IN ('active', 'draining')
-		  AND expires_at > now()`, orgID, sessionID).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count active session sandbox holders: %w", err)
-	}
-	return count, nil
-}
-
 func (s *SessionSandboxHolderStore) CountActiveThreadRuntimesBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx, `

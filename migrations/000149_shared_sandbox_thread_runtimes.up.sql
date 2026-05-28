@@ -129,7 +129,12 @@ CREATE TABLE session_sandbox_holders (
     )),
     CONSTRAINT chk_session_sandbox_holders_status CHECK (status IN (
         'active', 'draining', 'released', 'expired'
-    ))
+    )),
+    -- Insert-time guard against accidentally empty container ids. We never
+    -- have a meaningful holder claim against "no container" — the holder
+    -- exists to keep a *specific* container alive — so an empty string is
+    -- always a caller bug, not a valid state worth tolerating.
+    CONSTRAINT chk_session_sandbox_holders_container_id_nonempty CHECK (length(container_id) > 0)
 );
 
 CREATE UNIQUE INDEX idx_session_sandbox_holders_one_active
