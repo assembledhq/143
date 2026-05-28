@@ -21,6 +21,15 @@ type workerLoadStore interface {
 	WorkerLoadSamples(ctx context.Context) ([]db.WorkerLoadSample, error)
 }
 
+type workerHeartbeatHealthStore interface {
+	WorkerHeartbeatHealth(ctx context.Context, staleBefore time.Time) (db.WorkerHeartbeatHealth, error)
+}
+
+const (
+	controlPlaneQueueAgeAlertThreshold      = 10 * time.Minute
+	controlPlaneWorkerHeartbeatStaleTimeout = 2 * time.Minute
+)
+
 // RunQueueHealthSampler emits low-volume structured logs that feed the
 // platform health dashboard. It is worker-local but queries the shared job
 // table for platform-wide queue pressure.
@@ -58,6 +67,66 @@ func emitQueueHealthSample(ctx context.Context, store queueHealthStore, logger z
 			Float64("oldest_runnable_age_seconds", sample.OldestRunnableAgeSeconds).
 			Msg("platform health: job queue sample")
 	}
+}
+
+// RunControlPlaneHealthAlerts emits warning-level operational alerts from an
+// API-capable process so worker-fleet failures are still observable when the
+// worker processes themselves are down.
+func RunControlPlaneHealthAlerts(ctx context.Context, queues queueHealthStore, workers workerHeartbeatHealthStore, logger zerolog.Logger, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	emitControlPlaneHealthAlerts(ctx, queues, workers, logger, time.Now)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			emitControlPlaneHealthAlerts(ctx, queues, workers, logger, time.Now)
+		}
+	}
+}
+
+func emitControlPlaneHealthAlerts(ctx context.Context, queues queueHealthStore, workers workerHeartbeatHealthStore, logger zerolog.Logger, now func() time.Time) {
+	if queues != nil {
+		samples, err := queues.QueueHealthSamples(ctx)
+		if err != nil {
+			logger.Warn().Err(err).Msg("platform alert: failed to sample job queue")
+		} else {
+			for _, sample := range samples {
+				if sample.PendingRunnable == 0 || sample.OldestRunnableAgeSeconds < controlPlaneQueueAgeAlertThreshold.Seconds() {
+					continue
+				}
+				logger.Warn().
+					Str("queue", sample.Queue).
+					Str("job_type", sample.JobType).
+					Int64("pending_runnable", sample.PendingRunnable).
+					Float64("oldest_runnable_age_seconds", sample.OldestRunnableAgeSeconds).
+					Float64("threshold_seconds", controlPlaneQueueAgeAlertThreshold.Seconds()).
+					Msg("platform alert: runnable job queue age exceeded threshold")
+			}
+		}
+	}
+	if workers == nil {
+		return
+	}
+	health, err := workers.WorkerHeartbeatHealth(ctx, now().Add(-controlPlaneWorkerHeartbeatStaleTimeout))
+	if err != nil {
+		logger.Warn().Err(err).Msg("platform alert: failed to sample worker heartbeats")
+		return
+	}
+	if health.ActiveWorkers == 0 || health.FreshWorkers > 0 {
+		return
+	}
+	logger.Warn().
+		Int64("active_workers", health.ActiveWorkers).
+		Int64("fresh_workers", health.FreshWorkers).
+		Int64("stale_workers", health.StaleWorkers).
+		Float64("newest_heartbeat_age_seconds", health.NewestHeartbeatAgeSeconds).
+		Float64("stale_after_seconds", controlPlaneWorkerHeartbeatStaleTimeout.Seconds()).
+		Msg("platform alert: no fresh worker heartbeats")
 }
 
 // RunWorkerLoadSampler emits low-volume structured logs that feed the primary
