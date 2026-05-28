@@ -128,8 +128,8 @@ describe("AutomationDetailPage", () => {
     const hourTrigger = screen.getByLabelText("Run at hour");
     const minuteTrigger = screen.getByLabelText("Run at minute");
 
-    expect(scheduleRow).toHaveClass("flex-wrap");
-    expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
+    expect(scheduleRow).not.toHaveClass("flex-wrap");
+    expect(timezoneButton).toHaveClass("w-[12.5rem]", "max-w-full");
     expect(intervalUnitTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
     expect(hourTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
     expect(minuteTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
@@ -139,6 +139,69 @@ describe("AutomationDetailPage", () => {
     expect(runEveryText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
     expect(atText).toHaveClass("text-xs", "font-medium", "leading-none", "text-muted-foreground");
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps advanced automation controls collapsed by default", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 0,
+            completed: 0,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 0,
+            avg_duration_seconds: 0,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(screen.getByLabelText("Goal")).toHaveAttribute("rows", "9");
+    expect(screen.queryByRole("combobox", { name: "Model" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Base branch" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Review passes")).not.toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Advanced settings" }));
+
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Base branch" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Review passes")).toBeInTheDocument();
   });
 
   it("updates the browser tab title with the automation name", async () => {
@@ -577,6 +640,7 @@ describe("AutomationDetailPage", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(await screen.findByRole("button", { name: "Base branch" }));
     await user.type(await screen.findByPlaceholderText("Search branches..."), "ops");
     await user.click(await screen.findByText("release/ops"));
@@ -1173,6 +1237,7 @@ describe("AutomationDetailPage", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByText("claude-sonnet-4-6"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
@@ -1274,6 +1339,7 @@ describe("AutomationDetailPage", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(await screen.findByRole("button", { name: "Base branch" }));
     await user.type(await screen.findByPlaceholderText("Search branches..."), "ops");
     await user.click(await screen.findByText("release/ops"));
@@ -1370,6 +1436,7 @@ describe("AutomationDetailPage", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Advanced settings" }));
     await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
     await user.click(await screen.findByText("High"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));

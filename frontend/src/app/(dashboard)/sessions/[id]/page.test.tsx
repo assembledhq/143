@@ -7226,9 +7226,8 @@ describe('SessionDetailPage', () => {
     const changesTab = screen.getByRole('tab', { name: /^Changes/ });
     await user.click(changesTab);
 
-    // Click "Review 1 file" button to enter review mode
-    const reviewButton = await screen.findByText(/Review 1 file/);
-    await user.click(reviewButton);
+    expect(screen.queryByRole('button', { name: /Review 1 file/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
 
     // Should show the file content in the review diff view
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
@@ -7838,7 +7837,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByTitle('Hide details')).toBeInTheDocument();
   });
 
-  it('shows review file count in Changes tab and file click works', async () => {
+  it('uses the Changes tab file list as the desktop review entry point', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
@@ -7854,8 +7853,10 @@ describe('SessionDetailPage', () => {
     const changesTab = screen.getByRole('tab', { name: /^Changes/ });
     await user.click(changesTab);
 
-    // Should show "Review 2 files" button
-    expect(await screen.findByText(/Review 2 files/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Review 2 files/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
   it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
@@ -7979,10 +7980,10 @@ describe('SessionDetailPage', () => {
     await user.click(within(changesPanel).getByRole('combobox'));
     await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
 
-    expect(await screen.findByText('Review 2 files')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review 2 files' })).not.toBeInTheDocument();
     expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Review 2 files' }));
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
 
     expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
     expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();

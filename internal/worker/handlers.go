@@ -308,8 +308,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
 	if services != nil && services.PreviewStarter != nil {
-		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(services, logger))
-		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(services, logger))
+		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(stores, services, logger))
+		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(stores, services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -576,7 +576,7 @@ func newIngestWebhookHandler(stores *Stores, logger zerolog.Logger) JobHandler {
 	}
 }
 
-func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		if services == nil || services.PreviewStarter == nil {
 			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
@@ -595,13 +595,14 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 		if err := services.PreviewStarter.StartReservedPreview(ctx, input); err != nil {
 			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
 				retryAfter := previewCapacityRetryDelay
+				targetNodeID, clearTarget := sandboxCapacityRetryTarget(ctx, stores, logger)
 				logger.Info().
 					Err(err).
 					Str("preview_id", input.PreviewID.String()).
 					Str("session_id", input.SessionID.String()).
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_preview")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
 			}
 			return &FatalError{Err: err}
 		}
@@ -609,7 +610,7 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 	}
 }
 
-func newStartBranchPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		if services == nil || services.PreviewStarter == nil {
 			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
@@ -628,13 +629,14 @@ func newStartBranchPreviewHandler(services *Services, logger zerolog.Logger) Job
 		if err := services.PreviewStarter.StartReservedBranchPreview(ctx, input); err != nil {
 			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
 				retryAfter := previewCapacityRetryDelay
+				targetNodeID, clearTarget := sandboxCapacityRetryTarget(ctx, stores, logger)
 				logger.Info().
 					Err(err).
 					Str("preview_id", input.PreviewID.String()).
 					Str("preview_target_id", input.PreviewTargetID.String()).
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_branch_preview")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
 			}
 			return &FatalError{Err: err}
 		}
@@ -1903,6 +1905,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				// Stale orphan container_id cleared; retry against the clean
 				// row. See newRunAgentHandler for full rationale.
 				retryAfter := 2 * time.Second
+				var staleThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					staleThreadID = &threadIDLocal
+				}
+				registerStaleSandboxDeadLetter(ctx, stores, logger, session, staleThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).

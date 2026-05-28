@@ -58,6 +58,8 @@ import type {
 
 const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
 
+const SECRET_FILE_KEY = "SECRET_FILE_CONTENT";
+
 type SecretValueRow = {
   /** Stable identity used as a React key — never sent to the server. */
   rowId: string;
@@ -76,7 +78,9 @@ type BundleFormState = {
   name: string;
   deliveryMode: BundleDeliveryMode;
   rows: SecretValueRow[];
-  fileOutputsJSON: string;
+  filePath: string;
+  fileFormat: "raw" | "json";
+  fileContent: string;
 };
 
 /** Creates a new blank row with a stable unique ID for React reconciliation. */
@@ -85,7 +89,15 @@ function makeRow(overrides?: Partial<Omit<SecretValueRow, "rowId">>): SecretValu
 }
 
 function makeEmptyBundleForm(repositoryId = ""): BundleFormState {
-  return { repositoryId, name: "", deliveryMode: "env", rows: [makeRow()], fileOutputsJSON: "" };
+  return {
+    repositoryId,
+    name: "",
+    deliveryMode: "env",
+    rows: [makeRow()],
+    filePath: "",
+    fileFormat: "raw",
+    fileContent: "",
+  };
 }
 
 export default function PreviewSettingsPage() {
@@ -208,7 +220,9 @@ function PreviewSecretsSection() {
       name: bundle.name,
       deliveryMode: fileOuts.length > 0 && envRows.length === 0 ? "file" : "env",
       rows: envRows.length > 0 ? envRows : [makeRow()],
-      fileOutputsJSON: fileOuts.length > 0 ? JSON.stringify(fileOuts, null, 2) : "",
+      filePath: fileOuts[0]?.path ?? "",
+      fileFormat: fileOuts[0]?.format === "json" ? "json" : "raw",
+      fileContent: "",
     });
     setFormError(null);
   }
@@ -518,15 +532,19 @@ function BundleDialog({
   const editHasEnvOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "env") : false;
   const editHasBothOutputs = editHasFileOutputs && editHasEnvOutputs;
   const hasFilledValue = form.rows.some((row) => row.key.trim() && row.value);
-  const hasSelectedOutput = form.deliveryMode === "env" ? hasFilledValue : form.fileOutputsJSON.trim().length > 0;
-  const canSave = Boolean(form.repositoryId) && Boolean(form.name.trim()) && hasFilledValue && hasSelectedOutput;
-  const saveTooltip = isEdit && !hasFilledValue
-    ? "Re-enter at least one secret value to save changes"
-    : form.deliveryMode === "file" && !form.fileOutputsJSON.trim()
-      ? "Add the secret file JSON before saving"
-      : !hasFilledValue
-        ? "Add at least one secret name and value"
-        : undefined;
+  const hasFileOutput = Boolean(form.filePath.trim()) && Boolean(form.fileContent);
+  const canSave = Boolean(form.repositoryId)
+    && Boolean(form.name.trim())
+    && (form.deliveryMode === "env" ? hasFilledValue : hasFileOutput);
+  const saveTooltip = form.deliveryMode === "file" && !form.filePath.trim()
+    ? "Add the secret file path before saving"
+    : form.deliveryMode === "file" && !form.fileContent
+      ? "Paste the secret file contents before saving"
+      : form.deliveryMode === "env" && isEdit && !hasFilledValue
+        ? "Re-enter at least one secret value to save changes"
+        : form.deliveryMode === "env" && !hasFilledValue
+          ? "Add at least one secret name and value"
+          : undefined;
 
   return (
     <Dialog open={Boolean(mode)} onOpenChange={onOpenChange}>
@@ -537,8 +555,8 @@ function BundleDialog({
             Secret values are only sent when you save and are not shown again after creation.
             {editHasBothOutputs
               ? " This bundle uses both env vars and a secret file. Choose which delivery method to keep — the other will be removed on save."
-              : editHasFileOutputs
-                ? " This bundle has file outputs — switch to the Secret file tab to re-enter the content mapping and preserve it."
+              : editHasFileOutputs && form.deliveryMode === "file"
+                ? " This bundle has file outputs — re-enter the file contents below to preserve them."
                 : null}
           </DialogDescription>
         </DialogHeader>
@@ -595,34 +613,7 @@ function BundleDialog({
               />
             </TabsContent>
             <TabsContent value="file" className="space-y-4">
-              <StoredSecretsFields
-                rows={form.rows}
-                description="Store the values here, then reference them in the file JSON with secret:API_TOKEN."
-                onRowChange={onRowChange}
-                onRowAdd={onRowAdd}
-                onRowRemove={onRowRemove}
-              />
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-1.5">
-                  <Label htmlFor="file-outputs">Generated files</Label>
-                  <HelpTooltip
-                    label="Generated files help"
-                    content="Use this when the preview app expects a file such as .env or development.conf.json. The JSON describes files and can reference stored secrets like secret:API_TOKEN."
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Reference stored secrets with secret:API_TOKEN. The generated file is created for the preview runtime and is not committed.
-                </p>
-                <Textarea
-                  id="file-outputs"
-                  value={form.fileOutputsJSON}
-                  onChange={(event) => onFormChange({ ...form, fileOutputsJSON: event.target.value })}
-                  placeholder={'[{"type":"file","path":"development.conf.json","format":"json","content":{"token":"secret:API_TOKEN"}}]'}
-                  aria-label="Generated files JSON"
-                  className="min-h-24 font-mono text-xs"
-                  spellCheck={false}
-                />
-              </div>
+              <SecretFileFields form={form} onFormChange={onFormChange} />
             </TabsContent>
           </Tabs>
 
@@ -651,6 +642,61 @@ function BundleDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function SecretFileFields({
+  form,
+  onFormChange,
+}: {
+  form: BundleFormState;
+  onFormChange: (form: BundleFormState) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-muted-foreground">
+        Paste the exact file that the preview app expects. 143 stores it encrypted and writes it into the preview workspace at runtime.
+      </p>
+      <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
+        <div className="space-y-1.5">
+          <Label htmlFor="secret-file-path">Secret file path</Label>
+          <Input
+            id="secret-file-path"
+            value={form.filePath}
+            onChange={(event) => onFormChange({ ...form, filePath: event.target.value })}
+            placeholder="development.conf.json"
+            autoComplete="off"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="secret-file-type">Secret file type</Label>
+          <Select
+            value={form.fileFormat}
+            onValueChange={(fileFormat) => onFormChange({ ...form, fileFormat: fileFormat as BundleFormState["fileFormat"] })}
+          >
+            <SelectTrigger id="secret-file-type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="raw">Raw text</SelectItem>
+              <SelectItem value="json">JSON</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="secret-file-content">Secret file contents</Label>
+        <Textarea
+          id="secret-file-content"
+          value={form.fileContent}
+          onChange={(event) => onFormChange({ ...form, fileContent: event.target.value })}
+          placeholder={form.fileFormat === "json" ? '{\n  "token": "paste-secret-value-here"\n}' : "Paste the file contents here"}
+          aria-label="Secret file contents"
+          className="min-h-40 font-mono text-xs"
+          spellCheck={false}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -1029,52 +1075,49 @@ function buildBundleRequest(form: BundleFormState): PreviewSecretBundleUpsertReq
   }
 
   const values: Record<string, string> = {};
-  for (const row of form.rows) {
-    const key = row.key.trim();
-    if (!key && !row.value) continue;
-    if (!key || !row.value) {
-      return new Error("Each secret value needs both a key and a value.");
-    }
-    values[key] = row.value;
-  }
-  if (Object.keys(values).length === 0) {
-    return new Error("At least one secret value is required.");
-  }
-
-  let fileOutputs: PreviewSecretBundleOutput[] = [];
+  let outputs: PreviewSecretBundleOutput[] = [];
   if (form.deliveryMode === "file") {
-    if (!form.fileOutputsJSON.trim()) {
-      return new Error("Secret file JSON is required.");
+    const path = form.filePath.trim();
+    if (!path) {
+      return new Error("Secret file path is required.");
     }
-    try {
-      const parsed = JSON.parse(form.fileOutputsJSON) as unknown;
-      if (!Array.isArray(parsed)) {
-        return new Error("Secret file JSON must be an array.");
+    if (!form.fileContent) {
+      return new Error("Secret file contents are required.");
+    }
+    if (form.fileFormat === "json") {
+      try {
+        JSON.parse(form.fileContent);
+      } catch {
+        return new Error("Secret file contents must be valid JSON.");
       }
-      fileOutputs = parsed as PreviewSecretBundleOutput[];
-    } catch {
-      return new Error("Secret file JSON is invalid.");
     }
-  }
-
-  // `envValues` maps key → "secret:<key>" reference strings. These are distinct
-  // from `source.values` above, which holds the plaintext secret values. Both
-  // share the parameter name "values" in the API, but serve different roles:
-  // source.values are encrypted at rest; output.values are resolver references.
-  const envValues = form.rows.reduce<Record<string, string>>((acc, row) => {
-    const key = row.key.trim();
-    if (form.deliveryMode === "env" && key && row.value) {
-      acc[key] = `secret:${key}`;
+    values[SECRET_FILE_KEY] = form.fileContent;
+    outputs = [{
+      type: "file",
+      path,
+      format: form.fileFormat,
+      value: `secret:${SECRET_FILE_KEY}`,
+    }];
+  } else {
+    for (const row of form.rows) {
+      const key = row.key.trim();
+      if (!key && !row.value) continue;
+      if (!key || !row.value) {
+        return new Error("Each secret value needs both a key and a value.");
+      }
+      values[key] = row.value;
     }
-    return acc;
-  }, {});
-  const outputs: PreviewSecretBundleOutput[] = [
-    ...(form.deliveryMode === "env" && Object.keys(envValues).length > 0 ? [{ type: "env" as const, values: envValues }] : []),
-    ...fileOutputs,
-  ];
-
-  if (outputs.length === 0) {
-    return new Error("Choose environment variables or a secret file output.");
+    if (Object.keys(values).length === 0) {
+      return new Error("At least one secret value is required.");
+    }
+    const envValues = form.rows.reduce<Record<string, string>>((acc, row) => {
+      const key = row.key.trim();
+      if (key && row.value) {
+        acc[key] = `secret:${key}`;
+      }
+      return acc;
+    }, {});
+    outputs = Object.keys(envValues).length > 0 ? [{ type: "env" as const, values: envValues }] : [];
   }
 
   return {

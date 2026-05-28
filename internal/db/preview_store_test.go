@@ -579,6 +579,32 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalCascadesChildren(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_UpdatePreviewStatus_TerminalClearsPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+preview_holding_container = FALSE.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.NoError(t, err, "terminal status update should clear the preview sandbox hold")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpdatePreviewStatus_TerminalUpdateError(t *testing.T) {
 	t.Parallel()
 
@@ -762,6 +788,33 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadesChildren(t *te
 
 	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
 	require.NoError(t, err, "terminal conditional status update should cascade children")
+	require.True(t, updated, "conditional terminal status update should report the row was changed")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalClearsPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+preview_holding_container = FALSE.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.NoError(t, err, "terminal conditional status update should clear the preview sandbox hold")
 	require.True(t, updated, "conditional terminal status update should report the row was changed")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -2155,6 +2208,39 @@ func TestPreviewStore_CreateNextPreviewRuntimeStopsPreviousEpoch(t *testing.T) {
 	runtime, err := store.CreateNextPreviewRuntime(context.Background(), orgID, previewID, "worker-2", "http://worker-2.internal")
 	require.NoError(t, err, "CreateNextPreviewRuntime should atomically replace the active runtime")
 	require.Equal(t, runtimeID, runtime.ID, "CreateNextPreviewRuntime should return the inserted runtime")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_ReassignPreviewWorkerUpdatesReservationAndRuntime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET worker_node_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(runtime_epoch\\), 0\\) \\+ 1").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"runtime_epoch"}).AddRow(2))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+	mock.ExpectCommit()
+
+	err = store.ReassignPreviewWorker(context.Background(), orgID, previewID, "worker-2", "http://worker-2.internal")
+	require.NoError(t, err, "ReassignPreviewWorker should atomically update reservation ownership and runtime routing")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
