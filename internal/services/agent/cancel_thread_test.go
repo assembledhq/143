@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,18 +23,18 @@ func TestThreadCancelRegistry_CancelThreadFallsBackToContextCancel(t *testing.T)
 	t.Parallel()
 
 	threadID := uuid.New()
-	cancelled := false
+	var cancelled atomic.Bool
 	registry := NewThreadCancelRegistry(zerolog.Nop())
 
 	registry.Register(threadID, func() {
-		cancelled = true
+		cancelled.Store(true)
 	})
 
 	accepted := registry.CancelThread(threadID)
 	require.True(t, accepted, "CancelThread should accept registered threads")
 
 	require.Eventually(t, func() bool {
-		return cancelled
+		return cancelled.Load()
 	}, testWaitTimeout, testPollInterval, "CancelThread should unwind the run context")
 }
 
@@ -43,10 +44,10 @@ func TestThreadCancelRegistry_CancelThreadDeliversInterruptThroughHandle(t *test
 	threadID := uuid.New()
 	handle := newThreadCancelTestHandle()
 	registry := NewThreadCancelRegistry(zerolog.Nop())
-	cancelled := false
+	var cancelled atomic.Bool
 
 	registry.RegisterWithSpec(threadID, func() {
-		cancelled = true
+		cancelled.Store(true)
 	}, CancellationSpec{Method: CancellationMethodEscape})
 	registry.AttachHandle(threadID, handle)
 
@@ -57,7 +58,7 @@ func TestThreadCancelRegistry_CancelThreadDeliversInterruptThroughHandle(t *test
 		return len(handle.Interrupts()) == 1
 	}, testWaitTimeout, testPollInterval, "CancelThread should deliver the configured interrupt to the live thread handle")
 	require.Equal(t, CancellationMethodEscape, handle.Interrupts()[0].Method, "CancelThread should use the thread-specific cancellation method")
-	require.False(t, cancelled, "CancelThread should not cancel the context when the handle interrupt succeeds")
+	require.False(t, cancelled.Load(), "CancelThread should not cancel the context when the handle interrupt succeeds")
 }
 
 func TestThreadCancelRegistry_DeliverInputWritesToAttachedHandle(t *testing.T) {
@@ -89,14 +90,14 @@ func TestThreadCancelRegistry_CancelThreadIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	threadID := uuid.New()
-	calls := 0
+	var calls atomic.Int32
 	registry := NewThreadCancelRegistry(zerolog.Nop())
-	registry.Register(threadID, func() { calls++ })
+	registry.Register(threadID, func() { calls.Add(1) })
 
 	require.True(t, registry.CancelThread(threadID))
 	require.True(t, registry.CancelThread(threadID), "re-cancel of a still-registered thread is accepted")
 
-	require.Eventually(t, func() bool { return calls == 1 }, testWaitTimeout, testPollInterval,
+	require.Eventually(t, func() bool { return calls.Load() == 1 }, testWaitTimeout, testPollInterval,
 		"sync.Once must guarantee the cancel func fires exactly once")
 }
 
@@ -105,17 +106,17 @@ func TestThreadCancelRegistry_RequestStopForceKillsAfterGrace(t *testing.T) {
 
 	threadID := uuid.New()
 	handle := newThreadCancelTestHandle()
-	cancelled := false
+	var cancelled atomic.Bool
 	registry := NewThreadCancelRegistry(zerolog.Nop())
 	registry.Register(threadID, func() {
-		cancelled = true
+		cancelled.Store(true)
 	})
 	registry.AttachHandle(threadID, handle)
 
 	require.True(t, registry.requestStop(threadID, 10*time.Millisecond), "requestStop should accept a registered thread")
 
 	require.Eventually(t, func() bool {
-		return handle.KillCount() == 1 && cancelled
+		return handle.KillCount() == 1 && cancelled.Load()
 	}, testWaitTimeout, testPollInterval, "requestStop should force-kill and cancel context if the thread remains registered after grace")
 }
 
