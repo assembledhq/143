@@ -3867,6 +3867,57 @@ func TestRunAgent_PersistsDiffWorkspaceDirtyOnResult(t *testing.T) {
 	require.True(t, last.result.DiffWorkspaceDirty, "RunAgent should persist whether the session workspace still had uncommitted changes")
 }
 
+func TestRunAgent_RecomputesDiffWhenAdapterLeavesDiffEmpty(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TargetBranch = strPtr("main")
+	expectedDiff := "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n"
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  "done",
+			ExitCode: 0,
+		}, nil
+	}
+
+	headCalls := 0
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		switch cmd {
+		case "git rev-parse HEAD":
+			headCalls++
+			if headCalls == 1 {
+				_, _ = io.WriteString(stdout, "base123\n")
+			} else {
+				_, _ = io.WriteString(stdout, "result456\n")
+			}
+		case "git rev-parse --is-inside-work-tree":
+			_, _ = io.WriteString(stdout, "true\n")
+		case "git fetch --quiet --no-tags origin 'main'":
+			return 0, nil
+		case "git merge-base 'origin/main' HEAD":
+			_, _ = io.WriteString(stdout, "base123\n")
+		case "git diff --find-renames --binary base123 -- .":
+			_, _ = io.WriteString(stdout, expectedDiff)
+		case "git ls-files --others --exclude-standard -- .":
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed when the orchestrator can recompute the diff")
+
+	results := d.sessions.getResultUpdates()
+	require.NotEmpty(t, results, "RunAgent should persist a final result update")
+	last := results[len(results)-1]
+	require.NotNil(t, last.result.Diff, "RunAgent should persist the recomputed diff when the adapter leaves it empty")
+	require.Equal(t, expectedDiff, *last.result.Diff, "RunAgent should persist the fallback diff computed from the session base commit")
+}
+
 func TestRunAgent_UsesDesignatedWorkingBranchForSandboxAndSession(t *testing.T) {
 	t.Parallel()
 
