@@ -69,6 +69,7 @@ type SessionHandler struct {
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
 	orgStore           *db.OrganizationStore
+	userStore          *db.UserStore
 	jobStore           *db.JobStore
 	txStarter          db.TxStarter
 	messageStore       *db.SessionMessageStore
@@ -506,6 +507,10 @@ func NewSessionHandler(
 		llmClient:        llmClient,
 		logger:           logger,
 	}
+}
+
+func (h *SessionHandler) SetUserStore(store *db.UserStore) {
+	h.userStore = store
 }
 
 type publishActionTxError struct {
@@ -3345,6 +3350,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentType := models.AgentType(body.AgentType)
+	if body.Model == "" && agentType == "" && h.userStore != nil {
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			userWithSettings, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+			if err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to load user settings for default model")
+			} else if userWithSettings.Settings.CodingAgentModelDefault != "" {
+				resolvedAgentType := models.AgentTypeForModel(userWithSettings.Settings.CodingAgentModelDefault)
+				if resolvedAgentType != "" {
+					body.Model = userWithSettings.Settings.CodingAgentModelDefault
+					agentType = resolvedAgentType
+				}
+			}
+		}
+	}
 	if agentType == "" {
 		agentType = orgSettings.DefaultAgentType
 		if agentType == "" {

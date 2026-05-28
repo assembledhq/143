@@ -327,6 +327,36 @@ describe("ManualSessionCreatePageContent", () => {
     expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
   });
 
+  it("submits the user's default coding-agent model when no per-session model is selected", async () => {
+    const user = userEvent.setup();
+    mocks.authMeMock.mockResolvedValueOnce({
+      data: {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        settings: {
+          coding_agent_model_default: "claude-opus-4-7",
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const prompt = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    fireEvent.change(prompt, { target: { value: "Use my default model" } });
+    await user.click(screen.getByRole("button", { name: /start session/i }));
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+        model: "claude-opus-4-7",
+        agent_type: "claude_code",
+      }));
+    });
+  });
+
   it("renders the message input area", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
