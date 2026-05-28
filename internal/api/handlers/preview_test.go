@@ -29,6 +29,75 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestComputePreviewFreshness(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 28, 16, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name            string
+		sessionRevision int64
+		previewRevision *int64
+		status          models.PreviewStatus
+		expectedState   models.PreviewFreshnessState
+		expectedReason  string
+	}{
+		{
+			name:            "current when revisions match",
+			sessionRevision: 4,
+			previewRevision: int64Ptr(4),
+			status:          models.PreviewStatusReady,
+			expectedState:   models.PreviewFreshnessCurrent,
+		},
+		{
+			name:            "out of date when session is newer",
+			sessionRevision: 5,
+			previewRevision: int64Ptr(4),
+			status:          models.PreviewStatusReady,
+			expectedState:   models.PreviewFreshnessOutOfDate,
+			expectedReason:  "session_changed_after_preview_start",
+		},
+		{
+			name:            "updating when starting from current revision",
+			sessionRevision: 5,
+			previewRevision: int64Ptr(5),
+			status:          models.PreviewStatusStarting,
+			expectedState:   models.PreviewFreshnessUpdating,
+			expectedReason:  "preview_starting",
+		},
+		{
+			name:            "unknown when preview revision is missing",
+			sessionRevision: 5,
+			status:          models.PreviewStatusReady,
+			expectedState:   models.PreviewFreshnessUnknown,
+			expectedReason:  "preview_revision_missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			session := &models.Session{
+				WorkspaceRevision:          tt.sessionRevision,
+				WorkspaceRevisionUpdatedAt: now,
+			}
+			preview := &models.PreviewInstance{
+				Status:                           tt.status,
+				SourceWorkspaceRevision:          tt.previewRevision,
+				SourceWorkspaceRevisionUpdatedAt: &now,
+			}
+
+			freshness := computePreviewFreshness(session, preview)
+			require.Equal(t, tt.expectedState, freshness.State, "freshness state should match revision comparison")
+			require.Equal(t, tt.expectedReason, freshness.Reason, "freshness reason should explain non-current states")
+		})
+	}
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
+}
+
 // newPreviewTestHandler creates a PreviewHandler with nil manager/store
 // for testing endpoints that don't need a live manager.
 func newPreviewTestHandler() *PreviewHandler {
@@ -466,7 +535,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -632,6 +701,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, recycleConfig, recycleSandbox, "ready", strPtr("req-1"), "", now, now, now, nil,
+		(*int64)(nil), (*time.Time)(nil),
 		false,
 	}
 }
@@ -940,7 +1010,7 @@ var sessionRowColumns = []string{
 	"target_branch", "working_branch",
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -1495,7 +1565,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(previewAnyArgs(24)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1596,7 +1666,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(previewAnyArgs(24)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1772,7 +1842,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(previewAnyArgs(24)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),

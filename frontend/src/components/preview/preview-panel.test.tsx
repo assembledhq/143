@@ -1419,6 +1419,39 @@ describe("PreviewPanel component", () => {
     expect(mockRestart).not.toHaveBeenCalled();
   });
 
+  it("shows stale freshness marker and refresh action for out of date previews", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "out_of_date",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        preview_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        reason: "session_changed_after_preview_start",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("New changes available")).toBeInTheDocument();
+    expect(
+      screen.getByText("Restart the preview to see the latest session changes."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Preview" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Refresh preview" }));
+
+    await waitFor(() => {
+      expect(mockEnsure).toHaveBeenCalledTimes(1);
+    });
+  });
+
   /* ---------- Design mode toggle ---------- */
 
   it("shows design mode overlay when design mode button is toggled on", async () => {

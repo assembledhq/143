@@ -347,13 +347,15 @@ type Session struct {
 	// PRPushState drives the "Push changes" button's state machine for sessions
 	// that already have an open PR. Independent from PRCreationState so a single
 	// session can show "PR opened" while a follow-up push is mid-flight.
-	PRPushState          PRPushState         `db:"pr_push_state" json:"pr_push_state"`
-	PRPushError          *string             `db:"pr_push_error" json:"pr_push_error,omitempty"`
-	BranchCreationState  BranchCreationState `db:"branch_creation_state" json:"branch_creation_state"`
-	BranchCreationError  *string             `db:"branch_creation_error" json:"branch_creation_error,omitempty"`
-	BranchURL            *string             `db:"branch_url" json:"branch_url,omitempty"`
-	DiffCollectedAt      *time.Time          `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
-	LatestDiffSnapshotID *uuid.UUID          `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	PRPushState                PRPushState         `db:"pr_push_state" json:"pr_push_state"`
+	PRPushError                *string             `db:"pr_push_error" json:"pr_push_error,omitempty"`
+	BranchCreationState        BranchCreationState `db:"branch_creation_state" json:"branch_creation_state"`
+	BranchCreationError        *string             `db:"branch_creation_error" json:"branch_creation_error,omitempty"`
+	BranchURL                  *string             `db:"branch_url" json:"branch_url,omitempty"`
+	DiffCollectedAt            *time.Time          `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
+	LatestDiffSnapshotID       *uuid.UUID          `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	WorkspaceRevision          int64               `db:"workspace_revision" json:"workspace_revision"`
+	WorkspaceRevisionUpdatedAt time.Time           `db:"workspace_revision_updated_at" json:"workspace_revision_updated_at"`
 	// HasUnpushedChanges is a derived read-model field: true when the most
 	// recent persisted session HEAD differs from the open PR's tracked head
 	// commit, which means "Push changes" is actionable.

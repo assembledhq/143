@@ -80,6 +80,31 @@ func TestPreviewStatus_IsTerminal(t *testing.T) {
 	}
 }
 
+func TestPreviewFreshnessState_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		state   PreviewFreshnessState
+		wantErr bool
+	}{
+		{name: "current is valid", state: PreviewFreshnessCurrent},
+		{name: "out of date is valid", state: PreviewFreshnessOutOfDate},
+		{name: "updating is valid", state: PreviewFreshnessUpdating},
+		{name: "unknown is valid", state: PreviewFreshnessUnknown},
+		{name: "bogus is invalid", state: "bogus", wantErr: true},
+		{name: "empty is invalid", state: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.state.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestPreviewRuntimeStatus_Validate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

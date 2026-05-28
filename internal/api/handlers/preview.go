@@ -592,13 +592,15 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 		initialConfig = reservationPlaceholderConfig()
 	}
 	input := preview.StartPreviewInput{
-		SessionID:     session.ID,
-		OrgID:         orgID,
-		UserID:        userID,
-		Config:        initialConfig,
-		RepositoryID:  uuidValue(session.RepositoryID),
-		BaseCommitSHA: body.BaseCommitSHA,
-		ProfileName:   body.ProfileName,
+		SessionID:                  session.ID,
+		OrgID:                      orgID,
+		UserID:                     userID,
+		Config:                     initialConfig,
+		RepositoryID:               uuidValue(session.RepositoryID),
+		BaseCommitSHA:              body.BaseCommitSHA,
+		ProfileName:                body.ProfileName,
+		WorkspaceRevision:          session.WorkspaceRevision,
+		WorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
 	}
 
 	tx, err := h.store.Begin(ctx)
@@ -625,13 +627,15 @@ func (h *PreviewHandler) enqueueStartPreviewJob(ctx context.Context, orgID, user
 		Queue:   "preview",
 		JobType: models.JobTypeStartPreview,
 		Payload: preview.StartPreviewJobPayload{
-			OrgID:         orgID,
-			UserID:        userID,
-			SessionID:     session.ID,
-			PreviewID:     reservation.ID,
-			Config:        body.Config,
-			BaseCommitSHA: body.BaseCommitSHA,
-			ProfileName:   body.ProfileName,
+			OrgID:                      orgID,
+			UserID:                     userID,
+			SessionID:                  session.ID,
+			PreviewID:                  reservation.ID,
+			Config:                     body.Config,
+			BaseCommitSHA:              body.BaseCommitSHA,
+			ProfileName:                body.ProfileName,
+			WorkspaceRevision:          session.WorkspaceRevision,
+			WorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
 		},
 		Priority:     5,
 		DedupeKey:    &dedupeKey,
@@ -669,13 +673,15 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 		initialConfig = reservationPlaceholderConfig()
 	}
 	input := preview.StartPreviewInput{
-		SessionID:     sessionID,
-		OrgID:         orgID,
-		UserID:        userID,
-		Config:        initialConfig,
-		RepositoryID:  uuidValue(session.RepositoryID),
-		BaseCommitSHA: body.BaseCommitSHA,
-		ProfileName:   body.ProfileName,
+		SessionID:                  sessionID,
+		OrgID:                      orgID,
+		UserID:                     userID,
+		Config:                     initialConfig,
+		RepositoryID:               uuidValue(session.RepositoryID),
+		BaseCommitSHA:              body.BaseCommitSHA,
+		ProfileName:                body.ProfileName,
+		WorkspaceRevision:          session.WorkspaceRevision,
+		WorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
 	}
 	reservation, err := h.manager.ReservePreview(ctx, input)
 	if err != nil {
@@ -883,8 +889,59 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview status", err)
 		return
 	}
+	status.Freshness = h.previewFreshness(r.Context(), orgID, sessionID, status.Instance)
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewStatusResponse]{Data: status})
+}
+
+func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID uuid.UUID, instance *models.PreviewInstance) *models.PreviewFreshness {
+	if instance == nil {
+		return nil
+	}
+	if instance.SessionID == uuid.Nil || instance.SessionID != sessionID {
+		return &models.PreviewFreshness{State: models.PreviewFreshnessUnknown, Reason: "not_session_preview"}
+	}
+
+	session, err := h.sessionStore.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview freshness: failed to load session")
+		return &models.PreviewFreshness{
+			State:                             models.PreviewFreshnessUnknown,
+			PreviewWorkspaceRevision:          instance.SourceWorkspaceRevision,
+			PreviewWorkspaceRevisionUpdatedAt: instance.SourceWorkspaceRevisionUpdatedAt,
+			Reason:                            "preview_revision_missing",
+		}
+	}
+	return computePreviewFreshness(&session, instance)
+}
+
+func computePreviewFreshness(session *models.Session, instance *models.PreviewInstance) *models.PreviewFreshness {
+	if session == nil || instance == nil {
+		return nil
+	}
+	freshness := &models.PreviewFreshness{
+		State:                             models.PreviewFreshnessCurrent,
+		CurrentWorkspaceRevision:          session.WorkspaceRevision,
+		CurrentWorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
+		PreviewWorkspaceRevision:          instance.SourceWorkspaceRevision,
+		PreviewWorkspaceRevisionUpdatedAt: instance.SourceWorkspaceRevisionUpdatedAt,
+	}
+	if instance.SourceWorkspaceRevision == nil {
+		freshness.State = models.PreviewFreshnessUnknown
+		freshness.Reason = "preview_revision_missing"
+		return freshness
+	}
+	if *instance.SourceWorkspaceRevision < session.WorkspaceRevision {
+		freshness.State = models.PreviewFreshnessOutOfDate
+		freshness.Reason = "session_changed_after_preview_start"
+		return freshness
+	}
+	if instance.Status == models.PreviewStatusStarting && *instance.SourceWorkspaceRevision == session.WorkspaceRevision {
+		freshness.State = models.PreviewFreshnessUpdating
+		freshness.Reason = "preview_starting"
+		return freshness
+	}
+	return freshness
 }
 
 // =============================================================================
@@ -966,7 +1023,11 @@ func (h *PreviewHandler) recyclePreviewInstance(ctx context.Context, orgID uuid.
 	if cfgErr != nil {
 		return cfgErr
 	}
-	if err := h.manager.RecyclePreviewWithConfig(ctx, orgID, instance.ID, cfg); err != nil {
+	session, err := h.sessionStore.GetByID(ctx, orgID, instance.SessionID)
+	if err != nil {
+		return newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
+	}
+	if err := h.manager.RecyclePreviewWithConfigAndRevision(ctx, orgID, instance.ID, cfg, session.WorkspaceRevision, session.WorkspaceRevisionUpdatedAt); err != nil {
 		if errors.Is(err, preview.ErrInvalidConfig) {
 			return newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_CONFIG_INVALID", preview.InvalidConfigMessage(err), err)
 		}
