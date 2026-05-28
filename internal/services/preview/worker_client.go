@@ -52,13 +52,15 @@ type RemoteStartPreviewRequest struct {
 // StartPreviewJobPayload is the durable worker job payload for completing a
 // previously reserved preview startup.
 type StartPreviewJobPayload struct {
-	OrgID         uuid.UUID             `json:"org_id"`
-	UserID        uuid.UUID             `json:"user_id"`
-	SessionID     uuid.UUID             `json:"session_id"`
-	PreviewID     uuid.UUID             `json:"preview_id"`
-	Config        *models.PreviewConfig `json:"config,omitempty"`
-	BaseCommitSHA string                `json:"base_commit_sha,omitempty"`
-	ProfileName   string                `json:"profile_name,omitempty"`
+	OrgID                      uuid.UUID             `json:"org_id"`
+	UserID                     uuid.UUID             `json:"user_id"`
+	SessionID                  uuid.UUID             `json:"session_id"`
+	PreviewID                  uuid.UUID             `json:"preview_id"`
+	Config                     *models.PreviewConfig `json:"config,omitempty"`
+	BaseCommitSHA              string                `json:"base_commit_sha,omitempty"`
+	ProfileName                string                `json:"profile_name,omitempty"`
+	WorkspaceRevision          int64                 `json:"workspace_revision"`
+	WorkspaceRevisionUpdatedAt time.Time             `json:"workspace_revision_updated_at"`
 }
 
 // StartBranchPreviewJobPayload is the durable worker job payload for starting

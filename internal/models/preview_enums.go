@@ -52,6 +52,29 @@ func (s PreviewStatus) IsTerminal() bool {
 	}
 }
 
+// PreviewFreshnessState describes whether a session preview was launched from
+// the latest durable workspace revision.
+type PreviewFreshnessState string
+
+const (
+	PreviewFreshnessCurrent   PreviewFreshnessState = "current"
+	PreviewFreshnessOutOfDate PreviewFreshnessState = "out_of_date"
+	PreviewFreshnessUpdating  PreviewFreshnessState = "updating"
+	PreviewFreshnessUnknown   PreviewFreshnessState = "unknown"
+)
+
+func (s PreviewFreshnessState) Validate() error {
+	switch s {
+	case PreviewFreshnessCurrent,
+		PreviewFreshnessOutOfDate,
+		PreviewFreshnessUpdating,
+		PreviewFreshnessUnknown:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewFreshnessState: %q", s)
+	}
+}
+
 // PreviewRuntimeStatus captures the lifecycle of a worker-owned live preview runtime.
 type PreviewRuntimeStatus string
 

@@ -144,7 +144,7 @@ const sessionSelectColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -171,7 +171,7 @@ const sessionListColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -194,7 +194,7 @@ const sessionAPIDetailColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -976,6 +976,33 @@ func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, session
 	return tag.RowsAffected() == 1, nil
 }
 
+func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, time.Time, error) {
+	updatedAt := time.Now().UTC()
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = @updated_at
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING workspace_revision, workspace_revision_updated_at`,
+		pgx.NamedArgs{
+			"id":         sessionID,
+			"org_id":     orgID,
+			"updated_at": updatedAt,
+		},
+	)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("bump workspace revision (%s): %w", reason, err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("collect workspace revision (%s): %w", reason, err)
+	}
+	return row.Revision, row.UpdatedAt, nil
+}
+
 func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
 	args := pgx.NamedArgs{
 		"id":                    sessionID,
@@ -1012,6 +1039,14 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		    runtime_stop_reason = @runtime_stop_reason,
 		    runtime_graceful_stop_at = CASE
 		        WHEN @runtime_stop_reason = '' THEN runtime_graceful_stop_at
+		        ELSE @checkpointed_at
+		    END,
+		    workspace_revision = CASE
+		        WHEN @snapshot_key = '' THEN workspace_revision
+		        ELSE workspace_revision + 1
+		    END,
+		    workspace_revision_updated_at = CASE
+		        WHEN @snapshot_key = '' THEN workspace_revision_updated_at
 		        ELSE @checkpointed_at
 		    END
 		WHERE s.id = @id
@@ -1658,7 +1693,9 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 	_, err := db.Exec(ctx, `
 		UPDATE sessions
 		SET latest_diff_snapshot_id = @snapshot_id,
-		    diff_collected_at = @captured_at
+		    diff_collected_at = @captured_at,
+		    workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = @captured_at
 		WHERE id = @session_id AND org_id = @org_id`,
 		pgx.NamedArgs{
 			"snapshot_id": snapshotID,
@@ -2077,7 +2114,9 @@ func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessio
 		SET snapshot_key = pending_snapshot_key,
 		    pending_snapshot_key = NULL,
 		    pending_snapshot_set_at = NULL,
-		    sandbox_state = 'snapshotted'
+		    sandbox_state = 'snapshotted',
+		    workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = NOW()
 		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,

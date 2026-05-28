@@ -51,6 +51,7 @@ import {
   type PreviewStatus,
   type PreviewInfrastructure,
   type PreviewService,
+  type PreviewFreshnessState,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
@@ -399,6 +400,22 @@ function previewStatusMetadata(status?: PreviewStatus): string | undefined {
   }
 }
 
+function freshnessLabel(
+  freshness: PreviewFreshnessState | undefined,
+  mutationPending: boolean,
+): string | undefined {
+  if (mutationPending || freshness === "updating") {
+    return "Updating preview...";
+  }
+  if (freshness === "out_of_date") {
+    return "New changes available";
+  }
+  if (freshness === "unknown") {
+    return "Preview freshness could not be verified.";
+  }
+  return undefined;
+}
+
 export function PreviewPanel({
   sessionId,
   previewOriginTemplate,
@@ -464,6 +481,7 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const freshnessState = previewStatus?.freshness?.state;
   const lastPreviewStoppedAt =
     status === "stopped" || status === "expired" || status === "unavailable"
       ? instance?.stopped_at || instance?.updated_at
@@ -784,6 +802,12 @@ export function PreviewPanel({
     restartMutation.isPending ||
     lifetimeMutation.isPending;
   const showStartupCanvas = isPreparing;
+  const isPreviewOutOfDate = freshnessState === "out_of_date";
+  const isPreviewFreshnessUnknown = freshnessState === "unknown";
+  const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
+  const freshnessCalloutText = isPreviewFreshnessUnknown ? undefined : freshnessText;
+  const startupFreshnessText =
+    showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
@@ -853,10 +877,28 @@ export function PreviewPanel({
                     <ConsoleBadge sessionId={sessionId} />
                   </ErrorBoundary>
                 )}
+                {isPreviewFreshnessUnknown && freshnessText && (
+                  <span>{freshnessText}</span>
+                )}
               </div>
             </div>
 
             <div className="flex shrink-0 items-center gap-2">
+              {isPreviewOutOfDate && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  onClick={() => startMutation.mutate()}
+                  disabled={isMutating}
+                  loading={startMutation.isPending}
+                >
+                  {!startMutation.isPending && (
+                    <RefreshCw className="size-3.5" />
+                  )}
+                  Refresh preview
+                </Button>
+              )}
+
               {isReady && (
                 <TooltipProvider>
                   <Tooltip>
@@ -923,6 +965,37 @@ export function PreviewPanel({
               sessionId={sessionId}
               recycleScheduledAt={instance.recycle_scheduled_at}
             />
+          )}
+
+          {freshnessCalloutText && (
+            <div
+              data-testid="preview-freshness-callout"
+              className={cn(
+                "flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs",
+                isPreviewOutOfDate
+                  ? "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                  : "border-border bg-muted/40 text-muted-foreground",
+              )}
+            >
+              {isPreviewOutOfDate ? (
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              ) : (
+                <RefreshCw
+                  className={cn(
+                    "mt-0.5 size-3.5 shrink-0",
+                    startMutation.isPending && "animate-spin",
+                  )}
+                />
+              )}
+              <div className="min-w-0">
+                <div className="font-medium">{freshnessCalloutText}</div>
+                {isPreviewOutOfDate && (
+                  <div className="text-muted-foreground">
+                    Restart the preview to see the latest session changes.
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -994,6 +1067,11 @@ export function PreviewPanel({
                 <p className="text-sm text-muted-foreground">
                   {startupSubtitle}
                 </p>
+                {startupFreshnessText && (
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {startupFreshnessText}
+                  </p>
+                )}
               </div>
               <div
                 ref={startupPhaseRailRef}
