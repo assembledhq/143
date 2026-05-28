@@ -20,13 +20,13 @@ Logs are shipped via Vector to a VictoriaLogs instance and visualized in Grafana
   make logs-query Q='"timeout waiting for sandbox" AND _time:[now-15m,now]' | jq -r '.message'
   ```
 
-  See `docs/design/47-logging-victorialogs.md` for more examples and the [LogsQL reference](https://docs.victoriametrics.com/victorialogs/logsql/).
+  See `docs/design/implemented/47-logging-victorialogs.md` for more examples and the [LogsQL reference](https://docs.victoriametrics.com/victorialogs/logsql/).
 
 - **`make logs`** — opens an SSH tunnel to the prod Grafana instance at <http://localhost:9999> for interactive UI-based exploration. Press Ctrl+C to close the tunnel. Prefer `make logs-query` for anything scriptable.
 
 ## Backend Architecture (Go)
 
-**Key libraries**: `go-chi/chi` (router), `jackc/pgx` (Postgres driver + connection pooling), `rs/zerolog` (structured logging), `go-playground/validator` (request validation), `golang-migrate/migrate` (schema migrations). See `docs/design/02-api-server.md` for full dependency list.
+**Key libraries**: `go-chi/chi` (router), `jackc/pgx` (Postgres driver + connection pooling), `rs/zerolog` (structured logging), `go-playground/validator` (request validation), `golang-migrate/migrate` (schema migrations). See `docs/design/implemented/02-api-server.md` for full dependency list.
 
 **Direct pgx store functions for all DB queries**: One store struct per domain area in `internal/db/` (e.g. `issues.go`, `agent_runs.go`, `jobs.go`). All stores accept a `DBTX` interface (satisfied by both `pgxpool.Pool` and `pgx.Tx`). Use `pgx.CollectRows` + `pgx.RowToStructByName` for list queries. SQL lives as string literals inside Go functions, co-located with scanning and error handling. No ORM, no codegen, no separate `.sql` files.
 
