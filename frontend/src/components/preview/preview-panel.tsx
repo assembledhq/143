@@ -803,7 +803,11 @@ export function PreviewPanel({
     lifetimeMutation.isPending;
   const showStartupCanvas = isPreparing;
   const isPreviewOutOfDate = freshnessState === "out_of_date";
+  const isPreviewFreshnessUnknown = freshnessState === "unknown";
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
+  const freshnessCalloutText = isPreviewFreshnessUnknown ? undefined : freshnessText;
+  const startupFreshnessText =
+    showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
@@ -872,6 +876,9 @@ export function PreviewPanel({
                   <ErrorBoundary fallback={null}>
                     <ConsoleBadge sessionId={sessionId} />
                   </ErrorBoundary>
+                )}
+                {isPreviewFreshnessUnknown && freshnessText && (
+                  <span>{freshnessText}</span>
                 )}
               </div>
             </div>
@@ -960,8 +967,9 @@ export function PreviewPanel({
             />
           )}
 
-          {freshnessText && (
+          {freshnessCalloutText && (
             <div
+              data-testid="preview-freshness-callout"
               className={cn(
                 "flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs",
                 isPreviewOutOfDate
@@ -980,7 +988,7 @@ export function PreviewPanel({
                 />
               )}
               <div className="min-w-0">
-                <div className="font-medium">{freshnessText}</div>
+                <div className="font-medium">{freshnessCalloutText}</div>
                 {isPreviewOutOfDate && (
                   <div className="text-muted-foreground">
                     Restart the preview to see the latest session changes.
@@ -1059,6 +1067,11 @@ export function PreviewPanel({
                 <p className="text-sm text-muted-foreground">
                   {startupSubtitle}
                 </p>
+                {startupFreshnessText && (
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {startupFreshnessText}
+                  </p>
+                )}
               </div>
               <div
                 ref={startupPhaseRailRef}

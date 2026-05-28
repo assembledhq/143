@@ -901,6 +901,15 @@ func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID 
 	if instance.SessionID == uuid.Nil || instance.SessionID != sessionID {
 		return &models.PreviewFreshness{State: models.PreviewFreshnessUnknown, Reason: "not_session_preview"}
 	}
+	if h.sessionStore == nil {
+		h.logger.Warn().Str("session_id", sessionID.String()).Msg("preview freshness: session store is not configured")
+		return &models.PreviewFreshness{
+			State:                             models.PreviewFreshnessUnknown,
+			PreviewWorkspaceRevision:          instance.SourceWorkspaceRevision,
+			PreviewWorkspaceRevisionUpdatedAt: instance.SourceWorkspaceRevisionUpdatedAt,
+			Reason:                            "preview_revision_missing",
+		}
+	}
 
 	session, err := h.sessionStore.GetByID(ctx, orgID, sessionID)
 	if err != nil {
@@ -932,6 +941,11 @@ func computePreviewFreshness(session *models.Session, instance *models.PreviewIn
 		return freshness
 	}
 	if *instance.SourceWorkspaceRevision < session.WorkspaceRevision {
+		if !previewStatusCanRefreshForFreshness(instance.Status) {
+			freshness.State = models.PreviewFreshnessUnknown
+			freshness.Reason = "preview_not_refreshable"
+			return freshness
+		}
 		freshness.State = models.PreviewFreshnessOutOfDate
 		freshness.Reason = "session_changed_after_preview_start"
 		return freshness
@@ -942,6 +956,18 @@ func computePreviewFreshness(session *models.Session, instance *models.PreviewIn
 		return freshness
 	}
 	return freshness
+}
+
+func previewStatusCanRefreshForFreshness(status models.PreviewStatus) bool {
+	switch status {
+	case models.PreviewStatusReady,
+		models.PreviewStatusPartiallyReady,
+		models.PreviewStatusUnhealthy,
+		models.PreviewStatusFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // =============================================================================

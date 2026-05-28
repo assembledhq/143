@@ -976,6 +976,33 @@ func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, session
 	return tag.RowsAffected() == 1, nil
 }
 
+func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, sessionID uuid.UUID, _ string) (int64, time.Time, error) {
+	updatedAt := time.Now().UTC()
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = @updated_at
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING workspace_revision, workspace_revision_updated_at`,
+		pgx.NamedArgs{
+			"id":         sessionID,
+			"org_id":     orgID,
+			"updated_at": updatedAt,
+		},
+	)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("bump workspace revision: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("collect workspace revision: %w", err)
+	}
+	return row.Revision, row.UpdatedAt, nil
+}
+
 func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
 	args := pgx.NamedArgs{
 		"id":                    sessionID,
@@ -1012,6 +1039,14 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		    runtime_stop_reason = @runtime_stop_reason,
 		    runtime_graceful_stop_at = CASE
 		        WHEN @runtime_stop_reason = '' THEN runtime_graceful_stop_at
+		        ELSE @checkpointed_at
+		    END,
+		    workspace_revision = CASE
+		        WHEN @snapshot_key = '' THEN workspace_revision
+		        ELSE workspace_revision + 1
+		    END,
+		    workspace_revision_updated_at = CASE
+		        WHEN @snapshot_key = '' THEN workspace_revision_updated_at
 		        ELSE @checkpointed_at
 		    END
 		WHERE s.id = @id
@@ -2079,7 +2114,9 @@ func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessio
 		SET snapshot_key = pending_snapshot_key,
 		    pending_snapshot_key = NULL,
 		    pending_snapshot_set_at = NULL,
-		    sandbox_state = 'snapshotted'
+		    sandbox_state = 'snapshotted',
+		    workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = NOW()
 		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,

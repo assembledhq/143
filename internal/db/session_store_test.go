@@ -666,12 +666,73 @@ func TestSessionStore_PromotePendingSnapshot(t *testing.T) {
 	// Promote must clear both pending_snapshot_key AND pending_snapshot_set_at
 	// in the same statement — otherwise the reaper would see a phantom
 	// timestamp on a row whose pending key has already been promoted.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*pending_snapshot_key = @expected_key").
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), expected).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.PromotePendingSnapshot(context.Background(), orgID, sessionID, expected)
 	require.NoError(t, err, "PromotePendingSnapshot should not error on a clean update")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_PublishCheckpoint_BumpsWorkspaceRevisionForSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	checkpointedAt := time.Now().UTC()
+
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = CASE[\\s\\S]*workspace_revision = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision[\\s\\S]*ELSE workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision_updated_at[\\s\\S]*ELSE @checkpointed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	published, err := store.PublishCheckpoint(
+		context.Background(),
+		orgID,
+		sessionID,
+		uuid.Nil,
+		"agent-session-1",
+		"snapshots/org/session/checkpoint.tar.zst",
+		models.CheckpointKindTurnComplete,
+		models.CheckpointCapabilityFullResume,
+		1024,
+		checkpointedAt,
+		nil,
+		models.RuntimeStopReasonNone,
+	)
+	require.NoError(t, err, "PublishCheckpoint should update checkpoint metadata")
+	require.True(t, published, "PublishCheckpoint should report that the checkpoint row was updated")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_BumpWorkspaceRevision(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	updatedAt := time.Now().UTC()
+
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = @updated_at[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+				AddRow(int64(9), updatedAt),
+		)
+
+	revision, gotUpdatedAt, err := store.BumpWorkspaceRevision(context.Background(), orgID, sessionID, "test")
+	require.NoError(t, err, "BumpWorkspaceRevision should update and return the new revision")
+	require.Equal(t, int64(9), revision, "BumpWorkspaceRevision should return the incremented revision")
+	require.Equal(t, updatedAt, gotUpdatedAt, "BumpWorkspaceRevision should return the revision timestamp")
 	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
 }
 

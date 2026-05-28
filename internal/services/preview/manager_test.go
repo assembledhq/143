@@ -1965,11 +1965,27 @@ func validPreviewConfig() *models.PreviewConfig {
 // inserts a row and returns the row back. Tests inject a known preview ID via
 // the returned row, and the caller reads p.ID from the model after the call.
 func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time) {
+	expectCreatePreviewInstanceWithWorkspaceRevision(mock, previewID, sessionID, orgID, userID, status, now, nil, nil)
+}
+
+func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, revision *int64, revisionUpdatedAt *time.Time) {
+	args := previewAnyArgs(24)
+	args[22] = revision
+	args[23] = revisionUpdatedAt
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)
+	for i, column := range previewInstanceTestCols {
+		switch column {
+		case "source_workspace_revision":
+			row[i] = revision
+		case "source_workspace_revision_updated_at":
+			row[i] = revisionUpdatedAt
+		}
+	}
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(args...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)...),
+				AddRow(row...),
 		)
 }
 
@@ -2067,6 +2083,8 @@ func TestReservePreview_Success(t *testing.T) {
 	sessionID := uuid.New()
 	previewID := uuid.New()
 	now := time.Now()
+	workspaceRevision := int64(7)
+	workspaceRevisionUpdatedAt := now.Add(-time.Minute)
 
 	// GetActivePreviewForSession: no rows.
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
@@ -2084,21 +2102,25 @@ func TestReservePreview_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
-	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	expectCreatePreviewInstanceWithWorkspaceRevision(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now, &workspaceRevision, &workspaceRevisionUpdatedAt)
 
 	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 
 	instance, err := mgr.ReservePreview(context.Background(), StartPreviewInput{
-		SessionID: sessionID,
-		OrgID:     orgID,
-		UserID:    userID,
-		Config:    validPreviewConfig(),
+		SessionID:                  sessionID,
+		OrgID:                      orgID,
+		UserID:                     userID,
+		Config:                     validPreviewConfig(),
+		WorkspaceRevision:          workspaceRevision,
+		WorkspaceRevisionUpdatedAt: workspaceRevisionUpdatedAt,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, instance)
 	require.Equal(t, previewID, instance.ID)
+	require.Equal(t, &workspaceRevision, instance.SourceWorkspaceRevision, "ReservePreview should stamp the source workspace revision")
+	require.Equal(t, &workspaceRevisionUpdatedAt, instance.SourceWorkspaceRevisionUpdatedAt, "ReservePreview should stamp the source workspace revision timestamp")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
