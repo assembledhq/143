@@ -1644,6 +1644,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after secret resolution error")
 		}
+		m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
 		return err
 	}
 	var recycleRuntime *models.PreviewRuntime
@@ -1653,6 +1654,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 			if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not create runtime epoch"); statusErr != nil {
 				m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after runtime epoch error")
 			}
+			m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
 			return fmt.Errorf("recycle: create runtime epoch: %w", err)
 		}
 	}
@@ -1666,6 +1668,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
 		}
+		m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
 		return fmt.Errorf("recycle start: %w", err)
 	}
 
@@ -1683,6 +1686,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not persist new handle"); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after handle update error")
 		}
+		m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
 		return fmt.Errorf("recycle: update handle: %w", err)
 	}
 
@@ -1733,6 +1737,46 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	m.logger.Info().Str("preview_id", previewID.String()).Str("handle", handle.Handle).Msg("preview recycled")
 	return nil
+}
+
+func (m *Manager) releasePreviewHoldAfterRecycleFailure(parentCtx context.Context, instance *models.PreviewInstance) {
+	if instance == nil || instance.SessionID == uuid.Nil {
+		return
+	}
+	if !instance.PreviewHoldingContainer {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 60*time.Second)
+	defer cancel()
+
+	destroyNow, _, containerID, err := m.store.ReleasePreviewHold(ctx, instance.OrgID, instance.ID)
+	if err != nil {
+		m.logger.Warn().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Msg("recycle: failed to release preview hold after restart failure")
+		return
+	}
+	if !destroyNow || containerID == "" || m.sessionStore == nil || m.sandboxProvider == nil {
+		return
+	}
+
+	cleared, err := m.sessionStore.FinalizeContainerDestroy(ctx, instance.OrgID, instance.SessionID, containerID)
+	if err != nil {
+		m.logger.Warn().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Str("container_id", containerID).
+			Msg("recycle: failed to finalize container destroy after restart failure")
+		return
+	}
+	if !cleared {
+		return
+	}
+	if err := m.sandboxProvider.Destroy(ctx, &agent.Sandbox{ID: containerID, Provider: ProviderDocker}); err != nil {
+		m.logger.Error().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Str("container_id", containerID).
+			Msg("recycle: failed to destroy sandbox after restart failure")
+	}
 }
 
 // =============================================================================

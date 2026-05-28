@@ -212,6 +212,16 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 	}
 }
 
+func setPreviewInstanceRowColumn(row []any, column string, value any) {
+	for i, name := range previewInstanceTestCols {
+		if name == column {
+			row[i] = value
+			return
+		}
+	}
+	panic(fmt.Sprintf("unknown preview instance test column %q", column))
+}
+
 func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash string, expiresAt time.Time, revokedAt *time.Time, now time.Time) []any {
 	return []any{
 		id, orgID, userID, previewID,
@@ -1483,6 +1493,52 @@ func TestRecyclePreview_SecretResolutionFailureMarksFailed(t *testing.T) {
 	require.Error(t, err, "RecyclePreview should fail when secret bundle resolution fails")
 	require.Contains(t, err.Error(), "preview secrets require a repository id", "RecyclePreview should return the secret resolution error")
 	require.NoError(t, mock.ExpectationsWereMet(), "secret resolution failure should mark the preview failed")
+}
+
+func TestRecyclePreview_StartFailureReleasesPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	containerID := "sandbox-recycle"
+
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-recycle","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"sandbox-recycle"}}`))
+	setPreviewInstanceRowColumn(row, "preview_holding_container", true)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(row...),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectQuery(`WITH released AS \(\s*UPDATE preview_instances\s+SET preview_holding_container = FALSE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, containerID, true),
+		)
+
+	mgr := newTestManager(mock, &mockProvider{startErr: errors.New("service exited before ready")})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "RecyclePreview should return the provider start failure")
+	require.Contains(t, err.Error(), "service exited before ready", "RecyclePreview should preserve the provider error")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed recycle should release the preview sandbox hold")
 }
 
 func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {

@@ -1730,6 +1730,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				// Stale orphan container_id cleared; retry against the clean
 				// row. See newRunAgentHandler for full rationale.
 				retryAfter := 2 * time.Second
+				var staleThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					staleThreadID = &threadIDLocal
+				}
+				registerStaleSandboxDeadLetter(ctx, stores, logger, session, staleThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).
