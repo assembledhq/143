@@ -2815,7 +2815,7 @@ const SESSION_HEADER_HEIGHT_CLASSNAME = "h-14";
 const TRANSCRIPT_STEP_PX = 72;
 const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
-const REVIEW_AGENT_KEYS = ["codex", "claude_code"] as const;
+const REVIEW_AGENT_KEYS = ["codex", "claude_code", "amp", "pi"] as const;
 
 function getDefaultReviewAgentType(sessionAgentType?: string): string {
   return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";

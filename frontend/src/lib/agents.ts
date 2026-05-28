@@ -38,10 +38,7 @@ export interface AgentMeta {
   envVars: AgentEnvVar[];
   note?: string;       // small inline note shown in the settings card
   // lacksHeadlessResume is true for agents whose CLI has no flag to resume a
-  // prior conversation by ID. Follow-up turns replay only the new user message
-  // against the restored filesystem; earlier chat context is not sent back to
-  // the CLI. The session UI shows a banner so users include any context they
-  // need the agent to remember.
+  // prior conversation by ID.
   lacksHeadlessResume?: boolean;
 }
 
@@ -95,7 +92,6 @@ export const AGENTS: readonly AgentMeta[] = [
     description: "Sourcegraph Amp (mode-based agent)",
     providerKey: "amp",
     models: AVAILABLE_AMP_MODES,
-    lacksHeadlessResume: true,
     envVars: [
       { name: "AMP_API_KEY", label: "API Key", sensitive: true, placeholder: "amp_..." },
       { name: "AMP_MODE", label: "Default mode", options: [...AVAILABLE_AMP_MODES] },
@@ -109,7 +105,6 @@ export const AGENTS: readonly AgentMeta[] = [
     description: "Pi coding agent with dedicated Pi auth",
     providerKey: "pi",
     models: AVAILABLE_PI_MODELS,
-    lacksHeadlessResume: true,
     note: "Pi uses its own API key. Choose a default model if you want Pi to start from a specific provider/model pair.",
     envVars: [
       { name: "PI_API_KEY", label: "API Key", sensitive: true, placeholder: "pi_..." },

@@ -102,14 +102,14 @@ func TestAgentSupportsNativeReview(t *testing.T) {
 		{name: "codex", agentType: AgentTypeCodex, expected: true},
 		{name: "claude code", agentType: AgentTypeClaudeCode, expected: true},
 		{name: "gemini hidden", agentType: AgentTypeGeminiCLI, expected: false},
-		{name: "amp hidden", agentType: AgentTypeAmp, expected: false},
-		{name: "pi hidden", agentType: AgentTypePi, expected: false},
+		{name: "amp", agentType: AgentTypeAmp, expected: true},
+		{name: "pi", agentType: AgentTypePi, expected: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, AgentSupportsNativeReview(tt.agentType), "review support should match the v1 native command policy")
+			require.Equal(t, tt.expected, AgentSupportsNativeReview(tt.agentType), "review support should match the review-loop agent policy")
 		})
 	}
 }

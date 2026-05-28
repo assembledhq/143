@@ -34,12 +34,9 @@ func (a *AmpAdapter) Name() models.AgentType {
 	return models.AgentTypeAmp
 }
 
-// ResumeMode reports that Amp has no headless resume mechanism. Continuation
-// turns rely on the restored sandbox filesystem state. The session_id Amp
-// emits in its stream is captured for observability only and is never fed
-// back into the CLI.
+// ResumeMode reports that Amp can continue an upstream thread by ID.
 func (a *AmpAdapter) ResumeMode() agent.SessionResumeMode {
-	return agent.ResumeUnsupported
+	return agent.ResumeBySessionID
 }
 
 // PreparePrompt constructs the prompts for Amp based on the issue context.
@@ -66,10 +63,7 @@ func (a *AmpAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput)
 	}, nil
 }
 
-// Execute runs the Amp CLI inside the sandbox and streams output. The shared
-// runStreamingAgent helper handles continuation semantics — see that function
-// for details on how follow-up turns are replayed against the restored
-// filesystem without a headless resume flag.
+// Execute runs the Amp CLI inside the sandbox and streams output.
 func (a *AmpAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return runStreamingAgent(ctx, ampStreamingConfig, a.logger, sandbox, prompt, logCh)
 }
@@ -92,11 +86,15 @@ var ampStreamingConfig = streamingAgentConfig{
 			models.AmpModeSmart,
 		)
 	},
+	BuildResumeCmd: func(escapedPromptPath, escapedResumeSessionID string) string {
+		return fmt.Sprintf(
+			"amp threads continue '%s' -x \"$(cat '%s')\" --stream-json --dangerously-allow-all -m \"${AMP_MODE:-%s}\"",
+			escapedResumeSessionID,
+			escapedPromptPath,
+			models.AmpModeSmart,
+		)
+	},
 	ParseConfig: streamParseConfig{
-		// Capture session_id into result.AgentSessionID for tracing/observability
-		// only: Amp is lacksHeadlessResume, so we never feed this back to the CLI
-		// to resume a conversation. Persisting it lets operators correlate a 143
-		// session row with the upstream Amp run when debugging.
 		CaptureSessionID: true,
 	},
 	Profile: agent.AgentRuntimeProfile{
