@@ -40,6 +40,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { usePageTitle } from "@/hooks/use-page-title";
@@ -62,27 +63,29 @@ type SecretValueRow = {
   rowId: string;
   key: string;
   value: string;
-  exposeAsEnv: boolean;
 };
 
 type BundleDialogMode =
   | { type: "create" }
   | { type: "edit"; bundle: PreviewSecretBundleSummary };
 
+type BundleDeliveryMode = "env" | "file";
+
 type BundleFormState = {
   repositoryId: string;
   name: string;
+  deliveryMode: BundleDeliveryMode;
   rows: SecretValueRow[];
   fileOutputsJSON: string;
 };
 
 /** Creates a new blank row with a stable unique ID for React reconciliation. */
 function makeRow(overrides?: Partial<Omit<SecretValueRow, "rowId">>): SecretValueRow {
-  return { rowId: crypto.randomUUID(), key: "", value: "", exposeAsEnv: true, ...overrides };
+  return { rowId: crypto.randomUUID(), key: "", value: "", ...overrides };
 }
 
 function makeEmptyBundleForm(repositoryId = ""): BundleFormState {
-  return { repositoryId, name: "", rows: [makeRow()], fileOutputsJSON: "" };
+  return { repositoryId, name: "", deliveryMode: "env", rows: [makeRow()], fileOutputsJSON: "" };
 }
 
 export default function PreviewSettingsPage() {
@@ -199,11 +202,12 @@ function PreviewSecretsSection() {
   function openEditDialog(bundle: PreviewSecretBundleSummary) {
     setDialogMode({ type: "edit", bundle });
     const fileOuts = fileOutputsFromBundle(bundle);
-    const envRows = envNamesFromBundle(bundle).map((key) => makeRow({ key, exposeAsEnv: true }));
+    const envRows = envNamesFromBundle(bundle).map((key) => makeRow({ key }));
     setForm({
       repositoryId: bundle.repository_id,
       name: bundle.name,
-      rows: envRows.length > 0 ? envRows : [makeRow({ exposeAsEnv: false })],
+      deliveryMode: fileOuts.length > 0 && envRows.length === 0 ? "file" : "env",
+      rows: envRows.length > 0 ? envRows : [makeRow()],
       fileOutputsJSON: fileOuts.length > 0 ? JSON.stringify(fileOuts, null, 2) : "",
     });
     setFormError(null);
@@ -511,14 +515,18 @@ function BundleDialog({
   const isEdit = mode?.type === "edit";
   const editBundle = mode?.type === "edit" ? mode.bundle : null;
   const editHasFileOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "file") : false;
+  const editHasEnvOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "env") : false;
+  const editHasBothOutputs = editHasFileOutputs && editHasEnvOutputs;
   const hasFilledValue = form.rows.some((row) => row.key.trim() && row.value);
-  const hasOutput = form.rows.some((row) => row.key.trim() && row.value && row.exposeAsEnv) || form.fileOutputsJSON.trim().length > 0;
-  const canSave = Boolean(form.repositoryId) && Boolean(form.name.trim()) && hasFilledValue && hasOutput;
+  const hasSelectedOutput = form.deliveryMode === "env" ? hasFilledValue : form.fileOutputsJSON.trim().length > 0;
+  const canSave = Boolean(form.repositoryId) && Boolean(form.name.trim()) && hasFilledValue && hasSelectedOutput;
   const saveTooltip = isEdit && !hasFilledValue
     ? "Re-enter at least one secret value to save changes"
-    : !hasOutput
-      ? "Choose at least one delivery method: environment variables or generated files"
-      : undefined;
+    : form.deliveryMode === "file" && !form.fileOutputsJSON.trim()
+      ? "Add the secret file JSON before saving"
+      : !hasFilledValue
+        ? "Add at least one secret name and value"
+        : undefined;
 
   return (
     <Dialog open={Boolean(mode)} onOpenChange={onOpenChange}>
@@ -527,7 +535,11 @@ function BundleDialog({
           <DialogTitle>{isEdit ? "Edit bundle" : "New bundle"}</DialogTitle>
           <DialogDescription>
             Secret values are only sent when you save and are not shown again after creation.
-            {editHasFileOutputs ? " This bundle has file outputs — re-enter the content mapping in the field below to preserve it." : null}
+            {editHasBothOutputs
+              ? " This bundle uses both env vars and a secret file. Choose which delivery method to keep — the other will be removed on save."
+              : editHasFileOutputs
+                ? " This bundle has file outputs — switch to the Secret file tab to re-enter the content mapping and preserve it."
+                : null}
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-5" onSubmit={onSubmit}>
@@ -565,78 +577,54 @@ function BundleDialog({
             </div>
           </div>
 
-          <div className="space-y-2">
-            <div className="space-y-1">
-              <div className="flex items-center gap-1.5">
-                <Label>Stored secrets</Label>
-                <HelpTooltip
-                  label="Stored secrets help"
-                  content="These are the encrypted values 143 stores for this bundle. Previews can receive them as environment variables or use them when 143 generates config files."
+          <Tabs
+            value={form.deliveryMode}
+            onValueChange={(value) => onFormChange({ ...form, deliveryMode: value as BundleDeliveryMode })}
+          >
+            <TabsList aria-label="Delivery method" className="w-full sm:w-fit">
+              <TabsTrigger value="env">Environment variables</TabsTrigger>
+              <TabsTrigger value="file">Secret file</TabsTrigger>
+            </TabsList>
+            <TabsContent value="env" className="space-y-4">
+              <StoredSecretsFields
+                rows={form.rows}
+                description="Each secret name becomes an environment variable in the preview runtime."
+                onRowChange={onRowChange}
+                onRowAdd={onRowAdd}
+                onRowRemove={onRowRemove}
+              />
+            </TabsContent>
+            <TabsContent value="file" className="space-y-4">
+              <StoredSecretsFields
+                rows={form.rows}
+                description="Store the values here, then reference them in the file JSON with secret:API_TOKEN."
+                onRowChange={onRowChange}
+                onRowAdd={onRowAdd}
+                onRowRemove={onRowRemove}
+              />
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Label htmlFor="file-outputs">Generated files</Label>
+                  <HelpTooltip
+                    label="Generated files help"
+                    content="Use this when the preview app expects a file such as .env or development.conf.json. The JSON describes files and can reference stored secrets like secret:API_TOKEN."
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Reference stored secrets with secret:API_TOKEN. The generated file is created for the preview runtime and is not committed.
+                </p>
+                <Textarea
+                  id="file-outputs"
+                  value={form.fileOutputsJSON}
+                  onChange={(event) => onFormChange({ ...form, fileOutputsJSON: event.target.value })}
+                  placeholder={'[{"type":"file","path":"development.conf.json","format":"json","content":{"token":"secret:API_TOKEN"}}]'}
+                  aria-label="Generated files JSON"
+                  className="min-h-24 font-mono text-xs"
+                  spellCheck={false}
                 />
               </div>
-              <p className="text-xs text-muted-foreground">
-                Add the secret names and values once. Values are encrypted and are not shown again after saving.
-              </p>
-            </div>
-            <div className="space-y-2">
-              {form.rows.map((row, index) => (
-                <div key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
-                  <Input
-                    value={row.key}
-                    onChange={(event) => onRowChange(index, { key: normalizeEnvKey(event.target.value) })}
-                    placeholder="API_TOKEN"
-                    aria-label={index === 0 ? "Secret name" : `Secret name ${index + 1}`}
-                    autoComplete="off"
-                  />
-                  <Input
-                    value={row.value}
-                    onChange={(event) => onRowChange(index, { value: event.target.value })}
-                    placeholder="Secret value"
-                    type="password"
-                    aria-label={index === 0 ? "Secret value" : `Secret value ${index + 1}`}
-                    autoComplete="new-password"
-                  />
-                  <Label className="flex h-9 items-center gap-2 rounded-md border border-border px-3 text-xs">
-                    <Checkbox
-                      checked={row.exposeAsEnv}
-                      onCheckedChange={(checked) => onRowChange(index, { exposeAsEnv: checked === true })}
-                      aria-label={index === 0 ? "Expose as env" : `Expose as env ${index + 1}`}
-                    />
-                    Send as env var
-                  </Label>
-                  <Button type="button" variant="outline" size="icon" onClick={() => onRowRemove(index)} aria-label={`Remove secret row ${index + 1}`}>
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
-            </div>
-            <Button type="button" variant="outline" size="sm" onClick={onRowAdd}>
-              <Plus className="h-4 w-4" />
-              Add value
-            </Button>
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <Label htmlFor="file-outputs">Generated files</Label>
-              <HelpTooltip
-                label="Generated files help"
-                content="Use this only when the preview app expects a file such as .env or development.conf.json. The JSON describes files and can reference stored secrets like secret:API_TOKEN."
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Choose at least one delivery method: send stored secrets as environment variables above, or define generated files here. You do not need both.
-            </p>
-            <Textarea
-              id="file-outputs"
-              value={form.fileOutputsJSON}
-              onChange={(event) => onFormChange({ ...form, fileOutputsJSON: event.target.value })}
-              placeholder={'[{"type":"file","path":"development.conf.json","format":"json","content":{"token":"secret:API_TOKEN"}}]'}
-              aria-label="Generated files JSON"
-              className="min-h-24 font-mono text-xs"
-              spellCheck={false}
-            />
-          </div>
+            </TabsContent>
+          </Tabs>
 
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
@@ -655,14 +643,96 @@ function BundleDialog({
             <DialogClose asChild>
               <Button type="button" variant="outline" disabled={saving}>Cancel</Button>
             </DialogClose>
-            <Button type="submit" disabled={!canSave || saving} title={saveTooltip}>
+            <SaveButton disabled={!canSave || saving} tooltip={saveTooltip}>
               <KeyRound className="h-4 w-4" />
               Save
-            </Button>
+            </SaveButton>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function StoredSecretsFields({
+  rows,
+  description,
+  onRowChange,
+  onRowAdd,
+  onRowRemove,
+}: {
+  rows: SecretValueRow[];
+  description: string;
+  onRowChange: (index: number, patch: Partial<SecretValueRow>) => void;
+  onRowAdd: () => void;
+  onRowRemove: (index: number) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <div className="flex items-center gap-1.5">
+          <Label>Stored secrets</Label>
+          <HelpTooltip
+            label="Stored secrets help"
+            content="These are the encrypted values 143 stores for this bundle. The selected delivery method controls whether previews receive them as environment variables or inside a generated file."
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+      <div className="space-y-2">
+        {rows.map((row, index) => (
+          <div key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+            <Input
+              value={row.key}
+              onChange={(event) => onRowChange(index, { key: normalizeEnvKey(event.target.value) })}
+              placeholder="API_TOKEN"
+              aria-label={index === 0 ? "Secret name" : `Secret name ${index + 1}`}
+              autoComplete="off"
+            />
+            <Input
+              value={row.value}
+              onChange={(event) => onRowChange(index, { value: event.target.value })}
+              placeholder="Secret value"
+              type="password"
+              aria-label={index === 0 ? "Secret value" : `Secret value ${index + 1}`}
+              autoComplete="new-password"
+            />
+            <Button type="button" variant="outline" size="icon" onClick={() => onRowRemove(index)} aria-label={`Remove secret row ${index + 1}`}>
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+      </div>
+      <Button type="button" variant="outline" size="sm" onClick={onRowAdd}>
+        <Plus className="h-4 w-4" />
+        Add value
+      </Button>
+    </div>
+  );
+}
+
+function SaveButton({ disabled, tooltip, children }: { disabled: boolean; tooltip?: string; children: ReactNode }) {
+  const button = (
+    <Button type="submit" disabled={disabled}>
+      {children}
+    </Button>
+  );
+
+  if (!disabled || !tooltip) {
+    return button;
+  }
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">{button}</span>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={6}>
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -972,15 +1042,18 @@ function buildBundleRequest(form: BundleFormState): PreviewSecretBundleUpsertReq
   }
 
   let fileOutputs: PreviewSecretBundleOutput[] = [];
-  if (form.fileOutputsJSON.trim()) {
+  if (form.deliveryMode === "file") {
+    if (!form.fileOutputsJSON.trim()) {
+      return new Error("Secret file JSON is required.");
+    }
     try {
       const parsed = JSON.parse(form.fileOutputsJSON) as unknown;
       if (!Array.isArray(parsed)) {
-        return new Error("File outputs JSON must be an array.");
+        return new Error("Secret file JSON must be an array.");
       }
       fileOutputs = parsed as PreviewSecretBundleOutput[];
     } catch {
-      return new Error("File outputs JSON is invalid.");
+      return new Error("Secret file JSON is invalid.");
     }
   }
 
@@ -990,18 +1063,18 @@ function buildBundleRequest(form: BundleFormState): PreviewSecretBundleUpsertReq
   // source.values are encrypted at rest; output.values are resolver references.
   const envValues = form.rows.reduce<Record<string, string>>((acc, row) => {
     const key = row.key.trim();
-    if (key && row.value && row.exposeAsEnv) {
+    if (form.deliveryMode === "env" && key && row.value) {
       acc[key] = `secret:${key}`;
     }
     return acc;
   }, {});
   const outputs: PreviewSecretBundleOutput[] = [
-    ...(Object.keys(envValues).length > 0 ? [{ type: "env" as const, values: envValues }] : []),
+    ...(form.deliveryMode === "env" && Object.keys(envValues).length > 0 ? [{ type: "env" as const, values: envValues }] : []),
     ...fileOutputs,
   ];
 
   if (outputs.length === 0) {
-    return new Error("At least one env or file output is required.");
+    return new Error("Choose environment variables or a secret file output.");
   }
 
   return {
