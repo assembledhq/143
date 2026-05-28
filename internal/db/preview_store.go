@@ -888,7 +888,7 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	var query string
 	phase := previewPhaseForStatus(status)
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	} else {
 		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
@@ -947,7 +947,7 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{

@@ -5576,6 +5576,71 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
 }
 
+func TestContinueSessionHandler_StaleSandboxClearDeadLetterFailsSessionAndThread(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+				workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("cleared stale container: %w", agent.ErrStaleSandboxIDCleared)
+		},
+	}
+	var logBuf bytes.Buffer
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.New(&logBuf))
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "continue_session", payload)
+	require.Error(t, err, "stale sandbox clear should ask the worker to retry")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "stale sandbox clear should remain retryable before queue exhaustion")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale-clear retry should not mark the session failed before dead-letter")
+
+	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(11)...).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, errors.New(errMsg))
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the session and active thread with a visible stale-sandbox explanation; logs: %s", logBuf.String())
+}
+
 func TestSandboxCapacityFailureExplanationIncludesCurrentLoad(t *testing.T) {
 	t.Parallel()
 
