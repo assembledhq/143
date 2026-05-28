@@ -8,7 +8,7 @@ type IntegrationsCardItem = {
   action: ReactNode;
   logo?: ReactNode;
   badge?: ReactNode;
-  extra?: ReactNode;
+  summary?: ReactNode;
 };
 
 type IntegrationsCardProps = {
@@ -29,7 +29,7 @@ export function IntegrationsCard({ items }: IntegrationsCardProps) {
                   {item.badge}
                 </div>
                 <p className="mt-0.5 text-sm text-muted-foreground">{item.description}</p>
-                {item.extra}
+                {item.summary}
               </div>
             </div>
             <div className="w-full shrink-0 sm:w-auto [&>*]:w-full sm:[&>*]:w-auto">{item.action}</div>
