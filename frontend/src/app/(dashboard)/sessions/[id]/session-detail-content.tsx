@@ -1961,6 +1961,14 @@ function loadedTurnNumbers(messages: SessionMessage[]): number[] {
   return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
 }
 
+export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: SessionThread): number[] {
+  const turns = new Set(loadedTurnNumbers(messages));
+  if (thread && thread.status !== "idle" && Number.isInteger(thread.current_turn) && thread.current_turn >= 0) {
+    turns.add(thread.current_turn + 1);
+  }
+  return Array.from(turns).sort((a, b) => a - b);
+}
+
 function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
   return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
 }
@@ -2086,17 +2094,10 @@ function ChatPanel({
   const threadMessages = useMemo(() => {
     return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
   }, [threadMessagesQuery.data?.pages]);
-  const loadedThreadTurns = useMemo(() => loadedTurnNumbers(threadMessages), [threadMessages]);
-  const activeThreadLogTurn = activeThread && workingStatusesSet.has(activeThread.status)
-    ? activeThread.current_turn + 1
-    : null;
-  const visibleThreadLogTurns = useMemo(() => {
-    const turns = new Set(loadedThreadTurns);
-    if (activeThreadLogTurn !== null) {
-      turns.add(activeThreadLogTurn);
-    }
-    return Array.from(turns).sort((a, b) => a - b);
-  }, [activeThreadLogTurn, loadedThreadTurns]);
+  const visibleThreadLogTurns = useMemo(
+    () => getVisibleThreadLogTurns(threadMessages, activeThread),
+    [activeThread, threadMessages],
+  );
   const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
 
   const threadLogsQuery = useQuery({
@@ -2197,7 +2198,7 @@ function ChatPanel({
       const loadedThreadLogs = filterThreadLogsForLoadedMessages(
         threadLogsQuery.data?.data ?? [],
         threadMessages,
-        activeThreadLogTurn !== null ? [activeThreadLogTurn] : [],
+        visibleThreadLogTurns,
       );
       return sortTimelineEntries([...buildTimeline(
         mergePendingMessages(threadMessages, optimisticForCurrentView),
@@ -2223,7 +2224,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, activeThreadLogTurn, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
+  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data, visibleThreadLogTurns]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
