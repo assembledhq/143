@@ -1,0 +1,2 @@
+-- No-op: this migration repairs stale sandbox holds on terminal previews.
+-- Reinstating those holds would reintroduce the stale-container cleanup block.

@@ -1,0 +1,2 @@
+-- No-op: this migration repairs impossible running child threads under terminal sessions.
+-- Reinstating running thread state would reintroduce stale session UI.
