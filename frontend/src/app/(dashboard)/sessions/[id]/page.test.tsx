@@ -1330,7 +1330,7 @@ describe('SessionDetailPage', () => {
       },
     ];
     const patchedBodies: Array<{ agent_type?: string; label?: string; model?: string }> = [];
-    let postedMessageBody: { message: string } | null = null;
+    let postedMessageBody: { message: string; client_message_id?: string } | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -1392,7 +1392,7 @@ describe('SessionDetailPage', () => {
         return HttpResponse.json({ data: updatedThread } satisfies SingleResponse<SessionThread>);
       }),
       http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {
-        postedMessageBody = await request.json() as { message: string };
+        postedMessageBody = await request.json() as { message: string; client_message_id?: string };
         return HttpResponse.json({
           data: {
             id: 101,
@@ -1429,8 +1429,13 @@ describe('SessionDetailPage', () => {
       expect(patchedBodies).toContainEqual({ label: 'Codex 2', model: 'gpt-5.4-mini' });
     });
     await waitFor(() => {
-      expect(postedMessageBody).toEqual({ message: 'Use the selected model.' });
+      // Send carries a generated client_message_id (durable inbox
+      // idempotency token). Assert the user-meaningful payload here and
+      // verify the idempotency token shape separately so the test is not
+      // coupled to crypto.randomUUID output.
+      expect(postedMessageBody).toMatchObject({ message: 'Use the selected model.' });
     });
+    expect(postedMessageBody?.client_message_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it('shows the agent selector before model override on a new blank tab composer', async () => {
