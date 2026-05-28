@@ -2211,6 +2211,39 @@ func TestPreviewStore_CreateNextPreviewRuntimeStopsPreviousEpoch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_ReassignPreviewWorkerUpdatesReservationAndRuntime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET worker_node_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(runtime_epoch\\), 0\\) \\+ 1").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"runtime_epoch"}).AddRow(2))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+	mock.ExpectCommit()
+
+	err = store.ReassignPreviewWorker(context.Background(), orgID, previewID, "worker-2", "http://worker-2.internal")
+	require.NoError(t, err, "ReassignPreviewWorker should atomically update reservation ownership and runtime routing")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_GetActivePreviewRuntimeScopesByOrgAndLease(t *testing.T) {
 	t.Parallel()
 

@@ -112,11 +112,8 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.abort(ctx, reservation, "", "preview reservation no longer matches target")
 		return fmt.Errorf("reserved branch preview target mismatch")
 	}
-	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
-		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
-			return fmt.Errorf("reassign branch preview worker: %w", err)
-		}
-		reservation.WorkerNodeID = r.nodeID
+	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("reassign branch preview worker: %w", err)
 	}
 
 	target, err := r.previews.GetPreviewTarget(ctx, payload.OrgID, payload.PreviewTargetID)
@@ -283,11 +280,8 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 			return fmt.Errorf("reserved preview workspace revision mismatch")
 		}
 	}
-	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
-		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
-			return fmt.Errorf("reassign preview worker: %w", err)
-		}
-		reservation.WorkerNodeID = r.nodeID
+	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("reassign preview worker: %w", err)
 	}
 
 	session, err := r.sessions.GetByID(ctx, payload.OrgID, payload.SessionID)
@@ -366,8 +360,23 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	return nil
 }
 
-func shouldReassignPreviewWorker(deadTargetNode, reservationWorkerNode, claimingWorkerNode string) bool {
-	return deadTargetNode != "" && claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
+func (r *StartRunner) reassignReservationWorkerIfNeeded(ctx context.Context, orgID, previewID uuid.UUID, reservation *models.PreviewInstance) error {
+	if reservation == nil || !shouldReassignPreviewWorker("", reservation.WorkerNodeID, r.nodeID) {
+		return nil
+	}
+	endpointURL := ""
+	if r.manager != nil {
+		endpointURL = r.manager.previewInternalBaseURL
+	}
+	if err := r.previews.ReassignPreviewWorker(ctx, orgID, previewID, r.nodeID, endpointURL); err != nil {
+		return err
+	}
+	reservation.WorkerNodeID = r.nodeID
+	return nil
+}
+
+func shouldReassignPreviewWorker(_ string, reservationWorkerNode, claimingWorkerNode string) bool {
+	return claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
 }
 
 func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
