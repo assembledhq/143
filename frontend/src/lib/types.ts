@@ -45,6 +45,7 @@ export interface User {
 }
 
 export interface UserSettings {
+  coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
 }
 
