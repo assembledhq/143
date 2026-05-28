@@ -142,7 +142,7 @@ Columns:
 | Bundle | Bundle name. Optionally include source type as subdued metadata. |
 | Outputs | Badges such as `env DATABASE_URL`, `env API_TOKEN`, `json development.conf.json`, `raw .env`. |
 | Last changed | `created_at` from the active version until a version-specific display timestamp exists. |
-| Actions | `Test`, `Edit`, `Delete`. Keep destructive action visually secondary. |
+| Actions | `Edit`, `Delete`. Keep destructive action visually secondary. |
 
 Do not display secret values. Do not display decrypted source data. List APIs should expose only bundle metadata and output names.
 
@@ -171,21 +171,14 @@ Fields:
    - Copy should make clear that users need one delivery method, not both.
    - Validate output path rules client-side where possible, but rely on backend validation as source of truth.
 5. Actions
-   - `Test bundle`
    - `Save`
    - `Cancel`
 
-For edit flows, prefer patching unchanged metadata without requiring plaintext secret re-entry when backend support exists. If backend support does not allow preserving encrypted values, make the form copy explicit by using an empty password field placeholder such as `Leave blank to keep existing value` only after the API can actually honor that behavior. Do not imply secret preservation before it exists.
+For edit flows, do not fetch or show plaintext secret values again. File-bundle edits can preserve the existing encrypted file by leaving the contents field blank; the frontend sends a metadata-only PATCH with outputs but no `source`, and the backend merges the existing decrypted source before saving the next active version. Pasting new file contents replaces the stored encrypted value. Environment-variable edits still require re-entering changed values until the UI has per-value preservation controls.
 
-### Testing a Bundle
+### Secret File Validation
 
-The `Test` action should call the id-based test endpoint for the active bundle. It should surface:
-
-- `Ready` as a success toast and/or badge.
-- Validation failures as an inline row error or toast with the backend's safe message.
-- Network/server failures through the shared error treatment.
-
-Test responses must not include secret values.
+Secret-file JSON validation is local to the editor. When the selected file format is `JSON`, validate the textarea contents on a short debounce as the admin types and surface parse errors inline instead of exposing a separate bundle-test action. The backend remains the source of truth on save.
 
 ### Delete Behavior
 
