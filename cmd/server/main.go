@@ -379,6 +379,7 @@ func main() {
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
+		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -430,7 +431,9 @@ func main() {
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			HumanInputRequests:  sessionHumanInputStore,
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
+			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
@@ -590,6 +593,7 @@ func main() {
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 			agent.WithRuntimeJobTerminalizer(jobStore),
+			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -1174,6 +1178,9 @@ func buildServices(
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	threadInboxStore := db.NewThreadInboxStore(pool)
+	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
+	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
@@ -1246,6 +1253,9 @@ func buildServices(
 		MentionIndexes:     mentionIndexCache,
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
+		ThreadRuntimes:     threadRuntimeStore,
+		ThreadInbox:        threadInboxStore,
+		SandboxHolders:     sessionSandboxHolderStore,
 		Cancels:            cancelRegistry,
 		ThreadCancels:      threadCancelRegistry,
 		OrgSettingsCache:   orgSettingsCache,
@@ -1324,6 +1334,8 @@ func buildServices(
 		jobStore,
 		logger,
 	))
+	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
+	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	reviewLoopSvc := reviewloopservice.NewService(
 		reviewLoopStore,
 		reviewloopservice.RuntimeAdapter{

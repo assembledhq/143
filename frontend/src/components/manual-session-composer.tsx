@@ -582,6 +582,7 @@ export function ManualSessionComposer({
 
   const codexAuthStatus = codexAuthResponse?.data;
   const codingAuths = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse]);
+  const userDefaultModel = user?.settings?.coding_agent_model_default ?? "";
   // Sessions run under the user's own credentials, so we don't pass
   // orgAgentConfig — agents the org has keys for but the user doesn't are
   // intentionally hidden from the picker.
@@ -608,7 +609,8 @@ export function ManualSessionComposer({
   }, [modelGroups, selectedModel, resolvedCredsResponse, codexAuthResponse, codingAuthsResponse]);
 
   // Determine which agent type would be used and whether credentials exist.
-  const effectiveAgentType: string = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
+  const submittedModel = selectedModel || userDefaultModel;
+  const effectiveAgentType: string = submittedModel ? agentTypeForModel(submittedModel) ?? defaultAgentType : defaultAgentType;
   const defaultReasoningEffort = getDefaultCodingAgentReasoningForAgent(user?.settings, effectiveAgentType);
   const effectiveReasoningOverride = isCodingAgentReasoningEffortSupported(effectiveAgentType, reasoningOverride) ? reasoningOverride : "";
   const effectiveReasoningEffort = effectiveReasoningOverride || defaultReasoningEffort;
@@ -717,7 +719,7 @@ export function ManualSessionComposer({
         references,
         commands,
         ...(submittedReasoningEffort ? { reasoning_effort: submittedReasoningEffort } : {}),
-        ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
+        ...(submittedModel ? { model: submittedModel, agent_type: agentTypeForModel(submittedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
         ...(selectedBranch ? { branch: selectedBranch } : {}),
       }),
@@ -1049,7 +1051,7 @@ export function ManualSessionComposer({
   }
 
   const repoSummary = selectedRepo ? selectedRepo.full_name.split("/").pop() ?? selectedRepo.full_name : "No repo";
-  const modelSummary = selectedModel || "Default model";
+  const modelSummary = selectedModel || (userDefaultModel ? `Default (${userDefaultModel})` : "Default model");
   const reasoningSummary = effectiveReasoningEffort || "Default reasoning";
 
   const settingsControls = (

@@ -2301,7 +2301,7 @@ func TestPreviewStore_ListIdlePreviews(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances.+last_accessed_at").
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+session_sandbox_holders.+last_accessed_at").
 		WithArgs(previewAnyArgs(1)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
@@ -2329,7 +2329,7 @@ func TestPreviewStore_ListIdlePreviewsForWorker(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = .+last_accessed_at").
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = .+session_sandbox_holders.+last_accessed_at").
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).

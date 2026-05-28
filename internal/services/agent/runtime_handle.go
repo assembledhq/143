@@ -182,3 +182,35 @@ func InteractiveHandleAttacherFromContext(ctx context.Context) InteractiveHandle
 	a, _ := ctx.Value(interactiveHandleAttacherKey{}).(InteractiveHandleAttacher)
 	return a
 }
+
+type multiInteractiveHandleAttacher struct {
+	attachers []InteractiveHandleAttacher
+}
+
+func NewMultiInteractiveHandleAttacher(attachers ...InteractiveHandleAttacher) InteractiveHandleAttacher {
+	filtered := make([]InteractiveHandleAttacher, 0, len(attachers))
+	for _, attacher := range attachers {
+		if attacher != nil {
+			filtered = append(filtered, attacher)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	if len(filtered) == 1 {
+		return filtered[0]
+	}
+	return &multiInteractiveHandleAttacher{attachers: filtered}
+}
+
+func (a *multiInteractiveHandleAttacher) Attach(handle InteractiveCommandHandle) {
+	for _, attacher := range a.attachers {
+		attacher.Attach(handle)
+	}
+}
+
+func (a *multiInteractiveHandleAttacher) Detach() {
+	for i := len(a.attachers) - 1; i >= 0; i-- {
+		a.attachers[i].Detach()
+	}
+}

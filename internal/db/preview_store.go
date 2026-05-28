@@ -1782,6 +1782,14 @@ func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time
 			  AND s.org_id = preview_instances.org_id
 			  AND s.turn_holding_container = TRUE
 		)
+		AND NOT EXISTS (
+			SELECT 1 FROM session_sandbox_holders h
+			WHERE h.org_id = preview_instances.org_id
+			  AND h.session_id = preview_instances.session_id
+			  AND h.holder_kind = 'thread_runtime'
+			  AND h.status IN ('active', 'draining')
+			  AND h.expires_at > now()
+		)
 		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"idle_since": idleSince})
@@ -1810,6 +1818,14 @@ func (s *PreviewStore) ListIdlePreviewsForWorker(ctx context.Context, workerNode
 			WHERE s.id = preview_instances.session_id
 			  AND s.org_id = preview_instances.org_id
 			  AND s.turn_holding_container = TRUE
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM session_sandbox_holders h
+			WHERE h.org_id = preview_instances.org_id
+			  AND h.session_id = preview_instances.session_id
+			  AND h.holder_kind = 'thread_runtime'
+			  AND h.status IN ('active', 'draining')
+			  AND h.expires_at > now()
 		)
 		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
 
