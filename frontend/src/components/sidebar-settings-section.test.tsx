@@ -3,6 +3,21 @@ import { renderWithProviders, screen } from '@/test/test-utils';
 import { SidebarSettingsSection } from './sidebar-settings-section';
 
 describe('SidebarSettingsSection', () => {
+  it('matches desktop primary nav icon sizing and row spacing', () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/sessions" userRole="admin" />
+    );
+
+    expect(screen.getByTestId('sidebar-settings-divider')).toHaveClass('border-t');
+
+    const trigger = screen.getByRole('button', { name: /Settings/ });
+    expect(trigger).toHaveClass('gap-2.5', 'py-[7px]', 'text-xs');
+    expect(trigger).not.toHaveClass('gap-2', 'py-1.5');
+
+    const settingsIcon = trigger.querySelector('svg');
+    expect(settingsIcon).toHaveClass('h-4', 'w-4');
+  });
+
   it('uses the same touch target sizing as other mobile nav tabs', () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/sessions" userRole="admin" variant="mobile" />

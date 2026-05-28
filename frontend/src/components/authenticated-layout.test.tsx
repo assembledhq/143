@@ -106,6 +106,28 @@ describe("AuthenticatedLayout", () => {
     expect(compactRail).toHaveClass("w-14");
   });
 
+  it("keeps compact rail nav icons vertically aligned with desktop nav spacing", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const compactRail = container.querySelector("[data-testid='app-sidebar-rail']");
+    const primaryNav = compactRail?.querySelector("nav");
+    expect(primaryNav).not.toBeNull();
+    expect(primaryNav).toHaveClass("gap-0.5");
+
+    const sessionsLink = within(primaryNav as HTMLElement).getByRole("link", { name: "Sessions" });
+    expect(sessionsLink).toHaveClass("h-[30px]", "w-10");
+
+    expect(within(primaryNav as HTMLElement).getByTestId("compact-sidebar-settings-divider")).toHaveClass("border-t");
+    const settingsLink = within(primaryNav as HTMLElement).getByRole("link", { name: "Settings" });
+    const settingsIcon = settingsLink.querySelector("svg");
+    expect(settingsLink).toHaveClass("h-[30px]", "w-10");
+    expect(settingsIcon).toHaveClass("h-4", "w-4");
+  });
+
   it("keeps workspace and account actions reachable from the compact rail", async () => {
     const user = userEvent.setup();
 

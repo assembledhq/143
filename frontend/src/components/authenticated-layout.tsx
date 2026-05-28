@@ -336,14 +336,14 @@ function CompactSidebarRail({
         className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2"
         aria-label="Primary navigation"
       >
-        <div className="flex flex-col items-center gap-1">
+        <div className="flex flex-col items-center gap-0.5">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={onPaletteOpen}
-                className="h-10 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                className="h-7 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
                 aria-label="Search"
               >
                 <Search className="h-4 w-4" />
@@ -357,7 +357,7 @@ function CompactSidebarRail({
                 variant="ghost"
                 size="icon"
                 onClick={onCreateSession}
-                className="h-10 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                className="h-7 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
                 aria-label="New session"
               >
                 <PenSquare className="h-4 w-4" />
@@ -367,7 +367,7 @@ function CompactSidebarRail({
           </Tooltip>
         </div>
 
-        <nav className="mt-3 flex flex-1 flex-col items-center gap-1">
+        <nav className="mt-2 flex flex-1 flex-col items-center gap-0.5">
           {navItems.map((item) => {
             const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
@@ -378,7 +378,7 @@ function CompactSidebarRail({
                     aria-label={item.label}
                     aria-current={isActive ? "page" : undefined}
                     className={cn(
-                      "relative flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
+                      "relative flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
                       isActive
                         ? "bg-sidebar-accent text-sidebar-accent-foreground"
                         : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
@@ -394,26 +394,26 @@ function CompactSidebarRail({
               </Tooltip>
             );
           })}
+          <div data-testid="compact-sidebar-settings-divider" className="my-1 w-7 border-t border-border/50" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                href="/settings"
+                aria-label="Settings"
+                aria-current={pathname.startsWith("/settings") ? "page" : undefined}
+                className={cn(
+                  "flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
+                  pathname.startsWith("/settings")
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Settings className="h-4 w-4" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
+          </Tooltip>
         </nav>
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Link
-              href="/settings"
-              aria-label="Settings"
-              aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-              className={cn(
-                "flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
-                pathname.startsWith("/settings")
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
-              )}
-            >
-              <Settings className="h-4 w-4" />
-            </Link>
-          </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
-        </Tooltip>
 
         <Popover>
           <Tooltip>
