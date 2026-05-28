@@ -881,19 +881,6 @@ const ChangesTab = memo(function ChangesTab({
               <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
             </div>
           ) : null}
-          {!isMobile ? (
-            <div className="px-4 py-3">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenReview()}
-                className="w-full gap-2 text-xs"
-              >
-                <FileCode2 className="h-3.5 w-3.5" />
-                Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
-              </Button>
-            </div>
-          ) : null}
           <div className="flex-1 overflow-hidden">
             <FileTree
               files={filteredFiles}
