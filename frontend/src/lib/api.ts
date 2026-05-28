@@ -1,4 +1,5 @@
 import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
+import { normalizeAPIResponse } from './api-normalize';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
@@ -21,7 +22,7 @@ async function parseSuccessBody<T>(res: Response): Promise<T> {
     return undefined as T;
   }
 
-  return JSON.parse(text) as T;
+  return normalizeAPIResponse(JSON.parse(text)) as T;
 }
 
 function getCSRFToken(): string {
