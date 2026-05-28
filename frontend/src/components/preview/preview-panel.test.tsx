@@ -258,8 +258,8 @@ describe("PreviewPanel component", () => {
   /* ---------- Starting status ---------- */
 
   it("shows preview-first startup canvas and subtle controls during starting status", async () => {
-    mockGet.mockResolvedValue(
-      makePreviewStatus(
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus(
         { status: "starting" },
         [],
         [
@@ -276,7 +276,15 @@ describe("PreviewPanel component", () => {
           },
         ],
       ),
-    );
+      freshness: {
+        state: "updating",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 5,
+        preview_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        reason: "preview_starting",
+      },
+    });
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
@@ -289,6 +297,7 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
     expect(screen.getByText("Services")).toBeInTheDocument();
     expect(screen.getByText("Waiting for services to boot.")).toBeInTheDocument();
+    expect(screen.getByText("Updating preview...")).toBeInTheDocument();
     expect(screen.getByText("Preview")).toBeInTheDocument();
     expect(screen.getByText("Waiting for the preview URL to become reachable.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
@@ -1417,6 +1426,56 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Failed to restart preview: server error")).toBeInTheDocument();
     });
     expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("shows stale freshness marker and refresh action for out of date previews", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "out_of_date",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        preview_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        reason: "session_changed_after_preview_start",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("New changes available")).toBeInTheDocument();
+    expect(
+      screen.getByText("Restart the preview to see the latest session changes."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Preview" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Refresh preview" }));
+
+    await waitFor(() => {
+      expect(mockEnsure).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows unknown freshness as quiet metadata instead of a callout", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({ status: "ready" }),
+      freshness: {
+        state: "unknown",
+        current_workspace_revision: 0,
+        current_workspace_revision_updated_at: "0001-01-01T00:00:00Z",
+        reason: "preview_revision_missing",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Preview freshness could not be verified.")).toBeInTheDocument();
+    expect(screen.queryByTestId("preview-freshness-callout")).not.toBeInTheDocument();
   });
 
   /* ---------- Design mode toggle ---------- */
