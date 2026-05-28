@@ -122,6 +122,10 @@ type ThreadCanceller interface {
 	CancelThread(threadID uuid.UUID) bool
 }
 
+type OwnerLossOrchestrator interface {
+	RecoverLostOwner(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID) error
+}
+
 // MessageStore defines the message DB operations needed by the thread service.
 type MessageStore interface {
 	Create(ctx context.Context, msg *models.SessionMessage) error
@@ -253,6 +257,7 @@ type Service struct {
 	reviewCommentStore *db.SessionReviewCommentStore // optional — required for SendMessage with ResolveReviewCommentIDs
 	questionStore      QuestionStore                 // optional — required to answer pending questions on awaiting_input resume
 	humanInputStore    HumanInputRequestStore        // optional — required to answer pending human-input requests on awaiting_input resume
+	ownerLoss          OwnerLossOrchestrator         // optional — proactively recovers lost runtime owners after queue-only sends
 	logger             zerolog.Logger
 }
 
@@ -303,6 +308,10 @@ func (s *Service) SetThreadRuntimeStore(store ThreadRuntimeOwnerStore) {
 // orchestrator's thread-scoped cancel registry once it is constructed.
 func (s *Service) SetCanceller(c ThreadCanceller) {
 	s.canceller = c
+}
+
+func (s *Service) SetOwnerLossOrchestrator(orchestrator OwnerLossOrchestrator) {
+	s.ownerLoss = orchestrator
 }
 
 // SetReviewCommentResolver wires the plumbing required to resolve review
@@ -728,6 +737,8 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 			s.logger.Warn().Err(incErr).
 				Str("thread_id", input.ThreadID.String()).
 				Msg("failed to increment pending_message_count for queued message")
+		} else {
+			s.recoverLostOwnerAfterQueuedSend(ctx, input.OrgID, input.SessionID, input.ThreadID)
 		}
 		if err := s.enqueueLiveThreadInboxDelivery(ctx, input); err != nil {
 			s.logger.Warn().Err(err).
@@ -853,7 +864,22 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 			return nil, fmt.Errorf("increment queued message count: %w", err)
 		}
 	}
+	s.recoverLostOwnerAfterQueuedSend(ctx, input.OrgID, input.SessionID, input.ThreadID)
 	return &SendMessageResult{Message: msg, InboxEntry: inboxEntry, ThreadStatus: thread.Status, DeliveryState: deliveryStateForInboxEntry(inboxEntry), AnsweredQuestion: answeredQuestion, AnsweredHumanInput: answeredHumanInput}, nil
+}
+
+func (s *Service) recoverLostOwnerAfterQueuedSend(ctx context.Context, orgID, sessionID, threadID uuid.UUID) {
+	if s.ownerLoss == nil {
+		return
+	}
+	recoverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.ownerLoss.RecoverLostOwner(recoverCtx, orgID, sessionID, &threadID); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("thread_id", threadID.String()).
+			Msg("proactive owner-loss recovery failed after queued send")
+	}
 }
 
 func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, *models.HumanInputRequest, error) {

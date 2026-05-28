@@ -6074,6 +6074,53 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('button', { name: /^Retry$/i })).toBeEnabled();
   });
 
+  it('shows runtime restoration while keeping follow-up input enabled', async () => {
+    const recoveringSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+      recovery_state: 'queued',
+      recovery_queued_at: '2026-05-28T12:00:00Z',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: recoveringSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findAllByText('Restoring runtime from checkpoint')).not.toHaveLength(0);
+    expect(screen.getAllByText('Follow-up messages will be queued and delivered after the runtime is restored.')).not.toHaveLength(0);
+    const composer = screen.getByPlaceholderText('Send a follow-up message...');
+    expect(composer).toBeEnabled();
+  });
+
+  it('disables checkpoint retry while recovery is active', async () => {
+    const recoveringFailedSession: Session = {
+      ...mockSessions[1],
+      failure_retry_advised: true,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+      recovery_state: 'recovering',
+      recovery_started_at: '2026-05-28T12:00:00Z',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: recoveringFailedSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await screen.findByText('Failure details');
+    expect(screen.getAllByText('Restoring runtime from checkpoint')).not.toHaveLength(0);
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeDisabled();
+  });
+
   it('can toggle the detail panel visibility', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');

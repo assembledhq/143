@@ -321,6 +321,42 @@ func TestSessionExecutorStore_ReclaimLost(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionExecutorStore_ReclaimLostForSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	staleBefore := time.Now().Add(-2 * time.Minute)
+	mock.ExpectQuery("WITH stale_active AS").
+		WithArgs(orgID, sessionID, staleBefore, 100).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+	reclaimed, err := store.ReclaimLostForSession(context.Background(), orgID, sessionID, staleBefore, 100)
+	require.NoError(t, err, "targeted ReclaimLost should mark stale executors lost and requeue their jobs")
+	require.Equal(t, int64(1), reclaimed, "targeted ReclaimLost should return the number of reclaimed rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionExecutorStore_ReclaimLostForSession_ScopesToSessionAndRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("session_executor_store.go")
+	require.NoError(t, err, "test should read session executor store source")
+
+	body := string(src)
+	require.Contains(t, body, "func (s *SessionExecutorStore) ReclaimLostForSession", "targeted executor recovery helper should exist")
+	require.Contains(t, body, "se.org_id = $1", "targeted executor recovery must filter by org id")
+	require.Contains(t, body, "se.session_id = $2", "targeted executor recovery must filter by session id")
+	require.Contains(t, body, "runtime_stop_reason = 'worker_recovery'", "targeted executor recovery must persist worker-recovery stop reason")
+	require.Contains(t, body, "recovery_state = 'queued'", "targeted executor recovery must queue session recovery")
+	require.Contains(t, body, "j.lease_expires_at < now()", "targeted executor recovery must only reclaim stale running leases")
+}
+
 func TestSessionExecutorStore_ReclaimLostClearsPreHandoffOrphans(t *testing.T) {
 	t.Parallel()
 
