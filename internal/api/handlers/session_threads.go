@@ -470,6 +470,27 @@ func (h *SessionThreadHandler) RetryInboxEntry(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusInternalServerError, "RETRY_FAILED", "failed to retry inbox entry", err)
 		return
 	}
+	// Audit the "replay something we may have already delivered" path
+	// separately. Plain retries on dead-lettered entries are operator
+	// hygiene; replaying an unknown_delivery entry is a dual-delivery risk
+	// the operator is explicitly accepting, so we keep a record per call.
+	if body.ReplayUnknownDelivery && h.audit != nil {
+		entryIDStr := entry.ID.String()
+		details := map[string]any{
+			"session_id":     sessionID.String(),
+			"thread_id":      threadID.String(),
+			"entry_id":       entry.ID.String(),
+			"sequence_no":    entry.SequenceNo,
+			"delivery_state": string(entry.DeliveryState),
+		}
+		if entry.MessageID != 0 {
+			details["message_id"] = entry.MessageID
+		}
+		if entry.LastError != nil {
+			details["prior_last_error"] = *entry.LastError
+		}
+		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionThreadInboxReplayed, models.AuditResourceSession, &entryIDStr, &sessionID, nil, marshalAuditDetails(h.logger, details))
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ThreadInboxEntry]{Data: entry})
 }
 

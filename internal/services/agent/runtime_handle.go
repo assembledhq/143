@@ -127,32 +127,6 @@ type AgentRuntimeProfile struct {
 	PreferSplitOutput bool
 }
 
-type ThreadRuntimeLiveInputProtocolMode string
-
-const (
-	// ThreadRuntimeLiveInputProtocolUnsupported means the adapter has no
-	// provider-native way to accept follow-up input for an already-running
-	// thread runtime.
-	ThreadRuntimeLiveInputProtocolUnsupported ThreadRuntimeLiveInputProtocolMode = "unsupported"
-	// ThreadRuntimeLiveInputProtocolOpenHandle means the adapter can format
-	// accepted inbox entries and deliver them into the live runtime handle.
-	ThreadRuntimeLiveInputProtocolOpenHandle ThreadRuntimeLiveInputProtocolMode = "open_handle"
-	// ThreadRuntimeLiveInputProtocolTurnBoundResume means the provider-native
-	// continuation contract is an explicit one-shot resume command, not a
-	// write to the currently-running process stdin.
-	ThreadRuntimeLiveInputProtocolTurnBoundResume ThreadRuntimeLiveInputProtocolMode = "turn_bound_resume"
-)
-
-type ThreadRuntimeLiveInputProtocol struct {
-	Mode                 ThreadRuntimeLiveInputProtocolMode
-	DeliversToOpenHandle bool
-	Description          string
-}
-
-type ThreadRuntimeLiveInputProtocolProvider interface {
-	ThreadRuntimeLiveInputProtocol() ThreadRuntimeLiveInputProtocol
-}
-
 // RuntimeProfileProvider is an optional extension on top of AgentAdapter.
 // Adapters implement it to declare their interactive runtime requirements.
 type RuntimeProfileProvider interface {

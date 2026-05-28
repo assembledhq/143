@@ -370,6 +370,13 @@ func (s *ThreadRuntimeStore) MarkTerminalWithLease(ctx context.Context, orgID, r
 	return tag.RowsAffected() == 1, nil
 }
 
+// ReclaimExpiredLeases is the reaper-side recovery path for runtimes whose
+// owning worker missed its heartbeat: it flips them to 'lost', expires the
+// associated sandbox holders, resets in-flight inbox entries to 'pending'
+// (so a replacement runtime will redeliver them), and stamps already-
+// delivered entries as 'unknown_delivery' so an operator can choose between
+// replay-with-dual-delivery-risk and drop.
+//
 // lint:allow-no-orgid reason="system-wide runtime lease recovery scans expired runtime leases across orgs"
 func (s *ThreadRuntimeStore) ReclaimExpiredLeases(ctx context.Context, expiredBefore time.Time, limit int) (ThreadRuntimeReclaimResult, error) {
 	if limit <= 0 {

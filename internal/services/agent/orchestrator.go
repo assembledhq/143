@@ -315,6 +315,11 @@ type SessionStore interface {
 	PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error)
 	UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error
+	// MarkRunningWithSandboxState writes status=running and sandbox_state in
+	// a single statement so the row cannot be left half-updated by a partial
+	// write. Used by the sibling-runtime keepalive path to keep the parent
+	// session and its sandbox state coherent.
+	MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, sandboxState models.SandboxState) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
 	// SetGitIdentity records which credential authority issued the session's
@@ -2348,12 +2353,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if threadRuntimeCtl != nil {
 			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, cancel)
 			defer stopHeartbeat()
-			if o.threadRuntimeDeliversToOpenHandle(run.AgentType) {
-				stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
-					return o.DeliverThreadInbox(deliverCtx, run.OrgID, run.ID, *primaryThreadID)
-				})
-				defer stopInboxPoller()
-			}
+			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
+				return o.DeliverThreadInbox(deliverCtx, run.OrgID, run.ID, *primaryThreadID)
+			})
+			defer stopInboxPoller()
 			defer func() {
 				status := models.ThreadRuntimeStatusClosed
 				stopReason := "completed"
@@ -3559,12 +3562,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if threadRuntimeCtl != nil {
 			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, cancel)
 			defer stopHeartbeat()
-			if o.threadRuntimeDeliversToOpenHandle(session.AgentType) {
-				stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
-					return o.DeliverThreadInbox(deliverCtx, session.OrgID, session.ID, *opts.ThreadID)
-				})
-				defer stopInboxPoller()
-			}
+			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
+				return o.DeliverThreadInbox(deliverCtx, session.OrgID, session.ID, *opts.ThreadID)
+			})
+			defer stopInboxPoller()
 			defer func() {
 				status := models.ThreadRuntimeStatusClosed
 				stopReason := "completed"
@@ -4146,36 +4147,6 @@ func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *model
 				Msg("failed to revert queued sibling thread after enqueue failure")
 		}
 	}
-}
-
-func (o *Orchestrator) answerQueuedHumanInputRequest(ctx context.Context, session *models.Session, queued *models.SessionMessage, threadID *uuid.UUID, log zerolog.Logger) *uuid.UUID {
-	if o.humanInputRequests == nil || queued == nil || queued.UserID == nil {
-		return nil
-	}
-
-	answerText := strings.TrimPrefix(queued.Content, planModePrefix)
-	var (
-		request models.HumanInputRequest
-		err     error
-	)
-	if threadID != nil {
-		request, err = o.humanInputRequests.AnswerLatestPendingFreeTextByThread(ctx, session.OrgID, session.ID, *threadID, answerText, *queued.UserID)
-	} else {
-		request, err = o.humanInputRequests.AnswerLatestPendingFreeTextBySession(ctx, session.OrgID, session.ID, answerText, *queued.UserID)
-	}
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		log.Warn().Err(err).Msg("failed to answer pending human-input request during queue drain")
-		return nil
-	}
-	if o.agentRunQuestions != nil && legacyQuestionCompatible(request.Kind) {
-		if _, qerr := o.agentRunQuestions.AnswerLatestPendingBySessionAndQuestion(ctx, session.OrgID, session.ID, request.Body, answerText, *queued.UserID); qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
-			log.Warn().Err(qerr).Msg("failed to answer compatibility question during queue drain")
-		}
-	}
-	return &request.ID
 }
 
 // drainAcceptableStatus returns true for session states that can absorb

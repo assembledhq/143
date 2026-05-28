@@ -112,7 +112,6 @@ describe("RecoverableInboxNotice", () => {
   it("requires confirmation before replaying an uncertain entry", async () => {
     const user = userEvent.setup();
     const onRetryEntry = vi.fn();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     renderWithProviders(
       <RecoverableInboxNotice
@@ -126,6 +125,32 @@ describe("RecoverableInboxNotice", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Replay entry 14" }));
+    // The replay action is gated on a confirmation dialog, not a native
+    // window.confirm, so the click alone does not fire onRetryEntry.
+    expect(onRetryEntry).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Replay" }));
     expect(onRetryEntry).toHaveBeenCalledWith("entry-uncertain", true);
+  });
+
+  it("does not replay when the confirmation dialog is cancelled", async () => {
+    const user = userEvent.setup();
+    const onRetryEntry = vi.fn();
+
+    renderWithProviders(
+      <RecoverableInboxNotice
+        summary={makeSummary({ dead_letter_count: 0, unknown_delivery_count: 1 })}
+        entries={[makeEntry({ id: "entry-uncertain", delivery_state: "unknown_delivery" })]}
+        isLoading={false}
+        isRetrying={false}
+        onRetryEntry={onRetryEntry}
+        onRetryAll={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Replay entry 14" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onRetryEntry).not.toHaveBeenCalled();
   });
 });

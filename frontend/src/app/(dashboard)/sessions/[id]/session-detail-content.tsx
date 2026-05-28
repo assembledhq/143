@@ -3057,7 +3057,16 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
   const retryRecoverableInboxMutation = useMutation({
     mutationFn: async ({ threadId, entryIds, replayUnknownDelivery }: { threadId: string; entryIds: string[]; replayUnknownDelivery?: boolean }) => {
-      await Promise.all(entryIds.map((entryId) => api.sessions.retryThreadInboxEntry(id, threadId, entryId, { replayUnknownDelivery })));
+      // Drive retries sequentially, not via Promise.all. The server-side
+      // RetryRecoverable flips delivery_state and then enqueues a delivery
+      // notification; firing N concurrent calls against the same thread
+      // races those steps against each other for no benefit. The retry
+      // budget is tiny (one entry per click for individual retries; the
+      // current failed-entry list for "Retry all"), so the latency cost is
+      // negligible compared to the consistency win.
+      for (const entryId of entryIds) {
+        await api.sessions.retryThreadInboxEntry(id, threadId, entryId, { replayUnknownDelivery });
+      }
     },
     onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });

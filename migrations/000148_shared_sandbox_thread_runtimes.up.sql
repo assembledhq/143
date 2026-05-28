@@ -1,3 +1,9 @@
+-- Wrap in an explicit transaction so the DROP+CREATE of
+-- idx_session_executors_one_active never leaves session_executors without a
+-- uniqueness guarantee, even if the migration runner is configured for
+-- multi-statement files without implicit per-file tx.
+BEGIN;
+
 ALTER TABLE sessions
     ADD COLUMN workspace_generation bigint NOT NULL DEFAULT 0;
 
@@ -149,3 +155,5 @@ CREATE UNIQUE INDEX idx_session_executors_one_active_thread
     ON session_executors (org_id, session_id, thread_id)
     WHERE thread_id IS NOT NULL
       AND status IN ('starting', 'running', 'draining');
+
+COMMIT;

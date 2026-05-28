@@ -1038,9 +1038,14 @@ func (s *Service) enqueueLiveThreadInboxDelivery(ctx context.Context, input Send
 	return err
 }
 
+// deliveryStateForInboxEntry returns the entry's delivery state, or the empty
+// string when no inbox entry was created. Returning "" rather than "acked"
+// keeps the response honest in deployments where the inbox is not wired —
+// the client can render "no inbox" instead of mistaking it for a confirmed
+// delivery.
 func deliveryStateForInboxEntry(entry *models.ThreadInboxEntry) models.ThreadInboxDeliveryState {
 	if entry == nil {
-		return models.ThreadInboxDeliveryStateAcked
+		return ""
 	}
 	return entry.DeliveryState
 }

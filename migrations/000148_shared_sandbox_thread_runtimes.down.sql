@@ -1,3 +1,5 @@
+BEGIN;
+
 DROP INDEX IF EXISTS idx_session_executors_one_active_thread;
 DROP INDEX IF EXISTS idx_session_executors_one_active_unthreaded;
 
@@ -11,3 +13,5 @@ DROP TABLE IF EXISTS thread_runtimes;
 
 ALTER TABLE sessions
     DROP COLUMN IF EXISTS workspace_generation;
+
+COMMIT;

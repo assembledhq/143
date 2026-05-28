@@ -39,7 +39,7 @@ type ThreadInboxStore interface {
 	MarkDeliveredThrough(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, sequenceNo int64) (int64, error)
 	MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error)
 	MarkAckedThrough(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, sequenceNo int64) (int64, error)
-	MarkAckedForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
+	MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
 	MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error)
 	MarkDeadLetter(ctx context.Context, orgID, threadID, entryID uuid.UUID, reason string) (models.ThreadInboxEntry, error)
 	MarkDeliveryFailed(ctx context.Context, orgID, threadID, runtimeID, entryID uuid.UUID, reason string, maxAttempts int) (models.ThreadInboxEntry, error)
@@ -58,6 +58,10 @@ type SessionSandboxHolderStore interface {
 type sessionStatusUpdater interface {
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error
+	// MarkRunningWithSandboxState writes status=running and sandbox_state in a
+	// single SQL statement so the row cannot end up half-updated when one
+	// write succeeds and the other fails.
+	MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, sandboxState models.SandboxState) error
 }
 
 type ThreadRuntimeOwnedElsewhereError struct {
@@ -73,10 +77,10 @@ func (e *ThreadRuntimeOwnedElsewhereError) Error() string {
 var ErrThreadRuntimeLeaseLost = errors.New("thread runtime lease lost")
 var ErrThreadRuntimeLiveInputUnsupported = errors.New("thread runtime live input unsupported")
 
-// ThreadRuntimeInputFormatter is the adapter opt-in for provider-native live
-// input. The runtime delivery loop never writes raw inbox payloads into a
-// process unless the owning adapter knows how that provider accepts follow-up
-// input for its live handle.
+// ThreadRuntimeInputFormatter is an optional adapter extension. Every adapter
+// participates in live inbox delivery; implementing this interface only lets a
+// specific adapter override the default content-and-newline encoding (see
+// formatThreadInboxRuntimeInput). There is no opt-out.
 type ThreadRuntimeInputFormatter interface {
 	FormatThreadRuntimeInput(entry models.ThreadInboxEntry) ([]byte, error)
 }
@@ -339,17 +343,15 @@ func keepSessionRunningIfSiblingRuntimesActive(ctx context.Context, sessions ses
 	if active == 0 {
 		return
 	}
-	if err := sessions.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusRunning); err != nil {
+	// Use the combined update so status and sandbox_state move together. The
+	// previous split (UpdateStatus then UpdateSandboxState) could leave the
+	// row showing status='running' while sandbox_state had not been bumped,
+	// or vice versa, if one write failed.
+	if err := sessions.MarkRunningWithSandboxState(ctx, orgID, sessionID, models.SandboxStateRunning); err != nil {
 		log.Warn().Err(err).
 			Str("session_id", sessionID.String()).
 			Int("active_runtime_holders", active).
 			Msg("failed to keep session running while sibling thread runtimes remain active")
-	}
-	if err := sessions.UpdateSandboxState(ctx, orgID, sessionID, models.SandboxStateRunning); err != nil {
-		log.Warn().Err(err).
-			Str("session_id", sessionID.String()).
-			Int("active_runtime_holders", active).
-			Msg("failed to keep sandbox state running while sibling thread runtimes remain active")
 	}
 }
 
@@ -413,7 +415,7 @@ func (a *threadRuntimeHandleAttacher) Attach(handle InteractiveCommandHandle) {
 		return
 	}
 	if a.cfg.InboxStore != nil && len(a.cfg.SeedMessageIDs) > 0 {
-		if _, err := a.cfg.InboxStore.MarkAckedForMessages(ctx, a.cfg.OrgID, a.cfg.ThreadID, a.cfg.RuntimeID, a.cfg.SeedMessageIDs); err != nil {
+		if _, err := a.cfg.InboxStore.MarkAckedForSeedMessages(ctx, a.cfg.OrgID, a.cfg.ThreadID, a.cfg.RuntimeID, a.cfg.SeedMessageIDs); err != nil {
 			a.warn().Err(err).
 				Str("runtime_id", a.cfg.RuntimeID.String()).
 				Str("thread_id", a.cfg.ThreadID.String()).
@@ -459,15 +461,7 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		}
 	}
 
-	formatter, ok := o.threadRuntimeOpenHandleInputFormatter(runtime.AgentType)
-	if !ok {
-		o.logger.Debug().
-			Str("runtime_id", runtime.ID.String()).
-			Str("thread_id", threadID.String()).
-			Str("agent_type", string(runtime.AgentType)).
-			Msg("thread runtime adapter does not support open-handle live input; leaving inbox entries for turn-bound resume")
-		return nil
-	}
+	formatter := o.threadRuntimeInputFormatter(runtime.AgentType)
 
 	entries, err := o.threadInbox.ClaimDeliverableAfter(ctx, orgID, threadID, runtime.ID, runtime.OwnerNodeID, runtime.LastDeliveredSequence, threadInboxDeliveryBatchSize)
 	if err != nil {
@@ -541,27 +535,31 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 	return nil
 }
 
-func (o *Orchestrator) threadRuntimeOpenHandleInputFormatter(agentType models.AgentType) (ThreadRuntimeInputFormatter, bool) {
-	if o == nil || len(o.adapters) == 0 {
-		return nil, false
-	}
-	adapter := o.adapters[agentType]
-	if adapter == nil {
-		return nil, false
-	}
-	if provider, ok := adapter.(ThreadRuntimeLiveInputProtocolProvider); ok {
-		protocol := provider.ThreadRuntimeLiveInputProtocol()
-		if protocol.Mode != ThreadRuntimeLiveInputProtocolOpenHandle || !protocol.DeliversToOpenHandle {
-			return nil, false
+// threadRuntimeInputFormatter returns the formatter to use for delivering
+// inbox payloads to an adapter's live handle. Every adapter participates by
+// default; an adapter may implement ThreadRuntimeInputFormatter to override
+// the wire encoding. There is no opt-out — turn-bound CLIs whose handles do
+// not accept stdin will surface ErrInputNotOpen from WriteInput, which the
+// delivery loop already treats as "leave the entry claimed and try again".
+func (o *Orchestrator) threadRuntimeInputFormatter(agentType models.AgentType) ThreadRuntimeInputFormatter {
+	if o != nil && len(o.adapters) > 0 {
+		if adapter := o.adapters[agentType]; adapter != nil {
+			if formatter, ok := adapter.(ThreadRuntimeInputFormatter); ok {
+				return formatter
+			}
 		}
 	}
-	formatter, ok := adapter.(ThreadRuntimeInputFormatter)
-	return formatter, ok
+	return defaultThreadRuntimeInputFormatter{}
 }
 
-func (o *Orchestrator) threadRuntimeDeliversToOpenHandle(agentType models.AgentType) bool {
-	_, ok := o.threadRuntimeOpenHandleInputFormatter(agentType)
-	return ok
+// defaultThreadRuntimeInputFormatter is the formatter used when an adapter
+// has no provider-specific encoding. It delegates to the package-level
+// formatThreadInboxRuntimeInput helper so the wire shape is identical to
+// what an adapter would produce by hand.
+type defaultThreadRuntimeInputFormatter struct{}
+
+func (defaultThreadRuntimeInputFormatter) FormatThreadRuntimeInput(entry models.ThreadInboxEntry) ([]byte, error) {
+	return formatThreadInboxRuntimeInput(entry)
 }
 
 func (o *Orchestrator) threadDeliveryLock(threadID uuid.UUID) *sync.Mutex {

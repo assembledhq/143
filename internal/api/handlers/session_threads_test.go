@@ -1351,7 +1351,7 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 				require.NoError(t, err, "response body should be valid JSON")
 				require.Equal(t, "please continue", resp.Data.Message.Content, "should return the message content")
 				require.Equal(t, models.MessageRoleUser, resp.Data.Message.Role, "should set the message role to user")
-				require.Equal(t, models.ThreadInboxDeliveryStateAcked, resp.Data.DeliveryState, "should expose the fallback delivery state when the durable inbox is not wired in this test")
+				require.Equal(t, models.ThreadInboxDeliveryState(""), resp.Data.DeliveryState, "should expose an empty delivery state when the durable inbox is not wired in this test")
 			}
 		})
 	}

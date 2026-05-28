@@ -558,6 +558,10 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 	return nil
 }
 
+func (m *mockSessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
+	return nil
+}
+
 func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

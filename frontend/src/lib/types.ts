@@ -507,7 +507,10 @@ export interface ThreadInboxDeliverySummary {
 }
 
 export type ThreadInboxEntryType = 'user_message' | 'human_input_answer' | 'control';
-export type ThreadInboxDeliveryState = 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+// '' is emitted by the API when no inbox entry was created (deployment with the
+// inbox unwired), keeping the SendThreadMessageResponse delivery_state field
+// total without lying about confirmed delivery.
+export type ThreadInboxDeliveryState = '' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
 
 export interface ThreadInboxEntry {
   id: string;

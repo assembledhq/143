@@ -91,6 +91,9 @@ func (s *drainStubSessions) UpdateRecoveryState(context.Context, uuid.UUID, uuid
 func (s *drainStubSessions) UpdateSandboxState(context.Context, uuid.UUID, uuid.UUID, models.SandboxState) error {
 	return nil
 }
+func (s *drainStubSessions) MarkRunningWithSandboxState(context.Context, uuid.UUID, uuid.UUID, models.SandboxState) error {
+	return nil
+}
 func (s *drainStubSessions) UpdateWorkingBranch(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }

@@ -301,7 +301,7 @@ func TestThreadInboxStore_RetryRecoverableRequiresExplicitUnknownReplay(t *testi
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestThreadInboxStore_MarkAckedForMessages(t *testing.T) {
+func TestThreadInboxStore_MarkAckedForSeedMessages(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -317,10 +317,10 @@ func TestThreadInboxStore_MarkAckedForMessages(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
 	store := NewThreadInboxStore(mock)
-	updated, err := store.MarkAckedForMessages(context.Background(), orgID, threadID, runtimeID, []int64{11, 12})
+	updated, err := store.MarkAckedForSeedMessages(context.Background(), orgID, threadID, runtimeID, []int64{11, 12})
 
-	require.NoError(t, err, "MarkAckedForMessages should not return an error")
-	require.Equal(t, int64(2), updated, "MarkAckedForMessages should return updated row count")
+	require.NoError(t, err, "MarkAckedForSeedMessages should not return an error")
+	require.Equal(t, int64(2), updated, "MarkAckedForSeedMessages should return updated row count")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

@@ -1,5 +1,16 @@
+import { useState } from "react";
 import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -59,6 +70,11 @@ export function RecoverableInboxNotice({
   const recoverableCount = summary.dead_letter_count + summary.unknown_delivery_count;
   const failedEntries = entries.filter((entry) => entry.delivery_state === "dead_letter");
   const canRetryAllFailed = failedEntries.length > 0 && !isLoading && !isRetrying;
+  // Pending replay confirmation for an unknown_delivery entry. Tracked as
+  // local state so the dialog renders inside the React tree (no native
+  // window.confirm) — keeps the UX consistent with the rest of the page and
+  // unblocks browser-automation tests that can't dismiss native dialogs.
+  const [replayEntry, setReplayEntry] = useState<ThreadInboxEntry | null>(null);
 
   if (recoverableCount === 0) {
     return null;
@@ -140,10 +156,7 @@ export function RecoverableInboxNotice({
                   aria-label={`${entry.delivery_state === "unknown_delivery" ? "Replay" : "Retry"} entry ${entry.sequence_no}`}
                   onClick={() => {
                     if (entry.delivery_state === "unknown_delivery") {
-                      if (!window.confirm("Replay this message? It may already have reached the agent before the runtime stopped.")) {
-                        return;
-                      }
-                      onRetryEntry(entry.id, true);
+                      setReplayEntry(entry);
                       return;
                     }
                     onRetryEntry(entry.id, false);
@@ -162,6 +175,35 @@ export function RecoverableInboxNotice({
           </div>
         )}
       </CardContent>
+      <AlertDialog
+        open={replayEntry !== null}
+        onOpenChange={(open) => {
+          if (!open) setReplayEntry(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replay this message?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This message may already have reached the agent before the runtime stopped. Replaying could cause it to be processed twice.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                if (!replayEntry) return;
+                const id = replayEntry.id;
+                setReplayEntry(null);
+                onRetryEntry(id, true);
+              }}
+            >
+              Replay
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

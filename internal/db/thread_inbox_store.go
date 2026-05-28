@@ -16,6 +16,14 @@ import (
 
 const DefaultThreadInboxMaxDeliveryAttempts = 5
 
+// threadInboxDeliveryRetryCooldownSeconds is the minimum gap between
+// successive delivery attempts on the same entry. It decouples the
+// delivery_attempts budget from the poll cadence: without this, a poller
+// running every 2s could burn the entire 5-attempt budget in ~10s of
+// flapping, regardless of whether the underlying condition cleared. With a
+// 5s cooldown, dead-lettering takes at least ~25s of sustained failure.
+const threadInboxDeliveryRetryCooldownSeconds = 5
+
 type ThreadInboxStore struct {
 	db DBTX
 }
@@ -278,7 +286,11 @@ func (s *ThreadInboxStore) MarkAckedThrough(ctx context.Context, orgID, threadID
 	return tag.RowsAffected(), nil
 }
 
-func (s *ThreadInboxStore) MarkAckedForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
+// MarkAckedForSeedMessages acks inbox entries the calling runtime has just
+// pulled in as its seed prompt. Restricted to entries the runtime already
+// owns (runtime_id = $3) or that no runtime has claimed yet (runtime_id IS
+// NULL) so it cannot steal ownership stamped by another runtime.
+func (s *ThreadInboxStore) MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
 	if len(messageIDs) == 0 {
 		return 0, nil
 	}
@@ -292,9 +304,10 @@ func (s *ThreadInboxStore) MarkAckedForMessages(ctx context.Context, orgID, thre
 		WHERE org_id = $1
 		  AND thread_id = $2
 		  AND message_id = ANY($4)
-		  AND delivery_state IN ('pending', 'delivering', 'delivered')`, orgID, threadID, runtimeID, messageIDs)
+		  AND delivery_state IN ('pending', 'delivering', 'delivered')
+		  AND (runtime_id IS NULL OR runtime_id = $3)`, orgID, threadID, runtimeID, messageIDs)
 	if err != nil {
-		return 0, fmt.Errorf("mark thread inbox acked for messages: %w", err)
+		return 0, fmt.Errorf("mark thread inbox acked for seed messages: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
@@ -408,6 +421,11 @@ func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, thr
 			  AND thread_id = $2
 			  AND (sequence_no > $5 OR delivery_state = 'pending')
 			  AND delivery_state IN ('pending', 'delivering')
+			  -- Cooldown: a previously-failed entry is skipped until
+			  -- threadInboxDeliveryRetryCooldownSeconds have passed since
+			  -- its last write, so the attempt counter advances on a
+			  -- real-time clock rather than the poll cadence.
+			  AND (delivery_attempts = 0 OR updated_at <= now() - ($7 * interval '1 second'))
 			ORDER BY sequence_no ASC
 			LIMIT $6
 			FOR UPDATE SKIP LOCKED
@@ -430,7 +448,11 @@ func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, thr
 		WHERE e.id IN (SELECT id FROM candidates)
 		  AND e.delivery_state = 'delivering'
 		  AND e.runtime_id = $3
-		ORDER BY sequence_no ASC`, orgID, threadID, runtimeID, ownerNodeID, afterSequence, limit)
+		-- ORDER BY binds to the full UNION ALL (Postgres parses this as
+		-- (claimed UNION ALL prior_claims) ORDER BY sequence_no), so the
+		-- caller sees a single sequence-ordered stream regardless of which
+		-- arm produced each row.
+		ORDER BY sequence_no ASC`, orgID, threadID, runtimeID, ownerNodeID, afterSequence, limit, threadInboxDeliveryRetryCooldownSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliverable thread inbox entries: %w", err)
 	}

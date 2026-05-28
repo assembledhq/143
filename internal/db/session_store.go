@@ -1801,6 +1801,48 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 	return err
 }
 
+// MarkRunningWithSandboxState flips status and sandbox_state in a single
+// UPDATE so a caller can keep the session "running" while sibling thread
+// runtimes mutate the shared sandbox without ever leaving the row in a
+// half-updated state. Mirrors UpdateStatus's "clear failure fields and
+// refresh started_at when entering running" semantics so a session resumed
+// through the sibling-runtime keepalive path looks indistinguishable from
+// one resumed via UpdateStatus(SessionStatusRunning) followed by
+// UpdateSandboxState.
+func (s *SessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, sandboxState models.SandboxState) error {
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET status = @status,
+			sandbox_state = @sandbox_state,
+			started_at = now(),
+			completed_at = NULL,
+			error = NULL,
+			failure_explanation = NULL,
+			failure_category = NULL,
+			failure_next_steps = NULL,
+			failure_retry_advised = false,
+			last_activity_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		RETURNING `+sessionSelectColumns, pgx.NamedArgs{
+		"id":            sessionID,
+		"org_id":        orgID,
+		"status":        string(models.SessionStatusRunning),
+		"sandbox_state": string(sandboxState),
+	})
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
+}
+
 // UpdatePRCreationState transitions pr_creation_state and sets/clears
 // pr_creation_error atomically. The error is only preserved in the `failed`
 // state — any other transition clears it so a prior failure doesn't leak into

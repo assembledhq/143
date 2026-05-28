@@ -173,14 +173,20 @@ func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenHandleUnavailable(t *te
 	require.Empty(t, runtimes.commitCalls, "DeliverThreadInbox should not advance cursors when nothing was delivered")
 }
 
-func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenAdapterHasNoLiveInputFormatter(t *testing.T) {
+func TestOrchestrator_DeliverThreadInboxUsesDefaultFormatterWhenAdapterDoesNotOverride(t *testing.T) {
 	t.Parallel()
 
+	// Every adapter participates in live delivery by default; an adapter that
+	// does not implement ThreadRuntimeInputFormatter still gets its entries
+	// formatted through the package-level default. This test pins that
+	// guarantee — there is no opt-out path.
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	threadID := uuid.New()
+	runtimeID := uuid.New()
+	leaseToken := uuid.New()
 	payload, err := json.Marshal(map[string]any{
-		"content": "do not write raw stdin",
+		"content": "use the default formatter",
 	})
 	require.NoError(t, err, "test payload should marshal")
 
@@ -190,14 +196,16 @@ func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenAdapterHasNoLiveInputFo
 	registry.AttachHandle(threadID, handle)
 	runtimes := &fakeThreadRuntimeStore{
 		active: models.ThreadRuntime{
-			ID:          uuid.New(),
-			OrgID:       orgID,
-			SessionID:   sessionID,
-			ThreadID:    threadID,
-			AgentType:   models.AgentTypeClaudeCode,
-			Status:      models.ThreadRuntimeStatusLive,
-			OwnerNodeID: "worker-a",
-			LeaseToken:  uuid.New(),
+			ID:                    runtimeID,
+			OrgID:                 orgID,
+			SessionID:             sessionID,
+			ThreadID:              threadID,
+			AgentType:             models.AgentTypeClaudeCode,
+			Status:                models.ThreadRuntimeStatusLive,
+			OwnerNodeID:           "worker-a",
+			LeaseToken:            leaseToken,
+			LastDeliveredSequence: 0,
+			LastAckedSequence:     0,
 		},
 	}
 	inbox := &fakeThreadInboxStore{
@@ -227,12 +235,10 @@ func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenAdapterHasNoLiveInputFo
 	})
 
 	err = orch.DeliverThreadInbox(context.Background(), orgID, sessionID, threadID)
-
-	require.NoError(t, err, "DeliverThreadInbox should leave input pending when the provider has no native live input formatter")
-	require.Empty(t, handle.StdinBuffer(), "DeliverThreadInbox should not write raw input to providers without native live input support")
-	require.Empty(t, inbox.deliveredEntries, "DeliverThreadInbox should not mark delivered entries without provider-native acceptance")
-	require.Empty(t, inbox.ackedThrough, "DeliverThreadInbox should not ack entries without provider-native acceptance")
-	require.Empty(t, runtimes.commitCalls, "DeliverThreadInbox should not advance cursors when provider-native delivery is unsupported")
+	require.NoError(t, err, "DeliverThreadInbox should use the default formatter for adapters without an override")
+	require.Equal(t, []byte("use the default formatter\n"), handle.StdinBuffer(), "default formatter should write content with a trailing newline")
+	require.Len(t, inbox.deliveredEntries, 1, "default formatter delivery should mark the entry delivered")
+	require.Len(t, runtimes.commitCalls, 1, "default formatter delivery should advance the runtime cursor")
 }
 
 func TestOrchestrator_DeliverThreadInboxDeadLettersInvalidPayloadAndContinues(t *testing.T) {
@@ -799,7 +805,7 @@ type deliveringForMessagesCall struct {
 	messageIDs  []int64
 }
 
-func (s *fakeThreadInboxStore) MarkAckedForMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
+func (s *fakeThreadInboxStore) MarkAckedForSeedMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
 	copied := make([]int64, len(messageIDs))
 	copy(copied, messageIDs)
 	s.ackForMessagesCalls = append(s.ackForMessagesCalls, ackForMessagesCall{runtimeID: runtimeID, messageIDs: copied})
@@ -882,6 +888,12 @@ func (s *fakeSessionStatusUpdater) UpdateSandboxState(_ context.Context, _ uuid.
 	return nil
 }
 
+func (s *fakeSessionStatusUpdater) MarkRunningWithSandboxState(_ context.Context, _ uuid.UUID, _ uuid.UUID, state models.SandboxState) error {
+	s.statuses = append(s.statuses, models.SessionStatusRunning)
+	s.sandboxStates = append(s.sandboxStates, state)
+	return nil
+}
+
 type fakeThreadRuntimeAdapter struct{}
 
 func (fakeThreadRuntimeAdapter) Name() models.AgentType {
@@ -911,11 +923,4 @@ func (a fakeThreadRuntimeInputAdapter) FormatThreadRuntimeInput(entry models.Thr
 		return nil, err
 	}
 	return append([]byte(a.prefix), input...), nil
-}
-
-func (a fakeThreadRuntimeInputAdapter) ThreadRuntimeLiveInputProtocol() ThreadRuntimeLiveInputProtocol {
-	return ThreadRuntimeLiveInputProtocol{
-		Mode:                 ThreadRuntimeLiveInputProtocolOpenHandle,
-		DeliversToOpenHandle: true,
-	}
 }
