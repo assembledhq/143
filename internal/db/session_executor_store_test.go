@@ -361,6 +361,7 @@ func TestSessionExecutorStore_ReclaimLostDefersWhileThreadRuntimeLeaseActive(t *
 	require.Contains(t, body, "NOT EXISTS (\n\t\t\t\tSELECT 1\n\t\t\t\tFROM thread_runtimes tr", "ReclaimLost should consult active thread runtimes before requeueing a session job")
 	require.Contains(t, body, "tr.thread_id = se.thread_id", "ReclaimLost should gate recovery on the same thread runtime, not unrelated session work")
 	require.Contains(t, body, "tr.lease_expires_at > now()", "ReclaimLost should defer recovery while the thread runtime lease is still valid")
+	require.NotContains(t, body, "tr.lease_expires_at IS NULL OR tr.lease_expires_at > now()", "ReclaimLost should not treat NULL runtime leases as active because runtime reapers consider NULL leases expired")
 }
 
 func TestJobStore_GetRunningForSessionExecutor(t *testing.T) {

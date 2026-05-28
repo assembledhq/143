@@ -237,7 +237,7 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 				WHERE tr.org_id = se.org_id
 				  AND tr.thread_id = se.thread_id
 				  AND tr.status IN ('starting', 'live', 'paused', 'draining')
-				  AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at > now())
+				  AND tr.lease_expires_at > now()
 			  )
 			  AND (
 				(j.status = 'running' AND j.owner_kind = 'session_executor' AND j.lock_token = se.lock_token AND j.lease_expires_at < now())
