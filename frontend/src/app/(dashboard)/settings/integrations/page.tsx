@@ -2,16 +2,25 @@
 
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2 } from "lucide-react";
+import { RefreshCw, Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,7 +35,6 @@ import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { queryKeys } from "@/lib/query-keys";
 import { useAuth } from "@/hooks/use-auth";
-import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -35,10 +43,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { GitHubRepositoryClaimCandidate, LinearTeamKey, LinearTeamRepoMapping, Repository } from "@/lib/types";
+import { getIntegrationByKey, type IntegrationKey } from "@/lib/integrations";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
 const NO_DEFAULT_REPO_VALUE = "__none__";
+const CARD_PILL_LIMIT = 3;
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
 // `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
@@ -60,12 +70,109 @@ function claimStatusLabel(repo: GitHubRepositoryClaimCandidate): string {
   }
 }
 
+function SummaryPills({ values, empty }: { values: string[]; empty: string }) {
+  if (values.length === 0) {
+    return <p className="mt-1.5 text-xs text-muted-foreground">{empty}</p>;
+  }
+  const visible = values.slice(0, CARD_PILL_LIMIT);
+  const hiddenCount = values.length - visible.length;
+  return (
+    <div className="mt-1.5 flex min-w-0 flex-wrap gap-1.5">
+      {visible.map((value) => (
+        <Badge key={value} variant="secondary" className="max-w-44 truncate rounded-md text-xs">
+          {value}
+        </Badge>
+      ))}
+      {hiddenCount > 0 ? (
+        <Badge variant="outline" className="rounded-md text-xs">+{hiddenCount} more</Badge>
+      ) : null}
+    </div>
+  );
+}
+
+function GitHubCardSummary({ repositories }: { repositories: Repository[] }) {
+  const activeRepos = repositories.filter((repo) => repo.status === "active").map((repo) => repo.full_name);
+  return <SummaryPills values={activeRepos} empty="No repositories connected" />;
+}
+
+function ConnectedRepositoryControls({
+  repositories,
+  onDisconnectRepo,
+  onReconnectRepo,
+  pendingRepoID,
+}: {
+  repositories: Repository[];
+  onDisconnectRepo: (repoID: string) => void;
+  onReconnectRepo: (repoID: string) => void;
+  pendingRepoID?: string | null;
+}) {
+  if (repositories.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-medium uppercase text-muted-foreground">Current repository links</div>
+      <div className="space-y-2">
+        {repositories.map((repo) => {
+          const active = repo.status === "active";
+          const pending = pendingRepoID === repo.id;
+          return (
+            <div key={repo.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border px-3 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{repo.full_name}</div>
+                <div className="mt-1">
+                  <Badge variant={active ? "secondary" : "outline"} className="text-xs">
+                    {active ? "Connected" : "Disconnected"}
+                  </Badge>
+                </div>
+              </div>
+              {active ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={pending}
+                  disabled={pending}
+                  onClick={() => onDisconnectRepo(repo.id)}
+                  aria-label={`Disconnect ${repo.full_name}`}
+                >
+                  Disconnect
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  loading={pending}
+                  disabled={pending}
+                  onClick={() => onReconnectRepo(repo.id)}
+                  aria-label={`Reconnect ${repo.full_name}`}
+                >
+                  Reconnect
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function GitHubRepositoryClaims({
   installationId,
   enabled,
+  repositories,
+  onDisconnectRepo,
+  onReconnectRepo,
+  pendingRepoID,
+  onSyncRepos,
+  isSyncing,
 }: {
   installationId?: number;
   enabled: boolean;
+  repositories: Repository[];
+  onDisconnectRepo: (repoID: string) => void;
+  onReconnectRepo: (repoID: string) => void;
+  pendingRepoID?: string | null;
+  onSyncRepos: () => void;
+  isSyncing: boolean;
 }) {
   const queryClient = useQueryClient();
   const [transferRepo, setTransferRepo] = useState<GitHubRepositoryClaimCandidate | null>(null);
@@ -81,6 +188,7 @@ function GitHubRepositoryClaims({
       setTransferRepo(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
       queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+      queryClient.invalidateQueries({ queryKey: ["repositories", "integrations", "include-disconnected"] });
       queryClient.invalidateQueries({ queryKey: queryKeys.integrations.githubRepositories(installationId) });
     },
   });
@@ -97,7 +205,31 @@ function GitHubRepositoryClaims({
 
   return (
     <>
-      <div className="mt-3">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">Repository access</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Choose which repositories this organization can use for sessions, automation, and PR creation.
+            </p>
+          </div>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            onClick={onSyncRepos}
+            disabled={isSyncing}
+            aria-label="Sync repositories"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+        <ConnectedRepositoryControls
+          repositories={repositories}
+          onDisconnectRepo={onDisconnectRepo}
+          onReconnectRepo={onReconnectRepo}
+          pendingRepoID={pendingRepoID}
+        />
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading repositories...</p>
         ) : error ? (
@@ -219,12 +351,10 @@ function SlackChannelPicker() {
 
   if (isLoading) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Slack Channels</CardTitle>
-          <CardDescription>Loading channels...</CardDescription>
-        </CardHeader>
-      </Card>
+      <div>
+        <h3 className="text-sm font-medium">Monitored Slack channels</h3>
+        <p className="mt-1 text-sm text-muted-foreground">Loading channels...</p>
+      </div>
     );
   }
 
@@ -236,46 +366,60 @@ function SlackChannelPicker() {
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle className="text-sm">Monitored Slack Channels</CardTitle>
-            <CardDescription>
-              Select which channels the PM agent should monitor for actionable conversations.
-            </CardDescription>
-          </div>
-          <AutosaveIndicator status={status} />
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium">Monitored Slack channels</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Select which channels the PM agent should monitor for actionable conversations.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent>
-        {channels.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No channels found.</p>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid gap-2 max-h-64 overflow-y-auto">
-              {channels.map((ch) => (
-                <label
-                  key={ch.id}
-                  className="flex items-center gap-2 rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(ch.id)}
-                    onChange={() => toggle(ch.id)}
-                    className="h-4 w-4 rounded border-input"
-                  />
-                  <span className="text-sm font-medium">#{ch.name}</span>
-                </label>
-              ))}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {selected.size} channel{selected.size !== 1 ? "s" : ""} selected
-            </p>
+        <AutosaveIndicator status={status} />
+      </div>
+      {channels.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No channels found.</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid max-h-[24rem] gap-2 overflow-y-auto pr-1">
+            {channels.map((ch) => (
+              <Label
+                key={ch.id}
+                className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 transition-colors hover:bg-muted/50"
+              >
+                <Checkbox
+                  checked={selected.has(ch.id)}
+                  onCheckedChange={() => toggle(ch.id)}
+                  aria-label={`Monitor #${ch.name}`}
+                />
+                <span className="text-sm font-medium">#{ch.name}</span>
+              </Label>
+            ))}
           </div>
-        )}
-      </CardContent>
-    </Card>
+          <p className="text-xs text-muted-foreground">
+            {selected.size} channel{selected.size !== 1 ? "s" : ""} selected
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SlackCardSummary() {
+  const { data: channelsResp, isLoading } = useQuery<{ data: SlackChannel[] }>({
+    queryKey: queryKeys.integrations.slackChannels,
+    queryFn: () => api.integrations.listSlackChannels(),
+  });
+  if (isLoading) {
+    return <p className="mt-1.5 text-xs text-muted-foreground">Loading channel summary...</p>;
+  }
+  const selected = (channelsResp?.data ?? []).filter((ch) => ch.selected);
+  return (
+    <div>
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        Monitoring {selected.length} channel{selected.length === 1 ? "" : "s"}
+      </p>
+      <SummaryPills values={selected.map((ch) => `#${ch.name}`)} empty="No channels selected" />
+    </div>
   );
 }
 
@@ -292,7 +436,7 @@ function linearTeamMappingLabel(teams: LinearTeamKey[], teamKey: string): string
   return team ? linearTeamLabel(team) : teamKey;
 }
 
-function LinearAgentRoutingSettings() {
+function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOverride?: Repository[] }) {
   const queryClient = useQueryClient();
   const [teamID, setTeamID] = useState("");
   const [projectID, setProjectID] = useState("");
@@ -301,17 +445,21 @@ function LinearAgentRoutingSettings() {
   const { data: statusResp, isLoading: statusLoading } = useQuery({
     queryKey: queryKeys.integrations.linearAgentStatus,
     queryFn: () => api.integrations.getLinearAgentStatus(),
+    staleTime: 60_000,
   });
   const { data: mappingsResp, isLoading: mappingsLoading } = useQuery({
     queryKey: queryKeys.integrations.linearAgentMappings,
     queryFn: () => api.integrations.listLinearAgentMappings(),
+    staleTime: 60_000,
   });
   const { data: repositoriesResp } = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
+    enabled: !repositoriesOverride,
+    staleTime: 60_000,
   });
 
-  const repositories = (repositoriesResp?.data ?? []).filter((repo) => repo.status === "active");
+  const repositories = (repositoriesOverride ?? repositoriesResp?.data ?? []).filter((repo) => repo.status === "active");
   const status = statusResp?.data;
   const availableTeams = status?.available_teams ?? [];
   const mappings = mappingsResp?.data ?? [];
@@ -468,6 +616,200 @@ function LinearAgentRoutingSettings() {
   );
 }
 
+function LinearRoutingSummary({ repositories }: { repositories: Repository[] }) {
+  const { data: statusResp, isLoading: statusLoading } = useQuery({
+    queryKey: queryKeys.integrations.linearAgentStatus,
+    queryFn: () => api.integrations.getLinearAgentStatus(),
+    staleTime: 60_000,
+  });
+  const { data: mappingsResp, isLoading: mappingsLoading } = useQuery({
+    queryKey: queryKeys.integrations.linearAgentMappings,
+    queryFn: () => api.integrations.listLinearAgentMappings(),
+    staleTime: 60_000,
+  });
+  if (statusLoading || mappingsLoading) {
+    return <p className="mt-1.5 text-xs text-muted-foreground">Loading routing summary...</p>;
+  }
+
+  const defaultRepo = repoName(repositories, statusResp?.data?.default_repo_id);
+  const hasDefault = Boolean(statusResp?.data?.default_repo_id);
+  const mappings = mappingsResp?.data ?? [];
+  const overrideLabel = `${mappings.length} team override${mappings.length === 1 ? "" : "s"}`;
+  return (
+    <p className="mt-1.5 text-xs text-muted-foreground">
+      {hasDefault ? `Default repo: ${defaultRepo}` : "No default repo"} · {overrideLabel}
+    </p>
+  );
+}
+
+function IntegrationDangerZone({
+  provider,
+  name,
+  disconnecting,
+  onDisconnect,
+}: {
+  provider: IntegrationKey;
+  name: string;
+  disconnecting: boolean;
+  onDisconnect: (provider: IntegrationKey) => void;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  return (
+    <div className="space-y-3 rounded-md border border-destructive/25 bg-destructive/5 p-3">
+      <div>
+        <h3 className="text-sm font-medium text-destructive">Danger zone</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Disconnect {name} from this organization. Existing synced records remain visible where applicable.
+        </p>
+      </div>
+      <Button
+        size="sm"
+        variant="destructive"
+        loading={disconnecting}
+        disabled={disconnecting}
+        onClick={() => setConfirmOpen(true)}
+      >
+        Disconnect {name}
+      </Button>
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disconnect {name}</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will stop {name} sync and automation for this organization.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={disconnecting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={disconnecting}
+              onClick={() => {
+                setConfirmOpen(false);
+                onDisconnect(provider);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Disconnect
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+function IntegrationDetailSheet({
+  provider,
+  open,
+  onOpenChange,
+  connected,
+  repositories,
+  githubInstallationId,
+  onDisconnect,
+  disconnectingProvider,
+  onDisconnectRepo,
+  onReconnectRepo,
+  pendingRepoID,
+  onSyncRepos,
+  isSyncingRepos,
+  onReplaceNotionToken,
+  onReplaceCircleCIToken,
+}: {
+  provider: IntegrationKey | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  connected: Partial<Record<IntegrationKey, boolean>>;
+  repositories: Repository[];
+  githubInstallationId?: number;
+  onDisconnect: (provider: IntegrationKey) => void;
+  disconnectingProvider?: IntegrationKey | null;
+  onDisconnectRepo: (repoID: string) => void;
+  onReconnectRepo: (repoID: string) => void;
+  pendingRepoID?: string | null;
+  onSyncRepos: () => void;
+  isSyncingRepos: boolean;
+  onReplaceNotionToken: () => void;
+  onReplaceCircleCIToken: () => void;
+}) {
+  if (!provider) return null;
+  const meta = getIntegrationByKey(provider);
+  const isConnected = Boolean(connected[provider]);
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle>{meta.name}</SheetTitle>
+          <SheetDescription>{meta.description}</SheetDescription>
+        </SheetHeader>
+        <div className="mt-6 space-y-6">
+          <div className="rounded-md border border-border p-3">
+            <div className="text-xs font-medium uppercase text-muted-foreground">Status</div>
+            <div className="mt-2 flex items-center gap-2">
+              <Badge variant={isConnected ? "secondary" : "outline"}>
+                {isConnected ? "Connected" : "Not connected"}
+              </Badge>
+            </div>
+          </div>
+
+          {provider === "github" ? (
+            <GitHubRepositoryClaims
+              installationId={githubInstallationId}
+              enabled={isConnected}
+              repositories={repositories}
+              onDisconnectRepo={onDisconnectRepo}
+              onReconnectRepo={onReconnectRepo}
+              pendingRepoID={pendingRepoID}
+              onSyncRepos={onSyncRepos}
+              isSyncing={isSyncingRepos}
+            />
+          ) : null}
+          {provider === "linear" ? <LinearAgentRoutingSettings repositoriesOverride={repositories} /> : null}
+          {provider === "slack" ? <SlackChannelPicker /> : null}
+          {provider === "sentry" ? (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium">Connection scope</h3>
+              <p className="text-sm text-muted-foreground">
+                Sentry is connected for error ingestion. There are no project or environment filters to configure yet.
+              </p>
+            </div>
+          ) : null}
+          {provider === "notion" ? (
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">Connection settings</h3>
+              <p className="text-sm text-muted-foreground">
+                Replace the internal integration token when workspace access changes.
+              </p>
+              <Button size="sm" variant="outline" onClick={onReplaceNotionToken}>Replace token</Button>
+            </div>
+          ) : null}
+          {provider === "circleci" ? (
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">Connection settings</h3>
+              <p className="text-sm text-muted-foreground">
+                Replace the CircleCI API token or project slug used for flaky-test context.
+              </p>
+              <Button size="sm" variant="outline" onClick={onReplaceCircleCIToken}>Replace credentials</Button>
+            </div>
+          ) : null}
+
+          {isConnected ? (
+            <>
+              <Separator />
+              <IntegrationDangerZone
+                provider={provider}
+                name={meta.name}
+                disconnecting={disconnectingProvider === provider}
+                onDisconnect={onDisconnect}
+              />
+            </>
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 type TokenDialogField = {
   id: string;
   label: string;
@@ -540,11 +882,33 @@ export default function IntegrationsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const [selectedIntegration, setSelectedIntegration] = useState<IntegrationKey | null>(null);
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+  const { data: repositoriesResp } = useQuery({
+    queryKey: ["repositories", "integrations", "include-disconnected"],
+    queryFn: () => api.repositories.list({ includeDisconnected: true }),
+  });
   const disconnectMutation = useDisconnectIntegration();
+  const repositoryStatusMutation = useMutation({
+    mutationFn: ({ repoID, action }: { repoID: string; action: "disconnect" | "reconnect" }) =>
+      action === "disconnect" ? api.repositories.disconnect(repoID) : api.repositories.reconnect(repoID),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["repositories", "integrations", "include-disconnected"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+    },
+  });
+  const syncReposMutation = useMutation({
+    mutationFn: () => api.integrations.syncGitHub(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["repositories", "integrations", "include-disconnected"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.githubRepositories(githubIntegration?.github_installation_id) });
+    },
+  });
 
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
   const [notionError, setNotionError] = useState<string | null>(null);
@@ -602,6 +966,16 @@ export default function IntegrationsPage() {
   const circleciIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "circleci" && integration.status === "active"
   );
+  const repositories = repositoriesResp?.data ?? [];
+  const activeRepositories = repositories.filter((repo) => repo.status === "active");
+  const connected = {
+    github: githubConnected,
+    sentry: Boolean(sentryIntegration),
+    linear: Boolean(linearIntegration),
+    slack: Boolean(slackIntegration),
+    notion: Boolean(notionIntegration),
+    circleci: Boolean(circleciIntegration),
+  } satisfies Partial<Record<IntegrationKey, boolean>>;
 
   return (
     <PageContainer size="default">
@@ -617,17 +991,10 @@ export default function IntegrationsPage() {
       )}
       <AllIntegrationCards
         githubConnected={githubConnected}
-        githubExtra={
-          isAdmin && githubConnected ? (
-            <GitHubRepositoryClaims
-              installationId={githubIntegration?.github_installation_id}
-              enabled={githubConnected}
-            />
-          ) : undefined
-        }
+        githubRepos={activeRepositories.map((repo) => ({ id: repo.id, full_name: repo.full_name, status: repo.status }))}
+        githubSummary={githubConnected ? <GitHubCardSummary repositories={repositories} /> : undefined}
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
-        linearExtra={linearIntegration && isAdmin ? <LinearAgentRoutingSettings /> : undefined}
         linearLoading={false}
         linearAuthError={linearAuthError}
         slackConnected={Boolean(slackIntegration)}
@@ -647,14 +1014,55 @@ export default function IntegrationsPage() {
           setCircleciError(null);
           setCircleciDialogOpen(true);
         }}
+        onManageGitHub={isAdmin ? () => setSelectedIntegration("github") : undefined}
+        onManageIntegration={isAdmin ? (provider) => setSelectedIntegration(provider) : undefined}
+        summaries={{
+          linear: linearIntegration ? <LinearRoutingSummary repositories={repositories} /> : undefined,
+          slack: slackIntegration ? <SlackCardSummary /> : undefined,
+          notion: notionIntegration ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              {notionIntegration.notion_workspace_name ? `Workspace: ${notionIntegration.notion_workspace_name}` : "Workspace knowledge sync is enabled"}
+            </p>
+          ) : undefined,
+          circleci: circleciIntegration ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              {circleciIntegration.circleci_project_slug ? `Project: ${circleciIntegration.circleci_project_slug}` : "Flaky-test context is enabled"}
+            </p>
+          ) : undefined,
+        }}
         onDisconnect={(provider) => disconnectMutation.mutate(provider)}
         disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
         disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
         readOnly={!isAdmin}
       />
-      {slackIntegration && isAdmin && <SlackChannelPicker />}
       </div>
+
+      <IntegrationDetailSheet
+        provider={selectedIntegration}
+        open={selectedIntegration !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedIntegration(null);
+        }}
+        connected={connected}
+        repositories={repositories}
+        githubInstallationId={githubIntegration?.github_installation_id}
+        onDisconnect={(provider) => disconnectMutation.mutate(provider, { onSuccess: () => setSelectedIntegration(null) })}
+        disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
+        onDisconnectRepo={(repoID) => repositoryStatusMutation.mutate({ repoID, action: "disconnect" })}
+        onReconnectRepo={(repoID) => repositoryStatusMutation.mutate({ repoID, action: "reconnect" })}
+        pendingRepoID={repositoryStatusMutation.isPending ? repositoryStatusMutation.variables?.repoID : null}
+        onSyncRepos={() => syncReposMutation.mutate()}
+        isSyncingRepos={syncReposMutation.isPending}
+        onReplaceNotionToken={() => {
+          setNotionError(null);
+          setNotionDialogOpen(true);
+        }}
+        onReplaceCircleCIToken={() => {
+          setCircleciError(null);
+          setCircleciDialogOpen(true);
+        }}
+      />
 
       <TokenDialog
         open={notionDialogOpen}

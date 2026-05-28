@@ -76,6 +76,9 @@ type Integration struct {
 	GitHubAccountLogin          *string             `db:"-" json:"github_account_login,omitempty"`
 	GitHubRepoSelectionRequired *bool               `db:"-" json:"github_repo_selection_required,omitempty"`
 	GitHubActiveRepoCount       *int                `db:"-" json:"github_active_repo_count,omitempty"`
+	NotionWorkspaceID           *string             `db:"-" json:"notion_workspace_id,omitempty"`
+	NotionWorkspaceName         *string             `db:"-" json:"notion_workspace_name,omitempty"`
+	CircleCIProjectSlug         *string             `db:"-" json:"circleci_project_slug,omitempty"`
 	// AuthError is a derived view of the auth-failure markers stamped into
 	// config jsonb when a provider rejects our access token (currently only
 	// Linear). Populated by ListIntegrations / Get* paths via deriveIntegrationStatus

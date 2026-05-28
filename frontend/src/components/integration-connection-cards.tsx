@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { RefreshCw, X } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
 
 type IntegrationCallbacks = {
   onDisconnect?: (provider: IntegrationKey) => void;
+  onManageIntegration?: (provider: IntegrationKey) => void;
   disconnectingProvider?: IntegrationKey | null;
   disconnectErrorProvider?: IntegrationKey | null;
   disconnectError?: string | null;
@@ -29,19 +30,14 @@ export type GithubRepoChip = {
   status: string;
 };
 
-type RepoCallbacks = {
-  onDisconnectRepo?: (repoID: string) => void;
-  onReconnectRepo?: (repoID: string) => void;
-  pendingRepoID?: string | null;
-};
-
-type SourceControlIntegrationCardProps = IntegrationCallbacks & RepoCallbacks & {
+type SourceControlIntegrationCardProps = IntegrationCallbacks & {
   githubConnected: boolean;
   githubRepos?: GithubRepoChip[];
-  githubExtra?: ReactNode;
   onConnectGitHub: () => void;
+  onManageGitHub?: () => void;
   onSyncRepos?: () => void;
   isSyncing?: boolean;
+  githubSummary?: ReactNode;
 };
 
 // IntegrationAuthErrorInfo mirrors the shape the backend returns on
@@ -57,7 +53,6 @@ export type IntegrationAuthErrorInfo = {
 type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   sentryConnected: boolean;
   linearConnected: boolean;
-  linearExtra?: ReactNode;
   linearLoading: boolean;
   linearAuthError?: IntegrationAuthErrorInfo | null;
   slackConnected: boolean;
@@ -65,6 +60,7 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   notionLoading?: boolean;
   circleciConnected: boolean;
   circleciLoading?: boolean;
+  summaries?: Partial<Record<IntegrationKey, ReactNode>>;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
   onConnectSlack: () => void;
@@ -83,132 +79,40 @@ type AllIntegrationCardsProps =
 type AdditionalIntegrationCardsPropsWithReadOnly =
   AdditionalIntegrationCardsProps & ReadOnlyProps;
 
-// ActiveRepoChip renders one active repo with a trailing × button that opens a
-// confirmation dialog before disconnecting. The × is only shown when a handler
-// is provided so read-only callers (e.g. the GitHub card rendered before the
-// user has the disconnect wiring) still display cleanly.
-function ActiveRepoChip({
-  repo,
-  onDisconnect,
-  pending,
-}: {
-  repo: GithubRepoChip;
-  onDisconnect?: (id: string) => void;
-  pending: boolean;
-}) {
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
+function RepoSummaryPill({ repo }: { repo: GithubRepoChip }) {
   return (
-    <>
-      <span
-        className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
-      >
-        {repo.full_name}
-        {onDisconnect && (
-          <button
-            type="button"
-            onClick={() => setConfirmOpen(true)}
-            disabled={pending}
-            aria-label={`Disconnect ${repo.full_name}`}
-            className="ml-0.5 rounded-sm p-0.5 text-muted-foreground/70 transition hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
-          >
-            <X className="h-3 w-3" />
-          </button>
-        )}
-      </span>
-      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Disconnect {repo.full_name}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Existing sessions and runs for this repo will remain visible, but
-              you won&rsquo;t be able to start new ones. You can reconnect at
-              any time from this page.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setConfirmOpen(false);
-                onDisconnect?.(repo.id);
-              }}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Disconnect
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
-  );
-}
-
-function DisconnectedRepoChip({
-  repo,
-  onReconnect,
-  pending,
-}: {
-  repo: GithubRepoChip;
-  onReconnect?: (id: string) => void;
-  pending: boolean;
-}) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-muted-foreground/30 bg-transparent px-2 py-0.5 text-xs font-medium text-muted-foreground/70 line-through">
+    <Badge variant="secondary" className="max-w-44 truncate rounded-md text-xs">
       {repo.full_name}
-      {onReconnect && (
-        <button
-          type="button"
-          onClick={() => onReconnect(repo.id)}
-          disabled={pending}
-          aria-label={`Reconnect ${repo.full_name}`}
-          className="ml-0.5 rounded-sm px-1 py-0 text-xs font-semibold uppercase tracking-wide text-primary no-underline hover:bg-primary/10 disabled:opacity-50"
-        >
-          Reconnect
-        </button>
-      )}
-    </span>
+    </Badge>
   );
 }
 
 function ConnectedReposList({
   repos,
-  onDisconnectRepo,
-  onReconnectRepo,
-  pendingRepoID,
 }: {
   repos: GithubRepoChip[];
-} & RepoCallbacks) {
-  if (repos.length === 0) return null;
+}) {
   const active = repos.filter((r) => r.status === "active");
-  const disconnected = repos.filter((r) => r.status !== "active");
+  if (active.length === 0) {
+    return (
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        {repos.length > 0 ? "No active repositories" : "No repositories connected"}
+      </p>
+    );
+  }
+  const visible = active.slice(0, 3);
+  const hiddenCount = active.length - visible.length;
 
   return (
-    <div className="mt-1.5 space-y-1.5">
-      {active.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {active.map((repo) => (
-            <ActiveRepoChip
-              key={repo.id}
-              repo={repo}
-              onDisconnect={onDisconnectRepo}
-              pending={pendingRepoID === repo.id}
-            />
-          ))}
-        </div>
-      )}
-      {disconnected.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {disconnected.map((repo) => (
-            <DisconnectedRepoChip
-              key={repo.id}
-              repo={repo}
-              onReconnect={onReconnectRepo}
-              pending={pendingRepoID === repo.id}
-            />
-          ))}
-        </div>
-      )}
+    <div className="mt-1.5 flex min-w-0 flex-wrap gap-1.5">
+      {visible.map((repo) => (
+        <RepoSummaryPill key={repo.id} repo={repo} />
+      ))}
+      {hiddenCount > 0 ? (
+        <Badge variant="outline" className="rounded-md text-xs">
+          +{hiddenCount} more
+        </Badge>
+      ) : null}
     </div>
   );
 }
@@ -338,6 +242,18 @@ function IntegrationAction({
     );
   }
 
+  if (connected && onDisconnect === undefined && loading === undefined) {
+    return (
+      <Button
+        size="sm"
+        disabled
+        aria-label={`${integrationName} Connected`}
+      >
+        Connected
+      </Button>
+    );
+  }
+
   if (connected && onDisconnect) {
     return (
       <>
@@ -406,10 +322,8 @@ export function SourceControlIntegrationCard({
   disconnectError,
   onSyncRepos,
   isSyncing,
-  onDisconnectRepo,
-  onReconnectRepo,
-  pendingRepoID,
-  githubExtra,
+  githubSummary,
+  onManageGitHub,
 }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
@@ -422,20 +336,10 @@ export function SourceControlIntegrationCard({
           description: github.description,
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
-          extra: githubConnected ? (
-            <>
-              <ConnectedReposList
-                repos={githubRepos}
-                onDisconnectRepo={onDisconnectRepo}
-                onReconnectRepo={onReconnectRepo}
-                pendingRepoID={pendingRepoID}
-              />
-              {githubExtra}
-            </>
-          ) : undefined,
+          summary: githubConnected ? githubSummary ?? <ConnectedReposList repos={githubRepos} /> : undefined,
           action: (
             <div className="flex items-center gap-1.5">
-              {githubConnected && onSyncRepos && (
+              {githubConnected && onSyncRepos && !onManageGitHub && (
                 <Button
                   size="icon"
                   variant="ghost"
@@ -447,15 +351,24 @@ export function SourceControlIntegrationCard({
                   <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
                 </Button>
               )}
-              <IntegrationAction
-                connected={githubConnected}
-                integrationKey="github"
-                integrationName={github.name}
-                onConnect={onConnectGitHub}
-                onDisconnect={onDisconnect}
-                disconnecting={disconnectingProvider === "github"}
-                disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
-              />
+              {githubConnected && onManageGitHub ? (
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary" className="text-xs">Connected</Badge>
+                  <Button size="sm" variant="outline" onClick={onManageGitHub} aria-label="Manage GitHub">
+                    Manage
+                  </Button>
+                </div>
+              ) : (
+                <IntegrationAction
+                  connected={githubConnected}
+                  integrationKey="github"
+                  integrationName={github.name}
+                  onConnect={onConnectGitHub}
+                  onDisconnect={onDisconnect}
+                  disconnecting={disconnectingProvider === "github"}
+                  disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
+                />
+              )}
             </div>
           ),
         },
@@ -472,7 +385,7 @@ type OptionalIntegrationDescriptor = {
   connected: boolean;
   loading?: boolean;
   authError?: IntegrationAuthErrorInfo | null;
-  extra?: ReactNode;
+  summary?: ReactNode;
   onConnect: () => void;
 };
 
@@ -488,13 +401,20 @@ function buildOptionalIntegrationItems(
       description: meta.description,
       logo: <IntegrationLogo name={meta.name} src={meta.logoSrc} />,
       badge: <Badge variant="secondary" className="text-xs">Optional</Badge>,
-      extra: (
+      summary: (
         <>
           {d.authError ? <IntegrationAuthErrorAlert info={d.authError} /> : null}
-          {d.extra}
+          {d.summary}
         </>
       ),
-      action: (
+      action: d.connected && !d.authError && shared.onManageIntegration && !shared.readOnly ? (
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="text-xs">Connected</Badge>
+          <Button size="sm" variant="outline" onClick={() => shared.onManageIntegration?.(d.key)} aria-label={`Manage ${meta.name}`}>
+            Manage
+          </Button>
+        </div>
+      ) : (
         <IntegrationAction
           connected={d.connected}
           integrationKey={d.key}
@@ -516,11 +436,11 @@ function optionalDescriptorsFromProps(
   p: AdditionalIntegrationCardsPropsWithReadOnly,
 ): OptionalIntegrationDescriptor[] {
   return [
-    { key: "sentry", connected: p.sentryConnected, onConnect: p.onConnectSentry },
-    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, extra: p.linearExtra, onConnect: p.onConnectLinear },
-    { key: "slack", connected: p.slackConnected, onConnect: p.onConnectSlack },
-    { key: "notion", connected: p.notionConnected, loading: p.notionLoading, onConnect: p.onConnectNotion },
-    { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, onConnect: p.onConnectCircleCI },
+    { key: "sentry", connected: p.sentryConnected, summary: p.summaries?.sentry, onConnect: p.onConnectSentry },
+    { key: "linear", connected: p.linearConnected, loading: p.linearLoading, authError: p.linearAuthError ?? null, summary: p.summaries?.linear, onConnect: p.onConnectLinear },
+    { key: "slack", connected: p.slackConnected, summary: p.summaries?.slack, onConnect: p.onConnectSlack },
+    { key: "notion", connected: p.notionConnected, loading: p.notionLoading, summary: p.summaries?.notion, onConnect: p.onConnectNotion },
+    { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, summary: p.summaries?.circleci, onConnect: p.onConnectCircleCI },
   ];
 }
 
@@ -538,18 +458,15 @@ export function AllIntegrationCards(props: AllIntegrationCardsProps) {
     description: github.description,
     logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
     badge: <Badge variant="outline" className="text-xs">Required</Badge>,
-    extra: props.githubConnected ? (
-      <>
-        <ConnectedReposList
-          repos={props.githubRepos ?? []}
-          onDisconnectRepo={props.readOnly ? undefined : props.onDisconnectRepo}
-          onReconnectRepo={props.readOnly ? undefined : props.onReconnectRepo}
-          pendingRepoID={props.pendingRepoID}
-        />
-        {props.githubExtra}
-      </>
-    ) : undefined,
-    action: (
+    summary: props.githubConnected ? props.githubSummary ?? <ConnectedReposList repos={props.githubRepos ?? []} /> : undefined,
+    action: props.githubConnected && props.onManageGitHub && !props.readOnly ? (
+      <div className="flex items-center gap-2">
+        <Badge variant="secondary" className="text-xs">Connected</Badge>
+        <Button size="sm" variant="outline" onClick={props.onManageGitHub} aria-label="Manage GitHub">
+          Manage
+        </Button>
+      </div>
+    ) : (
       <IntegrationAction
         connected={props.githubConnected}
         integrationKey="github"

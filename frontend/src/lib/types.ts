@@ -223,6 +223,9 @@ export interface Integration {
   github_account_login?: string;
   github_repo_selection_required?: boolean;
   github_active_repo_count?: number;
+  notion_workspace_id?: string;
+  notion_workspace_name?: string;
+  circleci_project_slug?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
