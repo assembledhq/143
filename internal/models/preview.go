@@ -50,6 +50,28 @@ type PreviewInstance struct {
 	PreviewHoldingContainer bool `db:"preview_holding_container" json:"preview_holding_container"`
 }
 
+// PreviewRuntime is the live worker attachment for a preview instance. Preview
+// instances are durable user-facing records; runtimes are leased worker-owned
+// serving attachments and are authoritative for preview proxy routing.
+type PreviewRuntime struct {
+	ID                uuid.UUID            `db:"id" json:"id"`
+	OrgID             uuid.UUID            `db:"org_id" json:"org_id"`
+	PreviewInstanceID uuid.UUID            `db:"preview_instance_id" json:"preview_instance_id"`
+	RuntimeEpoch      int                  `db:"runtime_epoch" json:"runtime_epoch"`
+	WorkerNodeID      string               `db:"worker_node_id" json:"worker_node_id"`
+	EndpointURL       string               `db:"endpoint_url" json:"endpoint_url"`
+	PreviewHandle     string               `db:"preview_handle" json:"preview_handle"`
+	PrimaryPort       int                  `db:"primary_port" json:"primary_port"`
+	Status            PreviewRuntimeStatus `db:"status" json:"status"`
+	LeaseExpiresAt    time.Time            `db:"lease_expires_at" json:"lease_expires_at"`
+	LastHeartbeatAt   time.Time            `db:"last_heartbeat_at" json:"last_heartbeat_at"`
+	DrainRequestedAt  *time.Time           `db:"drain_requested_at" json:"drain_requested_at,omitempty"`
+	StoppedAt         *time.Time           `db:"stopped_at" json:"stopped_at,omitempty"`
+	Error             string               `db:"error" json:"error,omitempty"`
+	CreatedAt         time.Time            `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time            `db:"updated_at" json:"updated_at"`
+}
+
 // PreviewTarget is the branch/commit/config tuple a preview runtime attempts
 // to render. Runtime attempts live in preview_instances.
 type PreviewTarget struct {

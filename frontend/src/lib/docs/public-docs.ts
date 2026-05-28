@@ -105,6 +105,19 @@ function parseFrontmatter(source: string): Record<string, unknown> {
   return data;
 }
 
+function bodyWithoutFrontmatter(source: string) {
+  if (!source.startsWith("---\n")) {
+    return source;
+  }
+
+  const end = source.indexOf("\n---", 4);
+  if (end === -1) {
+    return source;
+  }
+
+  return source.slice(end + "\n---".length).trimStart();
+}
+
 function slugFromFile(filePath: string) {
   const relative = toPosixPath(path.relative(publicDocsRoot, filePath));
   const withoutExtension = relative.replace(/\.(mdx|md)$/, "");
@@ -231,8 +244,18 @@ export function getRawPublicDocBySlug(slug: string[]): RawPublicDoc {
     throw new Error(`Public doc not found: ${slug.join("/")}`);
   }
 
+  const source = fs.readFileSync(filePath, "utf8");
+  const frontmatter = parseFrontmatter(source);
+  const title = frontmatter.title;
+  const description = frontmatter.description;
+  const body = bodyWithoutFrontmatter(source);
+  const content =
+    typeof title === "string" && typeof description === "string"
+      ? `# ${title}\n\n${description}\n\n${body}`
+      : source;
+
   return {
-    content: fs.readFileSync(filePath, "utf8"),
+    content,
     contentType: "text/markdown; charset=utf-8",
     filePath,
   };

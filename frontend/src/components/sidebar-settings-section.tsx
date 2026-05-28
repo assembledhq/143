@@ -53,7 +53,7 @@ const settingsGroups: SettingsGroup[] = [
       { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
       { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
-      { label: "Preview API", icon: KeyRound, href: "/settings/previews", adminOnly: true },
+      { label: "Preview", icon: KeyRound, href: "/settings/previews", adminOnly: true },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },

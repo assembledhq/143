@@ -251,6 +251,72 @@ func TestSessionThreadStore_ListBySession_SelectsArchivedAt(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionThreadStore_GetRetryTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		rowStatus  models.ThreadStatus
+		expectErr  bool
+		queryMatch string
+	}{
+		{
+			name:       "prefers latest failed visible thread",
+			rowStatus:  models.ThreadStatusFailed,
+			queryMatch: `(?s)WITH failed_thread AS.*status = 'failed'.*latest_user_thread AS.*session_messages.*role = 'user'.*SELECT \* FROM failed_thread.*UNION ALL.*SELECT \* FROM latest_user_thread.*LIMIT 1`,
+		},
+		{
+			name:       "falls back to latest visible thread with user message",
+			rowStatus:  models.ThreadStatusCompleted,
+			queryMatch: `(?s)WITH failed_thread AS.*latest_user_thread AS.*session_messages.*SELECT \* FROM failed_thread.*UNION ALL.*SELECT \* FROM latest_user_thread.*LIMIT 1`,
+		},
+		{
+			name:       "returns error when no retry target exists",
+			expectErr:  true,
+			queryMatch: `(?s)WITH failed_thread AS.*latest_user_thread AS.*LIMIT 1`,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			now := time.Now()
+
+			rows := pgxmock.NewRows(sessionThreadTestColumns)
+			if !tt.expectErr {
+				row := newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)
+				row[8] = tt.rowStatus
+				rows.AddRow(row...)
+			}
+
+			mock.ExpectQuery(tt.queryMatch).
+				WithArgs(anyArgs(2)...).
+				WillReturnRows(rows)
+
+			thread, err := store.GetRetryTarget(context.Background(), orgID, sessionID)
+			if tt.expectErr {
+				require.Error(t, err, "GetRetryTarget should return an error when no visible retry target exists")
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+				return
+			}
+			require.NoError(t, err, "GetRetryTarget should not return an error for a retryable session")
+			require.Equal(t, threadID, thread.ID, "GetRetryTarget should return the selected thread")
+			require.Equal(t, tt.rowStatus, thread.Status, "GetRetryTarget should preserve the selected thread status")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionThreadStore_ListStuckRunningThreads(t *testing.T) {
 	t.Parallel()
 

@@ -183,6 +183,7 @@ export interface BranchPreviewResponse {
   stable_url: string;
   preview_url?: string;
   expires_at?: string;
+  stopped_at?: string;
   services?: import('./preview-types').PreviewService[];
   infrastructure?: import('./preview-types').PreviewInfrastructure[];
   logs?: import('./preview-types').PreviewLog[];
@@ -472,6 +473,12 @@ export interface Session {
   archived_by_user_id?: string;
   automation_run_id?: string;
   created_at: string;
+}
+
+export type SessionRetryMode = 'checkpoint' | 'start_over';
+
+export interface RetrySessionRequest {
+  mode?: SessionRetryMode;
 }
 
 export interface PRSummary {
@@ -832,7 +839,7 @@ export interface PullRequestHealthResponse {
   head_sha: string;
   base_sha: string;
   health_version: number;
-  merge_state: "unknown" | "clean" | "conflicted" | "behind" | "blocked";
+  merge_state: "unknown" | "mergeability_pending" | "clean" | "conflicted" | "behind" | "blocked";
   has_conflicts: boolean;
   failing_test_count: number;
   needs_agent_action: boolean;

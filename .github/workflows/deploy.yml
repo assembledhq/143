@@ -111,8 +111,14 @@ jobs:
         # SSH session (= a billed CI minute) doesn't sit idle for the up-to-
         # 45m drain. Rollover progress is logged to /var/log/143/deploy-worker-*.log
         # on the host; the verify step below polls the status file.
+        # The worker port range is required for true blue/green deploys: the new
+        # generation binds a free port while old worker generations keep serving
+        # previews on their existing endpoints until their preview drain windows
+        # expire. Keep the app-to-worker private network open for this range.
         env:
           WORKER_DEPLOY_DETACH: "1"
+          WORKER_BLUE_GREEN_PORT_START: "8080"
+          WORKER_BLUE_GREEN_PORT_END: "8087"
         run: |
           chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
           ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"

@@ -131,7 +131,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -216,6 +216,7 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
+const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = 3000;
 
 const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
   AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
@@ -341,6 +342,54 @@ function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session
     cancel_requested_at: undefined,
     model_override: session?.agent_type === loop.agent_type ? session.model_override : undefined,
   };
+}
+
+function threadStatusForSessionStatus(status: Session["status"]): ThreadStatus | null {
+  switch (status) {
+    case "pending":
+      return "pending";
+    case "running":
+      return "running";
+    case "idle":
+      return "idle";
+    case "awaiting_input":
+      return "awaiting_input";
+    case "completed":
+    case "pr_created":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return null;
+  }
+}
+
+function reconcileThreadsForOmittedStatusUpdate(
+  threads: SessionThread[],
+  updated: Session,
+): SessionThread[] {
+  const threadStatus = threadStatusForSessionStatus(updated.status);
+  if (!threadStatus || threadStatus === "running") {
+    return threads;
+  }
+
+  return threads.map((thread) => {
+    if (!workingStatusesSet.has(thread.status)) {
+      return thread;
+    }
+
+    return {
+      ...thread,
+      status: threadStatus,
+      completed_at: (
+        threadStatus === "completed" ||
+        threadStatus === "failed" ||
+        threadStatus === "cancelled"
+      ) ? updated.completed_at ?? thread.completed_at : thread.completed_at,
+    };
+  });
 }
 
 export function trackInFlightAgentUpdate(
@@ -481,6 +530,7 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
 function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+  const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
 
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
@@ -492,11 +542,13 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
   const isCodexAuthenticated = codexAuthResponse?.data?.status === "completed";
 
   const retryMutation = useMutation({
-    mutationFn: () => api.sessions.retry(session.id),
+    mutationFn: (mode: SessionRetryMode) => api.sessions.retry(session.id, { mode }),
     onSuccess: () => {
+      setShowStartOverRetryDialog(false);
       queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
   });
+  const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed";
 
   const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
@@ -543,17 +595,41 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
                 )}
               </CardTitle>
               {session.failure_retry_advised && (
-                <DisabledTooltip disabled={retryMutation.isPending} content="Retrying session...">
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    onClick={() => retryMutation.mutate()}
-                    disabled={retryMutation.isPending}
+                <div className="inline-flex">
+                  <DisabledTooltip
+                    disabled={retryMutation.isPending || checkpointRetryUnavailable}
+                    content={checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
                   >
-                    <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
-                    {retryMutation.isPending ? "Retrying..." : "Retry"}
-                  </Button>
-                </DisabledTooltip>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      className="rounded-r-none border-r-0"
+                      onClick={() => retryMutation.mutate("checkpoint")}
+                      disabled={retryMutation.isPending || checkpointRetryUnavailable}
+                    >
+                      <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
+                      {retryMutation.isPending ? "Retrying..." : "Retry"}
+                    </Button>
+                  </DisabledTooltip>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        className="rounded-l-none px-2"
+                        aria-label="More retry actions"
+                        disabled={retryMutation.isPending}
+                      >
+                        <ChevronDown className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => setShowStartOverRetryDialog(true)}>
+                        Start over from beginning
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               )}
             </div>
           </CardHeader>
@@ -583,10 +659,31 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
             {isCodexAuthFailure && isCodexAuthenticated && (
               <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                ChatGPT connected — click Retry to re-run this session.
+                {checkpointRetryUnavailable
+                  ? "ChatGPT connected — open the retry menu and choose Start over from beginning."
+                  : "ChatGPT connected — click Retry to continue this session."}
               </p>
             )}
           </CardContent>
+          <AlertDialog open={showStartOverRetryDialog} onOpenChange={setShowStartOverRetryDialog}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Start over from beginning?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This clears the current visible retry result and starts the session again from its original base.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={retryMutation.isPending}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => retryMutation.mutate("start_over")}
+                  disabled={retryMutation.isPending}
+                >
+                  Start over
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </Card>
       )}
       {showDeviceCodeModal && (
@@ -1851,9 +1948,13 @@ export function flattenThreadMessageWindows(
 export function filterThreadLogsForLoadedMessages(
   logs: SessionLog[],
   messages: SessionMessage[],
+  extraTurnNumbers: number[] = [],
 ): SessionLog[] {
   if (messages.length === 0) return logs;
   const loadedTurns = new Set(messages.map((message) => message.turn_number));
+  for (const turnNumber of extraTurnNumbers) {
+    loadedTurns.add(turnNumber);
+  }
   return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
 
@@ -1987,14 +2088,24 @@ function ChatPanel({
     return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
   }, [threadMessagesQuery.data?.pages]);
   const loadedThreadTurns = useMemo(() => loadedTurnNumbers(threadMessages), [threadMessages]);
-  const loadedThreadTurnsKey = loadedThreadTurns.join(",");
+  const activeThreadLogTurn = activeThread && workingStatusesSet.has(activeThread.status)
+    ? activeThread.current_turn + 1
+    : null;
+  const visibleThreadLogTurns = useMemo(() => {
+    const turns = new Set(loadedThreadTurns);
+    if (activeThreadLogTurn !== null) {
+      turns.add(activeThreadLogTurn);
+    }
+    return Array.from(turns).sort((a, b) => a - b);
+  }, [activeThreadLogTurn, loadedThreadTurns]);
+  const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
 
   const threadLogsQuery = useQuery({
-    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), loadedThreadTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
+    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), visibleThreadLogTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
     queryFn: () => api.sessions.getThreadLogs(
       sessionId,
       activeThreadId!,
-      loadedThreadTurns.length > 0 ? { turnNumbers: loadedThreadTurns } : {},
+      visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
     enabled: !!activeThreadId && threadMessagesQuery.isFetched,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
@@ -2087,6 +2198,7 @@ function ChatPanel({
       const loadedThreadLogs = filterThreadLogsForLoadedMessages(
         threadLogsQuery.data?.data ?? [],
         threadMessages,
+        activeThreadLogTurn !== null ? [activeThreadLogTurn] : [],
       );
       return sortTimelineEntries([...buildTimeline(
         mergePendingMessages(threadMessages, optimisticForCurrentView),
@@ -2112,7 +2224,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
+  }, [activeThreadId, activeThreadLogTurn, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
@@ -2351,19 +2463,10 @@ function ChatPanel({
         return { data: { ...updated, threads: [] } };
       }
       const existingThreads = existing.data.threads ?? [];
-      const threads = updated.threads ?? (
-        updated.status === "cancelled"
-          ? existingThreads.map((thread) => (
-            workingStatusesSet.has(thread.status)
-              ? {
-                ...thread,
-                status: "cancelled" as const,
-                completed_at: updated.completed_at ?? thread.completed_at,
-              }
-              : thread
-          ))
-          : existingThreads
-      );
+      const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
+      const threads = hasThreadPayload
+        ? updated.threads!
+        : reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
       return {
         ...existing,
         data: {
@@ -2397,6 +2500,7 @@ function ChatPanel({
 
       eventSource.onopen = () => {
         reconnectAttempts.current = 0;
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       };
 
       addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
@@ -2424,6 +2528,9 @@ function ChatPanel({
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
         mergeSessionStatusUpdate(updated);
+        if ((!updated.threads || updated.threads.length === 0) && updated.status === "running") {
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+        }
         // When the session transitions out of running (e.g. sandbox creation
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
@@ -2578,7 +2685,7 @@ function ChatPanel({
         tabIndex={0}
         aria-label="Session conversation"
         data-session-transcript-scroll="true"
-        className="flex-1 overflow-y-auto space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        className="flex-1 overflow-y-auto overscroll-contain space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
       >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
@@ -2896,6 +3003,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
+      const sessionVolatile = workingStatusesSet.has(s.status);
+      const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
@@ -2913,7 +3022,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       // machine advances without waiting for the user to navigate. Keep
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
-      return serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer ? 2000 : false;
+      if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
+        return 2000;
+      }
+      return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
     },
   });
 
@@ -3328,6 +3440,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     // or health events missed while the tab was hidden or the EventSource was
     // reconnecting.
     staleTime: 30_000,
+    refetchInterval: (query) => {
+      const mergeState = query.state.data?.data?.merge_state;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" ? 5_000 : false;
+    },
   });
   const prHealth = prHealthData?.data;
   const prStatus = prData?.data?.status;
@@ -5274,7 +5390,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   return (
     <div className="flex h-full">
       {/* Center area: chat or review diff view */}
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div
+        data-testid="session-conversation-workspace"
+        className="flex-1 min-w-0 md:min-w-[440px] flex flex-col"
+      >
         {!isDedicatedMobileReview ? (
           <>
             <MobileSessionTopBar
@@ -5301,7 +5420,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                 SESSION_HEADER_HEIGHT_CLASSNAME,
               )}
             >
-              <div className="min-w-0 flex-1 flex items-center gap-2">
+              <div
+                data-testid="session-header-summary"
+                className="min-w-0 flex-1 overflow-hidden flex items-center gap-2"
+              >
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
                     <Input
@@ -5369,7 +5491,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 <LinkedIssueChips session={session} />
               </div>
-              <div className="flex items-center gap-2" data-testid="session-header-actions">
+              <div className="flex shrink-0 items-center gap-2" data-testid="session-header-actions">
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
                     variant="ghost"

@@ -30,6 +30,11 @@ type JobHandler func(ctx context.Context, jobType string, payload json.RawMessag
 // zero-delay retry without colliding with the "unset, use backoff" sentinel.
 type RetryableError struct {
 	Err error
+	// ConsumeAttempt keeps the retryable job in the retryable-duration window
+	// while allowing the attempts counter to advance so exponential backoff can
+	// grow across repeated attempts. Leave false for capacity/dependency gates
+	// that should not spend the job's normal attempt budget.
+	ConsumeAttempt bool
 	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
 	// when the job row is older than maxRetryableDuration. Use this only when a
 	// successful retry is expected immediately after the current attempt repaired
@@ -40,6 +45,10 @@ type RetryableError struct {
 	// Use this when an unpinned attempt discovers the session's live sandbox
 	// already belongs to a specific worker node.
 	TargetNodeID *string
+	// ClearTargetNodeID clears jobs.target_node_id when TargetNodeID is nil.
+	// Use this when a pinned retry hits local capacity and no better worker is
+	// currently advertised, so the scheduler can claim any future free worker.
+	ClearTargetNodeID bool
 }
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
@@ -209,6 +218,7 @@ func (w *Worker) poll(ctx context.Context) {
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(job.OwnerKind))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
+	handlerCtx = jobctx.WithWorkerNodeID(handlerCtx, w.nodeID)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != w.nodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
 	}
@@ -270,7 +280,7 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true, retryable.RetryAfter, retryable.TargetNodeID)
+		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
 		return
 	}
 
@@ -363,10 +373,10 @@ func (w *Worker) failJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg
 }
 
 func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool) {
-	w.retryJobWithDelay(ctx, jobID, lockToken, errMsg, attempt, preserveAttempts, nil, nil)
+	w.retryJobWithDelay(ctx, jobID, lockToken, errMsg, attempt, preserveAttempts, nil, nil, false)
 }
 
-func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string) {
+func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) {
 	var backoff time.Duration
 	if override != nil {
 		backoff = *override
@@ -379,7 +389,8 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 		ok  bool
 		err error
 	)
-	if targetNodeID != nil {
+	updateTarget := targetNodeID != nil || clearTargetNodeID
+	if updateTarget {
 		if targetStore, supportsTargetRetry := w.jobs.(targetRetryLeaseStore); supportsTargetRetry {
 			if preserveAttempts {
 				ok, err = targetStore.RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx, jobID, lockToken, errMsg, runAt, targetNodeID)

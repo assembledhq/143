@@ -391,7 +391,7 @@ func TestDrainQueuedMessages_LinearPromptedRunningSessionContract(t *testing.T) 
 	require.Equal(t, continueSessionDrainDedupeKey(sessionID, processedID), jobs.enqueues[0].dedupeKey, "drain must use the drain-specific dedupe key — reusing the active continue_session key would collide with the still-running job")
 }
 
-func TestDrainQueuedMessages_ThreadScopeIgnoresOtherThreads(t *testing.T) {
+func TestDrainQueuedMessages_ThreadScopeDrainsQueuedSiblingThread(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -411,8 +411,10 @@ func TestDrainQueuedMessages_ThreadScopeIgnoresOtherThreads(t *testing.T) {
 
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadA, zerolog.Nop())
 
-	require.Empty(t, jobs.enqueues, "drain must ignore newer messages on a different thread")
-	require.Empty(t, threads.clearedThreadIDs, "no clear should fire when there is nothing to drain")
+	require.Equal(t, []uuid.UUID{threadB}, threads.clearedThreadIDs, "pending_message_count must be cleared for the queued sibling thread")
+	require.Len(t, jobs.enqueues, 1, "thread-scope drain must enqueue continue_session for a queued sibling thread")
+	payload := jobs.enqueues[0].payload.(map[string]string)
+	require.Equal(t, threadB.String(), payload["thread_id"], "thread-scope drain must target the queued sibling thread")
 }
 
 func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {

@@ -4054,15 +4054,11 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		if m.Role != models.MessageRoleUser || m.ID <= processedMessageID {
 			continue
 		}
-		// On the thread path, a queued message is bound to the same thread —
-		// we drain only the matching thread's queue. On the session path
-		// threadID is nil and we accept any user message that matches the
-		// session-level scope (no thread).
-		if threadID != nil {
-			if m.ThreadID == nil || *m.ThreadID != *threadID {
-				continue
-			}
-		} else if m.ThreadID != nil {
+		// On the session path threadID is nil and we accept only a
+		// session-level queued message. On the thread path, any newer user
+		// message is drainable: SendMessage can queue a sibling thread while
+		// another thread owns the shared parent session.
+		if threadID == nil && m.ThreadID != nil {
 			continue
 		}
 		if m.ThreadID != nil && o.threadInbox != nil {
@@ -4097,22 +4093,30 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		return
 	}
 
+	// Target the queued message's thread, not the calling thread. A turn
+	// finishing on thread A may drain a queued sibling message on thread B;
+	// the continuation job and the pending-counter reset must both follow
+	// the queued message's owner. Human-input answering happens in the
+	// worker (it consumes queued_message_id via
+	// answerQueuedHumanInputForContinue), so we do not call
+	// answerQueuedHumanInputRequest inline.
+	queuedThreadID := queued.ThreadID
 	payload := map[string]string{
 		"session_id":        session.ID.String(),
 		"org_id":            session.OrgID.String(),
 		"queued_message_id": strconv.FormatInt(queued.ID, 10),
 	}
-	if threadID != nil {
-		payload["thread_id"] = threadID.String()
+	if queuedThreadID != nil {
+		payload["thread_id"] = queuedThreadID.String()
 	}
 	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
 	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 		return
 	}
-	if threadID != nil && o.sessionThreads != nil {
-		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *threadID); err != nil {
-			log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to clear pending_message_count after drain")
+	if queuedThreadID != nil && o.sessionThreads != nil {
+		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *queuedThreadID); err != nil {
+			log.Warn().Err(err).Str("thread_id", queuedThreadID.String()).Msg("failed to clear pending_message_count after drain")
 		}
 	}
 }

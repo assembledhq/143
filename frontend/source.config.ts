@@ -14,6 +14,7 @@ const publicDocsFrontmatterSchema = pageSchema.extend({
 export const docs = defineDocs({
   dir: "../docs/public",
   docs: {
+    files: ["**/*.mdx", "!AGENTS.md"],
     schema: publicDocsFrontmatterSchema,
   },
   meta: {

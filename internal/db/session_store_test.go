@@ -552,6 +552,57 @@ func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
 	}
 }
 
+func TestSessionStore_TryMarkPRCreationQueued(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		returnRow  bool
+		wantQueued bool
+	}{
+		{
+			name:       "row returned signals successful CAS",
+			returnRow:  true,
+			wantQueued: true,
+		},
+		{
+			name:       "no row returned signals concurrent winner or terminal state",
+			returnRow:  false,
+			wantQueued: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			store.SetLogger(zerolog.Nop())
+			store.SetStreams(nil)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			now := time.Now()
+
+			expect := mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state = 'queued'[\\s\\S]*pr_creation_state NOT IN[\\s\\S]*RETURNING").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg())
+			if tt.returnRow {
+				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
+			} else {
+				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+			}
+
+			queued, err := store.TryMarkPRCreationQueued(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "TryMarkPRCreationQueued should not error on a successful CAS attempt")
+			require.Equal(t, tt.wantQueued, queued, "TryMarkPRCreationQueued should report whether the row transitioned")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionStore_ClearSnapshotKey(t *testing.T) {
 	t.Parallel()
 

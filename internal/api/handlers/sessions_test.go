@@ -139,6 +139,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 	// scoped instances are created on demand inside the handler.
 	h.SetReviewCommentStore(db.NewSessionReviewCommentStore(mock))
 	h.SetReviewLoopStore(db.NewSessionReviewLoopStore(mock))
+	h.SetTxStarter(mock)
 	return h
 }
 
@@ -691,6 +692,139 @@ func sessionAnyArgs(count int) []interface{} {
 		args[i] = pgxmock.AnyArg()
 	}
 	return args
+}
+
+type capturingJSONArg struct {
+	dest *[]byte
+}
+
+func (c capturingJSONArg) Match(v interface{}) bool {
+	switch b := v.(type) {
+	case json.RawMessage:
+		*c.dest = append((*c.dest)[:0], b...)
+	case []byte:
+		*c.dest = append((*c.dest)[:0], b...)
+	case string:
+		*c.dest = append((*c.dest)[:0], []byte(b)...)
+	default:
+		return false
+	}
+	return true
+}
+
+var sessionThreadHandlerColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
+	"result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at", "archived_at",
+	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
+func sessionThreadHandlerRow(threadID, sessionID, orgID uuid.UUID, status models.ThreadStatus, turn int, now time.Time) []interface{} {
+	return []interface{}{
+		threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil,
+		"Main", nil, nil, status, nil, turn, &now,
+		nil, nil, nil, nil,
+		nil, nil, now, nil,
+		nil, float64(0), 0, nil,
+	}
+}
+
+func retrySessionRow(sessionID, orgID uuid.UUID, status models.SessionStatus, snapshotKey *string, pendingSnapshotKey *string, sandboxState models.SandboxState, diffStats json.RawMessage, now time.Time) []interface{} {
+	values := map[string]interface{}{
+		"id":                             sessionID,
+		"primary_issue_id":               nil,
+		"org_id":                         orgID,
+		"origin":                         models.SessionOriginManual,
+		"interaction_mode":               models.SessionInteractionModeInteractive,
+		"validation_policy":              models.SessionValidationPolicyOnTurnComplete,
+		"agent_type":                     models.AgentTypeClaudeCode,
+		"status":                         status,
+		"autonomy_level":                 models.SessionAutonomySemi,
+		"token_mode":                     models.SessionTokenModeLow,
+		"complexity_tier":                nil,
+		"container_id":                   nil,
+		"worker_node_id":                 nil,
+		"turn_holding_container":         false,
+		"started_at":                     nil,
+		"completed_at":                   nil,
+		"token_usage":                    nil,
+		"failure_explanation":            nil,
+		"failure_category":               nil,
+		"failure_next_steps":             nil,
+		"failure_retry_advised":          false,
+		"parent_session_id":              nil,
+		"revision_context":               nil,
+		"error":                          nil,
+		"result_summary":                 nil,
+		"diff":                           ptr("diff --git a/file b/file"),
+		"pm_plan_id":                     nil,
+		"title":                          nil,
+		"pm_approach":                    nil,
+		"pm_reasoning":                   nil,
+		"project_task_id":                nil,
+		"model_override":                 nil,
+		"reasoning_effort":               nil,
+		"triggered_by_user_id":           nil,
+		"agent_session_id":               nil,
+		"current_turn":                   1,
+		"last_activity_at":               now,
+		"sandbox_state":                  sandboxState,
+		"snapshot_key":                   snapshotKey,
+		"pending_snapshot_key":           pendingSnapshotKey,
+		"pending_snapshot_set_at":        nil,
+		"runtime_soft_deadline_at":       nil,
+		"runtime_hard_deadline_at":       nil,
+		"runtime_last_progress_at":       nil,
+		"runtime_last_progress_type":     models.RuntimeProgressType(""),
+		"runtime_last_progress_strength": models.RuntimeProgressStrength(""),
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            models.RuntimeStopReason(""),
+		"runtime_graceful_stop_at":       nil,
+		"checkpointed_at":                nil,
+		"checkpoint_kind":                models.CheckpointKind(""),
+		"checkpoint_capability":          models.CheckpointCapability(""),
+		"checkpoint_size_bytes":          int64(0),
+		"checkpoint_error":               nil,
+		"recovery_state":                 models.RecoveryState(""),
+		"recovery_queued_at":             nil,
+		"recovery_started_at":            nil,
+		"recovery_attempt_count":         0,
+		"target_branch":                  nil,
+		"working_branch":                 nil,
+		"base_commit_sha":                nil,
+		"repository_id":                  nil,
+		"diff_stats":                     diffStats,
+		"diff_history":                   json.RawMessage(`[{"files_changed":1}]`),
+		"input_manifest":                 nil,
+		"archived_at":                    nil,
+		"archived_by_user_id":            nil,
+		"automation_run_id":              nil,
+		"pr_creation_state":              models.PRCreationStateIdle,
+		"pr_creation_error":              nil,
+		"pr_push_state":                  models.PRPushStateIdle,
+		"pr_push_error":                  nil,
+		"branch_creation_state":          models.BranchCreationStateIdle,
+		"branch_creation_error":          nil,
+		"branch_url":                     nil,
+		"diff_collected_at":              nil,
+		"latest_diff_snapshot_id":        nil,
+		"has_unpushed_changes":           false,
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         nil,
+		"linear_prepare_state":           models.LinearPrepareStateNone,
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
+	}
+	row := make([]interface{}, len(sessionColumns))
+	for i, column := range sessionColumns {
+		row[i] = values[column]
+	}
+	return row
 }
 
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
@@ -3108,6 +3242,51 @@ func newSessionTestStreams(t *testing.T) (*cache.SessionStreams, *miniredis.Mini
 	return cache.NewSessionStreams(client, zerolog.Nop(), nil), mr
 }
 
+var sessionHandlerThreadColumns = []string{
+	"id", "session_id", "org_id", "agent_type", "model_override",
+	"label", "instructions", "file_scope", "status", "agent_session_id",
+	"current_turn", "last_activity_at",
+	"result_summary", "diff", "failure_explanation", "failure_category",
+	"started_at", "completed_at", "created_at",
+	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+}
+
+func sessionHandlerThreadRow(threadID, sessionID, orgID uuid.UUID, label string, status models.ThreadStatus, turn int, now time.Time) []any {
+	return []any{
+		threadID, sessionID, orgID, "codex", nil,
+		label, nil, nil, string(status), nil,
+		turn, nil,
+		nil, nil, nil, nil,
+		nil, nil, now,
+		nil, nil, float64(0), 0, nil,
+	}
+}
+
+func extractSSEData(t *testing.T, body string, eventName string) string {
+	t.Helper()
+
+	blocks := strings.Split(body, "\n\n")
+	for _, block := range blocks {
+		lines := strings.Split(block, "\n")
+		foundEvent := false
+		var data []string
+		for _, line := range lines {
+			if line == "event: "+eventName {
+				foundEvent = true
+				continue
+			}
+			if strings.HasPrefix(line, "data: ") {
+				data = append(data, strings.TrimPrefix(line, "data: "))
+			}
+		}
+		if foundEvent {
+			return strings.Join(data, "\n")
+		}
+	}
+	require.Failf(t, "missing SSE event", "expected event %q in body %q", eventName, body)
+	return ""
+}
+
 func TestSessionHandler_CatchUpLogs_UsesRedisRangeAndFallbacks(t *testing.T) {
 	t.Parallel()
 
@@ -3156,6 +3335,86 @@ func TestShouldSkipRedisLog(t *testing.T) {
 	seen, skip = shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(5), "bad-last-id", uuid.New())
 	require.False(t, skip, "invalid last delivered stream IDs should not skip newer entries")
 	require.Equal(t, "", seen, "invalid last delivered stream IDs should not be preserved")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_StatusPayloadIncludesThreads(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now().UTC()
+	run := models.Session{
+		ID:             runID,
+		OrgID:          orgID,
+		PrimaryIssueID: &issueID,
+		Status:         models.SessionStatusRunning,
+		AgentType:      models.AgentTypeCodex,
+		CurrentTurn:    1,
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+	mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id .+ AND session_id .+ archived_at IS NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionHandlerThreadColumns).
+				AddRow(sessionHandlerThreadRow(threadID, runID, orgID, "Main", models.ThreadStatusRunning, 2, now)...),
+		)
+
+	rec := newLockedRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		done <- handler.streamLogsViaRedis(ctx, sw, orgID, run, "")
+	}()
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(rec.BodyString(), "event: status")
+	}, 2*time.Second, 20*time.Millisecond, "Redis stream helper should emit the initial status event")
+	cancel()
+
+	select {
+	case ok := <-done:
+		require.True(t, ok, "canceled contexts should exit the Redis stream helper cleanly")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Redis stream helper did not return after context cancellation")
+	}
+
+	var payload struct {
+		ID      uuid.UUID              `json:"id"`
+		Threads []models.SessionThread `json:"threads"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(extractSSEData(t, rec.BodyString(), "status")), &payload), "status event data should decode as SessionDetail")
+	require.Equal(t, runID, payload.ID, "status payload should preserve the session id")
+	require.Equal(t, []models.SessionThread{{
+		ID:                  threadID,
+		SessionID:           runID,
+		OrgID:               orgID,
+		AgentType:           models.AgentTypeCodex,
+		Label:               "Main",
+		Status:              models.ThreadStatusRunning,
+		CurrentTurn:         2,
+		CreatedAt:           now,
+		CostCents:           0,
+		PendingMessageCount: 0,
+	}}, payload.Threads, "status payload should include current session thread state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_StreamLogsViaRedis_FallsBackWhenRedisUnavailable(t *testing.T) {
@@ -4234,9 +4493,17 @@ func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 				now,
 			),
 		)
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     "snapshots/test.tar",
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -4323,12 +4590,17 @@ func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 			),
 		)
 	// Expect open_pr job instead of validate.
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     "snapshots/test.tar",
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -6411,13 +6683,38 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
-	// Mock job enqueue.
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                               // triggered_by_user_id
+				nil, 0, now, "none", &snapshotKey, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"queued",       // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6429,7 +6726,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 
 	handler.CreatePR(w, req)
 
-	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted")
+	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted: %s", w.Body.String())
 	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -6592,12 +6889,33 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 					WillReturnRows(tt.reviewRows)
 			}
 			if tt.expectEnqueue {
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 0, now, "none", &snapshotKey,
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							"queued", (*string)(nil),
+							nil,
+							now,
+						),
+					)
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-				mock.ExpectQuery("UPDATE sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectCommit()
 			}
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
@@ -6664,14 +6982,37 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				"queued", (*string)(nil),
+				nil,
+				now,
+			),
+		)
 	// ON CONFLICT DO NOTHING fires because the dedupe_key already matches a
-	// pending job — pgx surfaces this as ErrNoRows.
+	// pending job. EnqueueInTx returns uuid.Nil without an error, and the
+	// queued state repairs any legacy request that inserted the job before
+	// marking the action.
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(pgx.ErrNoRows)
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -6989,12 +7330,17 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     snapshotKey,
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	body := strings.NewReader(`{"author_mode":"app"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", body)
@@ -7140,12 +7486,17 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 			AddRow(orgID, "Acme", json.RawMessage(`{"pr_authorship":"user_preferred"}`), now, now))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     snapshotKey,
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
-	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"auto"}`))
 	rctx := chi.NewRouteContext()
@@ -7476,7 +7827,7 @@ func TestSessionHandler_CreatePR_InFlightRejectsDuplicateSubmit(t *testing.T) {
 	}
 }
 
-func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
+func TestSessionHandler_CreatePR_UpdateStateErrorRollsBackAndReturns500(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -7488,7 +7839,6 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
-	jobID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -7517,12 +7867,11 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("write failed"))
+	mock.ExpectRollback()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -7534,8 +7883,8 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 
 	handler.CreatePR(w, req)
 
-	require.Equal(t, http.StatusAccepted, w.Code, "CreatePR should still accept the request when the best-effort state update fails")
-	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should still indicate queued status")
+	require.Equal(t, http.StatusInternalServerError, w.Code, "CreatePR should fail when the queued state cannot be committed")
+	require.Contains(t, w.Body.String(), "INTERNAL_ERROR", "response should identify state transition failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -7763,7 +8112,9 @@ type pushSessionRowOpts struct {
 	pendingSnapshotKey string // explicit pending upload key; empty means NULL
 	nilSnapshot        bool   // if true, snapshot_key is NULL
 	sandboxState       string // defaults to "none"
+	prCreationState    string // defaults to "idle"
 	pushState          string // defaults to "idle"
+	branchState        string // defaults to "idle"
 	status             string // defaults to "completed"
 	diff               *string
 	diffHistory        any
@@ -7797,6 +8148,14 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 	pushState := opts.pushState
 	if pushState == "" {
 		pushState = "idle"
+	}
+	prCreationState := opts.prCreationState
+	if prCreationState == "" {
+		prCreationState = "idle"
+	}
+	branchState := opts.branchState
+	if branchState == "" {
+		branchState = "idle"
 	}
 	status := opts.status
 	if status == "" {
@@ -7873,11 +8232,11 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"archived_at":                    nil,
 		"archived_by_user_id":            nil,
 		"automation_run_id":              nil,
-		"pr_creation_state":              "idle",
+		"pr_creation_state":              prCreationState,
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  pushState,
 		"pr_push_error":                  (*string)(nil),
-		"branch_creation_state":          "idle",
+		"branch_creation_state":          branchState,
 		"branch_creation_error":          (*string)(nil),
 		"branch_url":                     (*string)(nil),
 		"diff_collected_at":              nil,
@@ -7925,9 +8284,7 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
 		)
 
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectBegin()
 	// CAS update from TryMarkPRPushQueued — 2 args (id, org_id). RETURNING +
 	// publishStatus replaced bare Exec so the SSE detail page sees the
 	// transition immediately; the test returns the post-CAS row (pr_push_state
@@ -7935,6 +8292,10 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()
@@ -8027,15 +8388,17 @@ func TestSessionHandler_PushChangesToPR_BuilderRequiresCleanReviewLoopForCurrent
 					WillReturnRows(tt.reviewRows)
 			}
 			if tt.expectEnqueue {
-				mock.ExpectQuery("INSERT INTO jobs").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 						snapshotKey: "snap-push-current",
 						pushState:   "queued",
 					}))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+				mock.ExpectCommit()
 			}
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
@@ -8073,7 +8436,6 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 	sessionID := uuid.New()
 	issueID := uuid.New()
 	prID := uuid.New()
-	jobID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -8087,16 +8449,14 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
 		)
 
-	// The job enqueue still runs (deduped by dedupeKey on the worker side).
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectBegin()
 	// CAS UPDATE matches no rows because a concurrent winner already moved
 	// pr_push_state to 'queued'. RETURNING with empty rows triggers
 	// pgx.ErrNoRows in TryMarkPRPushQueued, which surfaces as (false, nil).
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionColumns))
+	mock.ExpectRollback()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
 	rctx := chi.NewRouteContext()
@@ -8110,6 +8470,98 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 
 	require.Equal(t, http.StatusConflict, w.Code, "CAS losing the race should produce a 409")
 	require.Contains(t, w.Body.String(), "PR_PUSH_IN_FLIGHT", "loser of the CAS race should see the in-flight code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_PushChangesToPR_EnqueueFailureRollsBackQueuedState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionPullRequestColumns).
+				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
+		)
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("database unavailable"))
+	mock.ExpectRollback()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "enqueue failure should not return success")
+	require.Contains(t, w.Body.String(), "ENQUEUE_FAILED", "response should identify enqueue failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed enqueue should roll back the queued action state")
+}
+
+func TestSessionHandler_CreateBranch_QueuesActionAndJobInOneTransaction(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{}))
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{branchState: "queued"}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/branch", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateBranch(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "branch creation should return 202 Accepted")
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate branch job was queued")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -8351,6 +8803,193 @@ func TestSessionHandler_PushChangesToPR_SnapshotNotCaptured(t *testing.T) {
 	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when no snapshot was captured")
 	require.Contains(t, w.Body.String(), "SNAPSHOT_NOT_CAPTURED", "error code should indicate missing checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RetrySession_DefaultsToCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	snapshotKey := "snapshots/session.tar"
+	diffStats := json.RawMessage(`{"files_changed":7}`)
+	handler := newSessionHandler(t, mock)
+	handler.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop()))
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusFailed, &snapshotKey, nil, models.SandboxStateSnapshotted, diffStats, now)...))
+	mock.ExpectQuery("session_messages").
+		WithArgs(sessionAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerColumns).AddRow(sessionThreadHandlerRow(threadID, sessionID, orgID, models.ThreadStatusFailed, 2, now)...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusRunning, &snapshotKey, nil, models.SandboxStateSnapshotted, diffStats, now)...))
+	mock.ExpectQuery("UPDATE session_threads").
+		WithArgs(sessionAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerColumns).AddRow(sessionThreadHandlerRow(threadID, sessionID, orgID, models.ThreadStatusRunning, 2, now)...))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(sessionAnyArgs(11)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
+
+	var jobPayload []byte
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&jobPayload), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	var auditDetails []byte
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingJSONArg{dest: &auditDetails},
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "checkpoint retry should return the claimed running session: %s", w.Body.String())
+
+	var resp models.SingleResponse[models.Session]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as a session response")
+	require.Equal(t, models.SessionStatusRunning, resp.Data.Status, "checkpoint retry should mark the session running")
+	require.JSONEq(t, string(diffStats), string(resp.Data.DiffStats), "checkpoint retry should preserve existing diff stats")
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(jobPayload, &payload), "job payload should decode as string map")
+	require.Equal(t, sessionID.String(), payload["session_id"], "continue_session payload should include the session id")
+	require.Equal(t, threadID.String(), payload["thread_id"], "continue_session payload should include the retry thread id")
+
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(auditDetails, &details), "audit details should decode as an object")
+	require.Equal(t, string(models.SessionRetryModeCheckpoint), details["retry_mode"], "audit details should record checkpoint retry mode")
+	require.Equal(t, "continue_session", details["job_type"], "audit details should record continue_session job type")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RetrySession_CheckpointRejectsMissingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	diffStats := json.RawMessage(`{"files_changed":7}`)
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusFailed, nil, nil, models.SandboxStateNone, diffStats, now)...))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"checkpoint"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "checkpoint retry should reject sessions without a saved checkpoint")
+	require.Contains(t, w.Body.String(), "CHECKPOINT_UNAVAILABLE", "error response should explain the missing checkpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "checkpoint retry should not issue any diff-clearing update")
+}
+
+func TestSessionHandler_RetrySession_StartOverUsesRunAgent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	diffStats := json.RawMessage(`{"files_changed":7}`)
+
+	mock.ExpectQuery("SELECT status FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("failed"))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	var jobPayload []byte
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&jobPayload), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusPending, nil, nil, models.SandboxStateNone, nil, now)...))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"start_over"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "start-over retry should succeed for a failed session")
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(jobPayload, &payload), "job payload should decode as string map")
+	require.Equal(t, sessionID.String(), payload["session_id"], "run_agent payload should include the session id")
+	require.Empty(t, payload["thread_id"], "start-over retry should not enqueue a thread-scoped continuation")
+
+	var resp models.SingleResponse[models.Session]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as a session response")
+	require.Nil(t, resp.Data.DiffStats, "start-over retry should return cleared diff stats")
+	require.NotEqual(t, string(diffStats), string(resp.Data.DiffStats), "start-over retry should not preserve prior diff stats")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RetrySession_InvalidMode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"fresh"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RetrySession(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "invalid retry mode should return 400")
+	require.Contains(t, w.Body.String(), "INVALID_RETRY_MODE", "error response should identify retry mode validation failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid mode should not hit the database")
 }
 
 func TestSessionHandler_PushChangesToPR_SessionNotFound(t *testing.T) {

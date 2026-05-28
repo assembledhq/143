@@ -286,7 +286,7 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
 
 	body := string(src)
-	startWorkers := strings.Index(body, "\n\t\tprocessWorkers = startProcessWorkers(")
+	startWorkers := strings.Index(body, "processWorkers = startProcessWorkers(")
 	rehydrate := strings.Index(body, "orch.RehydrateSandboxAuthListeners(")
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
@@ -385,6 +385,23 @@ func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {
 	require.NotEqual(t, -1, serve, "startup should serve the already-bound listener")
 	require.Less(t, listen, ready, "preview routing must not be advertised until the HTTP listener is bound")
 	require.Less(t, ready, serve, "preview routing should be advertised before serving blocks")
+}
+
+func TestMainRunsControlPlaneHealthAlertsOutsideWorkerMode(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for control-plane alert wiring test")
+
+	body := string(src)
+	alertGuard := strings.Index(body, "if cfg.Mode != \"worker\"")
+	alertStart := strings.Index(body, "worker.RunControlPlaneHealthAlerts(")
+	workerBlock := strings.Index(body, "if cfg.Mode == \"all\" || cfg.Mode == \"worker\"")
+	require.NotEqual(t, -1, alertGuard, "startup should gate control-plane alerts away from worker-only mode")
+	require.NotEqual(t, -1, alertStart, "startup should run queue and worker-heartbeat alerts from an API-capable process")
+	require.NotEqual(t, -1, workerBlock, "startup should still have an explicit worker-mode block")
+	require.Less(t, alertGuard, alertStart, "control-plane alert guard should wrap the sampler start")
+	require.Less(t, alertStart, workerBlock, "control-plane alerts must start outside worker-only startup so they still run when workers are down")
 }
 
 func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {

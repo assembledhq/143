@@ -1615,4 +1615,147 @@ describe('api client', () => {
       expect(result.data).toHaveLength(1);
     });
   });
+
+  describe('repository preview secret bundles', () => {
+    it('lists preview secret bundles for a repository', async () => {
+      server.use(
+        http.get('/api/v1/repositories/repo-1/preview-secret-bundles', () => {
+          return HttpResponse.json({
+            data: [{
+              id: 'bundle-1',
+              repository_id: 'repo-1',
+              name: 'staging',
+              source_type: 'managed',
+              exposure_policy: 'preview_runtime',
+              outputs: [{ type: 'env', env: ['API_TOKEN'] }],
+              created_by_user_id: 'user-1',
+              created_at: '2026-01-01T00:00:00Z',
+            }],
+          });
+        }),
+      );
+
+      const result = await api.repositories.previewSecretBundles.list('repo-1');
+
+      expect(result.data[0].name).toBe('staging');
+      expect(result.data[0].outputs[0].env).toEqual(['API_TOKEN']);
+    });
+
+    it('upserts preview secret bundles for a repository', async () => {
+      let capturedBody: unknown;
+      let capturedUrl: string | undefined;
+      server.use(
+        http.post('/api/v1/repositories/repo-1/preview-secret-bundles', async ({ request }) => {
+          capturedUrl = request.url;
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'bundle-1',
+              repository_id: 'repo-1',
+              name: 'staging-api',
+              source_type: 'managed',
+              exposure_policy: 'preview_runtime',
+              outputs: [{ type: 'env', env: ['API_TOKEN'] }],
+              created_by_user_id: 'user-1',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      await api.repositories.previewSecretBundles.upsert('repo-1', {
+        name: 'staging-api',
+        source: { type: 'managed', values: { API_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { API_TOKEN: 'secret:API_TOKEN' } }],
+        exposure_policy: 'preview_runtime',
+      });
+
+      expect(capturedUrl).toContain('/api/v1/repositories/repo-1/preview-secret-bundles');
+      expect(capturedBody).toEqual({
+        name: 'staging-api',
+        source: { type: 'managed', values: { API_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { API_TOKEN: 'secret:API_TOKEN' } }],
+        exposure_policy: 'preview_runtime',
+      });
+    });
+
+    it('tests a preview secret bundle by ID', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.post('/api/v1/preview-secret-bundles/:bundleId/test', ({ params }) => {
+          capturedUrl = `/api/v1/preview-secret-bundles/${params.bundleId as string}/test`;
+          return HttpResponse.json({
+            data: {
+              status: 'ready',
+              bundle: {
+                id: 'bundle-1',
+                repository_id: 'repo-1',
+                name: 'staging',
+                source_type: 'managed',
+                exposure_policy: 'preview_runtime',
+                outputs: [{ type: 'env', env: ['API_TOKEN'] }],
+                created_by_user_id: 'user-1',
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            },
+          });
+        }),
+      );
+
+      const result = await api.repositories.previewSecretBundles.test('bundle-1');
+
+      expect(capturedUrl).toBe('/api/v1/preview-secret-bundles/bundle-1/test');
+      expect(result.data.status).toBe('ready');
+      expect(result.data.bundle.name).toBe('staging');
+    });
+
+    it('patches a preview secret bundle by ID', async () => {
+      let capturedBody: unknown;
+      let capturedUrl: string | undefined;
+      server.use(
+        http.patch('/api/v1/preview-secret-bundles/:bundleId', async ({ request, params }) => {
+          capturedUrl = `/api/v1/preview-secret-bundles/${params.bundleId as string}`;
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'bundle-1',
+              repository_id: 'repo-1',
+              name: 'staging-renamed',
+              source_type: 'managed',
+              exposure_policy: 'preview_runtime',
+              outputs: [{ type: 'env', env: ['NEW_TOKEN'] }],
+              created_by_user_id: 'user-1',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      await api.repositories.previewSecretBundles.patch('bundle-1', {
+        name: 'staging-renamed',
+        source: { type: 'managed', values: { NEW_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { NEW_TOKEN: 'secret:NEW_TOKEN' } }],
+      });
+
+      expect(capturedUrl).toBe('/api/v1/preview-secret-bundles/bundle-1');
+      expect(capturedBody).toEqual({
+        name: 'staging-renamed',
+        source: { type: 'managed', values: { NEW_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { NEW_TOKEN: 'secret:NEW_TOKEN' } }],
+      });
+    });
+
+    it('deletes preview secret bundles for a repository', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.delete('/api/v1/repositories/repo-1/preview-secret-bundles/:name', ({ request }) => {
+          capturedUrl = request.url;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await expect(api.repositories.previewSecretBundles.delete('repo-1', 'staging')).resolves.toBeUndefined();
+      expect(capturedUrl).toContain('/api/v1/repositories/repo-1/preview-secret-bundles/staging');
+    });
+  });
 });

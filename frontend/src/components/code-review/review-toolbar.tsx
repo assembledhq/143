@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Columns2, Rows3, Maximize2, Minimize2, PanelLeftClose, PanelLeft, FolderSearch, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { PassSelector, type DiffPassEntry, type PassRange } from "./pass-selector";
 
@@ -152,7 +153,7 @@ export function ReviewToolbar({
       {showSearch && onSearchChange && (
         <div className="flex items-center gap-2 px-3 py-1.5 border-t border-border/50 bg-muted/20">
           <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <input
+          <Input
             ref={searchInputRef}
             type="text"
             value={searchQuery ?? ""}
@@ -164,15 +165,19 @@ export function ReviewToolbar({
               }
             }}
             placeholder="Search in diff..."
-            className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
+            className="h-7 flex-1 border-none bg-transparent px-0 py-0 text-xs text-foreground shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
           />
           {searchQuery && (
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => onSearchChange("")}
-              className="text-muted-foreground hover:text-foreground"
+              className="h-5 w-5 text-muted-foreground hover:text-foreground"
+              aria-label="Clear diff search"
             >
               <X className="h-3 w-3" />
-            </button>
+            </Button>
           )}
         </div>
       )}

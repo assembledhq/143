@@ -804,8 +804,10 @@ export const handlers = [
     return HttpResponse.json({ data: { ...mockSessions[0], status: 'cancelled' } });
   }),
 
-  http.post('/api/v1/sessions/:id/retry', () => {
-    return HttpResponse.json({ data: { ...mockSessions[0], status: 'pending' } });
+  http.post('/api/v1/sessions/:id/retry', async ({ request }) => {
+    const body = await request.json().catch(() => ({ mode: 'checkpoint' }));
+    const mode = typeof body === 'object' && body && 'mode' in body ? body.mode : 'checkpoint';
+    return HttpResponse.json({ data: { ...mockSessions[0], status: mode === 'checkpoint' ? 'running' : 'pending' } });
   }),
 
   http.get('/api/v1/users/me/github-status', () => {

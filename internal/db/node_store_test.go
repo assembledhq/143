@@ -158,3 +158,30 @@ func TestNodeStore_ListActive(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 }
+
+func TestNodeStore_WorkerHeartbeatHealth(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	staleBefore := time.Now().UTC().Add(-2 * time.Minute)
+	mock.ExpectQuery("SELECT[\\s\\S]+COUNT\\(\\*\\) FILTER[\\s\\S]+FROM nodes").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"active_workers", "fresh_workers", "stale_workers", "newest_heartbeat_age_seconds"}).
+				AddRow(int64(3), int64(1), int64(2), float64(125)),
+		)
+
+	store := NewNodeStore(mock)
+	health, err := store.WorkerHeartbeatHealth(context.Background(), staleBefore)
+	require.NoError(t, err, "WorkerHeartbeatHealth should return heartbeat health")
+	require.Equal(t, WorkerHeartbeatHealth{
+		ActiveWorkers:             3,
+		FreshWorkers:              1,
+		StaleWorkers:              2,
+		NewestHeartbeatAgeSeconds: 125,
+	}, health, "WorkerHeartbeatHealth should scan the aggregate counts")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

@@ -65,9 +65,9 @@ func TestWaitForActivePreviewsToDrain(t *testing.T) {
 		{
 			name:      "returns false when previews outlive the timeout",
 			counter:   &previewDrainCounter{counts: []int{1, 1, 1, 1}},
-			timeout:   25 * time.Millisecond,
+			timeout:   time.Millisecond,
 			want:      false,
-			wantCalls: 3,
+			wantCalls: 1,
 		},
 		{
 			name:      "skips waiting when timeout is disabled",

@@ -21,7 +21,7 @@ vi.mock("./context-expander", () => ({
   }: {
     kind: string;
     hiddenStart: number;
-    hiddenEnd: number;
+    hiddenEnd?: number;
     visibleStart?: number;
     visibleEnd?: number;
     onExpand?: (direction: "above" | "below" | "all", lines: FileLine[], meta: {
@@ -33,7 +33,7 @@ vi.mock("./context-expander", () => ({
     }) => void;
   }) => (
     <div>
-      <div data-testid={`gap-${kind}`}>{`${kind}:${hiddenStart}-${hiddenEnd}`}</div>
+      <div data-testid={`gap-${kind}`}>{`${kind}:${hiddenStart}-${hiddenEnd ?? "open"}`}</div>
       <div data-testid={`gap-visible-${kind}`}>{`${visibleStart ?? "none"}-${visibleEnd ?? "none"}`}</div>
       <button
         data-testid={`expand-${kind}-above`}
@@ -45,8 +45,8 @@ vi.mock("./context-expander", () => ({
               startLine: hiddenStart,
               endLine: hiddenStart,
               hasMoreAbove: hiddenStart > 1,
-              hasMoreBelow: hiddenStart < hiddenEnd,
-              totalLines: hiddenEnd,
+              hasMoreBelow: hiddenEnd == null || hiddenStart < hiddenEnd,
+              totalLines: hiddenEnd ?? hiddenStart,
             },
           )
         }
@@ -58,13 +58,13 @@ vi.mock("./context-expander", () => ({
         onClick={() =>
           onExpand?.(
             "below",
-            [{ number: hiddenEnd, content: `line ${hiddenEnd}` }],
+            [{ number: hiddenEnd ?? hiddenStart, content: `line ${hiddenEnd ?? hiddenStart}` }],
             {
-              startLine: hiddenEnd,
-              endLine: hiddenEnd,
-              hasMoreAbove: hiddenStart < hiddenEnd,
+              startLine: hiddenEnd ?? hiddenStart,
+              endLine: hiddenEnd ?? hiddenStart,
+              hasMoreAbove: hiddenEnd == null ? false : hiddenStart < hiddenEnd,
               hasMoreBelow: false,
-              totalLines: hiddenEnd,
+              totalLines: hiddenEnd ?? hiddenStart,
             },
           )
         }
@@ -76,16 +76,16 @@ vi.mock("./context-expander", () => ({
         onClick={() =>
           onExpand?.(
             "all",
-            Array.from({ length: hiddenEnd - hiddenStart + 1 }, (_, index) => ({
+            Array.from({ length: (hiddenEnd ?? hiddenStart) - hiddenStart + 1 }, (_, index) => ({
               number: hiddenStart + index,
               content: `line ${hiddenStart + index}`,
             })),
             {
               startLine: hiddenStart,
-              endLine: hiddenEnd,
+              endLine: hiddenEnd ?? hiddenStart,
               hasMoreAbove: hiddenStart > 1,
               hasMoreBelow: false,
-              totalLines: hiddenEnd,
+              totalLines: hiddenEnd ?? hiddenStart,
             },
           )
         }
@@ -276,6 +276,32 @@ describe("FileDiffSection", () => {
     );
 
     expect(screen.getByTestId("gap-bottom")).toHaveTextContent("bottom:13-20");
+  });
+
+  it("renders a bottom boundary after the last hunk for sessions before total line metadata is known", () => {
+    const file = makeDiffFile({
+      hunks: [
+        makeHunk(
+          [
+            makeLine("context", "line 10", 10, 10),
+            makeLine("add", "line 11", null, 11),
+            makeLine("context", "line 12", 12, 12),
+          ],
+          10,
+          10,
+        ),
+      ],
+    });
+
+    render(
+      <FileDiffSection
+        file={file}
+        viewMode="unified"
+        sessionId="session-1"
+      />
+    );
+
+    expect(screen.getByTestId("gap-bottom")).toHaveTextContent("bottom:13-open");
   });
 
   it("maps expanded context lines onto the correct old and new numbers", async () => {

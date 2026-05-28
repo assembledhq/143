@@ -1125,6 +1125,53 @@ func (s *JobStore) CountRunningOwnedByNode(ctx context.Context, nodeID string) (
 	return count, nil
 }
 
+// SelectWorkerWithSandboxCapacity picks an active worker that currently
+// advertises free local sandbox slots in its heartbeat metadata. The result is
+// best-effort and still fenced by the worker-local admission gate when the job
+// runs, because metadata can be stale between heartbeats.
+// lint:allow-no-orgid reason="cross-org worker capacity routing for sandbox admission retries"
+func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeNodeID string) (*string, error) {
+	var nodeID string
+	err := s.db.QueryRow(ctx, `
+		WITH candidates AS (
+			SELECT
+				id,
+				COALESCE(NULLIF(metadata->>'live_sandbox_count', '')::int, 0) AS live_sandboxes,
+				COALESCE(NULLIF(metadata->>'reserved_sandbox_count', '')::int, 0) AS reserved_sandboxes,
+				COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) AS max_active_sandboxes,
+				COALESCE(NULLIF(metadata->>'active_job_count', '')::int, 0) AS active_job_count,
+				last_heartbeat_at
+			FROM nodes
+			WHERE mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+			  AND (@exclude_node_id = '' OR id <> @exclude_node_id)
+		)
+		SELECT id
+		FROM candidates
+		WHERE max_active_sandboxes > 0
+		  AND live_sandboxes + reserved_sandboxes < max_active_sandboxes
+		ORDER BY
+			live_sandboxes + reserved_sandboxes ASC,
+			active_job_count ASC,
+			last_heartbeat_at DESC,
+			id ASC
+		LIMIT 1`,
+		pgx.NamedArgs{
+			"exclude_node_id": excludeNodeID,
+			"dead_before":     time.Now().Add(-nodeDeadHeartbeatThreshold),
+		},
+	).Scan(&nodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select worker with sandbox capacity: %w", err)
+	}
+	return &nodeID, nil
+}
+
 func (s *JobStore) execLeaseTerminalUpdate(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 	execer, ok := s.db.(jobExecer)
 	if !ok {

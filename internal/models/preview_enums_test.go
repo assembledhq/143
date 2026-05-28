@@ -15,6 +15,7 @@ func TestPreviewStatus_Validate(t *testing.T) {
 		{PreviewStatusStopped, false},
 		{PreviewStatusFailed, false},
 		{PreviewStatusExpired, false},
+		{PreviewStatusUnavailable, false},
 		{"bogus", true},
 		{"", true},
 	}
@@ -42,6 +43,7 @@ func TestPreviewStatus_IsActive(t *testing.T) {
 		{PreviewStatusStopped, false},
 		{PreviewStatusFailed, false},
 		{PreviewStatusExpired, false},
+		{PreviewStatusUnavailable, false},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.status), func(t *testing.T) {
@@ -66,12 +68,61 @@ func TestPreviewStatus_IsTerminal(t *testing.T) {
 		{PreviewStatusStopped, true},
 		{PreviewStatusFailed, true},
 		{PreviewStatusExpired, true},
+		{PreviewStatusUnavailable, true},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.status), func(t *testing.T) {
 			t.Parallel()
 			if got := tt.status.IsTerminal(); got != tt.want {
 				t.Errorf("IsTerminal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPreviewRuntimeStatus_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status  PreviewRuntimeStatus
+		wantErr bool
+	}{
+		{PreviewRuntimeStatusStarting, false},
+		{PreviewRuntimeStatusReady, false},
+		{PreviewRuntimeStatusDraining, false},
+		{PreviewRuntimeStatusLost, false},
+		{PreviewRuntimeStatusStopped, false},
+		{PreviewRuntimeStatusFailed, false},
+		{"bogus", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+			if err := tt.status.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPreviewRuntimeStatus_IsActive(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status PreviewRuntimeStatus
+		want   bool
+	}{
+		{PreviewRuntimeStatusStarting, true},
+		{PreviewRuntimeStatusReady, true},
+		{PreviewRuntimeStatusDraining, true},
+		{PreviewRuntimeStatusLost, false},
+		{PreviewRuntimeStatusStopped, false},
+		{PreviewRuntimeStatusFailed, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+			if got := tt.status.IsActive(); got != tt.want {
+				t.Errorf("IsActive() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -86,6 +86,16 @@ describe("ReviewToolbar", () => {
     expect(screen.getByPlaceholderText("Search in diff...")).toBeInTheDocument();
   });
 
+  it("uses the shared mobile-safe input for search", async () => {
+    const user = userEvent.setup();
+    renderToolbar({ onSearchChange: vi.fn(), searchQuery: "" });
+    await user.click(screen.getByTitle("Search in diff (Ctrl+F)"));
+
+    const input = screen.getByPlaceholderText("Search in diff...");
+    expect(input).toHaveAttribute("data-slot", "input");
+    expect(input).toHaveClass("max-sm:text-base");
+  });
+
   it("calls onSearchChange when typing in search", async () => {
     const user = userEvent.setup();
     const onSearchChange = vi.fn();

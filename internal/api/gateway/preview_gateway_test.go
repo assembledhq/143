@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/preview"
@@ -23,6 +24,24 @@ import (
 
 func gatewayStringPtr(value string) *string {
 	return &value
+}
+
+var previewGatewayInstanceColumns = []string{
+	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"preview_holding_container",
+}
+
+func previewGatewayInstanceRow(id, sessionID uuid.UUID, targetID *uuid.UUID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, stoppedAt *time.Time) []any {
+	return []any{
+		id, sessionID, targetID, orgID, userID, "default", "preview", string(status),
+		"docker", "worker-1", "handle-1", "web", 3000,
+		"sha256:abc", "deadbeef", now, now.Add(time.Minute), stoppedAt,
+		"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), string(status), nil, "", now, now, now, nil,
+		false,
+	}
 }
 
 func TestExtractPreviewID(t *testing.T) {
@@ -536,6 +555,7 @@ func TestGateway_ServeHTTP_BootstrapPage(t *testing.T) {
 	require.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	require.Contains(t, w.Body.String(), "https://app.143.dev")
 	require.Contains(t, w.Body.String(), "preview_bootstrap_token")
+	require.Contains(t, w.Body.String(), "preview_bootstrap_complete", "bootstrap page should notify the parent after the gateway sets the preview session cookie")
 }
 
 func TestGateway_ServeHTTP_BootstrapExchange_MissingToken(t *testing.T) {
@@ -554,6 +574,80 @@ func TestGateway_ServeHTTP_BootstrapExchange_MissingToken(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestGateway_ServeHTTP_BootstrapExchange_AllowsTargetHost(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	accessSessionID := uuid.New()
+	now := time.Now()
+	secret := []byte("test-secret")
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:  store,
+		Logger: zerolog.Nop(),
+	})
+	gw := NewGateway(GatewayConfig{
+		Store:        store,
+		Manager:      manager,
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions WHERE session_token_hash").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, now.Add(5*time.Minute), nil, now, now),
+		)
+	mock.ExpectExec("UPDATE preview_access_sessions SET last_accessed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+				"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+				"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+				"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+				"preview_holding_container",
+			}).AddRow(
+				previewID, sessionID, &targetID, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
+				"docker", "worker-1", "handle-1", "web", 3000,
+				"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
+				"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
+				false,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/bootstrap/exchange", strings.NewReader(`{"token":"bootstrap-token"}`))
+	req.Host = targetID.String() + ".preview.143.dev"
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "bootstrap exchange should accept a token minted for the runtime when the host is the preview target")
+	require.Len(t, w.Result().Cookies(), 1, "bootstrap exchange should issue one preview session cookie")
+	cookie := w.Result().Cookies()[0]
+	_, cookieHostID, _, err := decodeCookieValue(secret, cookie.Value)
+	require.NoError(t, err, "preview session cookie should decode")
+	require.Equal(t, targetID, cookieHostID, "preview session cookie should be scoped to the public target host")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestGateway_ServeHTTP_Proxy_NoCookie(t *testing.T) {
 	t.Parallel()
 
@@ -564,8 +658,203 @@ func TestGateway_ServeHTTP_Proxy_NoCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	gw.ServeHTTP(w, req)
-	require.Equal(t, http.StatusUnauthorized, w.Code)
-	require.Contains(t, w.Body.String(), "preview session required")
+	require.Equal(t, http.StatusOK, w.Code, "direct preview visits without a preview session should render the lightweight control overlay")
+	require.Contains(t, w.Header().Get("Content-Type"), "text/html", "overlay response should be HTML")
+	require.Contains(t, w.Body.String(), "Start preview", "overlay should expose the primary start action")
+	require.Contains(t, w.Body.String(), "https://app.143.dev/previews/"+previewID.String(), "overlay should link back to the app-owned start flow")
+}
+
+func TestGateway_ServeHTTP_Proxy_NoCookieStoppedTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Date(2026, 5, 26, 20, 15, 0, 0, time.UTC)
+	stoppedAt := now.Add(-10 * time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "stopped direct preview visits should render the lightweight control overlay")
+	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
+	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped target overlay should show the terminal status")
+	require.Contains(t, w.Body.String(), "May 26, 2026 20:05 UTC", "stopped target overlay should show when the preview stopped")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_NoCookieActiveTargetRedirectsToLaunch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusReady, now, nil)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusFound, w.Code, "active direct preview visits should redirect into the bootstrap launch flow")
+	require.Equal(t, "https://app.143.dev/previews/"+targetID.String()+"?launch=1", w.Header().Get("Location"), "active target redirect should preserve the target host id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_StaleStoppedTargetCookieShowsRestart(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	stoppedAt := now.Add(-10 * time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	secret := []byte("test-secret")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, now.Add(5*time.Minute), nil, now, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:        db.NewPreviewStore(mock),
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, targetID, accessSessionID)})
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "stale stopped target cookies should fall back to the restart overlay")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "stale preview cookie should be cleared")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
+	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
+	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped target overlay should show terminal status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_RevokedTargetCookieRedirectsToLaunch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	revokedAt := now.Add(-time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	secret := []byte("test-secret")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, now.Add(5*time.Minute), &revokedAt, now, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusReady, now, nil)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:        db.NewPreviewStore(mock),
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, targetID, accessSessionID)})
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusFound, w.Code, "revoked target cookies should redirect through launch instead of showing a raw auth error")
+	require.Equal(t, "https://app.143.dev/previews/"+targetID.String()+"?launch=1", w.Header().Get("Location"), "revoked target cookie redirect should preserve the target host id")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "revoked target cookie should be cleared")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestGateway_ServeHTTP_Proxy_InvalidCookie(t *testing.T) {
@@ -683,8 +972,6 @@ func TestGateway_ProxyToWorker_Success(t *testing.T) {
 	defer mock.Close()
 
 	orgID := uuid.New()
-	userID := uuid.New()
-	sessionID := uuid.New()
 	previewID := uuid.New()
 	now := time.Now().UTC()
 
@@ -698,12 +985,6 @@ func TestGateway_ProxyToWorker_Success(t *testing.T) {
 	}))
 	defer workerServer.Close()
 
-	metadata, err := json.Marshal(preview.WorkerNodeMetadata{
-		PreviewCapable:         true,
-		PreviewInternalBaseURL: workerServer.URL,
-	})
-	require.NoError(t, err, "worker metadata should marshal")
-
 	store := db.NewPreviewStore(mock)
 	nodeStore := db.NewNodeStore(mock)
 	selector := preview.NewWorkerSelector(nodeStore, store)
@@ -715,28 +996,18 @@ func TestGateway_ProxyToWorker_Success(t *testing.T) {
 		PreviewTokenSecret: "preview-secret",
 	})
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{
-				"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
-				"provider", "worker_node_id", "preview_handle", "primary_service", "port",
-				"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-				"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-				"preview_holding_container",
+				"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+				"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+				"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
 			}).AddRow(
-				previewID, sessionID, nil, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
-				"docker", "worker-1", "handle-1", "web", 3000,
-				"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
-				"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
-				false,
+				uuid.New(), orgID, previewID, 1, "worker-1",
+				workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+				now, nil, nil, "", now, now,
 			),
-		)
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at"}).
-				AddRow("worker-1", "worker", "worker.internal", "active", metadata, now, now),
 		)
 
 	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
@@ -749,157 +1020,245 @@ func TestGateway_ProxyToWorker_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestGateway_ProxyToWorker_Failures(t *testing.T) {
+func TestGateway_ProxyToWorker_RoutesByRuntimeEndpoint(t *testing.T) {
 	t.Parallel()
 
-	t.Run("preview lookup failure", func(t *testing.T) {
-		t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
 
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should be created")
-		defer mock.Close()
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
 
-		orgID := uuid.New()
-		previewID := uuid.New()
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/internal/preview/"+previewID.String()+"/proxy/api/v1/auth/login", r.URL.Path, "proxyToWorker should rewrite preview paths to the internal worker proxy endpoint")
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		claims, validateErr := auth.ValidatePreviewToken("preview-secret", token)
+		require.NoError(t, validateErr, "worker request should include a valid preview token")
+		require.NotNil(t, claims.RuntimeID, "worker token should carry the runtime ID")
+		require.Equal(t, runtimeID, *claims.RuntimeID, "worker token should target the selected runtime")
+		require.Equal(t, 7, claims.RuntimeEpoch, "worker token should target the selected runtime epoch")
+		_, writeErr := io.WriteString(w, "ok")
+		require.NoError(t, writeErr, "worker test server should write a response body")
+	}))
+	defer workerServer.Close()
 
-		store := db.NewPreviewStore(mock)
-		selector := preview.NewWorkerSelector(db.NewNodeStore(mock), store)
-		gw := NewGateway(GatewayConfig{
-			Store:              store,
-			WorkerSelector:     selector,
-			Logger:             zerolog.Nop(),
-			AppOrigin:          "https://app.143.dev",
-			PreviewTokenSecret: "preview-secret",
-		})
-
-		mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{
-				"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
-				"provider", "worker_node_id", "preview_handle", "primary_service", "port",
-				"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-				"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-				"preview_holding_container",
-			}))
-
-		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
-		rr := httptest.NewRecorder()
-
-		gw.proxyToWorker(rr, req, orgID, previewID)
-		require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should fail closed when the preview instance lookup fails")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
 	})
 
-	t.Run("worker resolve failure", func(t *testing.T) {
-		t.Parallel()
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 7, "worker-runtime",
+			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", now, now,
+		))
 
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should be created")
-		defer mock.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{}`))
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: "secret"})
+	rr := httptest.NewRecorder()
 
-		orgID := uuid.New()
-		userID := uuid.New()
-		sessionID := uuid.New()
-		previewID := uuid.New()
-		now := time.Now().UTC()
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	require.Equal(t, http.StatusOK, rr.Code, "proxyToWorker should relay successful worker responses")
+	require.Equal(t, "ok", rr.Body.String(), "proxyToWorker should relay the worker response body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
 
-		store := db.NewPreviewStore(mock)
-		selector := preview.NewWorkerSelector(db.NewNodeStore(mock), store)
-		gw := NewGateway(GatewayConfig{
-			Store:              store,
-			WorkerSelector:     selector,
-			Logger:             zerolog.Nop(),
-			AppOrigin:          "https://app.143.dev",
-			PreviewTokenSecret: "preview-secret",
-		})
+func TestGateway_ProxyToWorker_UnavailableRuntime(t *testing.T) {
+	t.Parallel()
 
-		mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows([]string{
-					"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
-					"provider", "worker_node_id", "preview_handle", "primary_service", "port",
-					"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-					"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-					"preview_holding_container",
-				}).AddRow(
-					previewID, sessionID, nil, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
-					"docker", "worker-missing", "handle-1", "web", 3000,
-					"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
-					"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
-					false,
-				),
-			)
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
-			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at"}))
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
 
-		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
-		rr := httptest.NewRecorder()
-
-		gw.proxyToWorker(rr, req, orgID, previewID)
-		require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should fail closed when the worker cannot be resolved")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	orgID := uuid.New()
+	previewID := uuid.New()
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
 	})
 
-	t.Run("worker base url parse failure", func(t *testing.T) {
-		t.Parallel()
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}))
 
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err, "pgxmock pool should be created")
-		defer mock.Close()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil)
+	rr := httptest.NewRecorder()
 
-		orgID := uuid.New()
-		userID := uuid.New()
-		sessionID := uuid.New()
-		previewID := uuid.New()
-		now := time.Now().UTC()
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "proxyToWorker should return unavailable when no runtime can serve the preview")
 
-		metadata, err := json.Marshal(preview.WorkerNodeMetadata{
-			PreviewCapable:         true,
-			PreviewInternalBaseURL: "://bad-url",
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "unavailable runtime response should be JSON")
+	require.Equal(t, "PREVIEW_RUNTIME_UNAVAILABLE", resp.Error.Code, "unavailable runtime should return a preview-specific code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_TranslatesWorkerRuntimeMismatch(t *testing.T) {
+	t.Parallel()
+
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		err := json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "WRONG_PREVIEW_WORKER",
+				Message: "preview token targets a different worker",
+			},
 		})
-		require.NoError(t, err, "worker metadata should marshal")
+		require.NoError(t, err, "worker mismatch response should encode")
+	}))
+	defer workerServer.Close()
 
-		store := db.NewPreviewStore(mock)
-		selector := preview.NewWorkerSelector(db.NewNodeStore(mock), store)
-		gw := NewGateway(GatewayConfig{
-			Store:              store,
-			WorkerSelector:     selector,
-			Logger:             zerolog.Nop(),
-			AppOrigin:          "https://app.143.dev",
-			PreviewTokenSecret: "preview-secret",
-		})
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
 
-		mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows([]string{
-					"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
-					"provider", "worker_node_id", "preview_handle", "primary_service", "port",
-					"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-					"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-					"preview_holding_container",
-				}).AddRow(
-					previewID, sessionID, nil, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
-					"docker", "worker-1", "handle-1", "web", 3000,
-					"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
-					"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), "ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
-					false,
-				),
-			)
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
-			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows([]string{"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at"}).
-					AddRow("worker-1", "worker", "worker.internal", "active", metadata, now, now),
-			)
-
-		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
-		rr := httptest.NewRecorder()
-
-		gw.proxyToWorker(rr, req, orgID, previewID)
-		require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should fail closed when the worker base URL is invalid")
-		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
 	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 1, "worker-runtime",
+			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "proxyToWorker should hide worker runtime mismatch errors")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "runtime mismatch translation should return JSON")
+	require.Equal(t, "PREVIEW_RUNTIME_UNAVAILABLE", resp.Error.Code, "runtime mismatch should be translated to unavailable")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_PreservesLargeNonMismatchForbiddenBody(t *testing.T) {
+	t.Parallel()
+
+	largeBody := strings.Repeat("x", 70*1024)
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusForbidden)
+		_, err := io.WriteString(w, largeBody)
+		require.NoError(t, err, "worker test server should write the large body")
+	}))
+	defer workerServer.Close()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 1, "worker-runtime",
+			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/forbidden", nil)
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "proxyToWorker should preserve non-mismatch forbidden responses")
+	require.Equal(t, largeBody, rr.Body.String(), "proxyToWorker should not truncate non-mismatch forbidden bodies")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_InvalidRuntimeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 1, "worker-1",
+			"", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "proxyToWorker should return unavailable when the runtime endpoint is invalid")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

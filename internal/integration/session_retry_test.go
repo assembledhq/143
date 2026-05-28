@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -49,7 +50,7 @@ func TestIntegration_RetrySession_ResetsAndReenqueues(t *testing.T) {
 
 	req := buildAuthedRequest(http.MethodPost,
 		"/api/v1/sessions/"+session.ID.String()+"/retry",
-		nil, orgID, &user, map[string]string{"id": session.ID.String()})
+		strings.NewReader(`{"mode":"start_over"}`), orgID, &user, map[string]string{"id": session.ID.String()})
 
 	rec := httptest.NewRecorder()
 	handler.RetrySession(rec, req)

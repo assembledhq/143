@@ -503,6 +503,46 @@ func workerAnyArgs(n int) []interface{} {
 	return args
 }
 
+type capturingStringArg struct {
+	dest *string
+}
+
+func (c capturingStringArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	*c.dest = s
+	return true
+}
+
+func expectWorkerLoadSamples(mock pgxmock.PgxPoolIface) {
+	mock.ExpectQuery("(?s).*WITH worker_nodes.*").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"worker_node_id",
+			"node_status",
+			"running_sessions",
+			"turn_held_sessions",
+			"sandbox_containers",
+			"active_previews",
+			"preview_held_containers",
+			"running_jobs",
+			"running_session_jobs",
+		}).
+			AddRow("worker-a", "active", int64(2), int64(1), int64(2), int64(3), int64(1), int64(4), int64(2)).
+			AddRow("worker-b", "active", int64(1), int64(0), int64(1), int64(0), int64(0), int64(1), int64(1)))
+}
+
+func expectSandboxCapacityWorker(mock pgxmock.PgxPoolIface, workerNodeID string) {
+	rows := pgxmock.NewRows([]string{"id"})
+	if workerNodeID != "" {
+		rows.AddRow(workerNodeID)
+	}
+	mock.ExpectQuery("WITH candidates AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+}
+
 type orchestratorServiceStub struct {
 	runAgentCalls        int
 	continueSessionCalls int
@@ -2331,6 +2371,29 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return ghservice.ErrPullRequestMergeabilityPending
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "pending mergeability should defer the job instead of succeeding")
+	require.ErrorIs(t, retryable.Err, ghservice.ErrPullRequestMergeabilityPending, "deferred job should preserve the pending mergeability sentinel")
+	require.Nil(t, retryable.RetryAfter, "pending mergeability should use the worker's exponential backoff schedule")
+	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
 }
 
 type prHandlerCalls struct {
@@ -4876,9 +4939,11 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 		},
 	}
 	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "worker-with-space")
 	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
 
-	err := handler(context.Background(), "run_agent", payload)
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "run_agent", payload)
 
 	require.Error(t, err, "run_agent should return a retryable error when local sandbox capacity is full")
 	var retryable *RetryableError
@@ -4886,6 +4951,47 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
 	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "sandbox capacity retries should avoid requeueing onto the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "sandbox capacity retries should not clear the target pin when a replacement worker is selected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "")
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "run_agent", payload)
+
+	require.Error(t, err, "run_agent should return a retryable error when local sandbox capacity is full")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.Nil(t, retryable.TargetNodeID, "sandbox capacity retries should not pin to a worker when none advertise available capacity")
+	require.True(t, retryable.ClearTargetNodeID, "sandbox capacity retries should clear any stale target pin when no replacement worker is selected")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -4932,6 +5038,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 		AutomationRuns: automations.NewAutomationHooks(stores.AutomationRuns, zerolog.New(&logBuf)),
 	}, zerolog.New(&logBuf))
 	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	expectSandboxCapacityWorker(mock, "")
 	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
 
 	err := handler(handlerCtx, "run_agent", payload)
@@ -4946,6 +5053,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
+	expectWorkerLoadSamples(mock)
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -5422,13 +5530,15 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
-			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+			return fmt.Errorf("capacity full: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity)
 		},
 	}
 	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "worker-with-space")
 	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
 
-	err := handler(context.Background(), "continue_session", payload)
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "continue_session", payload)
 
 	require.Error(t, err, "continue_session should return a retryable error when local sandbox capacity is full")
 	var retryable *RetryableError
@@ -5436,6 +5546,48 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
 	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "sandbox capacity retries should avoid requeueing onto the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "sandbox capacity retries should not clear the target pin when a replacement worker is selected")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("capacity full: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "")
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "continue_session", payload)
+
+	require.Error(t, err, "continue_session should return a retryable error when local sandbox capacity is full")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.Nil(t, retryable.TargetNodeID, "sandbox capacity retries should not pin to a worker when none advertise available capacity")
+	require.True(t, retryable.ClearTargetNodeID, "sandbox capacity retries should clear any stale target pin when no replacement worker is selected")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -5474,7 +5626,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
-			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+			return fmt.Errorf("capacity full: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity)
 		},
 	}
 	projectHooks := &sessionCompleteRecorder{}
@@ -5485,6 +5637,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 		AutomationRuns: automationHooks,
 	}, zerolog.Nop())
 	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	expectSandboxCapacityWorker(mock, "")
 	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
 
 	err := handler(handlerCtx, "continue_session", payload)
@@ -5500,8 +5653,17 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
 			),
 		)
+	expectWorkerLoadSamples(mock)
+	var failureExplanation string
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
-		WithArgs(workerAnyArgs(6)...).
+		WithArgs(
+			capturingStringArg{dest: &failureExplanation},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_threads").
 		WithArgs(workerAnyArgs(7)...).
@@ -5518,7 +5680,43 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	}}
 	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
 	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
+	require.Contains(t, failureExplanation, "Final capacity check: worker reported 2/2 local sandbox slots active or reserved.", "failure explanation should include the worker-local capacity reason")
+	require.Contains(t, failureExplanation, "Current worker load: 3 running sessions, 3 session sandbox containers, 3 active previews, 1 preview-held sandbox, and 3 running session/preview jobs across 2 workers.", "failure explanation should include current session and preview counts")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
+}
+
+func TestSandboxCapacityFailureExplanationIncludesCurrentLoad(t *testing.T) {
+	t.Parallel()
+
+	explanation := formatSandboxCapacityFailureExplanation(
+		fmt.Errorf("retryable job timed out after 8m0s: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity),
+		[]db.WorkerLoadSample{
+			{
+				WorkerNodeID:          "worker-a",
+				NodeStatus:            "active",
+				RunningSessions:       2,
+				TurnHeldSessions:      1,
+				SandboxContainers:     2,
+				ActivePreviews:        3,
+				PreviewHeldContainers: 1,
+				RunningJobs:           4,
+				RunningSessionJobs:    2,
+			},
+			{
+				WorkerNodeID:       "worker-b",
+				NodeStatus:         "active",
+				RunningSessions:    1,
+				SandboxContainers:  1,
+				RunningJobs:        1,
+				RunningSessionJobs: 1,
+			},
+		},
+	)
+
+	require.Contains(t, explanation, "The worker could not acquire local sandbox capacity before the job retry window expired.", "explanation should keep the base retry-window context")
+	require.Contains(t, explanation, "Final capacity check: worker reported 2/2 local sandbox slots active or reserved.", "explanation should include the concrete worker-local slot count")
+	require.Contains(t, explanation, "Current worker load: 3 running sessions, 3 session sandbox containers, 3 active previews, 1 preview-held sandbox, and 3 running session/preview jobs across 2 workers.", "explanation should include current running session and preview counts")
+	require.Contains(t, explanation, "Sandbox capacity is local to a worker node and is consumed by live session sandboxes, preview-held sandboxes, and in-flight reservations.", "explanation should explain why low visible concurrency can still hit capacity")
 }
 
 func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {

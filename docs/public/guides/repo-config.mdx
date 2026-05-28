@@ -12,8 +12,6 @@ tags:
 llm_summary: Configure `.143/config.json` with dependencies, bootstrap commands, validation commands, and preview settings for a repository.
 ---
 
-# Repo config
-
 `.143/config.json` is the repository contract 143 reads before agent work. It tells 143 how to prepare a sandbox, which deterministic checks matter, and how to start a live preview.
 
 Place it at the repo root:
@@ -80,7 +78,7 @@ If you also need a preview:
 - Commit the file to the repo.
 - Keep commands deterministic.
 - Do not put secrets in the file.
-- Use managed preview credentials for secrets.
+- Use preview secret bundles for secret env vars or generated config files.
 - Put exhaustive preview fields in [Preview config reference](/docs/reference/preview-config) instead of overloading this guide.
 
 <Callout type="warning" title="No secrets">

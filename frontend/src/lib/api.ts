@@ -219,8 +219,6 @@ export const api = {
     previewSecretBundles: {
       list: (id: string) =>
         get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`),
-      get: (bundleId: string) =>
-        get<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/preview-secret-bundles/${bundleId}`),
       upsert: (id: string, body: import('./types').PreviewSecretBundleUpsertRequest) =>
         post<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`, body),
       patch: (bundleId: string, body: import('./types').PreviewSecretBundlePatchRequest) =>
@@ -229,8 +227,6 @@ export const api = {
         post<import('./types').SingleResponse<import('./types').PreviewSecretBundleTestResult>>(`/api/v1/preview-secret-bundles/${bundleId}/test`),
       delete: (id: string, name: string) =>
         del(`/api/v1/repositories/${id}/preview-secret-bundles/${encodeURIComponent(name)}`),
-      deleteById: (bundleId: string) =>
-        del(`/api/v1/preview-secret-bundles/${bundleId}`),
     },
   },
   pullRequests: {
@@ -453,8 +449,8 @@ export const api = {
       ),
     endSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
-    retry: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`),
+    retry: (sessionId: string, body?: import('./types').RetrySessionRequest) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`, body ?? {}),
     cancelSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`),
     archive: (sessionId: string) =>

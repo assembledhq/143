@@ -345,6 +345,9 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
 	}
 	go nodeManager.StartHeartbeat(ctx)
+	if cfg.Mode != "worker" {
+		go worker.RunControlPlaneHealthAlerts(ctx, db.NewJobStore(pool), db.NewNodeStore(pool), logger, time.Minute)
+	}
 
 	// Start worker if mode includes worker capability.
 	// sandboxAuthShutdown is hoisted to function scope so the graceful
@@ -571,9 +574,13 @@ func main() {
 			previewRoutingReady.Load,
 			sandboxCapacity,
 		)
+		if workerPreviewStore != nil && cfg.NodeID != "" {
+			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
+		}
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
+		recoveryLoop.SetPreviewRuntimes(workerPreviewStore)
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
@@ -668,6 +675,11 @@ func main() {
 		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
+		if workerPreviewStore != nil && cfg.NodeID != "" {
+			if _, err := workerPreviewStore.MarkPreviewRuntimesDrainingByWorker(nodeDrainCtx, cfg.NodeID); err != nil {
+				logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes draining")
+			}
+		}
 		nodeDrainCancel()
 
 		// Mark /healthz unhealthy before closing the listener. Caddy probes
@@ -717,7 +729,11 @@ func main() {
 		}
 		drainCancel()
 		if !workerDrainTimedOut && workerPreviewStore != nil && cfg.NodeID != "" {
-			waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second)
+			if drained := waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second); !drained {
+				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorker(context.Background(), cfg.NodeID, "worker preview drain timeout"); err != nil {
+					logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes lost after drain timeout")
+				}
+			}
 		}
 
 		cancel() // stop worker

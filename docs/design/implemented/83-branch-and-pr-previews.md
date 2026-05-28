@@ -114,17 +114,17 @@ The form should optimize for the common path: choose branch, start. Repository a
 
 Every 143-generated PR should include one small footer link:
 
-`Preview: https://app.143.dev/.../previews/github/{owner}/{repo}/pull/{number}`
+`Preview: https://{preview-target-id}.preview.143.dev`
 
-That URL should open a 143-owned preview page. It should not point directly at `<preview-id>.preview.143.dev`, because runtime previews are intentionally short-lived.
+That URL should use the preview origin, but it should be keyed by the durable branch-preview target rather than a runtime preview instance. Runtime instance IDs remain short-lived; the gateway resolves a target-host request to the active runtime when one exists.
 
 When opened:
 
-- If a matching active preview exists, open it.
-- If the active preview is for an older commit, show `New commits available` with `Start latest`.
-- If no preview exists, start one from the PR head branch when the viewer has access.
-- If startup fails, keep diagnostics at the same URL and offer retry.
-- If the preview expired, show `Preview expired` with `Start again`.
+- If a matching active preview exists and the browser has a preview access session, open it directly.
+- If a matching active preview exists but the browser needs bootstrap, show the lightweight gateway overlay and route the user through the app-owned bootstrap flow.
+- If no runtime is active, show a minimal `Start preview` surface on the preview origin and link into the app-owned start/status/log flow.
+- If a previous runtime stopped or expired, keep the same target-host URL, show the last stopped time when known, and present the restart path rather than sending the user to a separate dashboard page first.
+- If startup fails, keep diagnostics available from the start/status flow and offer retry.
 
 This same durable route can be used for externally created PRs when a user manually starts a preview from the PR page or an API caller creates one for a PR branch.
 

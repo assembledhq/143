@@ -2,10 +2,11 @@
 
 import { use } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ExternalLink, GitBranch, GitPullRequest, RotateCw } from "lucide-react";
+import { AlertTriangle, GitBranch, GitPullRequest, RotateCw } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -19,6 +20,18 @@ export default function PullRequestPreviewPage({
   params: Promise<{ owner: string; repo: string; number: string }>;
 }) {
   const { owner, repo, number } = use(params);
+  return <PullRequestPreviewContent owner={owner} repo={repo} number={number} />;
+}
+
+export function PullRequestPreviewContent({
+  owner,
+  repo,
+  number,
+}: {
+  owner: string;
+  repo: string;
+  number: string;
+}) {
   const queryClient = useQueryClient();
   const queryKey = ["branch-preview-pr", owner, repo, number];
   const previewQuery = useQuery<SingleResponse<BranchPreviewResponse>>({
@@ -150,13 +163,8 @@ export default function PullRequestPreviewPage({
                 ) : null}
 
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  {safeExternalUrl(preview.preview_url) ? (
-                    <Button asChild>
-                      <a href={safeExternalUrl(preview.preview_url)} target="_blank" rel="noopener noreferrer">
-                        <ExternalLink className="h-4 w-4" />
-                        Open preview
-                      </a>
-                    </Button>
+                  {safeExternalUrl(preview.preview_url) && preview.preview_id ? (
+                    <OpenPreviewButton previewId={preview.preview_id} previewUrl={preview.preview_url} />
                   ) : null}
                   {safeExternalUrl(preview.pull_request_url) ? (
                     <Button asChild variant="outline">

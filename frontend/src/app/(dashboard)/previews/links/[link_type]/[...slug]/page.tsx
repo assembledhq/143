@@ -2,10 +2,11 @@
 
 import { use } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, GitBranch } from "lucide-react";
+import { GitBranch } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -55,13 +56,8 @@ export default function PreviewStableLinkPage({
                   </div>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  {safeExternalUrl(preview.preview_url) ? (
-                    <Button asChild>
-                      <a href={safeExternalUrl(preview.preview_url)} target="_blank" rel="noopener noreferrer">
-                        <ExternalLink className="h-4 w-4" />
-                        Open preview
-                      </a>
-                    </Button>
+                  {safeExternalUrl(preview.preview_url) && preview.preview_id ? (
+                    <OpenPreviewButton previewId={preview.preview_id} previewUrl={preview.preview_url} />
                   ) : null}
                   <Button asChild variant="outline">
                     <a href={`/previews/${preview.preview_id ?? preview.target_id}`}>

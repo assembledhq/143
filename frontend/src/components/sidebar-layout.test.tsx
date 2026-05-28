@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
+import Link from "next/link";
 import { SidebarLayout } from "./sidebar-layout";
 
 function renderLayout(mobileShow?: "sidebar" | "content") {
@@ -12,6 +13,35 @@ function renderLayout(mobileShow?: "sidebar" | "content") {
       <div data-testid="content">content</div>
     </SidebarLayout>,
   );
+}
+
+function setCompactDesktopViewport(matches: boolean): () => void {
+  const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(min-width: 768px) and (max-width: 1279px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  return () => {
+    if (original !== undefined) {
+      Object.defineProperty(window, "matchMedia", original);
+    } else {
+      Object.defineProperty(window, "matchMedia", {
+        writable: true,
+        configurable: true,
+        value: undefined,
+      });
+    }
+  };
 }
 
 describe("SidebarLayout", () => {
@@ -114,10 +144,13 @@ describe("SidebarLayout", () => {
 
   it('hides the content pane on mobile when mobileShow="sidebar"', () => {
     const { getByTestId } = renderLayout("sidebar");
-    // Both panes are mounted; content is display:none below md.
+    // Both panes are mounted. The sidebar pane is visible on mobile and at xl+;
+    // it is hidden between md and xl (compact desktop) where the switcher rail takes over.
     const sidebar = getByTestId("sidebar").closest("div[style]");
     const content = getByTestId("content").parentElement;
-    expect(sidebar?.className).not.toContain("hidden");
+    expect(sidebar).toHaveClass("block");
+    expect(sidebar).toHaveClass("md:hidden");
+    expect(sidebar).toHaveClass("xl:block");
     expect(content?.className).toContain("hidden");
     expect(content?.className).toContain("md:block");
   });
@@ -127,7 +160,7 @@ describe("SidebarLayout", () => {
     const sidebar = getByTestId("sidebar").closest("div[style]");
     const content = getByTestId("content").parentElement;
     expect(sidebar?.className).toContain("hidden");
-    expect(sidebar?.className).toContain("md:block");
+    expect(sidebar?.className).toContain("xl:block");
     expect(content?.className).not.toContain("hidden");
   });
 
@@ -135,5 +168,63 @@ describe("SidebarLayout", () => {
     const { getByTestId } = renderLayout();
     const content = getByTestId("content").parentElement;
     expect(content?.className).toContain("hidden");
+  });
+
+  it("contains overscroll inside the session panes", () => {
+    const { container, getByTestId } = renderLayout("content");
+
+    const shell = container.firstElementChild;
+    expect(shell).toHaveClass("overflow-hidden");
+    expect(shell).toHaveClass("overscroll-none");
+
+    const content = getByTestId("content").parentElement;
+    expect(content).toHaveClass("overscroll-contain");
+  });
+
+  it("collapses the persistent session list between mobile and wide desktop", () => {
+    const { getByTestId } = renderLayout("content");
+
+    const sidebar = getByTestId("sidebar").closest("[data-testid='sidebar-pane']");
+    expect(sidebar).toHaveClass("xl:block");
+    expect(sidebar).toHaveClass("hidden");
+
+    const switcher = getByTestId("session-switcher-rail");
+    expect(switcher).toHaveClass("hidden");
+    expect(switcher).toHaveClass("md:flex");
+    expect(switcher).toHaveClass("xl:hidden");
+  });
+
+  it("keeps the mobile sessions list available below the compact breakpoint", () => {
+    const { getByTestId } = renderLayout("sidebar");
+
+    const sidebar = getByTestId("sidebar").closest("[data-testid='sidebar-pane']");
+    expect(sidebar).toHaveClass("block");
+    expect(sidebar).toHaveClass("md:hidden");
+    expect(sidebar).toHaveClass("xl:block");
+  });
+
+  it("closes the compact session switcher after a session link is selected", async () => {
+    const restoreMatchMedia = setCompactDesktopViewport(true);
+    try {
+      render(
+        <SidebarLayout
+          sidebar={<Link href="/sessions/session-1">Session one</Link>}
+          mobileShow="content"
+        >
+          <div data-testid="content">content</div>
+        </SidebarLayout>,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Open session switcher" }));
+      expect(await screen.findByRole("link", { name: "Session one" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("link", { name: "Session one" }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole("link", { name: "Session one" })).not.toBeInTheDocument();
+      });
+    } finally {
+      restoreMatchMedia();
+    }
   });
 });
