@@ -345,6 +345,9 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
 	}
 	go nodeManager.StartHeartbeat(ctx)
+	if cfg.Mode != "worker" {
+		go worker.RunControlPlaneHealthAlerts(ctx, db.NewJobStore(pool), db.NewNodeStore(pool), logger, time.Minute)
+	}
 
 	// Start worker if mode includes worker capability.
 	// sandboxAuthShutdown is hoisted to function scope so the graceful
