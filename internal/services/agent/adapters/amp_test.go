@@ -21,6 +21,13 @@ func TestAmpAdapter_Name(t *testing.T) {
 	require.Equal(t, models.AgentTypeAmp, adapter.Name(), "adapter name should be amp")
 }
 
+func TestAmpAdapter_ResumeMode(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewAmpAdapter(zerolog.Nop())
+	require.Equal(t, agent.ResumeBySessionID, adapter.ResumeMode(), "amp should support deterministic continuation by thread id")
+}
+
 func TestAmpAdapter_PreparePrompt(t *testing.T) {
 	t.Parallel()
 
@@ -146,13 +153,46 @@ func TestAmpAdapter_Execute_NonZeroExit(t *testing.T) {
 	require.Contains(t, result.Error, "invalid api key")
 }
 
-func TestAmpAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
+func TestAmpAdapter_Execute_ContinuationResumesThread(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 		require.NotContains(t, cmd, ".143-agent.pid", "amp continuation must not embed pidfile scaffolding (provider internal)")
 		require.NotContains(t, cmd, "& pid=$!", "amp continuation must not embed shell-shim wrapping (provider internal)")
+		require.Contains(t, cmd, "amp threads continue 'amp-thread-123'", "amp continuation should resume the upstream thread")
+		require.Contains(t, cmd, "-x \"$(cat '/home/sandbox/.143-prompt.md')\"", "amp continuation should pass the follow-up prompt file")
+		return 0, nil
+	}
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		return 0, nil
+	}
+
+	adapter := NewAmpAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}, &agent.AgentPrompt{
+		Continuation:    true,
+		ResumeSessionID: "amp-thread-123",
+		UserMessage:     "please continue where we left off",
+		MaxTokens:       50_000,
+	}, logCh)
+	require.NoError(t, err)
+	close(logCh)
+
+	promptData, ok := provider.Files["/home/sandbox/.143-prompt.md"]
+	require.True(t, ok, "continuation should still write the prompt file under HomeDir")
+	require.Equal(t, "please continue where we left off", string(promptData),
+		"continuation prompt should be the new UserMessage, not empty system/user prompts")
+}
+
+func TestAmpAdapter_Execute_AppendsHumanInputAnswer(t *testing.T) {
+	t.Parallel()
+
+	answerText := "Use option B."
+	provider := newMockProvider()
+	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 		return 0, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
@@ -165,16 +205,20 @@ func TestAmpAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 
 	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}, &agent.AgentPrompt{
 		Continuation: true,
-		UserMessage:  "please continue where we left off",
+		UserMessage:  "the agent requested input",
 		MaxTokens:    50_000,
+		HumanInputAnswer: &agent.HumanInputAnswer{
+			AnswerText:        &answerText,
+			SelectedChoiceIDs: []string{"choice-b"},
+		},
 	}, logCh)
-	require.NoError(t, err)
-	close(logCh)
+	require.NoError(t, err, "Execute should append normalized human input answers")
 
 	promptData, ok := provider.Files["/home/sandbox/.143-prompt.md"]
-	require.True(t, ok, "continuation should still write the prompt file under HomeDir")
-	require.Equal(t, "please continue where we left off", string(promptData),
-		"continuation prompt should be the new UserMessage, not empty system/user prompts")
+	require.True(t, ok, "prompt file should be written")
+	require.Contains(t, string(promptData), "Human input answer", "prompt should include a structured answer section")
+	require.Contains(t, string(promptData), "Use option B.", "prompt should include the answer text")
+	require.Contains(t, string(promptData), "choice-b", "prompt should include selected choices")
 }
 
 func TestAmpAdapter_Execute_MissingProvider(t *testing.T) {

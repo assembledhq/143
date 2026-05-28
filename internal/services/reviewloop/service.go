@@ -352,6 +352,9 @@ func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop
 		AgentType: loop.AgentType,
 		FixMode:   loop.FixMode,
 	})
+	if !agentHasBuiltinReviewCommand(loop.AgentType) {
+		return s.sendPlain(ctx, *loop, naturalLanguageReviewPrompt(reviewPrompt), userID, opts...)
+	}
 	arguments := strings.TrimPrefix(reviewPrompt, "/review")
 	arguments = strings.TrimSpace(arguments)
 	command := models.SessionInputCommand{
@@ -364,6 +367,27 @@ func (s *Service) sendReview(ctx context.Context, loop *models.SessionReviewLoop
 		Source:    models.SessionInputCommandSourceBuiltin,
 	}
 	return s.sendPlain(ctx, *loop, reviewPrompt, userID, append(opts, withCommands(command))...)
+}
+
+func agentHasBuiltinReviewCommand(agentType models.AgentType) bool {
+	for _, command := range models.SlashCommandsForAgent(agentType) {
+		if command.Name == "review" {
+			return true
+		}
+	}
+	return false
+}
+
+func naturalLanguageReviewPrompt(reviewPrompt string) string {
+	trimmed := strings.TrimSpace(reviewPrompt)
+	arguments := strings.TrimSpace(strings.TrimPrefix(trimmed, "/review"))
+	if arguments == trimmed {
+		return trimmed
+	}
+	if arguments == "" {
+		return "Review the current workspace diff."
+	}
+	return "Review " + arguments
 }
 
 func withCommands(commands ...models.SessionInputCommand) sendOption {
