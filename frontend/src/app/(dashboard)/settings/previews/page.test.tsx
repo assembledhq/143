@@ -140,7 +140,7 @@ describe("PreviewSettingsPage", () => {
     expect(savedBody).toMatchObject({ name: "docs-preview" });
   }, 10000);
 
-  it("uses delivery tabs to choose environment variables or a secret file", async () => {
+  it("uses delivery tabs to choose environment variables or a pasted secret file", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
@@ -156,19 +156,21 @@ describe("PreviewSettingsPage", () => {
     expect(screen.getByRole("tab", { name: "Secret file" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByText("Stored secrets")).toBeInTheDocument();
     expect(screen.getByText(/Each secret name becomes an environment variable/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText("Generated files JSON")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Secret file contents")).not.toBeInTheDocument();
     expect(screen.queryByText(/Send as env var/i)).not.toBeInTheDocument();
     expect(screen.getByLabelText("Stored secrets help")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
 
     expect(screen.getByRole("tab", { name: "Secret file" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByLabelText("Generated files JSON")).toBeInTheDocument();
-    expect(screen.getByLabelText("Generated files help")).toBeInTheDocument();
-    expect(screen.getByText(/Reference stored secrets with secret:API_TOKEN/i)).toBeInTheDocument();
+    expect(screen.queryByText("Stored secrets")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Secret file path")).toBeInTheDocument();
+    expect(screen.getByLabelText("Secret file type")).toBeInTheDocument();
+    expect(screen.getByLabelText("Secret file contents")).toBeInTheDocument();
+    expect(screen.getByText(/Paste the exact file that the preview app expects/i)).toBeInTheDocument();
   });
 
-  it("does not expose file-only preview secrets as environment variables", async () => {
+  it("stores a pasted secret file without exposing it as environment variables", async () => {
     let savedBody: unknown;
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -185,24 +187,21 @@ describe("PreviewSettingsPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.type(screen.getByLabelText("Bundle name"), "file-only");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
-    await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
-    fireEvent.change(screen.getByLabelText("Generated files JSON"), {
-      target: {
-        value: '[{"type":"file","path":"development.conf.json","format":"json","content":{"token":"secret:API_TOKEN"}}]',
-      },
-    });
+    await userEvent.type(screen.getByLabelText("Secret file path"), "development.conf.json");
+    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
+    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"token":"super-secret"}' } });
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
       expect(savedBody).toEqual({
         name: "file-only",
-        source: { type: "managed", values: { API_TOKEN: "super-secret" } },
+        source: { type: "managed", values: { SECRET_FILE_CONTENT: '{"token":"super-secret"}' } },
         outputs: [{
           type: "file",
           path: "development.conf.json",
           format: "json",
-          content: { token: "secret:API_TOKEN" },
+          value: "secret:SECRET_FILE_CONTENT",
         }],
         exposure_policy: "preview_runtime",
       });
@@ -221,15 +220,14 @@ describe("PreviewSettingsPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.type(screen.getByLabelText("Bundle name"), "no-outputs");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
-    await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
+    await userEvent.type(screen.getByLabelText("Secret file path"), "development.conf.json");
 
     // Save is disabled until the selected secret-file delivery method is configured.
     expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /save/i })).not.toHaveAttribute("title");
 
     await userEvent.hover(screen.getByText("Save").closest("span")!);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add the secret file JSON before saving");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Paste the secret file contents before saving");
   }, 10000);
 
   it("shows tooltip guidance when Save is disabled in env mode with no filled values", async () => {
@@ -279,6 +277,58 @@ describe("PreviewSettingsPage", () => {
     await userEvent.click((await screen.findAllByRole("button", { name: /edit dual-delivery/i }))[0]);
 
     expect(screen.getByText(/uses both env vars and a secret file/i)).toBeInTheDocument();
+  });
+
+  it("hides the re-enter file hint when switching to env delivery mode on a file bundle", async () => {
+    const fileBundle = {
+      id: "bundle-file",
+      repository_id: "repo-1",
+      name: "file-bundle",
+      source_type: "managed",
+      exposure_policy: "preview_runtime",
+      outputs: [{ type: "file", path: "config.json", format: "json" }],
+      created_by_user_id: "user-1",
+      created_at: "2026-05-27T00:00:00Z",
+    };
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () =>
+        HttpResponse.json({ data: [fileBundle], meta: {} }),
+      ),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
+
+    expect(screen.getByText(/re-enter the file contents/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Environment variables" }));
+
+    expect(screen.queryByText(/re-enter the file contents/i)).not.toBeInTheDocument();
+  });
+
+  it("rejects invalid JSON in secret file contents when format is JSON", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
+    await userEvent.type(screen.getByLabelText("Bundle name"), "bad-json");
+    await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
+    await userEvent.type(screen.getByLabelText("Secret file path"), "config.json");
+    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
+    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: "not valid json{{" } });
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(await screen.findByText(/must be valid JSON/i)).toBeInTheDocument();
   });
 
   it("edits a preview secret bundle via the patch endpoint", async () => {
