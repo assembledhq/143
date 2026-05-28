@@ -526,6 +526,23 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
     typeof details.can_fallback_to_app === "boolean";
 }
 
+function isRuntimeRecoveryActive(session: Session): boolean {
+  return session.recovery_state === "queued" || session.recovery_state === "recovering";
+}
+
+function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
+  return (
+    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300`}>
+      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+      <span>
+        <span className="font-medium">Restoring runtime from checkpoint</span>
+        <span className="mx-1">·</span>
+        <span>Follow-up messages will be queued and delivered after the runtime is restored.</span>
+      </span>
+    </div>
+  );
+}
+
 function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
@@ -547,7 +564,8 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
       queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
   });
-  const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed";
+  const recoveryActive = isRuntimeRecoveryActive(session);
+  const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
   const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
@@ -580,6 +598,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
       )}
 
       {/* Failure card — shown prominently at top for failed sessions */}
+      {recoveryActive && <RuntimeRecoveryNotice border="border" />}
       {session.status === "failed" && (session.failure_explanation || session.error) && (
         <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
           <CardHeader className="pb-0">
@@ -597,7 +616,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
                 <div className="inline-flex">
                   <DisabledTooltip
                     disabled={retryMutation.isPending || checkpointRetryUnavailable}
-                    content={checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
+                    content={recoveryActive ? "Runtime recovery is already in progress." : checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
                   >
                     <Button
                       size="xs"
@@ -4062,6 +4081,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
   const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
+  const runtimeRecoveryActive = session ? isRuntimeRecoveryActive(session) : false;
   const localStopRequested = sessionStopRequest?.sessionId === id && composerIsRunning;
   const threadStopRequested = !!activeThread?.cancel_requested_at && workingStatusesSet.has(activeThread.status);
   const isStopRequested = localStopRequested || threadStopRequested;
@@ -5509,6 +5529,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             )}
+            {runtimeRecoveryActive && !composerIsSnapshotExpired && (
+              <RuntimeRecoveryNotice />
+            )}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -5749,6 +5772,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
                 </span>
               </div>
+            ) : null}
+            {runtimeRecoveryActive && !composerIsSnapshotExpired ? (
+              <RuntimeRecoveryNotice border="border-b" />
             ) : null}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
               <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">

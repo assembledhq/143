@@ -36,6 +36,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/ownerloss"
 	"github.com/assembledhq/143/internal/services/preview"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -328,6 +329,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if threadCanceller != nil {
 		threadSvc.SetCanceller(threadCanceller)
 	}
+	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
+		sessionStore,
+		db.NewSessionExecutorStore(pool),
+		jobStore,
+		jobStore,
+		logger,
+	))
 	// Wire review-comment resolution so SendThreadMessage can resolve
 	// comments atomically with the message create — same invariant the
 	// session-level SendMessage already enforces. Without this, the

@@ -213,6 +213,27 @@ type testDeps struct {
 	jobStore     *mockJobStore
 }
 
+type mockOwnerLossRecovery struct {
+	calls []ownerLossRecoveryCall
+	err   error
+}
+
+type ownerLossRecoveryCall struct {
+	orgID     uuid.UUID
+	sessionID uuid.UUID
+	threadID  *uuid.UUID
+}
+
+func (m *mockOwnerLossRecovery) RecoverLostOwner(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID) error {
+	var copiedThreadID *uuid.UUID
+	if threadID != nil {
+		id := *threadID
+		copiedThreadID = &id
+	}
+	m.calls = append(m.calls, ownerLossRecoveryCall{orgID: orgID, sessionID: sessionID, threadID: copiedThreadID})
+	return m.err
+}
+
 func newTestService(t *testing.T) (*Service, *testDeps) {
 	t.Helper()
 	deps := &testDeps{
@@ -1301,6 +1322,48 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "thread busy queues message and proactively recovers lost owner",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "queued",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 7
+					return nil
+				}
+			},
+		},
+		{
+			name: "thread busy owner-loss recovery error does not roll back queued message",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "queued",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 8
+					return nil
+				}
+			},
+		},
+		{
 			// Resolving review comments on a queued send is rejected: the
 			// resolution pass is keyed on the in-flight turn and we cannot
 			// atomically commit it alongside a message that won't be
@@ -1738,6 +1801,14 @@ func TestService_SendMessage(t *testing.T) {
 			t.Parallel()
 
 			svc, deps := newTestService(t)
+			ownerLoss := &mockOwnerLossRecovery{}
+			switch tt.name {
+			case "thread busy queues message and proactively recovers lost owner":
+				svc.SetOwnerLossOrchestrator(ownerLoss)
+			case "thread busy owner-loss recovery error does not roll back queued message":
+				ownerLoss.err = errors.New("recovery temporarily unavailable")
+				svc.SetOwnerLossOrchestrator(ownerLoss)
+			}
 			tt.setupDeps(deps)
 
 			result, err := svc.SendMessage(context.Background(), tt.input)
@@ -1765,9 +1836,105 @@ func TestService_SendMessage(t *testing.T) {
 			require.NotNil(t, result, "should return a result")
 			require.NotNil(t, result.Message, "should return a message")
 			require.Equal(t, models.MessageRoleUser, result.Message.Role, "should set role to user")
+			if tt.name == "thread busy queues message and proactively recovers lost owner" ||
+				tt.name == "thread busy owner-loss recovery error does not roll back queued message" {
+				require.Len(t, ownerLoss.calls, 1, "queued send should trigger proactive owner-loss recovery")
+				require.Equal(t, orgID, ownerLoss.calls[0].orgID, "owner-loss recovery should receive org id")
+				require.Equal(t, sessionID, ownerLoss.calls[0].sessionID, "owner-loss recovery should receive session id")
+				require.NotNil(t, ownerLoss.calls[0].threadID, "owner-loss recovery should receive thread id")
+				require.Equal(t, threadID, *ownerLoss.calls[0].threadID, "owner-loss recovery should target queued thread")
+			}
 			if tt.name == "running limit reached queues the message instead of rejecting it" {
 				require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "queued send should increment the pending message count for that thread")
 			}
+		})
+	}
+}
+
+func TestService_SendMessage_ProactiveOwnerLossRecoveryForSiblingQueue(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	tests := []struct {
+		name  string
+		setup func(*testDeps)
+	}{
+		{
+			name: "parent session already running due to sibling",
+			setup: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{}, fmt.Errorf("session already running")
+				}
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 42
+					return nil
+				}
+			},
+		},
+		{
+			name: "running thread limit reached",
+			setup: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, db.ErrThreadRunningLimitReached
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusIdle}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 77
+					return nil
+				}
+			},
+		},
+		{
+			name: "normal idle send does not trigger recovery",
+			setup: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+					msg.ID = 7
+					return nil
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			ownerLoss := &mockOwnerLossRecovery{}
+			svc.SetOwnerLossOrchestrator(ownerLoss)
+			tt.setup(deps)
+
+			result, err := svc.SendMessage(context.Background(), SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "hello",
+			})
+			require.NoError(t, err, "send should succeed")
+			require.NotNil(t, result, "send should return a result")
+
+			if tt.name == "normal idle send does not trigger recovery" {
+				require.Empty(t, ownerLoss.calls, "normal enqueue path should not trigger proactive owner-loss recovery")
+				return
+			}
+			require.Len(t, ownerLoss.calls, 1, "queue-only sibling path should trigger proactive owner-loss recovery")
+			require.Equal(t, orgID, ownerLoss.calls[0].orgID, "owner-loss recovery should receive org id")
+			require.Equal(t, sessionID, ownerLoss.calls[0].sessionID, "owner-loss recovery should receive session id")
+			require.NotNil(t, ownerLoss.calls[0].threadID, "owner-loss recovery should receive thread id")
+			require.Equal(t, threadID, *ownerLoss.calls[0].threadID, "owner-loss recovery should target queued thread")
 		})
 	}
 }
