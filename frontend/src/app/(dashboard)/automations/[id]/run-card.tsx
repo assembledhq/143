@@ -99,7 +99,7 @@ function FullCard({ run, kind, navigateTo }: FullCardProps) {
       onKeyDown={handleKeyDown}
       className={cn(
         "group overflow-hidden border transition-all",
-        navigate && "cursor-pointer hover:border-border/90 hover:bg-muted/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        navigate && "cursor-pointer hover:border-primary/30 hover:bg-accent/35 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         cardSurfaceClass(kind),
       )}
     >
@@ -352,12 +352,16 @@ function PrimaryAction({
   if (kind === "needs_input") label = "Reply to agent";
   else if (kind === "running") label = "View live session";
   else if (kind === "failed" && run.session?.failure_retry_advised) label = "Retry on session";
+  else if (kind === "completed_no_pr") label = "Session";
 
   return (
     <Button
       size="sm"
       variant={kind === "needs_input" ? "default" : "outline"}
-      className="w-full shrink-0 sm:w-auto"
+      className={cn(
+        "w-full shrink-0 sm:w-auto",
+        kind === "completed_no_pr" && "h-7 w-auto px-2 text-muted-foreground hover:text-foreground",
+      )}
       onClick={(e) => {
         stop(e);
         navigateTo(`/sessions/${sessionId}`);

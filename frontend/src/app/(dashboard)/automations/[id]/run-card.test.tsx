@@ -154,6 +154,25 @@ describe("RunCard click-through", () => {
     expect(screen.getByRole("link", { name: /review pr/i })).toBeInTheDocument();
   });
 
+  it("uses a compact Session CTA for completed runs without PRs", () => {
+    const run = makeRun({
+      result_summary: "Updated stale retry handling",
+      session: {
+        id: "sess-open",
+        title: "Updated stale retry handling",
+        status: "completed",
+        failure_retry_advised: false,
+        pr_creation_state: "idle",
+      },
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByRole("button", { name: /open session for completed run/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^open session$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^session$/i })).toHaveClass("h-7", "px-2");
+  });
+
   it("renders manual-run metadata and failure detail in the row body", () => {
     const run = makeRun({
       status: "failed",

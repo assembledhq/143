@@ -339,6 +339,76 @@ describe("AutomationDetailPage", () => {
     expect(screen.getAllByText("acme/repo").length).toBeGreaterThan(1);
   });
 
+  it("keeps run history in the main column instead of duplicating previous runs in the rail", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => HttpResponse.json({
+        data: {
+          id: "auto-1",
+          org_id: "org-1",
+          repository_id: "repo-1",
+          name: "Weekly audit",
+          goal: "Check release health",
+          scope: "",
+          interval_value: 1,
+          interval_unit: "weeks",
+          base_branch: "main",
+          enabled: true,
+          timezone: "UTC",
+          last_run_at: null,
+          next_run_at: null,
+          priority: 50,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/automations/auto-1/runs*", () => HttpResponse.json({
+        data: [{
+          id: "run-1",
+          automation_id: "auto-1",
+          triggered_at: "2026-01-02T00:00:00Z",
+          triggered_by: "schedule",
+          goal_snapshot: "Check release health",
+          status: "completed",
+          result_summary: "Checked release health",
+          completed_at: "2026-01-02T00:00:30Z",
+          created_at: "2026-01-02T00:00:00Z",
+          updated_at: "2026-01-02T00:00:30Z",
+          session: {
+            id: "sess-1",
+            title: "Checked release health",
+            status: "completed",
+            failure_retry_advised: false,
+            pr_creation_state: "idle",
+          },
+        }],
+        meta: {},
+      })),
+      http.get("*/api/v1/automations/auto-1/stats*", () => HttpResponse.json({
+        data: {
+          since: "2026-01-01T00:00:00Z",
+          until: "2026-01-31T00:00:00Z",
+          buckets: [],
+          totals: {
+            total: 1,
+            completed: 1,
+            completed_noop: 0,
+            failed: 0,
+            skipped: 0,
+            running: 0,
+            pending: 0,
+            success_rate: 1,
+            avg_duration_seconds: 30,
+          },
+        },
+      })),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    expect(await screen.findByRole("heading", { name: "Run history" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Previous runs" })).not.toBeInTheDocument();
+  });
+
   it("hides member-only automation actions from builders", async () => {
     currentUserRole.value = "builder";
     server.use(
