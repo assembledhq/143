@@ -3470,6 +3470,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			SessionTitle:            title,
 			BranchName:              body.Branch,
 			ReferenceText:           linearReferenceText(body.References),
+			RepositoryID:            repoID,
 			UserID:                  userID,
 			LinearPrivate:           body.LinearPrivate,
 			LinearStateSyncDisabled: body.LinearStateSyncDisabled,

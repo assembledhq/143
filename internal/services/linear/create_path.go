@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,7 @@ type CreateInput struct {
 	SessionTitle            string
 	BranchName              string
 	ReferenceText           string
+	RepositoryID            *uuid.UUID
 	UserID                  *uuid.UUID
 	LinearPrivate           bool
 	LinearStateSyncDisabled bool
@@ -142,7 +144,8 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 		return CreateResult{PrepareInline: false}, nil
 	}
 
-	linkID, err := s.LinkResolved(ctx, in.OrgID, in.SessionID, resolved, models.SessionIssueLinkRolePrimary, 0, in.UserID)
+	linkOpts := LinkOptions{AllowRepositoryMismatch: in.RepositoryID != nil}
+	linkID, err := s.LinkResolvedWithOptions(ctx, in.OrgID, in.SessionID, resolved, models.SessionIssueLinkRolePrimary, 0, in.UserID, linkOpts)
 	if err != nil {
 		// Link write rejected (e.g. explicit repo mismatch). Skip primary
 		// linking; do not block the session, but warn so audit can pick up.
@@ -336,6 +339,9 @@ func (s *Service) enqueueLinearWorker(ctx context.Context, in CreateInput, jobTy
 		"identifiers": identifiers,
 		"refs":        linkRefsFromDetected(hits),
 	}
+	if in.RepositoryID != nil {
+		payload["allow_repository_mismatch"] = true
+	}
 	if in.UserID != nil {
 		payload["user_id"] = in.UserID.String()
 	}
@@ -380,6 +386,10 @@ func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uui
 }
 
 func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID) error {
+	return s.PrepareLinearPrimaryRefsWithOptions(ctx, orgID, sessionID, refs, userID, LinkOptions{})
+}
+
+func (s *Service) PrepareLinearPrimaryRefsWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID, linkOpts LinkOptions) error {
 	if len(refs) == 0 {
 		if err := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone); err != nil {
 			return fmt.Errorf("clear linear prepare state: %w", err)
@@ -407,7 +417,7 @@ func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID
 		return err
 	}
 
-	linkID, err := s.LinkResolved(ctx, orgID, sessionID, resolved, models.SessionIssueLinkRolePrimary, 0, userID)
+	linkID, err := s.LinkResolvedWithOptions(ctx, orgID, sessionID, resolved, models.SessionIssueLinkRolePrimary, 0, userID, linkOpts)
 	if err != nil {
 		// Same retry contract as the resolve path above: leave the row in
 		// "pending" until the prepare job is truly exhausted.
@@ -431,7 +441,7 @@ func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID
 			Msg("worker prepare_linear_primary: failed to persist linear identifier hint; branch naming will fall back to non-linear slug")
 	}
 
-	s.linkRelatedRefs(ctx, orgID, sessionID, refs[1:], userID)
+	s.linkRelatedRefs(ctx, orgID, sessionID, refs[1:], userID, linkOpts)
 
 	if err := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateReady); err != nil {
 		return err
@@ -462,6 +472,19 @@ func (s *Service) MarkLinearPrepareFailed(ctx context.Context, orgID, sessionID 
 	return s.sessions.SetLinearPrepareStateIfNotReady(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
 }
 
+func (s *Service) MarkLinearPrepareFailedWithError(ctx context.Context, orgID, sessionID uuid.UUID, message string) error {
+	if s == nil || s.sessions == nil {
+		return nil
+	}
+	if err := s.sessions.SetLinearPrepareStateIfNotReady(ctx, orgID, sessionID, models.LinearPrepareStateFailed); err != nil {
+		return err
+	}
+	if strings.TrimSpace(message) == "" {
+		return nil
+	}
+	return s.sessions.UpdateResult(ctx, orgID, sessionID, models.SessionStatusFailed, &models.SessionResult{Error: &message})
+}
+
 // LinkRelatedLinearIssues is the worker-side catch-up path after the primary
 // has already been prepared inline. The payload includes the primary first so
 // old workers and dedupe keys stay stable; this method intentionally skips it
@@ -474,19 +497,19 @@ func (s *Service) LinkRelatedLinearRefs(ctx context.Context, orgID, sessionID uu
 	if len(refs) <= 1 {
 		return nil
 	}
-	s.linkRelatedRefs(ctx, orgID, sessionID, refs[1:], userID)
+	s.linkRelatedRefs(ctx, orgID, sessionID, refs[1:], userID, LinkOptions{})
 	s.notifyLinksChanged(ctx, orgID, sessionID, "refreshed")
 	return nil
 }
 
-func (s *Service) linkRelatedRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID) {
+func (s *Service) linkRelatedRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID, linkOpts LinkOptions) {
 	for i, ref := range refs {
 		related, err := s.ResolvePrimary(ctx, orgID, ref.detected())
 		if err != nil {
 			s.logger.Warn().Err(err).Str("identifier", ref.Identifier).Msg("failed to resolve related linear issue")
 			continue
 		}
-		if _, err := s.LinkResolved(ctx, orgID, sessionID, related, models.SessionIssueLinkRoleRelated, i+1, userID); err != nil {
+		if _, err := s.LinkResolvedWithOptions(ctx, orgID, sessionID, related, models.SessionIssueLinkRoleRelated, i+1, userID, linkOpts); err != nil {
 			s.logger.Warn().Err(err).Str("identifier", ref.Identifier).Msg("failed to link related linear issue")
 		}
 	}
