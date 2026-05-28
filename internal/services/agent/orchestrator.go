@@ -1354,8 +1354,8 @@ func sanitizeAttachmentFileName(name string, attachmentNumber int) string {
 	return cleaned
 }
 
-func shouldRetryClaudeResumeFromSnapshot(session *models.Session, prompt *AgentPrompt, result *AgentResult) bool {
-	if session == nil || session.AgentType != models.AgentTypeClaudeCode {
+func shouldRetryResumeFromSnapshot(session *models.Session, prompt *AgentPrompt, result *AgentResult) bool {
+	if session == nil {
 		return false
 	}
 	if prompt == nil || !prompt.Continuation || prompt.ResumeSessionID == "" {
@@ -1373,7 +1373,19 @@ func shouldRetryClaudeResumeFromSnapshot(session *models.Session, prompt *AgentP
 	if result.AgentSessionID != "" {
 		return false
 	}
-	return true
+	switch session.AgentType {
+	case models.AgentTypeClaudeCode:
+		return true
+	case models.AgentTypeCodex:
+		return isCodexMissingRolloutError(result.Error)
+	default:
+		return false
+	}
+}
+
+func isCodexMissingRolloutError(message string) bool {
+	return strings.Contains(message, "thread/resume failed") &&
+		strings.Contains(message, "no rollout found for thread id")
 }
 
 func isRetryableSnapshotSaveError(err error) bool {
@@ -3586,7 +3598,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				}(),
 				RevisionContext: revisionContext,
 			}
-			if !reusedExisting && session.AgentType == models.AgentTypeClaudeCode && resumeSessionID != "" {
+			if !reusedExisting && resumeMode == ResumeBySessionID && resumeSessionID != "" {
 				restoredWorkspaceFallbackPrompt = func() (*AgentPrompt, error) {
 					basePrompt, err := adapter.PreparePrompt(ctx, buildSnapshotContinueInput())
 					if err != nil {
@@ -3709,26 +3721,27 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
-	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryClaudeResumeFromSnapshot(session, prompt, result) {
+	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryResumeFromSnapshot(session, prompt, result) {
 		log.Warn().
+			Str("agent_type", string(session.AgentType)).
 			Str("resume_session_id", prompt.ResumeSessionID).
 			Int("exit_code", result.ExitCode).
-			Msg("claude resume failed against restored snapshot; retrying with reconstructed context")
+			Msg("agent resume failed against restored snapshot; retrying with reconstructed context")
 		fallbackPrompt, fallbackErr := restoredWorkspaceFallbackPrompt()
 		if fallbackErr != nil {
 			err = fallbackErr
 		} else {
 			fallbackResult, fallbackExecErr := adapter.Execute(execCtx, sandbox, fallbackPrompt, logCh)
 			if fallbackExecErr != nil {
-				err = fmt.Errorf("execute restored-workspace fallback after stale Claude resume: %w", fallbackExecErr)
+				err = fmt.Errorf("execute restored-workspace fallback after stale agent resume: %w", fallbackExecErr)
 			} else if fallbackResult == nil {
-				err = errors.New("restored-workspace fallback after stale Claude resume returned no result")
+				err = errors.New("restored-workspace fallback after stale agent resume returned no result")
 			} else if fallbackResult.ExitCode != 0 {
 				msg := strings.TrimSpace(fallbackResult.Error)
 				if msg == "" {
-					msg = fmt.Sprintf("claude fallback exited with code %d", fallbackResult.ExitCode)
+					msg = fmt.Sprintf("agent fallback exited with code %d", fallbackResult.ExitCode)
 				}
-				err = fmt.Errorf("restored-workspace fallback after stale Claude resume failed: %s", msg)
+				err = fmt.Errorf("restored-workspace fallback after stale agent resume failed: %s", msg)
 				result = fallbackResult
 			} else {
 				prompt = fallbackPrompt
@@ -3847,7 +3860,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	} else if newSnapshotKey != "" {
 		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC(), "")
 		lockToken, _ := jobctx.LockTokenFromContext(ctx)
-		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
+		checkpointAgentSessionID := result.AgentSessionID
+		if threadScopedExecution {
+			checkpointAgentSessionID = parentAgentSessionID
+		}
+		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, checkpointAgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
 		o.warmMentionIndexFromSandboxAsync(ctx, session, sandbox, newSnapshotKey, log)
