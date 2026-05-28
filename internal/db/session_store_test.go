@@ -1166,12 +1166,38 @@ func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
 	store.SetLogger(zerolog.Nop())
 	store.SetStreams(nil)
 
-	mock.ExpectQuery(`UPDATE sessions SET status = @status, started_at = now\(\), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
+	mock.ExpectQuery(`UPDATE sessions SET status = @status, started_at = now\(\), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)
 
 	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusRunning)
 	require.Error(t, err, "UpdateStatus should surface query failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateStatusRunningClearsRuntimeControlFields(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	err = store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusRunning)
+
+	require.NoError(t, err, "UpdateStatus should transition the session to running")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
