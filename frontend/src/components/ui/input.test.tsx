@@ -9,7 +9,8 @@ describe("Input", () => {
     renderWithProviders(<Input aria-label="Name" />);
 
     const input = screen.getByRole("textbox", { name: "Name" });
-    expect(input).toHaveClass("text-base");
-    expect(input).toHaveClass("sm:text-xs");
+    expect(input).toHaveClass("max-sm:text-base");
+    expect(input).toHaveClass("text-xs");
+    expect(input).not.toHaveClass("text-base");
   });
 });

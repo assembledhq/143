@@ -341,8 +341,9 @@ describe("ManualSessionCreatePageContent", () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
-    expect(textarea).toHaveClass("text-base");
-    expect(textarea).toHaveClass("sm:text-xs");
+    expect(textarea).toHaveClass("max-sm:text-base");
+    expect(textarea).toHaveClass("text-xs");
+    expect(textarea).not.toHaveClass("text-base");
   });
 
   it("autofocuses the main message textarea", async () => {
