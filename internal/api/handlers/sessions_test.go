@@ -146,6 +146,17 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 // sessionColumns is the standard column set for sessions queries.
 // Must match sessionSelectColumns in session_store.go. Update all inline
 // AddRow calls in this file when adding/removing/reordering columns.
+//
+// Note on positional fixtures: every new column on `sessions` ripples
+// through several helpers — sessionTestRow, padSessionIdentityColumns,
+// padLinearFields, padSessionWorkspaceGeneration, and the row literals in
+// internal/db/auth_session_store_test.go and
+// internal/api/handlers/session_files_test.go. Each helper has to be taught
+// where the new column lives relative to landmarks like pending_snapshot_*,
+// linear_*, git_identity_*, and deleted_at. If you add a column, search
+// repo-wide for sessionColumns and update every fixture so the positional
+// indexes stay coherent — or replace this scaffolding with a named-column
+// row builder so future additions stop requiring this dance.
 var sessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier",
@@ -154,7 +165,7 @@ var sessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -257,6 +268,7 @@ const (
 const (
 	sessionWorkerNodeIndex      = 15
 	sessionReasoningIndex       = 35
+	sessionWorkspaceGenIndex    = 38
 	sessionBaseCommitSHAIndex   = 62
 	sessionDiffCollectedAtIndex = 72
 	sessionLatestDiffIndex      = 73
@@ -282,11 +294,12 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const identityFieldsAdded = 2
 	const prPushFieldsAdded = 2
 	const branchCreationFieldsAdded = 3
+	const workspaceGenerationFieldAdded = 1
 	const workspaceRevisionFieldsAdded = 2
 	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+workspaceRevisionFieldsAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
 			"unpushedChangesFieldAdded, workspaceRevisionFieldsAdded, linearFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
-	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen, "legacy confidence columns should stay isolated to test fixtures")
+	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded, "legacy confidence columns should stay isolated to test fixtures")
 }
 
 // linearSessionDefaults returns the placeholder values for the derived
@@ -323,6 +336,22 @@ func padLinearFields(values []interface{}) []interface{} {
 	row = append(row, linearSessionDefaults()...)
 	row = append(row, values[insertAt:]...)
 	return row
+}
+
+func padSessionWorkspaceGeneration(row []interface{}) []interface{} {
+	if len(row) <= sessionWorkspaceGenIndex {
+		return row
+	}
+	switch row[sessionWorkspaceGenIndex].(type) {
+	case int64, int, int32:
+		return row
+	default:
+		padded := make([]interface{}, 0, len(row)+1)
+		padded = append(padded, row[:sessionWorkspaceGenIndex]...)
+		padded = append(padded, int64(0))
+		padded = append(padded, row[sessionWorkspaceGenIndex:]...)
+		return padded
+	}
 }
 
 var sessionPullRequestColumns = []string{
@@ -495,9 +524,10 @@ func sessionTestRow(values ...interface{}) []interface{} {
 		row = padLinearFields(row)
 	}
 	row = padSessionIdentityColumns(row)
-	if len(row) == len(sessionColumns)+3 {
+	if len(row) == sessionColumnsWithLegacyResultConfidenceLen || len(row) == len(sessionColumns)+3 {
 		row = stripLegacySessionResultConfidence(row)
 	}
+	row = padSessionWorkspaceGeneration(row)
 	return row
 }
 
@@ -619,6 +649,9 @@ func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
 // git_identity_user_id pair (immediately before created_at). Callers don't
 // have to update their fixtures one-by-one.
 func padSessionIdentityColumns(row []interface{}) []interface{} {
+	if len(row) == len(sessionColumns) {
+		return row
+	}
 	if len(row) >= sessionColumnsWithLegacyResultConfidenceLen {
 		return row
 	}
@@ -1572,6 +1605,144 @@ func TestSessionHandler_Get(t *testing.T) {
 			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
+	}
+}
+
+func TestSessionHandler_Get_AttachesThreadInboxDeliverySummary(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	lastError := "delivery needs operator review"
+	handler := newSessionHandler(t, mock)
+	handler.SetThreadInboxStore(db.NewThreadInboxStore(mock))
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionHandlerDetailRow(runID, orgID, now)...),
+		)
+	mock.ExpectQuery("(?s)SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerTestColumns()).AddRow(
+			threadID, runID, orgID, "claude_code", nil,
+			"Backend", nil, nil, "running", nil,
+			2, &now,
+			nil, nil, nil, nil,
+			&now, nil, now,
+			nil, nil, float64(0), 0, nil,
+		))
+	mock.ExpectQuery("(?s)SELECT .* FROM thread_inbox_entries").
+		WithArgs(orgID, runID).
+		WillReturnRows(pgxmock.NewRows(threadInboxSummaryHandlerTestColumns()).AddRow(
+			threadID, 1, 0, 2, 1, 4, 0, int64(8), now, now.Add(time.Second), now.Add(2*time.Second), lastError,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Get(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "should return the session detail")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	var resp struct {
+		Data struct {
+			Threads []models.SessionThread `json:"threads"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response body should decode as session detail")
+	require.Len(t, resp.Data.Threads, 1, "session detail should include thread tabs")
+	require.NotNil(t, resp.Data.Threads[0].InboxDelivery, "thread tab should include inbox delivery summary")
+	require.Equal(t, models.ThreadInboxSummaryStateUnknownDelivery, resp.Data.Threads[0].InboxDelivery.State, "unknown delivery should dominate delivered and acked counts")
+	require.Equal(t, 1, resp.Data.Threads[0].InboxDelivery.PendingCount, "summary should include pending entries")
+	require.Equal(t, 1, resp.Data.Threads[0].InboxDelivery.UnknownDeliveryCount, "summary should include unknown delivery entries")
+	require.Equal(t, int64(8), resp.Data.Threads[0].InboxDelivery.LastSequenceNo, "summary should include the latest sequence")
+	require.Equal(t, &lastError, resp.Data.Threads[0].InboxDelivery.LastError, "summary should include the latest delivery error")
+}
+
+func sessionThreadHandlerTestColumns() []string {
+	return []string{
+		"id", "session_id", "org_id", "agent_type", "model_override",
+		"label", "instructions", "file_scope", "status", "agent_session_id",
+		"current_turn", "last_activity_at",
+		"result_summary", "diff", "failure_explanation", "failure_category",
+		"started_at", "completed_at", "created_at",
+		"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	}
+}
+
+func sessionHandlerDetailRow(sessionID, orgID uuid.UUID, now time.Time) []interface{} {
+	row := make([]interface{}, len(sessionColumns))
+	for i, column := range sessionColumns {
+		switch column {
+		case "id":
+			row[i] = sessionID
+		case "primary_issue_id":
+			row[i] = nil
+		case "org_id":
+			row[i] = orgID
+		case "origin":
+			row[i] = string(models.SessionOriginManual)
+		case "interaction_mode":
+			row[i] = string(models.SessionInteractionModeInteractive)
+		case "validation_policy":
+			row[i] = string(models.SessionValidationPolicyOnTurnComplete)
+		case "agent_type":
+			row[i] = string(models.AgentTypeClaudeCode)
+		case "status":
+			row[i] = string(models.SessionStatusRunning)
+		case "autonomy_level":
+			row[i] = string(models.SessionAutonomySupervised)
+		case "token_mode":
+			row[i] = string(models.SessionTokenModeLow)
+		case "turn_holding_container", "failure_retry_advised", "has_unpushed_changes",
+			"linear_private", "linear_state_sync_disabled":
+			row[i] = false
+		case "started_at":
+			row[i] = &now
+		case "current_turn", "runtime_extension_count", "runtime_extension_seconds",
+			"recovery_attempt_count":
+			row[i] = 0
+		case "last_activity_at", "created_at":
+			row[i] = now
+		case "sandbox_state":
+			row[i] = string(models.SandboxStateNone)
+		case "runtime_last_progress_type", "runtime_last_progress_strength",
+			"runtime_stop_reason", "checkpoint_kind", "checkpoint_capability", "recovery_state":
+			row[i] = ""
+		case "checkpoint_size_bytes":
+			row[i] = int64(0)
+		case "pr_creation_state":
+			row[i] = string(models.PRCreationStateIdle)
+		case "pr_push_state":
+			row[i] = string(models.PRPushStateIdle)
+		case "branch_creation_state":
+			row[i] = string(models.BranchCreationStateIdle)
+		case "linear_prepare_state":
+			row[i] = string(models.LinearPrepareStateNone)
+		default:
+			row[i] = nil
+		}
+	}
+	return row
+}
+
+func threadInboxSummaryHandlerTestColumns() []string {
+	return []string{
+		"thread_id", "pending_count", "delivering_count", "delivered_count",
+		"unknown_delivery_count", "acked_count", "dead_letter_count", "last_sequence_no",
+		"last_accepted_at", "last_delivered_at", "last_acked_at", "last_error",
 	}
 }
 
@@ -6670,6 +6841,67 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted: %s", w.Body.String())
 	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_RejectsActiveThreadRuntimeHolders(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-active-thread-runtime"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	handler.SetSessionSandboxHolderStore(db.NewSessionSandboxHolderStore(mock))
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "snapshotted", &snapshotKey,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT count").
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "CreatePR should reject snapshot publication while a thread runtime is mutating the shared workspace")
+	require.Contains(t, w.Body.String(), "SNAPSHOT_NOT_QUIESCENT", "response should expose the quiescence guard")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

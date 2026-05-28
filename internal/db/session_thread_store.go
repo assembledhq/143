@@ -478,6 +478,58 @@ func (s *SessionThreadStore) ClaimForResumeInSession(ctx context.Context, orgID,
 	})
 }
 
+func (s *SessionThreadStore) ClaimNextQueuedForSession(ctx context.Context, orgID, sessionID uuid.UUID, maxRunning int) (models.SessionThread, error) {
+	if maxRunning <= 0 {
+		maxRunning = models.MaxRunningThreadsPerSession
+	}
+	claimableStatuses := append([]string{"idle"}, threadStatusStrings(models.ResumableThreadStatuses)...)
+	rows, err := s.db.Query(ctx, `
+		WITH locked_threads AS (
+			SELECT id, status, pending_message_count, last_activity_at, created_at
+			FROM session_threads
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND archived_at IS NULL
+			FOR UPDATE
+		), running_count AS (
+			SELECT count(*) AS n
+			FROM locked_threads
+			WHERE status IN ('pending', 'running', 'awaiting_input')
+		), candidate AS (
+			SELECT id, status
+			FROM locked_threads, running_count
+			WHERE pending_message_count > 0
+			  AND status = ANY(@claimable_statuses)
+			  AND running_count.n < @max_running
+			ORDER BY COALESCE(last_activity_at, created_at), created_at, id
+			LIMIT 1
+		)
+		UPDATE session_threads st
+		SET status = 'running',
+		    started_at = now(),
+		    completed_at = CASE WHEN st.status = 'idle' THEN st.completed_at ELSE NULL END,
+		    last_activity_at = now(),
+		    cancel_requested_at = NULL
+		WHERE st.org_id = @org_id
+		  AND st.session_id = @session_id
+		  AND st.id = (SELECT id FROM candidate)
+		  AND st.archived_at IS NULL
+		RETURNING `+sessionThreadSelectColumns, pgx.NamedArgs{
+		"org_id":             orgID,
+		"session_id":         sessionID,
+		"max_running":        maxRunning,
+		"claimable_statuses": claimableStatuses,
+	})
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("claim next queued session thread: %w", err)
+	}
+	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	if err != nil {
+		return models.SessionThread{}, err
+	}
+	return thread, nil
+}
+
 // claimForSessionArgs bundles inputs for claimForSession so each call site
 // stays readable and additions don't ripple across positional argument lists.
 type claimForSessionArgs struct {

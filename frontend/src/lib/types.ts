@@ -501,6 +501,59 @@ export interface SessionListItem extends Session {
 
 export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
 
+export type ThreadInboxSummaryState = 'idle' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+
+export interface ThreadInboxDeliverySummary {
+  thread_id: string;
+  state: ThreadInboxSummaryState;
+  pending_count: number;
+  delivering_count: number;
+  delivered_count: number;
+  unknown_delivery_count: number;
+  acked_count: number;
+  dead_letter_count: number;
+  last_sequence_no: number;
+  last_accepted_at?: string;
+  last_delivered_at?: string;
+  last_acked_at?: string;
+  last_error?: string;
+}
+
+export type ThreadInboxEntryType = 'user_message' | 'human_input_answer' | 'control';
+// '' is emitted by the API when no inbox entry was created (deployment with the
+// inbox unwired), keeping the SendThreadMessageResponse delivery_state field
+// total without lying about confirmed delivery.
+export type ThreadInboxDeliveryState = '' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+
+export interface ThreadInboxEntry {
+  id: string;
+  org_id: string;
+  session_id: string;
+  thread_id: string;
+  sequence_no: number;
+  message_id?: number;
+  client_message_id?: string;
+  entry_type: ThreadInboxEntryType;
+  payload: unknown;
+  delivery_state: ThreadInboxDeliveryState;
+  delivery_attempts: number;
+  last_error?: string;
+  owner_node_id?: string;
+  runtime_id?: string;
+  accepted_at: string;
+  delivered_at?: string;
+  acked_at?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface SendThreadMessageResponse {
+  message: SessionMessage;
+  inbox_entry?: ThreadInboxEntry;
+  thread_status: ThreadStatus;
+  delivery_state: ThreadInboxDeliveryState;
+}
+
 export interface SessionThread {
   id: string;
   session_id: string;
@@ -526,6 +579,7 @@ export interface SessionThread {
   cost_cents: number;
   pending_message_count: number;
   cancel_requested_at?: string;
+  inbox_delivery?: ThreadInboxDeliverySummary;
 }
 
 export interface SessionThreadFileEvent {

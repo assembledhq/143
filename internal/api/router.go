@@ -217,6 +217,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	threadInboxStore := db.NewThreadInboxStore(pool)
+	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
+	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
@@ -243,6 +246,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionHandler.SetUserStore(userStore)
+	sessionHandler.SetThreadInboxStore(threadInboxStore)
+	sessionHandler.SetSessionSandboxHolderStore(sessionSandboxHolderStore)
 	sessionHandler.SetTxStarter(pool)
 
 	// Inbound-agent metrics. Constructed once and shared between the
@@ -325,6 +330,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 		logger,
 	)
+	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
+	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	threadSvc.SetFileEventStore(sessionThreadFileEventStore)
 	if threadCanceller != nil {
 		threadSvc.SetCanceller(threadCanceller)
@@ -881,6 +888,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
+				r.Get("/api/v1/sessions/{id}/threads/{tid}/inbox/recoverable", sessionThreadHandler.ListRecoverableInboxEntries)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
 				r.Get("/api/v1/sessions/{id}/review-loops/{loop_id}", reviewLoopHandler.Get)
@@ -1012,6 +1020,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/cancel", sessionThreadHandler.CancelThread)
+				r.Post("/api/v1/sessions/{id}/threads/{tid}/inbox/{entry_id}/retry", sessionThreadHandler.RetryInboxEntry)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
 				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
