@@ -96,4 +96,7 @@ export const queryKeys = {
     bootstrapCandidates: ["evals", "bootstrap", "candidates"] as const,
     bootstrapRun: (id: string) => ["evals", "bootstrap", "run", id] as const,
   },
+  previews: {
+    apiTokens: ["preview-api-tokens"] as const,
+  },
 } as const;
