@@ -231,6 +231,14 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 			 AND j.id = se.job_id
 			WHERE se.status IN ('starting', 'running', 'draining')
 			  AND se.heartbeat_at < $1
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM thread_runtimes tr
+				WHERE tr.org_id = se.org_id
+				  AND tr.thread_id = se.thread_id
+				  AND tr.status IN ('starting', 'live', 'paused', 'draining')
+				  AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at > now())
+			  )
 			  AND (
 				(j.status = 'running' AND j.owner_kind = 'session_executor' AND j.lock_token = se.lock_token AND j.lease_expires_at < now())
 				OR
@@ -267,7 +275,60 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 			WHERE se.id = stale.id
 			  AND stale.owner_kind = 'session_executor'
 			  AND stale.job_status = 'running'
-			RETURNING stale.org_id, stale.job_id, stale.lock_token
+			RETURNING stale.org_id, se.session_id, se.thread_id, stale.job_id, stale.lock_token
+		),
+		lost_thread_runtimes AS (
+			UPDATE thread_runtimes tr
+			SET status = 'lost',
+				closed_at = COALESCE(closed_at, now()),
+				stop_reason = COALESCE(stop_reason, 'executor_lease_lost'),
+				last_error = COALESCE(last_error, 'session executor lease was lost before runtime closed'),
+				updated_at = now()
+			FROM lost_executors lost
+			WHERE lost.thread_id IS NOT NULL
+			  AND tr.org_id = lost.org_id
+			  AND tr.session_id = lost.session_id
+			  AND tr.thread_id = lost.thread_id
+			  AND tr.status IN ('starting', 'live', 'paused', 'draining')
+			  AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at <= now())
+			RETURNING tr.id, tr.org_id, tr.session_id
+		),
+		lost_runtime_holders AS (
+			UPDATE session_sandbox_holders h
+			SET status = 'expired',
+				released_at = COALESCE(released_at, now()),
+				updated_at = now()
+			FROM lost_thread_runtimes lost
+			WHERE h.org_id = lost.org_id
+			  AND h.session_id = lost.session_id
+			  AND h.holder_kind = 'thread_runtime'
+			  AND h.holder_id = lost.id
+			  AND h.status IN ('active', 'draining')
+			RETURNING h.id
+		),
+		reset_inbox AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'pending',
+				runtime_id = NULL,
+				owner_node_id = NULL,
+				last_error = COALESCE(last_error, 'session executor lease lost before ack'),
+				updated_at = now()
+			FROM lost_thread_runtimes lost
+			WHERE e.org_id = lost.org_id
+			  AND e.runtime_id = lost.id
+			  AND e.delivery_state = 'delivering'
+			RETURNING e.id
+		),
+		unknown_inbox AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'unknown_delivery',
+				last_error = COALESCE(last_error, 'session executor lease lost after live delivery before ack'),
+				updated_at = now()
+			FROM lost_thread_runtimes lost
+			WHERE e.org_id = lost.org_id
+			  AND e.runtime_id = lost.id
+			  AND e.delivery_state = 'delivered'
+			RETURNING e.id
 		),
 		updated_jobs AS (
 			UPDATE jobs j
