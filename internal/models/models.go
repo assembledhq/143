@@ -289,9 +289,10 @@ type Session struct {
 	// LastActivityAt is the timestamp of the last write to this session — used
 	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.
-	LastActivityAt time.Time    `db:"last_activity_at" json:"last_activity_at"`
-	SandboxState   SandboxState `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey    *string      `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	LastActivityAt      time.Time    `db:"last_activity_at" json:"last_activity_at"`
+	SandboxState        SandboxState `db:"sandbox_state" json:"sandbox_state"`
+	WorkspaceGeneration int64        `db:"workspace_generation" json:"workspace_generation"`
+	SnapshotKey         *string      `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	// PendingSnapshotKey, when non-nil, is the storage key for a post-PR
 	// snapshot whose upload is still in flight. Hydration paths
 	// (continue_session / Fix tests) must wait until this is NULL before
@@ -745,30 +746,31 @@ type SessionMessage struct {
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
-	ID                  uuid.UUID    `db:"id" json:"id"`
-	SessionID           uuid.UUID    `db:"session_id" json:"session_id"`
-	OrgID               uuid.UUID    `db:"org_id" json:"org_id"`
-	AgentType           AgentType    `db:"agent_type" json:"agent_type"`
-	ModelOverride       *string      `db:"model_override" json:"model_override,omitempty"`
-	Label               string       `db:"label" json:"label"`
-	Instructions        *string      `db:"instructions" json:"instructions,omitempty"`
-	FileScope           []string     `db:"file_scope" json:"file_scope,omitempty"`
-	Status              ThreadStatus `db:"status" json:"status"`
-	AgentSessionID      *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn         int          `db:"current_turn" json:"current_turn"`
-	LastActivityAt      *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ResultSummary       *string      `db:"result_summary" json:"result_summary,omitempty"`
-	Diff                *string      `db:"diff" json:"diff,omitempty"`
-	FailureExplanation  *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory     *string      `db:"failure_category" json:"failure_category,omitempty"`
-	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
-	ArchivedAt          *time.Time   `db:"archived_at" json:"archived_at,omitempty"`
-	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
-	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
-	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`
-	CancelRequestedAt   *time.Time   `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+	ID                  uuid.UUID                   `db:"id" json:"id"`
+	SessionID           uuid.UUID                   `db:"session_id" json:"session_id"`
+	OrgID               uuid.UUID                   `db:"org_id" json:"org_id"`
+	AgentType           AgentType                   `db:"agent_type" json:"agent_type"`
+	ModelOverride       *string                     `db:"model_override" json:"model_override,omitempty"`
+	Label               string                      `db:"label" json:"label"`
+	Instructions        *string                     `db:"instructions" json:"instructions,omitempty"`
+	FileScope           []string                    `db:"file_scope" json:"file_scope,omitempty"`
+	Status              ThreadStatus                `db:"status" json:"status"`
+	AgentSessionID      *string                     `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn         int                         `db:"current_turn" json:"current_turn"`
+	LastActivityAt      *time.Time                  `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ResultSummary       *string                     `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                *string                     `db:"diff" json:"diff,omitempty"`
+	FailureExplanation  *string                     `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory     *string                     `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt           *time.Time                  `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt         *time.Time                  `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt           time.Time                   `db:"created_at" json:"created_at"`
+	ArchivedAt          *time.Time                  `db:"archived_at" json:"archived_at,omitempty"`
+	BaseSnapshotKey     *string                     `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
+	CostCents           float64                     `db:"cost_cents" json:"cost_cents"`
+	PendingMessageCount int                         `db:"pending_message_count" json:"pending_message_count"`
+	CancelRequestedAt   *time.Time                  `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+	InboxDelivery       *ThreadInboxDeliverySummary `db:"-" json:"inbox_delivery,omitempty"`
 }
 
 // SessionThreadFileEvent is operational write attribution: which thread

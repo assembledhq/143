@@ -470,11 +470,12 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`, body),
     archiveThread: (sessionId: string, threadId: string) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/archive`, {}),
-    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
-      post<import('./types').SingleResponse<import('./types').SessionMessage>>(
+    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; clientMessageID?: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').SendThreadMessageResponse>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,
         {
           message: body.message,
+          client_message_id: body.clientMessageID || undefined,
           images: body.images,
           references: body.references && body.references.length > 0 ? body.references : undefined,
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
@@ -509,6 +510,12 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs${qs ? `?${qs}` : ''}`);
     },
+    listRecoverableThreadInboxEntries: (sessionId: string, threadId: string) =>
+      get<import('./types').ListResponse<import('./types').ThreadInboxEntry>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/inbox/recoverable`),
+    retryThreadInboxEntry: (sessionId: string, threadId: string, entryId: string, opts: { replayUnknownDelivery?: boolean } = {}) =>
+      post<import('./types').SingleResponse<import('./types').ThreadInboxEntry>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/inbox/${entryId}/retry`, {
+        replay_unknown_delivery: opts.replayUnknownDelivery || undefined,
+      }),
     listThreadFileEvents: (sessionId: string, since?: string) => {
       const qs = since ? `?since=${encodeURIComponent(since)}` : '';
       return get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events${qs}`);

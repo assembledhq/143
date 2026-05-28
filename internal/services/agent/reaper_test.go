@@ -111,6 +111,21 @@ func (m *reaperMockRuntimeJobTerminalizer) TerminalizeRunningSessionJobs(_ conte
 	return 1, m.err
 }
 
+type reaperMockRuntimeLeaseReclaimer struct {
+	result       ThreadRuntimeLeaseReclaimResult
+	err          error
+	called       bool
+	seenBefore   time.Time
+	seenMaxBatch int
+}
+
+func (m *reaperMockRuntimeLeaseReclaimer) ReclaimExpiredLeases(_ context.Context, before time.Time, maxBatch int) (ThreadRuntimeLeaseReclaimResult, error) {
+	m.called = true
+	m.seenBefore = before
+	m.seenMaxBatch = maxBatch
+	return m.result, m.err
+}
+
 // reaperMockThreadLister implements StuckThreadLister for testing.
 type reaperMockThreadLister struct {
 	stuckThreads []models.SessionThread
@@ -192,6 +207,29 @@ func TestReapPhase0_FailsStalePendingSessions(t *testing.T) {
 	require.Len(t, mock.updatedFailures, 2)
 	assert.Equal(t, FailureCategoryStuckPending, mock.updatedFailures[0].category)
 	assert.Equal(t, FailureCategoryStuckPending, mock.updatedFailures[1].category)
+}
+
+func TestReapPhase0_ReclaimsExpiredThreadRuntimeLeases(t *testing.T) {
+	t.Parallel()
+
+	sessions := &reaperMockSessionLister{}
+	reclaimer := &reaperMockRuntimeLeaseReclaimer{
+		result: ThreadRuntimeLeaseReclaimResult{
+			LostRuntimes:           2,
+			ExpiredHolders:         2,
+			ResetInboxEntries:      3,
+			UnknownDeliveryEntries: 1,
+		},
+	}
+	reaper := NewSessionReaper(sessions, &reaperMockSnapshotStore{}, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithThreadRuntimeLeaseReclaimer(reclaimer),
+	)
+
+	reaper.reap(context.Background())
+
+	require.True(t, reclaimer.called, "reaper should reclaim expired thread runtime leases each tick")
+	require.WithinDuration(t, time.Now(), reclaimer.seenBefore, 5*time.Second, "reaper should reclaim runtimes expired before now")
+	require.Equal(t, defaultThreadRuntimeReclaimBatchSize, reclaimer.seenMaxBatch, "reaper should bound runtime lease recovery work per tick")
 }
 
 func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {

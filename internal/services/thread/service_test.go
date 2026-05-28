@@ -139,6 +139,7 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, sessionID uu
 
 type mockMessageStore struct {
 	createFn             func(ctx context.Context, msg *models.SessionMessage) error
+	getByIDFn            func(ctx context.Context, orgID uuid.UUID, id int64) (models.SessionMessage, error)
 	listByThreadFn       func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error)
 	listWindowByThreadFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
@@ -148,6 +149,13 @@ func (m *mockMessageStore) Create(ctx context.Context, msg *models.SessionMessag
 		return m.createFn(ctx, msg)
 	}
 	return nil
+}
+
+func (m *mockMessageStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) (models.SessionMessage, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, orgID, id)
+	}
+	return models.SessionMessage{ID: id, OrgID: orgID}, nil
 }
 
 func (m *mockMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
@@ -205,12 +213,112 @@ func (m *mockJobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opt
 	return uuid.New(), nil
 }
 
+type mockThreadInboxStore struct {
+	appendFn                func(ctx context.Context, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error)
+	getByClientMessageIDFn  func(ctx context.Context, orgID, threadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error)
+	listSummariesBySession  func(ctx context.Context, orgID, sessionID uuid.UUID) (map[uuid.UUID]models.ThreadInboxDeliverySummary, error)
+	getSummaryByThread      func(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadInboxDeliverySummary, error)
+	listRecoverableFn       func(ctx context.Context, orgID, threadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error)
+	retryRecoverableFn      func(ctx context.Context, orgID, threadID, entryID uuid.UUID, allowUnknown bool) (models.ThreadInboxEntry, error)
+	countPendingByThreadFn  func(ctx context.Context, orgID, threadID uuid.UUID) (int, error)
+	countPendingBySessionFn func(ctx context.Context, orgID, sessionID uuid.UUID) (int, error)
+	appendCalls             []db.AppendThreadInboxEntryParams
+	retryCalls              []uuid.UUID
+	retryAllowUnknownCalls  []bool
+}
+
+func (m *mockThreadInboxStore) AppendForMessage(ctx context.Context, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error) {
+	m.appendCalls = append(m.appendCalls, params)
+	if m.appendFn != nil {
+		return m.appendFn(ctx, orgID, params)
+	}
+	return models.ThreadInboxEntry{
+		ID:            uuid.New(),
+		OrgID:         orgID,
+		SessionID:     params.SessionID,
+		ThreadID:      params.ThreadID,
+		MessageID:     params.MessageID,
+		EntryType:     params.EntryType,
+		DeliveryState: models.ThreadInboxDeliveryStatePending,
+	}, nil
+}
+
+func (m *mockThreadInboxStore) GetByClientMessageID(ctx context.Context, orgID, threadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error) {
+	if m.getByClientMessageIDFn != nil {
+		return m.getByClientMessageIDFn(ctx, orgID, threadID, clientMessageID)
+	}
+	return models.ThreadInboxEntry{}, pgx.ErrNoRows
+}
+
+func (m *mockThreadInboxStore) ListDeliverySummariesBySession(ctx context.Context, orgID, sessionID uuid.UUID) (map[uuid.UUID]models.ThreadInboxDeliverySummary, error) {
+	if m.listSummariesBySession != nil {
+		return m.listSummariesBySession(ctx, orgID, sessionID)
+	}
+	return map[uuid.UUID]models.ThreadInboxDeliverySummary{}, nil
+}
+
+func (m *mockThreadInboxStore) GetDeliverySummaryByThread(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadInboxDeliverySummary, error) {
+	if m.getSummaryByThread != nil {
+		return m.getSummaryByThread(ctx, orgID, threadID)
+	}
+	summary := models.ThreadInboxDeliverySummary{ThreadID: threadID}
+	summary.Normalize()
+	return summary, nil
+}
+
+func (m *mockThreadInboxStore) ListRecoverableByThread(ctx context.Context, orgID, threadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error) {
+	if m.listRecoverableFn != nil {
+		return m.listRecoverableFn(ctx, orgID, threadID, limit)
+	}
+	return []models.ThreadInboxEntry{}, nil
+}
+
+func (m *mockThreadInboxStore) RetryRecoverable(ctx context.Context, orgID, threadID, entryID uuid.UUID, allowUnknown bool) (models.ThreadInboxEntry, error) {
+	m.retryCalls = append(m.retryCalls, entryID)
+	m.retryAllowUnknownCalls = append(m.retryAllowUnknownCalls, allowUnknown)
+	if m.retryRecoverableFn != nil {
+		return m.retryRecoverableFn(ctx, orgID, threadID, entryID, allowUnknown)
+	}
+	return models.ThreadInboxEntry{
+		ID:            entryID,
+		OrgID:         orgID,
+		ThreadID:      threadID,
+		DeliveryState: models.ThreadInboxDeliveryStatePending,
+	}, nil
+}
+
+type mockRuntimeOwnerStore struct {
+	getActiveFn func(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadRuntime, error)
+}
+
+func (m *mockRuntimeOwnerStore) GetActiveByThread(ctx context.Context, orgID, threadID uuid.UUID) (models.ThreadRuntime, error) {
+	if m.getActiveFn != nil {
+		return m.getActiveFn(ctx, orgID, threadID)
+	}
+	return models.ThreadRuntime{}, pgx.ErrNoRows
+}
+
+func (m *mockThreadInboxStore) CountPendingByThread(ctx context.Context, orgID, threadID uuid.UUID) (int, error) {
+	if m.countPendingByThreadFn != nil {
+		return m.countPendingByThreadFn(ctx, orgID, threadID)
+	}
+	return 0, nil
+}
+
+func (m *mockThreadInboxStore) CountPendingBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {
+	if m.countPendingBySessionFn != nil {
+		return m.countPendingBySessionFn(ctx, orgID, sessionID)
+	}
+	return 0, nil
+}
+
 type testDeps struct {
 	threadStore  *mockThreadStore
 	sessionStore *mockSessionStore
 	messageStore *mockMessageStore
 	logStore     *mockLogStore
 	jobStore     *mockJobStore
+	inboxStore   *mockThreadInboxStore
 }
 
 func newTestService(t *testing.T) (*Service, *testDeps) {
@@ -221,6 +329,7 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 		messageStore: &mockMessageStore{},
 		logStore:     &mockLogStore{},
 		jobStore:     &mockJobStore{},
+		inboxStore:   &mockThreadInboxStore{},
 	}
 	svc := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, zerolog.Nop())
 	return svc, deps
@@ -967,6 +1076,8 @@ func TestService_ListThreads(t *testing.T) {
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	threadID1 := uuid.New()
+	threadID2 := uuid.New()
 
 	tests := []struct {
 		name      string
@@ -981,7 +1092,14 @@ func TestService_ListThreads(t *testing.T) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
 				}
 				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
-					return []models.SessionThread{{ID: uuid.New()}, {ID: uuid.New()}}, nil
+					return []models.SessionThread{{ID: threadID1}, {ID: threadID2}}, nil
+				}
+				deps.inboxStore.listSummariesBySession = func(_ context.Context, gotOrgID, gotSessionID uuid.UUID) (map[uuid.UUID]models.ThreadInboxDeliverySummary, error) {
+					require.Equal(t, orgID, gotOrgID, "ListThreads should load delivery state within the requested org")
+					require.Equal(t, sessionID, gotSessionID, "ListThreads should load delivery state for the requested session")
+					summary := models.ThreadInboxDeliverySummary{ThreadID: threadID1, PendingCount: 2}
+					summary.Normalize()
+					return map[uuid.UUID]models.ThreadInboxDeliverySummary{threadID1: summary}, nil
 				}
 			},
 			expectLen: 2,
@@ -1015,6 +1133,7 @@ func TestService_ListThreads(t *testing.T) {
 
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
+			svc.SetThreadInboxStore(deps.inboxStore)
 
 			threads, err := svc.ListThreads(context.Background(), orgID, sessionID)
 			if tt.expectErr != nil {
@@ -1027,6 +1146,12 @@ func TestService_ListThreads(t *testing.T) {
 			}
 			require.NoError(t, err, "should not return an error")
 			require.Len(t, threads, tt.expectLen, "should return expected number of threads")
+			if tt.name == "success" {
+				require.NotNil(t, threads[0].InboxDelivery, "ListThreads should attach delivery state to threads when the inbox store is wired")
+				require.Equal(t, models.ThreadInboxSummaryStatePending, threads[0].InboxDelivery.State, "ListThreads should expose pending delivery state")
+				require.NotNil(t, threads[1].InboxDelivery, "ListThreads should attach an idle delivery state for threads without inbox rows")
+				require.Equal(t, models.ThreadInboxSummaryStateIdle, threads[1].InboxDelivery.State, "ListThreads should expose idle delivery state when no inbox rows exist")
+			}
 		})
 	}
 }
@@ -1048,6 +1173,13 @@ func TestService_GetThread(t *testing.T) {
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.inboxStore.getSummaryByThread = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.ThreadInboxDeliverySummary, error) {
+					require.Equal(t, orgID, gotOrgID, "GetThread should load delivery state within the requested org")
+					require.Equal(t, threadID, gotThreadID, "GetThread should load delivery state for the requested thread")
+					summary := models.ThreadInboxDeliverySummary{ThreadID: threadID, DeliveredCount: 1}
+					summary.Normalize()
+					return summary, nil
 				}
 			},
 		},
@@ -1087,6 +1219,7 @@ func TestService_GetThread(t *testing.T) {
 
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
+			svc.SetThreadInboxStore(deps.inboxStore)
 
 			thread, err := svc.GetThread(context.Background(), orgID, sessionID, threadID)
 			if tt.expectErr != nil {
@@ -1095,6 +1228,8 @@ func TestService_GetThread(t *testing.T) {
 			}
 			require.NoError(t, err, "should not return an error")
 			require.Equal(t, threadID, thread.ID, "should return the correct thread")
+			require.NotNil(t, thread.InboxDelivery, "GetThread should attach delivery state when the inbox store is wired")
+			require.Equal(t, models.ThreadInboxSummaryStateDelivered, thread.InboxDelivery.State, "GetThread should expose live-delivered state")
 		})
 	}
 }
@@ -1138,7 +1273,7 @@ func TestService_SendMessage(t *testing.T) {
 					require.IsType(t, map[string]string{}, payload, "thread message payload should be string keyed")
 					require.Equal(t, threadID.String(), payload.(map[string]string)["thread_id"], "thread id should be included for worker attribution")
 					require.NotNil(t, dedupeKey, "continue-session enqueue should carry a dedupe key")
-					require.Equal(t, db.ContinueSessionDedupeKey(threadID), *dedupeKey, "continue-session dedupe should be keyed by thread so a concurrent send to a sibling tab is not silently swallowed; worker-side AcquireTurnHold still serializes shared-sandbox execution")
+					require.Equal(t, db.ContinueSessionDedupeKey(threadID), *dedupeKey, "continue-session dedupe should be keyed by thread so a concurrent send to a sibling tab is not silently swallowed")
 					return uuid.New(), nil
 				}
 			},
@@ -1200,7 +1335,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "queues without enqueue when parent session is already running due to sibling",
+			name: "enqueues concurrent continue_session when parent session is already running due to sibling",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -1208,36 +1343,47 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
+				ownerNodeID := "worker-1"
+				containerID := "sandbox-live"
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 				}
 				// The parent session ClaimIdle fails because a sibling tab
-				// already moved the session into running state. The service must
-				// queue this message for the requested thread without enqueueing a
-				// second continue_session job for the shared sandbox.
+				// already moved the session into running state. The thread claim
+				// above means this tab is admitted under the sibling cap, so the
+				// service should enqueue an independent thread-scoped job rather
+				// than parking the message behind the active sibling.
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
+					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, ContainerID: &containerID, WorkerNodeID: &ownerNodeID}, nil
 				}
 				deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
-					require.Equal(t, "hi", msg.Content, "queued sibling message should preserve content")
-					require.Equal(t, 2, msg.TurnNumber, "queued sibling message should use the claimed thread's next turn")
+					require.Equal(t, "hi", msg.Content, "concurrent sibling message should preserve content")
+					require.Equal(t, 2, msg.TurnNumber, "concurrent sibling message should use the claimed thread's next turn")
 					msg.ID = 99
 					return nil
 				}
 				deps.threadStore.updateStatusFn = func(_ context.Context, _, tid uuid.UUID, status models.ThreadStatus) error {
-					require.Equal(t, threadID, tid, "sibling-running queue should release the claimed thread")
-					require.Equal(t, models.ThreadStatusIdle, status, "sibling-running queue should leave the thread idle with pending messages")
+					require.Failf(t, "concurrent sibling send must not release the admitted thread", "tid=%s status=%s", tid, status)
 					return nil
 				}
 				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
-					require.Equal(t, threadID, tid, "sibling-running queue should increment the requested thread")
+					require.Failf(t, "concurrent sibling send must not increment pending count", "tid=%s", tid)
 					return nil
 				}
-				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
-					t.Fatalf("sibling-running send must queue only and must not enqueue a concurrent continue_session job")
+				deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+					require.Equal(t, "agent", opts.Queue, "concurrent sibling send should use the agent queue")
+					require.Equal(t, "continue_session", opts.JobType, "concurrent sibling send should enqueue a continue_session job")
+					require.NotNil(t, opts.DedupeKey, "concurrent sibling send should carry a dedupe key")
+					require.Equal(t, db.ContinueSessionDedupeKey(threadID), *opts.DedupeKey, "concurrent sibling send should dedupe by thread")
+					require.NotNil(t, opts.TargetNodeID, "concurrent sibling send should pin to the active sandbox owner")
+					require.Equal(t, ownerNodeID, *opts.TargetNodeID, "concurrent sibling send should target the active sandbox owner")
+					payload, ok := opts.Payload.(map[string]string)
+					require.True(t, ok, "concurrent sibling payload should be string keyed")
+					require.Equal(t, sessionID.String(), payload["session_id"], "concurrent sibling payload should carry session id")
+					require.Equal(t, threadID.String(), payload["thread_id"], "concurrent sibling payload should carry thread id")
 					return uuid.New(), nil
 				}
 			},
@@ -1467,7 +1613,7 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrEnqueueFailed,
 		},
 		{
-			name: "sibling-owned session queues without touching job store",
+			name: "sibling-owned session enqueues thread-scoped job without reverting the session",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -1489,16 +1635,17 @@ func TestService_SendMessage(t *testing.T) {
 					return nil
 				}
 				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
-					require.Equal(t, models.ThreadStatusIdle, status, "sibling-owned send should release the claimed thread")
+					require.Failf(t, "sibling-owned send should keep the admitted thread running", "status=%s", status)
 					return nil
 				}
 				deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
-					require.Equal(t, threadID, tid, "sibling-owned send should increment pending messages")
+					require.Failf(t, "sibling-owned send should not increment pending messages", "tid=%s", tid)
 					return nil
 				}
-				deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
-					t.Fatalf("sibling-owned send must not enqueue a concurrent continue_session job")
-					return uuid.Nil, nil
+				deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+					require.Equal(t, "continue_session", opts.JobType, "sibling-owned send should enqueue a thread-scoped continue_session job")
+					require.Nil(t, opts.TargetNodeID, "sibling-owned send should leave worker routing open when no owner node is recorded")
+					return uuid.New(), nil
 				}
 			},
 		},
@@ -1770,6 +1917,290 @@ func TestService_SendMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestService_SendMessage_AppendsDurableInboxEntryWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusRunning}, nil
+	}
+	deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+		msg.ID = 123
+		msg.CreatedAt = time.Now()
+		return nil
+	}
+	deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+		require.Len(t, deps.inboxStore.appendCalls, 1, "SendMessage should append the durable inbox entry before enqueueing work")
+		return uuid.New(), nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		UserID:    &userID,
+		Message:   "continue",
+	})
+
+	require.NoError(t, err, "SendMessage should not return an error")
+	require.NotNil(t, result, "SendMessage should return a result")
+	require.Len(t, deps.inboxStore.appendCalls, 1, "SendMessage should append exactly one durable inbox entry")
+	require.Equal(t, sessionID, deps.inboxStore.appendCalls[0].SessionID, "inbox entry should carry the session id")
+	require.Equal(t, threadID, deps.inboxStore.appendCalls[0].ThreadID, "inbox entry should carry the thread id")
+	require.Equal(t, int64(123), deps.inboxStore.appendCalls[0].MessageID, "inbox entry should point at the persisted message")
+	require.Equal(t, models.ThreadInboxEntryTypeUserMessage, deps.inboxStore.appendCalls[0].EntryType, "user sends should append user-message inbox entries")
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(deps.inboxStore.appendCalls[0].Payload, &payload), "inbox payload should be valid JSON")
+	require.Equal(t, "continue", payload["content"], "inbox payload should include message content for live delivery")
+}
+
+func TestService_SendMessage_AppliesInboxBackpressureWithoutClientMessageID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+	deps.inboxStore.countPendingByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (int, error) {
+		require.Equal(t, orgID, gotOrgID, "backpressure should count pending entries inside the org")
+		require.Equal(t, threadID, gotThreadID, "backpressure should count pending entries for the target thread")
+		return maxThreadInboxPending, nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "continue without idempotency key",
+	})
+
+	require.ErrorIs(t, err, ErrThreadInboxBackpressure, "SendMessage should enforce durable inbox backpressure even without a client message id")
+	require.Nil(t, result, "SendMessage should not create a message once backpressure is exceeded")
+	require.Empty(t, deps.inboxStore.appendCalls, "SendMessage should reject before appending more inbox entries")
+}
+
+func TestService_SendMessage_RunningThreadEnqueuesLiveInboxDelivery(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
+	}
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 4,
+			Status:      models.ThreadStatusRunning,
+		}, nil
+	}
+	deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+		msg.ID = 456
+		msg.CreatedAt = time.Now()
+		return nil
+	}
+	var enqueued []db.EnqueueOpts
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, orgID, gotOrgID, "live delivery job should be scoped to the message org")
+		enqueued = append(enqueued, opts)
+		return uuid.New(), nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		UserID:    &userID,
+		Message:   "please keep going",
+	})
+
+	require.NoError(t, err, "SendMessage should accept same-thread input while the runtime is running")
+	require.NotNil(t, result, "SendMessage should return the accepted message")
+	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "running-thread send should increment pending messages")
+	require.Len(t, deps.inboxStore.appendCalls, 1, "running-thread send should append durable inbox state")
+	require.Len(t, enqueued, 1, "running-thread send should enqueue live inbox delivery")
+	require.Equal(t, "agent", enqueued[0].Queue, "live delivery should use the agent queue")
+	require.Equal(t, "deliver_thread_inbox", enqueued[0].JobType, "live delivery should use the thread inbox job type")
+	require.Equal(t, 7, enqueued[0].Priority, "live delivery should be prioritized ahead of regular continuations")
+	require.NotNil(t, enqueued[0].DedupeKey, "live delivery enqueue should dedupe repeated notifications for the same thread")
+	require.Equal(t, "deliver_thread_inbox:"+threadID.String(), *enqueued[0].DedupeKey, "live delivery dedupe should be keyed by thread")
+	payload, ok := enqueued[0].Payload.(map[string]string)
+	require.True(t, ok, "live delivery payload should be a string map")
+	require.Equal(t, sessionID.String(), payload["session_id"], "live delivery payload should carry the session id")
+	require.Equal(t, threadID.String(), payload["thread_id"], "live delivery payload should carry the thread id")
+	require.Equal(t, orgID.String(), payload["org_id"], "live delivery payload should carry the org id")
+	require.Nil(t, enqueued[0].TargetNodeID, "live delivery job should let the runtime registry route to the current owner")
+}
+
+func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureDoesNotRejectAcceptedMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
+	}
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 1,
+			Status:      models.ThreadStatusRunning,
+		}, nil
+	}
+	deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+		msg.ID = 789
+		msg.CreatedAt = time.Now()
+		return nil
+	}
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, _ db.EnqueueOpts) (uuid.UUID, error) {
+		return uuid.Nil, fmt.Errorf("queue unavailable")
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		UserID:    &userID,
+		Message:   "this should still be accepted",
+	})
+
+	require.NoError(t, err, "SendMessage should not reject already-committed input when live-delivery notification fails")
+	require.NotNil(t, result, "SendMessage should return the accepted message despite notification failure")
+	require.Len(t, deps.inboxStore.appendCalls, 1, "SendMessage should keep durable inbox state for later recovery")
+	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "SendMessage should still reflect queued input in pending counts")
+}
+
+func TestService_ListRecoverableInboxEntries(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	entryID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "GetByID should be scoped to the org")
+		require.Equal(t, threadID, gotThreadID, "GetByID should fetch the requested thread")
+		return models.SessionThread{ID: threadID, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning}, nil
+	}
+	reason := "runtime lease expired after live delivery before ack"
+	expected := []models.ThreadInboxEntry{{
+		ID:            entryID,
+		OrgID:         orgID,
+		SessionID:     sessionID,
+		ThreadID:      threadID,
+		DeliveryState: models.ThreadInboxDeliveryStateUnknownDelivery,
+		LastError:     &reason,
+	}}
+	deps.inboxStore.listRecoverableFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, limit int) ([]models.ThreadInboxEntry, error) {
+		require.Equal(t, orgID, gotOrgID, "recoverable lookup should be scoped to the org")
+		require.Equal(t, threadID, gotThreadID, "recoverable lookup should be scoped to the thread")
+		require.Greater(t, limit, 0, "recoverable lookup should use a bounded positive limit")
+		return expected, nil
+	}
+
+	entries, err := svc.ListRecoverableInboxEntries(context.Background(), orgID, sessionID, threadID)
+
+	require.NoError(t, err, "ListRecoverableInboxEntries should not return an error")
+	require.Equal(t, expected, entries, "ListRecoverableInboxEntries should return recoverable entries for the requested thread")
+}
+
+func TestService_RetryInboxEntryReturnsEntryToPendingAndNotifiesDelivery(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	entryID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "GetByID should be scoped to the org")
+		require.Equal(t, threadID, gotThreadID, "GetByID should fetch the requested thread")
+		return models.SessionThread{ID: threadID, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning}, nil
+	}
+	var enqueued []db.EnqueueOpts
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, orgID, gotOrgID, "retry notification should be scoped to the org")
+		enqueued = append(enqueued, opts)
+		return uuid.New(), nil
+	}
+
+	entry, err := svc.RetryInboxEntry(context.Background(), orgID, sessionID, threadID, entryID, false)
+
+	require.NoError(t, err, "RetryInboxEntry should not return an error")
+	require.Equal(t, models.ThreadInboxDeliveryStatePending, entry.DeliveryState, "RetryInboxEntry should return the entry to pending")
+	require.Equal(t, []uuid.UUID{entryID}, deps.inboxStore.retryCalls, "RetryInboxEntry should retry the requested inbox entry")
+	require.Equal(t, []bool{false}, deps.inboxStore.retryAllowUnknownCalls, "RetryInboxEntry should not replay unknown-delivery entries by default")
+	require.Len(t, enqueued, 1, "RetryInboxEntry should notify live delivery after making the entry pending")
+	require.Equal(t, "deliver_thread_inbox", enqueued[0].JobType, "RetryInboxEntry should reuse the live inbox delivery job")
+	require.NotNil(t, enqueued[0].DedupeKey, "RetryInboxEntry should dedupe delivery notifications by thread")
+	require.Equal(t, "deliver_thread_inbox:"+threadID.String(), *enqueued[0].DedupeKey, "RetryInboxEntry should key notification dedupe by thread")
+}
+
+func TestService_RetryInboxEntryEnqueuesContinuationWhenRuntimeIsGone(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	entryID := uuid.New()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+	svc.SetThreadRuntimeStore(&mockRuntimeOwnerStore{})
+
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning}, nil
+	}
+	var enqueued []db.EnqueueOpts
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, orgID, gotOrgID, "retry continuation should be scoped to the org")
+		enqueued = append(enqueued, opts)
+		return uuid.New(), nil
+	}
+
+	_, err := svc.RetryInboxEntry(context.Background(), orgID, sessionID, threadID, entryID, true)
+
+	require.NoError(t, err, "RetryInboxEntry should not fail when no live runtime owns the tab")
+	require.Equal(t, []bool{true}, deps.inboxStore.retryAllowUnknownCalls, "explicit replay consent should be forwarded to the store")
+	require.Len(t, enqueued, 1, "RetryInboxEntry should enqueue a thread continuation when there is no active runtime")
+	require.Equal(t, "continue_session", enqueued[0].JobType, "RetryInboxEntry should resume the tab when live delivery is impossible")
+	payload, ok := enqueued[0].Payload.(map[string]string)
+	require.True(t, ok, "continuation payload should be string keyed")
+	require.Equal(t, threadID.String(), payload["thread_id"], "continuation payload should address the retried thread")
 }
 
 func TestService_SendMessage_AnswersThreadHumanInputRequest(t *testing.T) {
@@ -2188,16 +2619,15 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 	})
 
-	t.Run("answers latest pending question when awaiting_input thread queues behind sibling", func(t *testing.T) {
+	t.Run("answers latest pending human input when awaiting_input thread runs beside sibling", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()
 		require.NoError(t, err, "should create pgx mock")
 		defer mock.Close()
 
 		userID := uuid.New()
-		questionID := uuid.New()
+		requestID := uuid.New()
 		answerText := "continue"
-		answeredAt := now
 
 		mock.ExpectBegin()
 		mock.ExpectQuery("INSERT INTO session_messages").
@@ -2205,18 +2635,15 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(22), now))
-		mock.ExpectQuery("UPDATE session_questions").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(
-				pgxmock.NewRows([]string{
-					"id", "session_id", "org_id", "question_text", "options", "context",
-					"blocks_phase", "answer_text", "answered_by", "answered_at", "status", "created_at",
-				}).AddRow(questionID, sessionID, orgID, "continue?", []string{"continue", "stop"}, (*string)(nil),
-					(*string)(nil), &answerText, &userID, &answeredAt, "answered", now),
-			)
+		mock.ExpectQuery("UPDATE session_human_input_requests").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(threadHumanInputRequestColumns).
+				AddRow(threadHumanInputRequestRow(requestID, orgID, sessionID, threadID, userID, answerText, now)...))
 		mock.ExpectCommit()
 
 		svc, deps := newTestService(t)
+		ownerNodeID := "worker-1"
+		containerID := "sandbox-live"
 		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 			return models.SessionThread{}, fmt.Errorf("no rows")
 		}
@@ -2230,23 +2657,27 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 			return models.Session{}, fmt.Errorf("session already running")
 		}
 		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
+			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, ContainerID: &containerID, WorkerNodeID: &ownerNodeID}, nil
 		}
 		deps.threadStore.updateStatusFn = func(_ context.Context, _, tid uuid.UUID, status models.ThreadStatus) error {
-			require.Equal(t, threadID, tid, "sibling-queued awaiting_input answer should release the claimed thread")
-			require.Equal(t, models.ThreadStatusIdle, status, "sibling-queued awaiting_input answer should leave the thread idle")
+			require.Failf(t, "sibling awaiting_input answer should keep the admitted thread running", "tid=%s status=%s", tid, status)
 			return nil
 		}
 		deps.threadStore.incrementPendingFn = func(_ context.Context, _, tid uuid.UUID) error {
-			require.Equal(t, threadID, tid, "sibling-queued awaiting_input answer should increment the requested thread")
+			require.Failf(t, "sibling awaiting_input answer should not increment pending messages", "tid=%s", tid)
 			return nil
 		}
-		deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
-			require.Fail(t, "sibling-queued awaiting_input answer should not enqueue a second continue_session")
-			return uuid.Nil, nil
+		deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+			require.Equal(t, "continue_session", opts.JobType, "sibling awaiting_input answer should enqueue a thread-scoped continue_session")
+			require.NotNil(t, opts.TargetNodeID, "sibling awaiting_input answer should pin to the active sandbox owner")
+			require.Equal(t, ownerNodeID, *opts.TargetNodeID, "sibling awaiting_input answer should target the active sandbox owner")
+			payload, ok := opts.Payload.(map[string]string)
+			require.True(t, ok, "sibling awaiting_input payload should be string keyed")
+			require.Equal(t, requestID.String(), payload["human_input_request_id"], "sibling awaiting_input payload should carry the answered request id")
+			return uuid.New(), nil
 		}
 		svc.SetReviewCommentResolver(mock, db.NewSessionReviewCommentStore(mock))
-		svc.SetQuestionStore(db.NewSessionQuestionStore(mock))
+		svc.SetHumanInputRequestStore(db.NewSessionHumanInputRequestStore(mock))
 
 		result, err := svc.SendMessage(context.Background(), SendMessageInput{
 			SessionID: sessionID,
@@ -2255,11 +2686,11 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 			UserID:    &userID,
 			Message:   answerText,
 		})
-		require.NoError(t, err, "sibling-queued awaiting_input answer should be accepted")
-		require.NotNil(t, result, "sibling-queued awaiting_input answer should return a result")
-		require.NotNil(t, result.AnsweredQuestion, "sibling-queued awaiting_input answer should return the answered question for audit")
-		require.Equal(t, questionID, result.AnsweredQuestion.ID, "sibling-queued awaiting_input answer should report the answered question")
-		require.Equal(t, models.SessionQuestionStatusAnswered, result.AnsweredQuestion.Status, "sibling-queued awaiting_input answer should mark the question answered")
+		require.NoError(t, err, "sibling awaiting_input answer should be accepted")
+		require.NotNil(t, result, "sibling awaiting_input answer should return a result")
+		require.NotNil(t, result.AnsweredHumanInput, "sibling awaiting_input answer should return the answered human input request for audit")
+		require.Equal(t, requestID, result.AnsweredHumanInput.ID, "sibling awaiting_input answer should report the answered request")
+		require.Equal(t, models.HumanInputRequestStatusAnswered, result.AnsweredHumanInput.Status, "sibling awaiting_input answer should mark the request answered")
 		require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 	})
 
