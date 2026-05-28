@@ -31,6 +31,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_WANT_PREVIEW_PORT_LISTENER_HELPER") == "1" {
+		runPreviewPortListenerHelper()
+		return
+	}
+	os.Exit(m.Run())
+}
+
 type mockDockerPreviewClient struct {
 	createHostConfig       *container.HostConfig
 	createNetworkingConfig *network.NetworkingConfig
@@ -1704,8 +1712,8 @@ func TestBuildTerminateServiceProcessCmd_KillsPortWithoutLsof(t *testing.T) {
 		t.Skip("the /proc socket fallback is Linux-specific")
 	}
 
-	helper := exec.Command(os.Args[0], "-test.run=TestPreviewPortListenerHelper", "--")
-	helper.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+	helper := exec.Command(os.Args[0], "-test.run=^$", "--")
+	helper.Env = append(os.Environ(), "GO_WANT_PREVIEW_PORT_LISTENER_HELPER=1")
 	stdout, err := helper.StdoutPipe()
 	require.NoError(t, err, "helper stdout pipe should be created")
 	helper.Stderr = os.Stderr
@@ -1737,10 +1745,7 @@ func TestBuildTerminateServiceProcessCmd_KillsPortWithoutLsof(t *testing.T) {
 	}
 }
 
-func TestPreviewPortListenerHelper(t *testing.T) {
-	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
-		return
-	}
+func runPreviewPortListenerHelper() {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
