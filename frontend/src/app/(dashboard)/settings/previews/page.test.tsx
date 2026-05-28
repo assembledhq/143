@@ -48,7 +48,7 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    await userEvent.click(await screen.findByRole("combobox", { name: /repository/i }));
+    await userEvent.click(await screen.findByRole("combobox", { name: /filter by repository/i }));
     await userEvent.click(await screen.findByRole("option", { name: "assembledhq/docs" }));
 
     expect((await screen.findAllByText("docs-preview"))[0]).toBeInTheDocument();
@@ -84,7 +84,7 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.type(screen.getByLabelText("Bundle name"), "staging");
-    await userEvent.type(screen.getByLabelText("Secret key"), "API_TOKEN");
+    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
     await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
@@ -110,6 +110,64 @@ describe("PreviewSettingsPage", () => {
     expect(screen.queryByText("super-secret")).not.toBeInTheDocument();
   }, 10000);
 
+  it("lets users choose the bundle repository inside the create dialog", async () => {
+    let savedPath = "";
+    let savedBody: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.post("*/api/v1/repositories/repo-2/preview-secret-bundles", async ({ request }) => {
+        savedPath = new URL(request.url).pathname;
+        savedBody = await request.json();
+        return HttpResponse.json({ data: bundle("bundle-2", "repo-2", "docs-preview") });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Bundle repository" }));
+    await userEvent.click(await screen.findByRole("option", { name: "assembledhq/docs" }));
+    await userEvent.type(screen.getByLabelText("Bundle name"), "docs-preview");
+    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
+    await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(savedPath).toBe("/api/v1/repositories/repo-2/preview-secret-bundles");
+    });
+    expect(savedBody).toMatchObject({ name: "docs-preview" });
+  }, 10000);
+
+  it("uses delivery tabs to choose environment variables or a secret file", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
+
+    expect(screen.getByRole("tablist", { name: "Delivery method" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Environment variables" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Secret file" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByText("Stored secrets")).toBeInTheDocument();
+    expect(screen.getByText(/Each secret name becomes an environment variable/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Generated files JSON")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Send as env var/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Stored secrets help")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
+
+    expect(screen.getByRole("tab", { name: "Secret file" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Generated files JSON")).toBeInTheDocument();
+    expect(screen.getByLabelText("Generated files help")).toBeInTheDocument();
+    expect(screen.getByText(/Reference stored secrets with secret:API_TOKEN/i)).toBeInTheDocument();
+  });
+
   it("does not expose file-only preview secrets as environment variables", async () => {
     let savedBody: unknown;
     server.use(
@@ -126,10 +184,10 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.type(screen.getByLabelText("Bundle name"), "file-only");
-    await userEvent.type(screen.getByLabelText("Secret key"), "API_TOKEN");
+    await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
+    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
     await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
-    await userEvent.click(screen.getByLabelText("Expose as env"));
-    fireEvent.change(screen.getByLabelText("File outputs JSON"), {
+    fireEvent.change(screen.getByLabelText("Generated files JSON"), {
       target: {
         value: '[{"type":"file","path":"development.conf.json","format":"json","content":{"token":"secret:API_TOKEN"}}]',
       },
@@ -151,7 +209,7 @@ describe("PreviewSettingsPage", () => {
     });
   }, 10000);
 
-  it("disables Save when a bundle has a filled value but no env or file outputs configured", async () => {
+  it("uses the shared tooltip for disabled Save guidance", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
@@ -162,19 +220,66 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.type(screen.getByLabelText("Bundle name"), "no-outputs");
-    await userEvent.type(screen.getByLabelText("Secret key"), "API_TOKEN");
+    await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
+    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
     await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
-    // Uncheck the only env output row so outputs will be empty
-    await userEvent.click(screen.getByLabelText("Expose as env"));
 
-    // Save is disabled — the button gives immediate feedback via the title tooltip
-    // rather than allowing submission and showing a post-submit error.
+    // Save is disabled until the selected secret-file delivery method is configured.
     expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /save/i })).toHaveAttribute(
-      "title",
-      "At least one env or file output is required",
-    );
+    expect(screen.getByRole("button", { name: /save/i })).not.toHaveAttribute("title");
+
+    await userEvent.hover(screen.getByText("Save").closest("span")!);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add the secret file JSON before saving");
   }, 10000);
+
+  it("shows tooltip guidance when Save is disabled in env mode with no filled values", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
+    await userEvent.type(screen.getByLabelText("Bundle name"), "my-bundle");
+
+    expect(screen.getByRole("tab", { name: "Environment variables" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+
+    await userEvent.hover(screen.getByText("Save").closest("span")!);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add at least one secret name and value");
+  });
+
+  it("warns when editing a legacy bundle that has both env and file outputs", async () => {
+    const dualBundle = {
+      id: "bundle-dual",
+      repository_id: "repo-1",
+      name: "dual-delivery",
+      source_type: "managed",
+      exposure_policy: "preview_runtime",
+      outputs: [
+        { type: "env", env: ["API_TOKEN"] },
+        { type: "file", path: "config.json", format: "json" },
+      ],
+      created_by_user_id: "user-1",
+      created_at: "2026-05-27T00:00:00Z",
+    };
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () =>
+        HttpResponse.json({ data: [dualBundle], meta: {} }),
+      ),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit dual-delivery/i }))[0]);
+
+    expect(screen.getByText(/uses both env vars and a secret file/i)).toBeInTheDocument();
+  });
 
   it("edits a preview secret bundle via the patch endpoint", async () => {
     let patchedBody: unknown;

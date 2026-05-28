@@ -45,7 +45,6 @@ import {
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
 import { RunsTab } from "./runs-tab";
-import { RunCard } from "./run-card";
 import {
   browserTimezone,
   formatRunAtWithTimezone,
@@ -695,7 +694,6 @@ export default function AutomationDetailPage() {
               runActions={runActions}
             />
             <AutomationStatsCard automationId={automationId} />
-            <RecentRunsRail automationId={automationId} />
           </aside>
         </div>
       </div>
@@ -808,34 +806,6 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
         </Button>
       ) : null}
     </div>
-  );
-}
-
-function RecentRunsRail({ automationId }: { automationId: string }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["automation-runs", automationId, "recent"],
-    queryFn: () => api.automations.listRuns(automationId, { limit: 5 }),
-    refetchInterval: 10_000,
-  });
-  const runs = data?.data ?? [];
-
-  return (
-    <section className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-3">
-        <h2 className="text-sm font-semibold text-foreground">Previous runs</h2>
-      </div>
-      {isLoading ? (
-        <div className="h-20 animate-pulse rounded-md bg-muted/25" />
-      ) : runs.length > 0 ? (
-        <div className="space-y-2">
-          {runs.map((run) => (
-            <RunCard key={run.id} run={run} />
-          ))}
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">No runs yet.</p>
-      )}
-    </section>
   );
 }
 

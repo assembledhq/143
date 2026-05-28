@@ -59,6 +59,70 @@ func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.Provi
 	return &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "linear-token"}}, nil
 }
 
+type workerLinearClient struct {
+	fetch map[string]*linearservice.FetchedIssue
+	err   error
+}
+
+func (c workerLinearClient) FetchIssue(_ context.Context, identifier string) (*linearservice.FetchedIssue, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.fetch[identifier], nil
+}
+
+func (c workerLinearClient) ListTeamKeys(context.Context) ([]linearservice.TeamKeyInfo, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) CreateOrUpdateAttachment(context.Context, linearservice.AttachmentWriteInput) (linearservice.AttachmentResult, error) {
+	return linearservice.AttachmentResult{}, c.err
+}
+
+func (c workerLinearClient) CreateComment(context.Context, string, string) (string, error) {
+	return "", c.err
+}
+
+func (c workerLinearClient) UpdateComment(context.Context, string, string) error {
+	return c.err
+}
+
+func (c workerLinearClient) FindRecentBotCommentByURL(context.Context, string, string) (string, error) {
+	return "", c.err
+}
+
+func (c workerLinearClient) WorkflowStateForType(context.Context, string, []string, string) (*linearservice.WorkflowState, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) UpdateIssueState(context.Context, string, string) error {
+	return c.err
+}
+
+func (c workerLinearClient) IssueRecentHumanEdits(context.Context, string, time.Time) (bool, error) {
+	return false, c.err
+}
+
+func (c workerLinearClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
+	return false, c.err
+}
+
+func (c workerLinearClient) AgentActivityCreate(context.Context, linearservice.AgentActivityInput) (linearservice.AgentActivityResult, error) {
+	return linearservice.AgentActivityResult{}, c.err
+}
+
+func (c workerLinearClient) AgentSessionUpdate(context.Context, linearservice.AgentSessionUpdateInput) error {
+	return c.err
+}
+
+func (c workerLinearClient) AgentSessionGet(context.Context, string) (*linearservice.FetchedAgentSession, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) FetchComment(context.Context, string) (*linearservice.FetchedComment, error) {
+	return nil, c.err
+}
+
 // workerLinearIntegrationRecorder doubles as IntegrationReader and
 // IntegrationWriter so unauthorized-flow tests can both feed an active row
 // to MarkIntegrationUnauthorized's pre-write lookup and assert the resulting
@@ -100,7 +164,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -287,11 +351,13 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 // current sessionColumns; we pad after dispatch so the shape matches.
 const (
 	preLinearWorkerSessionColumnsLen              = 76
-	workerSessionColumnsWithLegacyConfidenceCount = 90
+	workerSessionColumnsWithLegacyConfidenceCount = 92
 )
 
 func workerLinearSessionDefaults() []any {
 	return []any{
+		int64(0),       // workspace_revision
+		time.Time{},    // workspace_revision_updated_at
 		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
@@ -937,6 +1003,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		stores, mock := newTestStores(t)
 		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
 
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -967,6 +1034,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		stores, mock := newTestStores(t)
 		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
 
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -994,6 +1062,84 @@ func TestLinearJobHandlers(t *testing.T) {
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		jobctx.RunDeadLetterHooks(handlerCtx, err)
 		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
+	})
+
+	t.Run("prepare_linear_primary dead-letters fatally on invalid session issue link", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:     stores.Sessions,
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			Issues:       stores.Issues,
+			Links:        stores.SessionIssueLinks,
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return workerLinearClient{fetch: map[string]*linearservice.FetchedIssue{
+					"ACS-123": {
+						ID:            "linear-ACS-123",
+						Identifier:    "ACS-123",
+						Title:         "Fix ACS-123",
+						Description:   "issue body",
+						URL:           "https://linear.app/acme/issue/ACS-123",
+						StateName:     "Todo",
+						StateType:     "unstarted",
+						TeamID:        "team-1",
+						TeamKey:       "ACS",
+						WorkspaceSlug: "acme",
+					},
+				}}, nil
+			},
+			Logger: zerolog.Nop(),
+		})
+
+		mock.ExpectQuery("INSERT INTO issues").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, time.Now(), time.Now()))
+		mock.ExpectQuery("INSERT INTO session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectQuery("SELECT id FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("(?s).*UPDATE sessions.*RETURNING.*").
+			WithArgs(workerAnyArgs(11)...).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID, models.SessionStatusFailed, "failed")...,
+			))
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(handlerCtx, "prepare_linear_primary", payload)
+		require.Error(t, err, "invalid session issue links should surface as a handler error")
+		require.Contains(t, err.Error(), "Linear issue could not be linked", "invalid-link fatal error should explain the repository mismatch")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "invalid session issue links are permanent and must dead-letter immediately")
+		require.ErrorIs(t, err, db.ErrInvalidSessionIssueLink, "fatal wrapper should preserve the invalid-link sentinel")
+		var retryable *RetryableError
+		require.False(t, errors.As(err, &retryable), "invalid session issue links must not be classified as retryable")
+		require.NoError(t, mock.ExpectationsWereMet(), "fatal invalid-link handling should persist the specific message without retrying")
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should keep prepare state failed after the synchronous message write")
 	})
 
 	t.Run("prepare_linear_primary dead-letters fatally on missing integration", func(t *testing.T) {
@@ -4995,6 +5141,51 @@ func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_SandboxOnDifferentNodeTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	containerID := "container-on-recorded-worker"
+	workerNodeID := "worker-recorded"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	orch := &orchestratorServiceStub{
+		recoverSessionFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.WorkerNodeID, "run_agent recovery should preserve the recorded sandbox worker")
+			require.Equal(t, workerNodeID, *run.WorkerNodeID, "run_agent recovery should preserve the recorded sandbox worker")
+			return agent.ErrSandboxOnDifferentNode
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+
+	require.Error(t, err, "run_agent recovery should ask the worker to retry when the sandbox lives on another node")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "wrong-node run_agent recovery should be retryable")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node run_agent recovery should bypass the generic capacity retry window")
+	require.NotNil(t, retryable.TargetNodeID, "wrong-node run_agent recovery should persist the recorded worker target")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node run_agent recovery should target the worker that owns the recorded sandbox")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testing.T) {
 	t.Parallel()
 
@@ -5680,8 +5871,9 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	}}
 	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
 	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
-	require.Contains(t, failureExplanation, "Final capacity check: worker reported 2/2 local sandbox slots active or reserved.", "failure explanation should include the worker-local capacity reason")
-	require.Contains(t, failureExplanation, "Current worker load: 3 running sessions, 3 session sandbox containers, 3 active previews, 1 preview-held sandbox, and 3 running session/preview jobs across 2 workers.", "failure explanation should include current session and preview counts")
+	require.Equal(t, sandboxCapacityBaseExplanation, failureExplanation, "failure explanation should stay concise for users")
+	require.NotContains(t, failureExplanation, "2/2", "failure explanation should not expose local slot counts")
+	require.NotContains(t, failureExplanation, "Current worker load", "failure explanation should not expose fleet load details")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
 }
 
@@ -5713,10 +5905,10 @@ func TestSandboxCapacityFailureExplanationIncludesCurrentLoad(t *testing.T) {
 		},
 	)
 
-	require.Contains(t, explanation, "The worker could not acquire local sandbox capacity before the job retry window expired.", "explanation should keep the base retry-window context")
-	require.Contains(t, explanation, "Final capacity check: worker reported 2/2 local sandbox slots active or reserved.", "explanation should include the concrete worker-local slot count")
-	require.Contains(t, explanation, "Current worker load: 3 running sessions, 3 session sandbox containers, 3 active previews, 1 preview-held sandbox, and 3 running session/preview jobs across 2 workers.", "explanation should include current running session and preview counts")
-	require.Contains(t, explanation, "Sandbox capacity is local to a worker node and is consumed by live session sandboxes, preview-held sandboxes, and in-flight reservations.", "explanation should explain why low visible concurrency can still hit capacity")
+	require.Equal(t, sandboxCapacityBaseExplanation, explanation, "user-facing capacity explanation should stay concise and omit operational capacity internals")
+	require.NotContains(t, explanation, "2/2", "user-facing capacity explanation should not expose local slot counts")
+	require.NotContains(t, explanation, "Current worker load", "user-facing capacity explanation should not expose fleet load details")
+	require.NotContains(t, explanation, "preview-held", "user-facing capacity explanation should not expose internal sandbox accounting")
 }
 
 func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {

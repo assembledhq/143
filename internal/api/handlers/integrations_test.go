@@ -66,6 +66,26 @@ func (f fakeGitHubMembershipStore) Get(context.Context, uuid.UUID, uuid.UUID) (m
 	return f.membership, nil
 }
 
+type fakeIntegrationCredentialStore struct {
+	credentials map[models.ProviderName]*models.DecryptedCredential
+	err         error
+}
+
+func (f fakeIntegrationCredentialStore) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	credential, ok := f.credentials[provider]
+	if !ok {
+		return nil, nil
+	}
+	return credential, nil
+}
+
+func (f fakeIntegrationCredentialStore) Upsert(context.Context, uuid.UUID, models.ProviderConfig) error {
+	return nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ──────────────────────────────────────────────────────────────────────────────
@@ -199,6 +219,76 @@ func TestIntegrationHandler_ListIntegrations_SurfacesAuthErrorWhenNoActiveDuplic
 	require.Len(t, resp.Data, 1, "response should include the errored integration")
 	require.NotNil(t, resp.Data[0].AuthError, "auth_error should surface when there is no active Linear duplicate")
 	require.Equal(t, "Linear rejected the access token (HTTP 401). Reconnect to continue syncing.", resp.Data[0].AuthError.Reason, "auth_error reason should be preserved")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ListIntegrations_DerivesSafeCredentialMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+	credentialStore := fakeIntegrationCredentialStore{
+		credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderNotion: {
+				OrgID:    orgID,
+				Provider: models.ProviderNotion,
+				Config: models.NotionConfig{
+					AccessToken:   "secret-notion-token",
+					WorkspaceName: "Acme HQ",
+				},
+			},
+			models.ProviderCircleCI: {
+				OrgID:    orgID,
+				Provider: models.ProviderCircleCI,
+				Config: models.CircleCIConfig{
+					AuthToken:   "secret-circle-token",
+					ProjectSlug: "gh/acme/api",
+				},
+			},
+		},
+	}
+	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(uuid.New(), orgID, "notion", json.RawMessage(`{}`), "active", nil, now).
+		AddRow(uuid.New(), orgID, "circleci", json.RawMessage(`{}`), "active", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListIntegrations(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "list integrations should succeed")
+	var resp models.ListResponse[models.Integration]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as integration list")
+	require.Len(t, resp.Data, 2, "response should include both integrations")
+
+	var notionIntegration, circleciIntegration *models.Integration
+	for i := range resp.Data {
+		switch resp.Data[i].Provider {
+		case models.IntegrationProviderNotion:
+			notionIntegration = &resp.Data[i]
+		case models.IntegrationProviderCircleCI:
+			circleciIntegration = &resp.Data[i]
+		}
+	}
+	require.NotNil(t, notionIntegration, "Notion integration should be present in response")
+	require.NotNil(t, notionIntegration.NotionWorkspaceName, "Notion workspace name should be derived from credential metadata")
+	require.Equal(t, "Acme HQ", *notionIntegration.NotionWorkspaceName, "Notion workspace name should be exposed without token data")
+	require.NotNil(t, circleciIntegration, "CircleCI integration should be present in response")
+	require.NotNil(t, circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be derived from credential metadata")
+	require.Equal(t, "gh/acme/api", *circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be exposed without token data")
+	require.NotContains(t, w.Body.String(), "secret-notion-token", "response should not expose Notion token")
+	require.NotContains(t, w.Body.String(), "secret-circle-token", "response should not expose CircleCI token")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

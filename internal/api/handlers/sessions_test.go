@@ -170,7 +170,7 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -279,7 +279,7 @@ const (
 	// right pad helper, then sessionTestRow pads the four trailing linear
 	// columns and the two trailing identity nils at the end.
 	preLinearSessionColumnsLen                  = 76
-	sessionColumnsWithLegacyResultConfidenceLen = 90
+	sessionColumnsWithLegacyResultConfidenceLen = 92
 )
 
 // TestPreLinearSessionColumnsLenStaysInSync trips when a future migration
@@ -295,9 +295,10 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const prPushFieldsAdded = 2
 	const branchCreationFieldsAdded = 3
 	const workspaceGenerationFieldAdded = 1
-	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
+	const workspaceRevisionFieldsAdded = 2
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+workspaceRevisionFieldsAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
-			"unpushedChangesFieldAdded, linearFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
+			"unpushedChangesFieldAdded, workspaceRevisionFieldsAdded, linearFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
 	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded, "legacy confidence columns should stay isolated to test fixtures")
 }
 
@@ -307,6 +308,8 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 // length-difference cases below).
 func linearSessionDefaults() []interface{} {
 	return []interface{}{
+		int64(0),                              // workspace_revision
+		time.Time{},                           // workspace_revision_updated_at
 		false,                                 // has_unpushed_changes
 		false,                                 // linear_private
 		false,                                 // linear_state_sync_disabled
