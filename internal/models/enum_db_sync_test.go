@@ -112,6 +112,30 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"jobs_owner_kind": toStrings(
 			JobOwnerKindWorker, JobOwnerKindSessionExecutor,
 		),
+		"thread_inbox_entries_entry_type": toStrings(
+			ThreadInboxEntryTypeUserMessage, ThreadInboxEntryTypeHumanInputAnswer,
+			ThreadInboxEntryTypeControl,
+		),
+		"thread_inbox_entries_delivery_state": toStrings(
+			ThreadInboxDeliveryStatePending, ThreadInboxDeliveryStateDelivering,
+			ThreadInboxDeliveryStateDelivered, ThreadInboxDeliveryStateUnknownDelivery,
+			ThreadInboxDeliveryStateAcked,
+			ThreadInboxDeliveryStateDeadLetter,
+		),
+		"thread_runtimes_status": toStrings(
+			ThreadRuntimeStatusStarting, ThreadRuntimeStatusLive,
+			ThreadRuntimeStatusPaused, ThreadRuntimeStatusDraining,
+			ThreadRuntimeStatusLost, ThreadRuntimeStatusClosed,
+			ThreadRuntimeStatusFailed,
+		),
+		"session_sandbox_holders_holder_kind": toStrings(
+			SessionSandboxHolderKindThreadRuntime, SessionSandboxHolderKindPreview,
+			SessionSandboxHolderKindSnapshot, SessionSandboxHolderKindOperator,
+		),
+		"session_sandbox_holders_status": toStrings(
+			SessionSandboxHolderStatusActive, SessionSandboxHolderStatusDraining,
+			SessionSandboxHolderStatusReleased, SessionSandboxHolderStatusExpired,
+		),
 		// project_enums.go
 		"projects_status": toStrings(
 			ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted,

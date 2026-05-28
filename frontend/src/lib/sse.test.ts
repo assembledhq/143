@@ -33,6 +33,30 @@ describe("addSSEListener", () => {
     expect(handler).toHaveBeenCalledWith(payload);
   });
 
+  it("normalizes LOG events before invoking the handler", () => {
+    const source = createMockEventSource();
+    const handler = vi.fn();
+
+    addSSEListener(source as unknown as EventSource, SSE_EVENT.LOG, handler);
+
+    const payload = { id: 1, session_id: "s1", level: "info", message: "hi", metadata: null, turn_number: 1, timestamp: "2026-01-01T00:00:00Z" };
+    source._fire("message", JSON.stringify(payload));
+
+    expect(handler).toHaveBeenCalledWith({ ...payload, created_at: "2026-01-01T00:00:00Z" });
+  });
+
+  it("normalizes named human-input events before invoking the handler", () => {
+    const source = createMockEventSource();
+    const handler = vi.fn();
+
+    addSSEListener(source as unknown as EventSource, SSE_EVENT.HUMAN_INPUT_CREATED, handler);
+
+    const payload = { id: 12, session_id: "s1", level: "human_input", message: "created", metadata: { status: "pending" }, turn_number: 1, timestamp: "2026-01-01T00:00:00Z" };
+    source._fire("session_human_input.created", JSON.stringify(payload));
+
+    expect(handler).toHaveBeenCalledWith({ ...payload, created_at: "2026-01-01T00:00:00Z" });
+  });
+
   it("handles STATUS events via addEventListener", () => {
     const source = createMockEventSource();
     const handler = vi.fn();

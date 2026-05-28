@@ -248,6 +248,38 @@ func TestCancelRegistry_HandleAttacher_AttachAndDetach(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
+func TestNewMultiInteractiveHandleAttacher_AttachesAndDetachesAll(t *testing.T) {
+	t.Parallel()
+
+	first := &recordingHandleAttacher{}
+	second := &recordingHandleAttacher{}
+	handle := newFakeHandle()
+
+	attacher := agent.NewMultiInteractiveHandleAttacher(first, nil, second)
+	require.NotNil(t, attacher, "multi attacher should be created when at least one delegate is present")
+
+	attacher.Attach(handle)
+	attacher.Detach()
+
+	require.Equal(t, int32(1), first.attached.Load(), "first delegate should receive Attach")
+	require.Equal(t, int32(1), second.attached.Load(), "second delegate should receive Attach")
+	require.Equal(t, int32(1), first.detached.Load(), "first delegate should receive Detach")
+	require.Equal(t, int32(1), second.detached.Load(), "second delegate should receive Detach")
+}
+
+type recordingHandleAttacher struct {
+	attached atomic.Int32
+	detached atomic.Int32
+}
+
+func (a *recordingHandleAttacher) Attach(agent.InteractiveCommandHandle) {
+	a.attached.Add(1)
+}
+
+func (a *recordingHandleAttacher) Detach() {
+	a.detached.Add(1)
+}
+
 // TestCancelRegistry_GraceWindowExpiry_EscalatesToKill exercises the cancel-
 // mid-stream path: Interrupt is delivered to a handle whose underlying agent
 // keeps streaming output and never exits. After the grace window the registry

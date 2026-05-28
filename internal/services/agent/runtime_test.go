@@ -130,6 +130,10 @@ func (s *runtimeTestSessionStore) UpdateSandboxState(context.Context, uuid.UUID,
 	return nil
 }
 
+func (s *runtimeTestSessionStore) MarkRunningWithSandboxState(context.Context, uuid.UUID, uuid.UUID, models.SandboxState) error {
+	return nil
+}
+
 func (s *runtimeTestSessionStore) UpdateWorkingBranch(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }

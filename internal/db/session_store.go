@@ -139,7 +139,7 @@ const sessionSelectColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -166,7 +166,7 @@ const sessionListColumns = `id,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -189,7 +189,7 @@ const sessionAPIDetailColumns = `id,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -1651,9 +1651,16 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 	// than clobbering the Changes tab with a blank value.
 	query := `
 		UPDATE sessions
-		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
+		SET status = 'idle',
+		    -- Multiple sibling tabs can complete from the same in-memory
+		    -- session.CurrentTurn. Advance relative to the row so concurrent
+		    -- completions are counted instead of last-writer-wins collapsing
+		    -- them to the same value.
+		    current_turn = GREATEST(current_turn + 1, @current_turn),
+		    last_activity_at = now(),
 		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted',
+		    workspace_generation = workspace_generation + 1,
 		    pr_creation_state = 'idle', pr_creation_error = NULL,
 		    -- Only reset pr_push_state when no push is currently in flight.
 		    -- A concurrent turn-complete from the orchestrator must never
@@ -1675,7 +1682,7 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
-		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
+		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := db.Exec(ctx, query, pgx.NamedArgs{
@@ -1890,6 +1897,48 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 		"sandbox_state": string(state),
 	})
 	return err
+}
+
+// MarkRunningWithSandboxState flips status and sandbox_state in a single
+// UPDATE so a caller can keep the session "running" while sibling thread
+// runtimes mutate the shared sandbox without ever leaving the row in a
+// half-updated state. Mirrors UpdateStatus's "clear failure fields and
+// refresh started_at when entering running" semantics so a session resumed
+// through the sibling-runtime keepalive path looks indistinguishable from
+// one resumed via UpdateStatus(SessionStatusRunning) followed by
+// UpdateSandboxState.
+func (s *SessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, sandboxState models.SandboxState) error {
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET status = @status,
+			sandbox_state = @sandbox_state,
+			started_at = now(),
+			completed_at = NULL,
+			error = NULL,
+			failure_explanation = NULL,
+			failure_category = NULL,
+			failure_next_steps = NULL,
+			failure_retry_advised = false,
+			last_activity_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		RETURNING `+sessionSelectColumns, pgx.NamedArgs{
+		"id":            sessionID,
+		"org_id":        orgID,
+		"status":        string(models.SessionStatusRunning),
+		"sandbox_state": string(sandboxState),
+	})
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 // UpdatePRCreationState transitions pr_creation_state and sets/clears
@@ -2321,19 +2370,29 @@ func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uui
 				  AND org_id = @org_id
 				  AND preview_holding_container = TRUE
 				LIMIT 1
-			), FALSE) AS preview_holds
+			), FALSE) AS preview_holds,
+			COALESCE((
+				SELECT TRUE
+				FROM session_sandbox_holders h
+				WHERE h.session_id = released.id
+				  AND h.org_id = @org_id
+				  AND h.status IN ('active', 'draining')
+				  AND h.expires_at > now()
+				LIMIT 1
+			), FALSE) AS sandbox_holds
 		FROM released`
 
 	var cid string
 	var previewHolds bool
+	var sandboxHolds bool
 	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
-	}).Scan(&cid, &previewHolds)
+	}).Scan(&cid, &previewHolds, &sandboxHolds)
 	if err != nil {
 		return false, "", fmt.Errorf("release turn hold: %w", err)
 	}
-	return cid != "" && !previewHolds, cid, nil
+	return cid != "" && !previewHolds && !sandboxHolds, cid, nil
 }
 
 // PeekContainerID returns the session's current container_id (empty when
@@ -2493,6 +2552,13 @@ func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uu
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id
+		      AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining')
+		      AND h.expires_at > now()
 		  )`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,
@@ -2537,6 +2603,13 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id
+		      AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining')
+		      AND h.expires_at > now()
 		  )`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,
@@ -2583,6 +2656,13 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id
+		      AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining')
+		      AND h.expires_at > now()
 		  )
 		ORDER BY id ASC
 		LIMIT 100`

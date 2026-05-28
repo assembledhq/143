@@ -160,6 +160,47 @@ describe('api client', () => {
       expect(url.searchParams.get('triggered_by_user_ids')).toBe('user-1,user-2');
     });
 
+    it('normalizes timeline payloads at the API boundary', async () => {
+      server.use(
+        http.get('/api/v1/sessions/:id/timeline', () => {
+          return HttpResponse.json({
+            data: [
+              {
+                kind: 'message',
+                created_at: '2026-01-01T00:00:01Z',
+                message: {
+                  id: 1,
+                  session_id: 'session-1',
+                  org_id: 'org-1',
+                  turn_number: 1,
+                  role: 'user',
+                  content: 'hello',
+                },
+              },
+              {
+                kind: 'log',
+                created_at: '2026-01-01T00:00:02Z',
+                log: {
+                  id: 2,
+                  session_id: 'session-1',
+                  level: 'info',
+                  message: 'working',
+                  metadata: null,
+                  turn_number: 1,
+                },
+              },
+            ],
+            meta: {},
+          });
+        }),
+      );
+
+      const result = await api.sessions.getTimeline('session-1');
+
+      expect(result.data[0].message?.created_at).toBe('2026-01-01T00:00:01Z');
+      expect(result.data[1].log?.created_at).toBe('2026-01-01T00:00:02Z');
+    });
+
     it('fetches single session', async () => {
       const mockSession = {
         data: {
@@ -239,6 +280,71 @@ describe('api client', () => {
       expect(capturedUrl).toBeDefined();
       const url = new URL(capturedUrl!);
       expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
+    });
+
+    it('fetches recoverable thread inbox entries', async () => {
+      const mockEntries = {
+        data: [
+          {
+            id: 'entry-1',
+            org_id: 'org-1',
+            session_id: 'session-abc',
+            thread_id: 'thread-1',
+            sequence_no: 12,
+            message_id: 99,
+            entry_type: 'user_message',
+            payload: { content: 'Please continue' },
+            delivery_state: 'dead_letter',
+            delivery_attempts: 2,
+            last_error: 'payload serialization failed',
+            accepted_at: '2026-05-26T10:00:00Z',
+            created_at: '2026-05-26T10:00:00Z',
+          },
+        ],
+        meta: {},
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:threadId/inbox/recoverable', () => {
+          return HttpResponse.json(mockEntries);
+        }),
+      );
+
+      const result = await api.sessions.listRecoverableThreadInboxEntries('session-abc', 'thread-1');
+
+      expect(result).toEqual(mockEntries);
+    });
+
+    it('retries a recoverable thread inbox entry', async () => {
+      let capturedBody: unknown;
+      const mockEntry = {
+        data: {
+          id: 'entry-1',
+          org_id: 'org-1',
+          session_id: 'session-abc',
+          thread_id: 'thread-1',
+          sequence_no: 12,
+          message_id: 99,
+          entry_type: 'user_message',
+          payload: { content: 'Please continue' },
+          delivery_state: 'pending',
+          delivery_attempts: 0,
+          accepted_at: '2026-05-26T10:00:00Z',
+          created_at: '2026-05-26T10:00:00Z',
+        },
+      };
+
+      server.use(
+        http.post('/api/v1/sessions/:id/threads/:threadId/inbox/:entryId/retry', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json(mockEntry);
+        }),
+      );
+
+      const result = await api.sessions.retryThreadInboxEntry('session-abc', 'thread-1', 'entry-1', { replayUnknownDelivery: true });
+
+      expect(result).toEqual(mockEntry);
+      expect(capturedBody).toEqual({ replay_unknown_delivery: true });
     });
 
     it('answers question with backend contract field', async () => {
