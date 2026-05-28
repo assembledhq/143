@@ -171,6 +171,49 @@ func TestSessionStreams_PublishStatusSchedulesExpiryForTerminalSessions(t *testi
 	require.True(t, ttl > 0, "terminal status publish should set stream expiry")
 }
 
+func TestSessionStreams_PublishEventAndSubscribeEvents(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	streams := NewSessionStreams(client, zerolog.Nop(), nil)
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	orgID := uuid.New()
+
+	sub, err := streams.SubscribeEvents(sessionID)
+	require.NoError(t, err, "event subscription should succeed when Redis is available")
+	defer sub.Close()
+
+	event := models.SessionStreamEvent{
+		Type:      models.SessionStreamEventThreadInboxQueued,
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Data: models.ThreadInboxEvent{
+			SessionID:           sessionID,
+			ThreadID:            threadID,
+			OrgID:               orgID,
+			PendingMessageCount: 2,
+		},
+	}
+	var got models.SessionStreamEvent
+	require.Eventually(t, func() bool {
+		require.NoError(t, streams.PublishEvent(context.Background(), event), "typed session event should publish to Redis")
+		select {
+		case got = <-sub.C:
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "event subscription should receive the published event")
+	require.Equal(t, event.Type, got.Type, "subscriber should receive the published event type")
+	require.Equal(t, sessionID, got.SessionID, "subscriber should receive the session id")
+	require.Equal(t, orgID, got.OrgID, "subscriber should receive the org id")
+	payload, ok := got.Data.(models.ThreadInboxEvent)
+	require.True(t, ok, "subscriber should decode thread inbox payloads")
+	require.Equal(t, threadID, payload.ThreadID, "subscriber should receive the thread id")
+	require.Equal(t, 2, payload.PendingMessageCount, "subscriber should receive the pending count")
+}
+
 func TestParseLogStreamID(t *testing.T) {
 	t.Parallel()
 
@@ -367,6 +410,7 @@ func TestSessionStreams_NilAndDecodeHelpers(t *testing.T) {
 
 	require.NoError(t, streams.PublishLog(context.Background(), nil), "nil stream helper should ignore nil log publishes")
 	require.NoError(t, streams.PublishStatus(context.Background(), nil), "nil stream helper should ignore nil status publishes")
+	require.NoError(t, streams.PublishEvent(context.Background(), models.SessionStreamEvent{}), "nil stream helper should ignore event publishes")
 	require.NoError(t, streams.ScheduleExpiry(context.Background(), uuid.New(), time.Now()), "nil stream helper should ignore expiry scheduling")
 	require.NoError(t, streams.DeleteSessionStreams(context.Background(), uuid.New()), "nil stream helper should ignore stream deletion")
 }
@@ -391,6 +435,8 @@ func TestSessionStreams_RunCleanupBatch(t *testing.T) {
 	require.NoError(t, err, "test should seed the log stream")
 	_, err = mr.XAdd(statusStreamKey(sessionID), "1-0", []string{"json", `{"id":"` + sessionID.String() + `"}`})
 	require.NoError(t, err, "test should seed the status stream")
+	_, err = mr.XAdd(eventStreamKey(sessionID), "1-0", []string{"json", `{"type":"thread.inbox.queued","session_id":"` + sessionID.String() + `","org_id":"` + uuid.New().String() + `","data":{}}`})
+	require.NoError(t, err, "test should seed the event stream")
 
 	count, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{
 		sessions: []models.Session{{ID: sessionID}},
@@ -399,6 +445,7 @@ func TestSessionStreams_RunCleanupBatch(t *testing.T) {
 	require.Equal(t, 1, count, "cleanup batch should report the deleted session stream count")
 	require.False(t, mr.Exists(logStreamKey(sessionID)), "cleanup should delete the log stream")
 	require.False(t, mr.Exists(statusStreamKey(sessionID)), "cleanup should delete the status stream")
+	require.False(t, mr.Exists(eventStreamKey(sessionID)), "cleanup should delete the event stream")
 }
 
 func TestSessionStreams_StartCleanup_StopsOnCanceledContext(t *testing.T) {
@@ -470,4 +517,10 @@ func TestSessionStreams_FanoutCloseHelpers(t *testing.T) {
 	statusFanout := &statusFanout{clients: map[*statusSubscriber]struct{}{statusSub: {}}, cancel: func() {}}
 	statusFanout.removeClient(statusSub, "client_closed")
 	require.Equal(t, "client_closed", statusSub.reason.Load(), "removeClient should store the close reason on status subscribers")
+
+	eventSub := &eventSubscriber{ch: make(chan models.SessionStreamEvent, 1)}
+	eventSub.reason.Store("")
+	eventFanout := &eventFanout{clients: map[*eventSubscriber]struct{}{eventSub: {}}, cancel: func() {}}
+	eventFanout.removeClient(eventSub, "client_closed")
+	require.Equal(t, "client_closed", eventSub.reason.Load(), "removeClient should store the close reason on event subscribers")
 }

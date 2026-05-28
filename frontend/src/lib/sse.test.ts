@@ -122,5 +122,9 @@ describe("SSE_EVENT constants", () => {
     expect(SSE_EVENT.HUMAN_INPUT_CREATED).toBe("session_human_input.created");
     expect(SSE_EVENT.HUMAN_INPUT_UPDATED).toBe("session_human_input.updated");
     expect(SSE_EVENT.PULL_REQUEST_UPDATED).toBe("pull_request.updated");
+    expect(SSE_EVENT.THREAD_INBOX_QUEUED).toBe("thread.inbox.queued");
+    expect(SSE_EVENT.THREAD_INBOX_CLEARED).toBe("thread.inbox.cleared");
+    expect(SSE_EVENT.THREAD_RUNTIME_UPDATED).toBe("thread.runtime.updated");
+    expect(SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED).toBe("session.workspace.generation_changed");
   });
 });
