@@ -156,7 +156,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -189,7 +189,7 @@ var sessionTestCols = []string{
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	// Migration 102 — Linear session-linking columns. Migration 100 — git
 	// identity audit columns. Mocks must include both so SessionStore.GetByID's
 	// row decode finds every selected field.
@@ -207,8 +207,19 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", stringPtr("req-1"), "", now, now, now, nil,
+		(*int64)(nil), (*time.Time)(nil),
 		false,
 	}
+}
+
+func setPreviewInstanceRowColumn(row []any, column string, value any) {
+	for i, name := range previewInstanceTestCols {
+		if name == column {
+			row[i] = value
+			return
+		}
+	}
+	panic(fmt.Sprintf("unknown preview instance test column %q", column))
 }
 
 func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash string, expiresAt time.Time, revokedAt *time.Time, now time.Time) []any {
@@ -1499,8 +1510,8 @@ func TestRecyclePreview_StartFailureReleasesPreviewHold(t *testing.T) {
 	containerID := "sandbox-recycle"
 
 	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
-	row[23] = []byte(`{"id":"sandbox-recycle","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"sandbox-recycle"}}`)
-	row[31] = true
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-recycle","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"sandbox-recycle"}}`))
+	setPreviewInstanceRowColumn(row, "preview_holding_container", true)
 
 	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2010,11 +2021,27 @@ func validPreviewConfig() *models.PreviewConfig {
 // inserts a row and returns the row back. Tests inject a known preview ID via
 // the returned row, and the caller reads p.ID from the model after the call.
 func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time) {
+	expectCreatePreviewInstanceWithWorkspaceRevision(mock, previewID, sessionID, orgID, userID, status, now, nil, nil)
+}
+
+func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, revision *int64, revisionUpdatedAt *time.Time) {
+	args := previewAnyArgs(24)
+	args[22] = revision
+	args[23] = revisionUpdatedAt
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)
+	for i, column := range previewInstanceTestCols {
+		switch column {
+		case "source_workspace_revision":
+			row[i] = revision
+		case "source_workspace_revision_updated_at":
+			row[i] = revisionUpdatedAt
+		}
+	}
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(args...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)...),
+				AddRow(row...),
 		)
 }
 
@@ -2112,6 +2139,8 @@ func TestReservePreview_Success(t *testing.T) {
 	sessionID := uuid.New()
 	previewID := uuid.New()
 	now := time.Now()
+	workspaceRevision := int64(7)
+	workspaceRevisionUpdatedAt := now.Add(-time.Minute)
 
 	// GetActivePreviewForSession: no rows.
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
@@ -2129,21 +2158,25 @@ func TestReservePreview_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
-	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	expectCreatePreviewInstanceWithWorkspaceRevision(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now, &workspaceRevision, &workspaceRevisionUpdatedAt)
 
 	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 
 	instance, err := mgr.ReservePreview(context.Background(), StartPreviewInput{
-		SessionID: sessionID,
-		OrgID:     orgID,
-		UserID:    userID,
-		Config:    validPreviewConfig(),
+		SessionID:                  sessionID,
+		OrgID:                      orgID,
+		UserID:                     userID,
+		Config:                     validPreviewConfig(),
+		WorkspaceRevision:          workspaceRevision,
+		WorkspaceRevisionUpdatedAt: workspaceRevisionUpdatedAt,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, instance)
 	require.Equal(t, previewID, instance.ID)
+	require.Equal(t, &workspaceRevision, instance.SourceWorkspaceRevision, "ReservePreview should stamp the source workspace revision")
+	require.Equal(t, &workspaceRevisionUpdatedAt, instance.SourceWorkspaceRevisionUpdatedAt, "ReservePreview should stamp the source workspace revision timestamp")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

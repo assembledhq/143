@@ -100,7 +100,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -274,11 +274,13 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 // current sessionColumns; we pad after dispatch so the shape matches.
 const (
 	preLinearWorkerSessionColumnsLen              = 76
-	workerSessionColumnsWithLegacyConfidenceCount = 90
+	workerSessionColumnsWithLegacyConfidenceCount = 92
 )
 
 func workerLinearSessionDefaults() []any {
 	return []any{
+		int64(0),       // workspace_revision
+		time.Time{},    // workspace_revision_updated_at
 		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
@@ -4886,6 +4888,51 @@ func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_SandboxOnDifferentNodeTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	containerID := "container-on-recorded-worker"
+	workerNodeID := "worker-recorded"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	orch := &orchestratorServiceStub{
+		recoverSessionFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.WorkerNodeID, "run_agent recovery should preserve the recorded sandbox worker")
+			require.Equal(t, workerNodeID, *run.WorkerNodeID, "run_agent recovery should preserve the recorded sandbox worker")
+			return agent.ErrSandboxOnDifferentNode
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+
+	require.Error(t, err, "run_agent recovery should ask the worker to retry when the sandbox lives on another node")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "wrong-node run_agent recovery should be retryable")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node run_agent recovery should bypass the generic capacity retry window")
+	require.NotNil(t, retryable.TargetNodeID, "wrong-node run_agent recovery should persist the recorded worker target")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node run_agent recovery should target the worker that owns the recorded sandbox")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testing.T) {
 	t.Parallel()
 
@@ -5571,8 +5618,9 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	}}
 	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
 	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
-	require.Contains(t, failureExplanation, "Final capacity check: worker reported 2/2 local sandbox slots active or reserved.", "failure explanation should include the worker-local capacity reason")
-	require.Contains(t, failureExplanation, "Current worker load: 3 running sessions, 3 session sandbox containers, 3 active previews, 1 preview-held sandbox, and 3 running session/preview jobs across 2 workers.", "failure explanation should include current session and preview counts")
+	require.Equal(t, sandboxCapacityBaseExplanation, failureExplanation, "failure explanation should stay concise for users")
+	require.NotContains(t, failureExplanation, "2/2", "failure explanation should not expose local slot counts")
+	require.NotContains(t, failureExplanation, "Current worker load", "failure explanation should not expose fleet load details")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
 }
 
@@ -5669,10 +5717,10 @@ func TestSandboxCapacityFailureExplanationIncludesCurrentLoad(t *testing.T) {
 		},
 	)
 
-	require.Contains(t, explanation, "The worker could not acquire local sandbox capacity before the job retry window expired.", "explanation should keep the base retry-window context")
-	require.Contains(t, explanation, "Final capacity check: worker reported 2/2 local sandbox slots active or reserved.", "explanation should include the concrete worker-local slot count")
-	require.Contains(t, explanation, "Current worker load: 3 running sessions, 3 session sandbox containers, 3 active previews, 1 preview-held sandbox, and 3 running session/preview jobs across 2 workers.", "explanation should include current running session and preview counts")
-	require.Contains(t, explanation, "Sandbox capacity is local to a worker node and is consumed by live session sandboxes, preview-held sandboxes, and in-flight reservations.", "explanation should explain why low visible concurrency can still hit capacity")
+	require.Equal(t, sandboxCapacityBaseExplanation, explanation, "user-facing capacity explanation should stay concise and omit operational capacity internals")
+	require.NotContains(t, explanation, "2/2", "user-facing capacity explanation should not expose local slot counts")
+	require.NotContains(t, explanation, "Current worker load", "user-facing capacity explanation should not expose fleet load details")
+	require.NotContains(t, explanation, "preview-held", "user-facing capacity explanation should not expose internal sandbox accounting")
 }
 
 func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {

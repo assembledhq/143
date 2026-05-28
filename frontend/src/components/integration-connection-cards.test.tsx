@@ -70,6 +70,27 @@ describe("integration connection cards", () => {
     expect(screen.getByText("acme/web")).toBeInTheDocument();
   });
 
+  it("summarizes overflow repository names instead of expanding card height", () => {
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        githubRepos={[
+          { id: "r1", full_name: "acme/api", status: "active" },
+          { id: "r2", full_name: "acme/web", status: "active" },
+          { id: "r3", full_name: "acme/mobile", status: "active" },
+          { id: "r4", full_name: "acme/docs", status: "active" },
+        ]}
+        onConnectGitHub={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("acme/api")).toBeInTheDocument();
+    expect(screen.getByText("acme/web")).toBeInTheDocument();
+    expect(screen.getByText("acme/mobile")).toBeInTheDocument();
+    expect(screen.getByText("+1 more")).toBeInTheDocument();
+    expect(screen.queryByText("acme/docs")).not.toBeInTheDocument();
+  });
+
   it("does not show repo names when GitHub is not connected", () => {
     renderWithProviders(
       <SourceControlIntegrationCard
@@ -82,41 +103,29 @@ describe("integration connection cards", () => {
     expect(screen.queryByText("acme/api")).not.toBeInTheDocument();
   });
 
-  it("shows per-repo disconnect button and calls onDisconnectRepo on confirm", async () => {
-    const user = userEvent.setup();
-    const onDisconnectRepo = vi.fn();
-
+  it("does not render per-repo disconnect controls on the summary card", () => {
     renderWithProviders(
       <SourceControlIntegrationCard
         githubConnected
         githubRepos={[{ id: "r1", full_name: "acme/api", status: "active" }]}
         onConnectGitHub={vi.fn()}
-        onDisconnectRepo={onDisconnectRepo}
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Disconnect acme/api" }));
-    await user.click(screen.getByRole("button", { name: "Disconnect" }));
-
-    expect(onDisconnectRepo).toHaveBeenCalledWith("r1");
+    expect(screen.queryByRole("button", { name: "Disconnect acme/api" })).not.toBeInTheDocument();
   });
 
-  it("renders Reconnect button for disconnected repos and calls onReconnectRepo", async () => {
-    const user = userEvent.setup();
-    const onReconnectRepo = vi.fn();
-
+  it("does not render per-repo reconnect controls on the summary card", () => {
     renderWithProviders(
       <SourceControlIntegrationCard
         githubConnected
         githubRepos={[{ id: "r1", full_name: "acme/api", status: "disconnected" }]}
         onConnectGitHub={vi.fn()}
-        onReconnectRepo={onReconnectRepo}
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Reconnect acme/api" }));
-
-    expect(onReconnectRepo).toHaveBeenCalledWith("r1");
+    expect(screen.getByText("No active repositories")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reconnect acme/api" })).not.toBeInTheDocument();
   });
 
   it("disables Linear connect when already connected and no disconnect handler", () => {
@@ -388,7 +397,6 @@ describe("integration connection cards", () => {
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
         onDisconnect={vi.fn()}
-        onDisconnectRepo={vi.fn()}
         readOnly
       />
     );

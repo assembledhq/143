@@ -194,19 +194,21 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 // StartPreviewInput contains everything needed to start a new preview.
 type StartPreviewInput struct {
-	SessionID                 uuid.UUID
-	PreviewTargetID           uuid.UUID
-	OrgID                     uuid.UUID
-	UserID                    uuid.UUID // for per-user concurrency cap
-	Sandbox                   *agent.Sandbox
-	Config                    *models.PreviewConfig
-	RepositoryID              uuid.UUID
-	BaseCommitSHA             string
-	ProfileName               string
-	ExpiresAt                 time.Time
-	RequestID                 string
-	MetricsSource             string
-	MetricsRepositoryFullName string
+	SessionID                  uuid.UUID
+	PreviewTargetID            uuid.UUID
+	OrgID                      uuid.UUID
+	UserID                     uuid.UUID // for per-user concurrency cap
+	Sandbox                    *agent.Sandbox
+	Config                     *models.PreviewConfig
+	RepositoryID               uuid.UUID
+	BaseCommitSHA              string
+	ProfileName                string
+	ExpiresAt                  time.Time
+	RequestID                  string
+	MetricsSource              string
+	MetricsRepositoryFullName  string
+	WorkspaceRevision          int64
+	WorkspaceRevisionUpdatedAt time.Time
 }
 
 // =============================================================================
@@ -406,6 +408,12 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		MemoryLimitMB:  limits.MemoryMiB,
 		CPULimitMillis: limits.CPUMillis,
 		DiskLimitMB:    limits.DiskMiB,
+	}
+	if !input.WorkspaceRevisionUpdatedAt.IsZero() {
+		revision := input.WorkspaceRevision
+		updatedAt := input.WorkspaceRevisionUpdatedAt
+		instance.SourceWorkspaceRevision = &revision
+		instance.SourceWorkspaceRevisionUpdatedAt = &updatedAt
 	}
 	// Only store recycle bytes if we already have a sandbox at reservation
 	// time. The handler flow reserves before hydrate, so Sandbox is typically
@@ -1522,7 +1530,7 @@ func (m *Manager) HMRWatcher() *HMRWatcher {
 // re-provisions infrastructure, re-runs init scripts, and restarts services.
 // The preview instance ID and last_path are preserved.
 func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID) error {
-	return m.recyclePreview(ctx, orgID, previewID, nil)
+	return m.recyclePreview(ctx, orgID, previewID, nil, nil)
 }
 
 // RecyclePreviewWithConfig restarts an active preview in place using a freshly
@@ -1530,10 +1538,22 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 // stopped so invalid workspace edits do not take down the currently running
 // preview.
 func (m *Manager) RecyclePreviewWithConfig(ctx context.Context, orgID, previewID uuid.UUID, cfg *models.PreviewConfig) error {
-	return m.recyclePreview(ctx, orgID, previewID, cfg)
+	return m.recyclePreview(ctx, orgID, previewID, cfg, nil)
 }
 
-func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID, refreshedConfig *models.PreviewConfig) error {
+func (m *Manager) RecyclePreviewWithConfigAndRevision(ctx context.Context, orgID, previewID uuid.UUID, cfg *models.PreviewConfig, revision int64, revisionUpdatedAt time.Time) error {
+	return m.recyclePreview(ctx, orgID, previewID, cfg, &workspaceRevisionStamp{
+		revision:  revision,
+		updatedAt: revisionUpdatedAt,
+	})
+}
+
+type workspaceRevisionStamp struct {
+	revision  int64
+	updatedAt time.Time
+}
+
+func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID, refreshedConfig *models.PreviewConfig, revisionStamp *workspaceRevisionStamp) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
 		return fmt.Errorf("get preview instance: %w", err)
@@ -1596,6 +1616,11 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if !updated {
 		return fmt.Errorf("preview was stopped concurrently before recycle could begin")
+	}
+	if revisionStamp != nil && !revisionStamp.updatedAt.IsZero() {
+		if err := m.store.UpdatePreviewSourceWorkspaceRevision(ctx, orgID, previewID, revisionStamp.revision, revisionStamp.updatedAt); err != nil {
+			return err
+		}
 	}
 
 	// Stop current processes via provider.

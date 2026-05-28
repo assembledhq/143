@@ -402,6 +402,8 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 		}
 	}
 
+	h.deriveSafeCredentialMetadata(ctx, integration)
+
 	if integration.Provider != models.IntegrationProviderGitHub {
 		return
 	}
@@ -443,6 +445,41 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 			integration.GitHubRepoSelectionRequired = &required
 		}
 	}
+}
+
+func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, integration *models.Integration) {
+	if h.credentialStore == nil || integration.Status != models.IntegrationStatusActive {
+		return
+	}
+
+	switch integration.Provider {
+	case models.IntegrationProviderNotion, models.IntegrationProviderCircleCI:
+	default:
+		return
+	}
+
+	credential, err := h.credentialStore.Get(ctx, integration.OrgID, models.ProviderName(integration.Provider))
+	if err != nil || credential == nil {
+		return
+	}
+
+	switch cfg := credential.Config.(type) {
+	case models.NotionConfig:
+		if cfg.WorkspaceID != "" {
+			integration.NotionWorkspaceID = integrationStringPtr(cfg.WorkspaceID)
+		}
+		if cfg.WorkspaceName != "" {
+			integration.NotionWorkspaceName = integrationStringPtr(cfg.WorkspaceName)
+		}
+	case models.CircleCIConfig:
+		if cfg.ProjectSlug != "" {
+			integration.CircleCIProjectSlug = integrationStringPtr(cfg.ProjectSlug)
+		}
+	}
+}
+
+func integrationStringPtr(value string) *string {
+	return &value
 }
 
 // readAuthErrorFromConfig extracts the auth-error pair the linear service
@@ -2425,6 +2462,9 @@ func (h *IntegrationHandler) ConnectNotion(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_NOTION_FAILED", "failed to create Notion integration", err)
 		return
 	}
+	h.deriveIntegrationStatus(r.Context(), &integration, map[models.IntegrationProvider]bool{
+		models.IntegrationProviderNotion: true,
+	})
 
 	if created {
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
@@ -2523,6 +2563,9 @@ func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_CIRCLECI_FAILED", "failed to create CircleCI integration", err)
 		return
 	}
+	h.deriveIntegrationStatus(r.Context(), &integration, map[models.IntegrationProvider]bool{
+		models.IntegrationProviderCircleCI: true,
+	})
 
 	if created {
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
