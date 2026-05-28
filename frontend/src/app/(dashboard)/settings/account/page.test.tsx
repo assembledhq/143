@@ -274,6 +274,39 @@ describe("Account settings page", () => {
     });
   });
 
+  it("stores a default coding-agent model preference", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+    server.use(
+      ...emptyCodingCredentialsHandlers(),
+      http.patch("/api/v1/auth/me/settings", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          data: {
+            id: "user-1",
+            org_id: "org-1",
+            email: "alice@example.com",
+            name: "Alice Smith",
+            role: "admin",
+            settings: {
+              coding_agent_model_default: "claude-opus-4-7",
+            },
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: "Default coding-agent model" }));
+    await user.click(screen.getByRole("option", { name: "claude-opus-4-7" }));
+
+    expect(requestBody).toEqual({
+      coding_agent_model_default: "claude-opus-4-7",
+    });
+  });
+
   it("serializes reasoning-default saves so older responses cannot overwrite newer ones", async () => {
     const user = userEvent.setup();
     const requestBodies: Array<Record<string, unknown>> = [];

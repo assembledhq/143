@@ -37,6 +37,7 @@ var (
 // is nothing more specific to interrupt.
 type cancelEntry struct {
 	ctxCancel context.CancelCauseFunc
+	scopeID   uuid.UUID
 	cancel    CancellationSpec
 
 	mu     sync.Mutex
@@ -45,13 +46,18 @@ type cancelEntry struct {
 	once   sync.Once
 }
 
+type cancelGroup struct {
+	mu      sync.Mutex
+	entries map[uuid.UUID]*cancelEntry
+}
+
 // CancelRegistry tracks cancellable running sessions. The Orchestrator
 // registers an entry when it spawns an adapter run; the adapter's runtime
 // helper attaches the live InteractiveCommandHandle once it has one. The API
 // layer calls CancelSession to deliver the agent's configured graceful
 // interrupt and, on grace expiry, force-close the handle.
 type CancelRegistry struct {
-	mu        sync.Map // session ID (uuid.UUID) → *cancelEntry
+	mu        sync.Map // session ID (uuid.UUID) → *cancelGroup
 	cancelled sync.Map // session ID (uuid.UUID) → bool
 	logger    zerolog.Logger
 }
@@ -71,13 +77,32 @@ func (r *CancelRegistry) Register(sessionID uuid.UUID, ctxCancel context.CancelF
 // function so downstream code can distinguish user cancellation from system
 // shutdown/drain cancellation.
 func (r *CancelRegistry) RegisterCause(sessionID uuid.UUID, ctxCancel context.CancelCauseFunc, cancelSpec CancellationSpec) {
+	r.RegisterScopedCause(sessionID, sessionID, ctxCancel, cancelSpec)
+}
+
+// RegisterScoped stores cancellation state for one independently running
+// process under a shared session. Session-level cancellation fans out to every
+// scope; handle attach/detach can still address one tab/runtime precisely.
+func (r *CancelRegistry) RegisterScoped(sessionID, scopeID uuid.UUID, ctxCancel context.CancelFunc, cancelSpec CancellationSpec) {
+	r.RegisterScopedCause(sessionID, scopeID, func(error) { ctxCancel() }, cancelSpec)
+}
+
+// RegisterScopedCause stores one scoped process with a cancel-cause function.
+func (r *CancelRegistry) RegisterScopedCause(sessionID, scopeID uuid.UUID, ctxCancel context.CancelCauseFunc, cancelSpec CancellationSpec) {
 	if cancelSpec.Method == "" {
 		cancelSpec = DefaultCancellationSpec
 	}
-	r.mu.Store(sessionID, &cancelEntry{
+	if scopeID == uuid.Nil {
+		scopeID = sessionID
+	}
+	group := r.cancelGroup(sessionID)
+	group.mu.Lock()
+	group.entries[scopeID] = &cancelEntry{
+		scopeID:   scopeID,
 		ctxCancel: ctxCancel,
 		cancel:    cancelSpec,
-	})
+	}
+	group.mu.Unlock()
 }
 
 // Deregister removes the cancel entry for the given session.
@@ -86,16 +111,56 @@ func (r *CancelRegistry) Deregister(sessionID uuid.UUID) {
 	r.cancelled.Delete(sessionID)
 }
 
+// DeregisterScoped removes one running process from the session group.
+func (r *CancelRegistry) DeregisterScoped(sessionID, scopeID uuid.UUID) {
+	if scopeID == uuid.Nil {
+		scopeID = sessionID
+	}
+	val, ok := r.mu.Load(sessionID)
+	if !ok {
+		return
+	}
+	group := val.(*cancelGroup)
+	group.mu.Lock()
+	delete(group.entries, scopeID)
+	empty := len(group.entries) == 0
+	group.mu.Unlock()
+	if empty {
+		r.mu.Delete(sessionID)
+		r.cancelled.Delete(sessionID)
+	}
+}
+
+func (r *CancelRegistry) cancelGroup(sessionID uuid.UUID) *cancelGroup {
+	val, _ := r.mu.LoadOrStore(sessionID, &cancelGroup{entries: make(map[uuid.UUID]*cancelEntry)})
+	return val.(*cancelGroup)
+}
+
 // AttachHandle binds a live interactive command handle to the session entry.
 // Adapters call this through the InteractiveHandleAttacher installed in the
 // context. Replacing an existing handle is allowed (multi-turn sessions
 // recreate the handle each turn).
 func (r *CancelRegistry) AttachHandle(sessionID uuid.UUID, handle InteractiveCommandHandle) {
+	r.AttachHandleScoped(sessionID, sessionID, handle)
+}
+
+// AttachHandleScoped binds a live interactive command handle to one scope in a
+// shared session.
+func (r *CancelRegistry) AttachHandleScoped(sessionID, scopeID uuid.UUID, handle InteractiveCommandHandle) {
+	if scopeID == uuid.Nil {
+		scopeID = sessionID
+	}
 	val, ok := r.mu.Load(sessionID)
 	if !ok {
 		return
 	}
-	entry := val.(*cancelEntry)
+	group := val.(*cancelGroup)
+	group.mu.Lock()
+	entry := group.entries[scopeID]
+	group.mu.Unlock()
+	if entry == nil {
+		return
+	}
 	entry.mu.Lock()
 	entry.handle = handle
 	entry.mu.Unlock()
@@ -105,11 +170,26 @@ func (r *CancelRegistry) AttachHandle(sessionID uuid.UUID, handle InteractiveCom
 // by the runtime helper when a turn ends but the session lives on (e.g.
 // follow-up turn).
 func (r *CancelRegistry) DetachHandle(sessionID uuid.UUID) {
+	r.DetachHandleScoped(sessionID, sessionID)
+}
+
+// DetachHandleScoped clears the live handle for one scope without removing
+// cancellation state.
+func (r *CancelRegistry) DetachHandleScoped(sessionID, scopeID uuid.UUID) {
+	if scopeID == uuid.Nil {
+		scopeID = sessionID
+	}
 	val, ok := r.mu.Load(sessionID)
 	if !ok {
 		return
 	}
-	entry := val.(*cancelEntry)
+	group := val.(*cancelGroup)
+	group.mu.Lock()
+	entry := group.entries[scopeID]
+	group.mu.Unlock()
+	if entry == nil {
+		return
+	}
 	entry.mu.Lock()
 	entry.handle = nil
 	entry.mu.Unlock()
@@ -118,20 +198,30 @@ func (r *CancelRegistry) DetachHandle(sessionID uuid.UUID) {
 // HandleAttacher returns an InteractiveHandleAttacher bound to this session.
 // The orchestrator installs it in the context before invoking adapter.Execute.
 func (r *CancelRegistry) HandleAttacher(sessionID uuid.UUID) InteractiveHandleAttacher {
-	return &registryHandleAttacher{registry: r, sessionID: sessionID}
+	return r.HandleAttacherScoped(sessionID, sessionID)
+}
+
+// HandleAttacherScoped returns an InteractiveHandleAttacher bound to a single
+// process scope within this session.
+func (r *CancelRegistry) HandleAttacherScoped(sessionID, scopeID uuid.UUID) InteractiveHandleAttacher {
+	if scopeID == uuid.Nil {
+		scopeID = sessionID
+	}
+	return &registryHandleAttacher{registry: r, sessionID: sessionID, scopeID: scopeID}
 }
 
 type registryHandleAttacher struct {
 	registry  *CancelRegistry
 	sessionID uuid.UUID
+	scopeID   uuid.UUID
 }
 
 func (a *registryHandleAttacher) Attach(handle InteractiveCommandHandle) {
-	a.registry.AttachHandle(a.sessionID, handle)
+	a.registry.AttachHandleScoped(a.sessionID, a.scopeID, handle)
 }
 
 func (a *registryHandleAttacher) Detach() {
-	a.registry.DetachHandle(a.sessionID)
+	a.registry.DetachHandleScoped(a.sessionID, a.scopeID)
 }
 
 // WasCancelled returns true if CancelSession was called for this session.
@@ -146,10 +236,26 @@ func (r *CancelRegistry) StopReason(sessionID uuid.UUID) StopReason {
 	if !ok {
 		return StopReasonNone
 	}
-	entry := val.(*cancelEntry)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	return entry.reason
+	group := val.(*cancelGroup)
+	group.mu.Lock()
+	entries := make([]*cancelEntry, 0, len(group.entries))
+	for _, entry := range group.entries {
+		entries = append(entries, entry)
+	}
+	group.mu.Unlock()
+	reason := StopReasonNone
+	for _, entry := range entries {
+		entry.mu.Lock()
+		entryReason := entry.reason
+		entry.mu.Unlock()
+		if entryReason == StopReasonUserCancel {
+			return StopReasonUserCancel
+		}
+		if reason == StopReasonNone {
+			reason = entryReason
+		}
+	}
+	return reason
 }
 
 // CancelSession sends the agent's configured graceful interrupt and falls
@@ -168,19 +274,32 @@ func (r *CancelRegistry) RequestStop(sessionID uuid.UUID, reason StopReason, gra
 	if !ok {
 		return false
 	}
-	entry := val.(*cancelEntry)
+	group := val.(*cancelGroup)
 	if reason == StopReasonUserCancel {
 		r.cancelled.Store(sessionID, true)
 	}
-	entry.mu.Lock()
-	if entry.reason == StopReasonNone || reason == StopReasonUserCancel {
-		entry.reason = reason
+	group.mu.Lock()
+	entries := make([]*cancelEntry, 0, len(group.entries))
+	for _, entry := range group.entries {
+		entries = append(entries, entry)
 	}
-	entry.mu.Unlock()
+	group.mu.Unlock()
+	if len(entries) == 0 {
+		return false
+	}
 
-	entry.once.Do(func() {
-		go r.doCancel(sessionID, entry, graceWindow)
-	})
+	for _, entry := range entries {
+		entry.mu.Lock()
+		if entry.reason == StopReasonNone || reason == StopReasonUserCancel {
+			entry.reason = reason
+		}
+		entry.mu.Unlock()
+
+		scopeID := entry.scopeID
+		entry.once.Do(func() {
+			go r.doCancel(sessionID, scopeID, entry, graceWindow)
+		})
+	}
 	return true
 }
 
@@ -196,7 +315,7 @@ func (r *CancelRegistry) RequestStop(sessionID uuid.UUID, reason StopReason, gra
 //     is attached or when interrupt delivery fails outright.
 //  4. After graceWindow, if the entry is still registered, ctxCancel() and
 //     handle.Kill(...) force-close the underlying transport.
-func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, graceWindow time.Duration) {
+func (r *CancelRegistry) doCancel(sessionID, scopeID uuid.UUID, entry *cancelEntry, graceWindow time.Duration) {
 	interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer interruptCancel()
 
@@ -216,6 +335,7 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 	if handle == nil {
 		r.logger.Info().
 			Str("session_id", sessionID.String()).
+			Str("cancel_scope_id", scopeID.String()).
 			Msg("no live handle attached, falling back to context cancel")
 		entry.ctxCancel(cancelCauseForStopReason(entryReason(entry)))
 		return
@@ -225,6 +345,7 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 		if errors.Is(err, ErrUnsupportedInterruptMethod) && spec.Method != CancellationMethodCtrlC {
 			r.logger.Warn().Err(err).
 				Str("session_id", sessionID.String()).
+				Str("cancel_scope_id", scopeID.String()).
 				Str("requested_method", string(spec.Method)).
 				Msg("handle does not support requested interrupt method, falling back to Ctrl+C")
 			err = handle.Interrupt(interruptCtx, DefaultCancellationSpec)
@@ -232,6 +353,7 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 		if err != nil {
 			r.logger.Warn().Err(err).
 				Str("session_id", sessionID.String()).
+				Str("cancel_scope_id", scopeID.String()).
 				Msg("failed to deliver graceful interrupt, falling back to context cancel")
 			entry.ctxCancel(cancelCauseForStopReason(entryReason(entry)))
 			return
@@ -240,6 +362,7 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 
 	r.logger.Info().
 		Str("session_id", sessionID.String()).
+		Str("cancel_scope_id", scopeID.String()).
 		Msg("delivered graceful interrupt to running agent")
 
 	if graceWindow <= 0 {
@@ -249,17 +372,19 @@ func (r *CancelRegistry) doCancel(sessionID uuid.UUID, entry *cancelEntry, grace
 	defer timer.Stop()
 
 	<-timer.C
-	if _, stillRunning := r.mu.Load(sessionID); !stillRunning {
+	if !r.scopeStillRegistered(sessionID, scopeID) {
 		return
 	}
 	r.logger.Warn().
 		Str("session_id", sessionID.String()).
+		Str("cancel_scope_id", scopeID.String()).
 		Msg("agent did not exit after graceful interrupt, force-stopping handle and cancelling context")
 	killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer killCancel()
 	if err := handle.Kill(killCtx); err != nil {
 		r.logger.Warn().Err(err).
 			Str("session_id", sessionID.String()).
+			Str("cancel_scope_id", scopeID.String()).
 			Msg("failed to force-stop interactive handle")
 	}
 	entry.ctxCancel(cancelCauseForStopReason(entryReason(entry)))
@@ -280,4 +405,16 @@ func cancelCauseForStopReason(reason StopReason) error {
 	default:
 		return context.Canceled
 	}
+}
+
+func (r *CancelRegistry) scopeStillRegistered(sessionID, scopeID uuid.UUID) bool {
+	val, ok := r.mu.Load(sessionID)
+	if !ok {
+		return false
+	}
+	group := val.(*cancelGroup)
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	_, ok = group.entries[scopeID]
+	return ok
 }

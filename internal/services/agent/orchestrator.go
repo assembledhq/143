@@ -114,6 +114,13 @@ var ErrStaleSandboxIDCleared = errors.New("sandbox race: cleared stale orphan co
 // dead-lettering as a duplicate.
 var ErrSandboxPreviewRace = errors.New("sandbox race: preview holder attached first, retry")
 
+// ErrSandboxSiblingRace is returned from thread-scoped ContinueSession when
+// another tab published the shared sandbox container first. Unlike a duplicate
+// job, the losing sibling still has distinct work to run; the worker should
+// retry so the next attempt re-fetches the session row and attaches to the
+// winning container.
+var ErrSandboxSiblingRace = errors.New("sandbox race: sibling thread attached first, retry")
+
 // ErrSandboxOnDifferentNode is returned from ContinueSession's reuse path
 // when the session's recorded worker_node_id points at a different worker
 // than the one running this job. Container ids are local to a docker
@@ -331,6 +338,11 @@ type SessionStore interface {
 	PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error)
 	UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error
+	// MarkRunningWithSandboxState writes status=running and sandbox_state in
+	// a single statement so the row cannot be left half-updated by a partial
+	// write. Used by the sibling-runtime keepalive path to keep the parent
+	// session and its sandbox state coherent.
+	MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, sandboxState models.SandboxState) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
 	// SetGitIdentity records which credential authority issued the session's
@@ -411,6 +423,7 @@ type SessionThreadStore interface {
 	// orchestrator has re-enqueued a continue_session to drain the queue.
 	// Called from drainQueuedMessages after the in-flight turn completes.
 	ClearPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
+	ClaimNextQueuedForSession(ctx context.Context, orgID, sessionID uuid.UUID, maxRunning int) (models.SessionThread, error)
 }
 
 type SessionIssueLinkStore interface {
@@ -499,45 +512,49 @@ type AutomationRunUpdater interface {
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
-	provider           SandboxProvider
-	adapters           map[models.AgentType]AgentAdapter
-	sessions           SessionStore
-	agentRunLogs       SessionLogStore
-	agentRunQuestions  SessionQuestionStore
-	humanInputRequests SessionHumanInputRequestStore
-	sessionMessages    SessionMessageStore
-	sessionThreads     SessionThreadStore
-	sessionIssueLinks  SessionIssueLinkStore
-	issueSnapshots     SessionIssueSnapshotStore
-	decisionLog        DecisionLogStore
-	projectTasks       ProjectTaskUpdater   // can be nil
-	automationRuns     AutomationRunUpdater // can be nil
-	issues             IssueStore
-	repositories       RepositoryStore
-	orgs               OrgStore
-	jobs               JobStore
-	github             GitHubTokenProvider
-	claudeCodeAuth     ClaudeCodeAuthProvider // can be nil
-	credentials        CredentialProvider     // can be nil — disables integration-skills doc generation
-	memory             MemoryService          // can be nil
-	snapshots          storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	uploads            storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
-	fileReader         sandbox.FileReader     // can be nil — disables proactive mention-index warmup
-	mentionIndexes     *workspace.MentionIndexCache
-	usageTracker       UsageRecorder        // can be nil — billing tracking disabled if nil
-	sandboxCapacity    *SandboxCapacityGate // can be nil — live local sandbox admission disabled
-	env                *AgentEnv            // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver   *identity.Resolver   // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth        SandboxAuthServer    // can be nil — paired with identityResolver
-	users              UserLookup           // can be nil — needed for App-token Co-authored-by trailer
-	internalAPIURL     string
-	internalAPISecret  string
-	logger             zerolog.Logger
-	maxConcurrent      int
-	cancels            *CancelRegistry
-	threadCancels      *ThreadCancelRegistry // optional — enables per-tab SIGINT
-	nodeID             string
-	isDraining         func() bool
+	provider            SandboxProvider
+	adapters            map[models.AgentType]AgentAdapter
+	sessions            SessionStore
+	agentRunLogs        SessionLogStore
+	agentRunQuestions   SessionQuestionStore
+	humanInputRequests  SessionHumanInputRequestStore
+	sessionMessages     SessionMessageStore
+	sessionThreads      SessionThreadStore
+	sessionIssueLinks   SessionIssueLinkStore
+	issueSnapshots      SessionIssueSnapshotStore
+	decisionLog         DecisionLogStore
+	projectTasks        ProjectTaskUpdater   // can be nil
+	automationRuns      AutomationRunUpdater // can be nil
+	issues              IssueStore
+	repositories        RepositoryStore
+	orgs                OrgStore
+	jobs                JobStore
+	github              GitHubTokenProvider
+	claudeCodeAuth      ClaudeCodeAuthProvider // can be nil
+	credentials         CredentialProvider     // can be nil — disables integration-skills doc generation
+	memory              MemoryService          // can be nil
+	snapshots           storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	uploads             storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
+	fileReader          sandbox.FileReader     // can be nil — disables proactive mention-index warmup
+	mentionIndexes      *workspace.MentionIndexCache
+	usageTracker        UsageRecorder        // can be nil — billing tracking disabled if nil
+	sandboxCapacity     *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	threadRuntimes      ThreadRuntimeStore   // can be nil — disables live thread-runtime routing
+	threadInbox         ThreadInboxStore     // can be nil — disables live inbox delivery
+	sandboxHolders      SessionSandboxHolderStore
+	threadDeliveryLocks sync.Map
+	env                 *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver    *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth         SandboxAuthServer  // can be nil — paired with identityResolver
+	users               UserLookup         // can be nil — needed for App-token Co-authored-by trailer
+	internalAPIURL      string
+	internalAPISecret   string
+	logger              zerolog.Logger
+	maxConcurrent       int
+	cancels             *CancelRegistry
+	threadCancels       *ThreadCancelRegistry // optional — enables per-tab SIGINT
+	nodeID              string
+	isDraining          func() bool
 }
 
 // CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
@@ -758,8 +775,11 @@ type OrchestratorConfig struct {
 	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
 	FileReader         sandbox.FileReader       // optional — enables proactive mention-index warmup
 	MentionIndexes     *workspace.MentionIndexCache
-	UsageTracker       UsageRecorder         // optional — enables billing observability
-	SandboxCapacity    *SandboxCapacityGate  // optional — gates new local sandbox creation
+	UsageTracker       UsageRecorder        // optional — enables billing observability
+	SandboxCapacity    *SandboxCapacityGate // optional — gates new local sandbox creation
+	ThreadRuntimes     ThreadRuntimeStore   // optional — records per-thread live runtime ownership
+	ThreadInbox        ThreadInboxStore     // optional — durable per-thread input delivery log
+	SandboxHolders     SessionSandboxHolderStore
 	Cancels            *CancelRegistry       // optional — enables session cancellation from API
 	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
 	OrgSettingsCache   *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
@@ -847,6 +867,9 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		mentionIndexes:     cfg.MentionIndexes,
 		usageTracker:       cfg.UsageTracker,
 		sandboxCapacity:    cfg.SandboxCapacity,
+		threadRuntimes:     cfg.ThreadRuntimes,
+		threadInbox:        cfg.ThreadInbox,
+		sandboxHolders:     cfg.SandboxHolders,
 		env:                env,
 		identityResolver:   cfg.IdentityResolver,
 		sandboxAuth:        cfg.SandboxAuth,
@@ -1916,9 +1939,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	if o.cancels != nil {
-		defer o.cancels.Deregister(run.ID)
-	}
 
 	log := o.logger.With().
 		Str("session_id", run.ID.String()).
@@ -2337,8 +2357,62 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// is attached lazily once the adapter starts it (see runInteractiveAgent
 	// in the adapters package); until that point CancelSession falls back
 	// to context cancellation.
+	deregisterSessionCancel := func() {}
 	if o.cancels != nil {
-		o.cancels.RegisterCause(run.ID, cancel, ResolveCancellationSpec(adapter))
+		if primaryThreadID != nil {
+			o.cancels.RegisterScopedCause(run.ID, *primaryThreadID, cancel, ResolveCancellationSpec(adapter))
+			deregisterSessionCancel = func() { o.cancels.DeregisterScoped(run.ID, *primaryThreadID) }
+		} else {
+			o.cancels.RegisterCause(run.ID, cancel, ResolveCancellationSpec(adapter))
+			deregisterSessionCancel = func() { o.cancels.Deregister(run.ID) }
+		}
+		defer deregisterSessionCancel()
+	}
+	if o.threadCancels != nil && primaryThreadID != nil {
+		o.threadCancels.RegisterWithSpec(*primaryThreadID, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
+		defer o.threadCancels.Deregister(*primaryThreadID)
+	}
+	var threadRuntimeCtl *threadRuntimeControl
+	if primaryThreadID != nil {
+		var seedMessages []models.SessionMessage
+		if latestMsg != nil {
+			seedMessages = append(seedMessages, *latestMsg)
+		}
+		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox, threadRuntimeSeedMessageIDs(seedMessages), log)
+		if err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("start thread runtime: %s", err))
+			return fmt.Errorf("start thread runtime: %w", err)
+		}
+		if threadRuntimeCtl != nil {
+			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
+			defer stopHeartbeat()
+			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
+				return o.DeliverThreadInbox(deliverCtx, run.OrgID, run.ID, *primaryThreadID)
+			})
+			defer stopInboxPoller()
+			defer func() {
+				status := models.ThreadRuntimeStatusClosed
+				stopReason := "completed"
+				lastError := ""
+				if err != nil {
+					status = models.ThreadRuntimeStatusFailed
+					stopReason = "failed"
+					lastError = err.Error()
+				} else if ctx.Err() != nil {
+					status = models.ThreadRuntimeStatusLost
+					stopReason = "context_cancelled"
+					lastError = ctx.Err().Error()
+				}
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
+				threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
+				closeCancel()
+				o.forgetThreadDeliveryLock(*primaryThreadID)
+				refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
+				defer refreshCancel()
+				keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, run.OrgID, run.ID, log)
+				o.admitNextQueuedThread(refreshCtx, run, log)
+			}()
+		}
 	}
 
 	// 8. Clone repo into sandbox. This must happen before auth injection
@@ -2463,8 +2537,23 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	var attachers []InteractiveHandleAttacher
 	if o.cancels != nil {
-		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(run.ID))
+		if primaryThreadID != nil {
+			attachers = append(attachers, o.cancels.HandleAttacherScoped(run.ID, *primaryThreadID))
+		} else {
+			attachers = append(attachers, o.cancels.HandleAttacher(run.ID))
+		}
+	}
+	if o.threadCancels != nil && primaryThreadID != nil {
+		if threadRuntimeCtl != nil {
+			attachers = append(attachers, threadRuntimeCtl.Attacher(o.threadCancels))
+		} else {
+			attachers = append(attachers, o.threadCancels.HandleAttacher(*primaryThreadID))
+		}
+	}
+	if attacher := NewMultiInteractiveHandleAttacher(attachers...); attacher != nil {
+		execCtx = WithInteractiveHandleAttacher(execCtx, attacher)
 	}
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
@@ -2514,9 +2603,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		//      classification to the async analyze_failure job.
 		if wasCancelled {
 			log.Info().Msg("session cancelled by user")
-			if o.cancels != nil {
-				o.cancels.Deregister(run.ID)
-			}
+			deregisterSessionCancel()
 			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 			logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
@@ -2525,9 +2612,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if systemStopReason == StopReasonWorkerDrain {
 			log.Info().Str("stop_reason", string(systemStopReason)).Msg("session interrupted by system stop")
-			if o.cancels != nil {
-				o.cancels.Deregister(run.ID)
-			}
+			deregisterSessionCancel()
 			o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, log)
 			logAgentRunFinished(log, run, "system_interrupted", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(stopReasonToRuntime(systemStopReason)))
@@ -2536,9 +2621,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
-			if o.cancels != nil {
-				o.cancels.Deregister(run.ID)
-			}
+			deregisterSessionCancel()
 			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 			logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 				event.Str("stop_reason", string(stopReason))
@@ -2566,9 +2649,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the workspace and return the session to idle so it can be continued.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
-		if o.cancels != nil {
-			o.cancels.Deregister(run.ID)
-		}
+		deregisterSessionCancel()
 		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 		logAgentRunFinished(log, run, "cancelled", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(models.RuntimeStopReasonUserCancel))
@@ -2577,9 +2658,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	if systemStopReason == StopReasonWorkerDrain {
 		log.Info().Str("stop_reason", string(systemStopReason)).Msg("agent exited after system stop")
-		if o.cancels != nil {
-			o.cancels.Deregister(run.ID)
-		}
+		deregisterSessionCancel()
 		o.handleSystemInterruptedSession(ctx, run, sandbox, result, fallbackStatus, systemStopReason, log)
 		logAgentRunFinished(log, run, "system_interrupted", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReasonToRuntime(systemStopReason)))
@@ -2588,9 +2667,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
-		if o.cancels != nil {
-			o.cancels.Deregister(run.ID)
-		}
+		deregisterSessionCancel()
 		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 		logAgentRunFinished(log, run, "runtime_policy_stopped", runStartedAt, func(event *zerolog.Event) {
 			event.Str("stop_reason", string(stopReason))
@@ -2612,7 +2689,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
-	snapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, run, sandbox, result, log)
+	currentRuntimeID := uuid.Nil
+	if threadRuntimeCtl != nil {
+		currentRuntimeID = threadRuntimeCtl.runtime.ID
+	}
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, run, sandbox, result, log, currentRuntimeID)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
 	} else if snapshotKey != "" {
@@ -2736,9 +2817,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	if o.cancels != nil {
-		defer o.cancels.Deregister(session.ID)
-	}
 
 	log := o.logger.With().
 		Str("session_id", session.ID.String()).
@@ -2939,8 +3017,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		humanInputAnswer = humanInputAnswerFromRequest(request)
 	}
 
-	turnNumber := session.CurrentTurn + 1
-	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, turnNumber)
+	// Two distinct turn counters in one ContinueSession run:
+	//   sessionTurnNumber  — shared session counter, drives UpdateTurnComplete
+	//                        and any session-wide turn artifacts (issue
+	//                        snapshot, diff history append).
+	//   messageTurnNumber  — per-message thread-local turn used for transcript
+	//                        ordering, log streaming, retry helpers, and
+	//                        assistant-message creation. Falls back to the
+	//                        session counter when this isn't a thread-scoped
+	//                        continuation.
+	sessionTurnNumber := session.CurrentTurn + 1
+	messageTurnNumber := sessionTurnNumber
+	if threadID != nil && latestMsg.TurnNumber > 0 {
+		messageTurnNumber = latestMsg.TurnNumber
+	}
+	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, sessionTurnNumber)
 	if err != nil {
 		o.failRun(ctx, session, fmt.Sprintf("resolve issue context: %s", err))
 		return fmt.Errorf("resolve issue context: %w", err)
@@ -3406,6 +3497,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after preview won sandbox race")
 			}
 		}
+		if errors.Is(diagErr, ErrSandboxRaceLoser) && opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+			diagErr = ErrSandboxSiblingRace
+		}
 		return fmt.Errorf("%w: actual container %s != local %s", diagErr, actualContainerID, sandbox.ID)
 	}
 	containerStartedAt := time.Now()
@@ -3506,15 +3600,61 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// Register the session with the cancel registry. The interactive
 	// command handle is attached lazily by the adapter's runtime helper.
+	deregisterSessionCancel := func() {}
 	if o.cancels != nil {
-		o.cancels.RegisterCause(session.ID, cancel, ResolveCancellationSpec(adapter))
+		if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+			o.cancels.RegisterScopedCause(session.ID, *opts.ThreadID, cancel, ResolveCancellationSpec(adapter))
+			deregisterSessionCancel = func() { o.cancels.DeregisterScoped(session.ID, *opts.ThreadID) }
+		} else {
+			o.cancels.RegisterCause(session.ID, cancel, ResolveCancellationSpec(adapter))
+			deregisterSessionCancel = func() { o.cancels.Deregister(session.ID) }
+		}
+		defer deregisterSessionCancel()
 	}
 	// Mirror the registration on the thread-scoped registry so a per-tab
 	// cancel can unwind just this thread's run context. The session-level
 	// registry remains the legacy path for whole-sandbox cancels.
 	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
-		o.threadCancels.Register(*opts.ThreadID, func() { cancel(ErrUserCancelCause) })
+		o.threadCancels.RegisterWithSpec(*opts.ThreadID, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
 		defer o.threadCancels.Deregister(*opts.ThreadID)
+	}
+	var threadRuntimeCtl *threadRuntimeControl
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, session, *opts.ThreadID, sandbox, threadRuntimeSeedMessageIDs(pendingMsgs), log)
+		if err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("start thread runtime: %s", err))
+			return fmt.Errorf("start thread runtime: %w", err)
+		}
+		if threadRuntimeCtl != nil {
+			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
+			defer stopHeartbeat()
+			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
+				return o.DeliverThreadInbox(deliverCtx, session.OrgID, session.ID, *opts.ThreadID)
+			})
+			defer stopInboxPoller()
+			defer func() {
+				status := models.ThreadRuntimeStatusClosed
+				stopReason := "completed"
+				lastError := ""
+				if err != nil {
+					status = models.ThreadRuntimeStatusFailed
+					stopReason = "failed"
+					lastError = err.Error()
+				} else if ctx.Err() != nil {
+					status = models.ThreadRuntimeStatusLost
+					stopReason = "context_cancelled"
+					lastError = ctx.Err().Error()
+				}
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
+				threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
+				closeCancel()
+				o.forgetThreadDeliveryLock(*opts.ThreadID)
+				refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
+				defer refreshCancel()
+				keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, session.OrgID, session.ID, log)
+				o.admitNextQueuedThread(refreshCtx, session, log)
+			}()
+		}
 	}
 
 	// 5. Set up the workspace. Three paths:
@@ -3527,7 +3667,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var prompt *AgentPrompt
 	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
-	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, turnNumber, pendingMsgs, log)
+	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, pendingMsgs, log)
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
@@ -3761,12 +3901,27 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, threadID, messageTurnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	var attachers []InteractiveHandleAttacher
 	if o.cancels != nil {
-		execCtx = WithInteractiveHandleAttacher(execCtx, o.cancels.HandleAttacher(session.ID))
+		if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+			attachers = append(attachers, o.cancels.HandleAttacherScoped(session.ID, *opts.ThreadID))
+		} else {
+			attachers = append(attachers, o.cancels.HandleAttacher(session.ID))
+		}
+	}
+	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
+		if threadRuntimeCtl != nil {
+			attachers = append(attachers, threadRuntimeCtl.Attacher(o.threadCancels))
+		} else {
+			attachers = append(attachers, o.threadCancels.HandleAttacher(*opts.ThreadID))
+		}
+	}
+	if attacher := NewMultiInteractiveHandleAttacher(attachers...); attacher != nil {
+		execCtx = WithInteractiveHandleAttacher(execCtx, attacher)
 	}
 	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
@@ -3801,12 +3956,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, threadID, messageTurnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, messageTurnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 	}
@@ -3823,33 +3978,27 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// deadline is classified as a cancel, not a timeout.
 		if wasCancelled {
 			log.Info().Msg("session cancelled by user during continue")
-			if o.cancels != nil {
-				o.cancels.Deregister(session.ID)
-			}
-			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+			deregisterSessionCancel()
+			o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
 			drainAfterRelease = true
 			return fmt.Errorf("%w: %w", ErrSessionCancelled, ctx.Err())
 		}
 		if systemStopReason == StopReasonWorkerDrain {
 			log.Info().Str("stop_reason", string(systemStopReason)).Msg("session interrupted by system stop during continue")
-			if o.cancels != nil {
-				o.cancels.Deregister(session.ID)
-			}
+			deregisterSessionCancel()
 			o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, log)
 			return fmt.Errorf("%w: %w", ErrSessionInterrupted, err)
 		}
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
-			if o.cancels != nil {
-				o.cancels.Deregister(session.ID)
-			}
-			o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
+			deregisterSessionCancel()
+			o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, log)
 			return nil
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(turnStartedAt).Round(time.Second)
-			o.failTimedOutSession(session, elapsed, turnNumber, err, log)
-			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, turnNumber, elapsed, err)
+			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log)
+			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
 		}
 		o.failRun(ctx, session, err.Error())
 		return fmt.Errorf("execute agent on continue: %w", err)
@@ -3858,39 +4007,33 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. If cancelled but agent exited gracefully, snapshot and return to idle.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
-		if o.cancels != nil {
-			o.cancels.Deregister(session.ID)
-		}
-		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+		deregisterSessionCancel()
+		o.handleCancelledSession(ctx, session, sandbox, result, messageTurnNumber, log)
 		drainAfterRelease = true
 		return nil
 	}
 	if systemStopReason == StopReasonWorkerDrain {
 		log.Info().Str("stop_reason", string(systemStopReason)).Msg("agent exited after system stop during continue")
-		if o.cancels != nil {
-			o.cancels.Deregister(session.ID)
-		}
+		deregisterSessionCancel()
 		o.handleSystemInterruptedSession(ctx, session, sandbox, result, fallbackStatus, systemStopReason, log)
 		return ErrSessionInterrupted
 	}
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
-		if o.cancels != nil {
-			o.cancels.Deregister(session.ID)
-		}
-		o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
+		deregisterSessionCancel()
+		o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, log)
 		return nil
 	}
 	if result != nil && result.RequiresHumanInput {
 		log.Info().Msg("agent requested human input during continue, snapshotting and pausing session")
-		if err := o.handleHumanInputPause(ctx, session, sandbox, result, turnNumber, threadID, log); err != nil {
+		if err := o.handleHumanInputPause(ctx, session, sandbox, result, messageTurnNumber, threadID, log); err != nil {
 			return err
 		}
 		return nil
 	}
 
 	// 7. Create assistant message with result summary.
-	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
+	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, messageTurnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 	if opts != nil && opts.ResultAgentSessionID != nil {
@@ -3919,7 +4062,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 8. Snapshot again.
-	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log)
+	currentRuntimeID := uuid.Nil
+	if threadRuntimeCtl != nil {
+		currentRuntimeID = threadRuntimeCtl.runtime.ID
+	}
+	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log, currentRuntimeID)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	} else if newSnapshotKey != "" {
@@ -3942,13 +4089,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if snapshotKey == "" && session.SnapshotKey != nil {
 		snapshotKey = *session.SnapshotKey
 	}
-	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, turnNumber, o.buildRunResult(ctx, session, sandbox, result), agentSessionID, snapshotKey); err != nil {
+	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, o.buildRunResult(ctx, session, sandbox, result), agentSessionID, snapshotKey); err != nil {
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 
 	drainAfterRelease = true
 
-	log.Info().Int("turn", turnNumber).Msg("session turn completed, now idle")
+	log.Info().Int("turn", sessionTurnNumber).Int("message_turn", messageTurnNumber).Msg("session turn completed, now idle")
 	return nil
 }
 
@@ -3993,6 +4140,18 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		if threadID == nil && m.ThreadID != nil {
 			continue
 		}
+		if m.ThreadID != nil && o.threadInbox != nil {
+			acked, ackErr := o.threadInbox.IsMessageAcked(ctx, session.OrgID, *m.ThreadID, m.ID)
+			if ackErr != nil {
+				log.Warn().Err(ackErr).
+					Str("thread_id", m.ThreadID.String()).
+					Int64("message_id", m.ID).
+					Msg("failed to check thread inbox ack state during queue drain")
+			}
+			if acked {
+				continue
+			}
+		}
 		queued = &messages[i]
 		break
 	}
@@ -4013,56 +4172,64 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		return
 	}
 
+	// Target the queued message's thread, not the calling thread. A turn
+	// finishing on thread A may drain a queued sibling message on thread B;
+	// the continuation job and the pending-counter reset must both follow
+	// the queued message's owner. Human-input answering happens in the
+	// worker (it consumes queued_message_id via
+	// answerQueuedHumanInputForContinue), so we do not call
+	// answerQueuedHumanInputRequest inline.
 	queuedThreadID := queued.ThreadID
+	payload := map[string]string{
+		"session_id":        session.ID.String(),
+		"org_id":            session.OrgID.String(),
+		"queued_message_id": strconv.FormatInt(queued.ID, 10),
+	}
+	if queuedThreadID != nil {
+		payload["thread_id"] = queuedThreadID.String()
+	}
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
+	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
+		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
+		return
+	}
 	if queuedThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *queuedThreadID); err != nil {
 			log.Warn().Err(err).Str("thread_id", queuedThreadID.String()).Msg("failed to clear pending_message_count after drain")
 		}
 	}
-	payload := map[string]string{
-		"session_id": session.ID.String(),
-		"org_id":     session.OrgID.String(),
-	}
-	if queuedThreadID != nil {
-		payload["thread_id"] = queuedThreadID.String()
-	}
-	if requestID := o.answerQueuedHumanInputRequest(ctx, session, queued, queuedThreadID, log); requestID != nil {
-		payload["human_input_request_id"] = requestID.String()
-	}
-	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
-	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
-		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
-	}
 }
 
-func (o *Orchestrator) answerQueuedHumanInputRequest(ctx context.Context, session *models.Session, queued *models.SessionMessage, threadID *uuid.UUID, log zerolog.Logger) *uuid.UUID {
-	if o.humanInputRequests == nil || queued == nil || queued.UserID == nil {
-		return nil
+func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *models.Session, log zerolog.Logger) {
+	if o == nil || session == nil || o.sessionThreads == nil || o.jobs == nil {
+		return
 	}
-
-	answerText := strings.TrimPrefix(queued.Content, planModePrefix)
-	var (
-		request models.HumanInputRequest
-		err     error
-	)
-	if threadID != nil {
-		request, err = o.humanInputRequests.AnswerLatestPendingFreeTextByThread(ctx, session.OrgID, session.ID, *threadID, answerText, *queued.UserID)
-	} else {
-		request, err = o.humanInputRequests.AnswerLatestPendingFreeTextBySession(ctx, session.OrgID, session.ID, answerText, *queued.UserID)
-	}
+	thread, err := o.sessionThreads.ClaimNextQueuedForSession(ctx, session.OrgID, session.ID, models.MaxRunningThreadsPerSession)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			return
 		}
-		log.Warn().Err(err).Msg("failed to answer pending human-input request during queue drain")
-		return nil
+		log.Warn().Err(err).
+			Str("session_id", session.ID.String()).
+			Msg("failed to claim next queued sibling thread")
+		return
 	}
-	if o.agentRunQuestions != nil && legacyQuestionCompatible(request.Kind) {
-		if _, qerr := o.agentRunQuestions.AnswerLatestPendingBySessionAndQuestion(ctx, session.OrgID, session.ID, request.Body, answerText, *queued.UserID); qerr != nil && !errors.Is(qerr, pgx.ErrNoRows) {
-			log.Warn().Err(qerr).Msg("failed to answer compatibility question during queue drain")
+	payload := map[string]string{
+		"session_id": session.ID.String(),
+		"thread_id":  thread.ID.String(),
+		"org_id":     session.OrgID.String(),
+	}
+	dedupeKey := continueSessionDedupeKey(thread.ID)
+	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", thread.ID.String()).
+			Msg("failed to enqueue queued sibling thread after slot opened")
+		if revertErr := o.sessionThreads.UpdateStatus(ctx, session.OrgID, thread.ID, models.ThreadStatusIdle); revertErr != nil {
+			log.Warn().Err(revertErr).
+				Str("thread_id", thread.ID.String()).
+				Msg("failed to revert queued sibling thread after enqueue failure")
 		}
 	}
-	return &request.ID
 }
 
 // drainAcceptableStatus returns true for session states that can absorb
@@ -5164,12 +5331,13 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
 	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
+	diff := o.resultDiffOrWorkspaceFallback(ctx, run, sandbox, result.Diff)
 
 	return &models.SessionResult{
 		TokenUsage:         tokenUsage,
 		ModelUsed:          modelUsed,
 		ResultSummary:      strPtr(result.Summary),
-		Diff:               strPtr(result.Diff),
+		Diff:               strPtr(diff),
 		Error:              strPtr(result.Error),
 		DiffBaseCommitSHA:  run.BaseCommitSHA,
 		DiffHeadCommitSHA:  headSHA,
@@ -5177,6 +5345,30 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		DiffCollectedAt:    timePtr(time.Now().UTC()),
 		DiffSource:         "turn_complete",
 	}
+}
+
+func (o *Orchestrator) resultDiffOrWorkspaceFallback(ctx context.Context, run *models.Session, sandbox *Sandbox, resultDiff string) string {
+	if strings.TrimSpace(resultDiff) != "" || run == nil {
+		return resultDiff
+	}
+	baseCommitSHA := derefString(run.BaseCommitSHA)
+	if baseCommitSHA == "" {
+		return resultDiff
+	}
+	targetBranch := derefString(run.TargetBranch)
+	diff, err := o.collectWorkspaceDiff(ctx, sandbox, baseCommitSHA, targetBranch)
+	if err != nil {
+		if !errors.Is(err, errNoBaseCommitSHA) {
+			o.logger.Warn().
+				Err(err).
+				Str("session_id", run.ID.String()).
+				Str("base_commit_sha", baseCommitSHA).
+				Str("target_branch", targetBranch).
+				Msg("failed to recompute workspace diff after empty agent result diff")
+		}
+		return resultDiff
+	}
+	return diff
 }
 
 func (o *Orchestrator) captureCurrentHeadSHA(ctx context.Context, sandbox *Sandbox) *string {
@@ -5846,13 +6038,32 @@ func (o *Orchestrator) failHumanInputPause(ctx context.Context, session *models.
 //   - a sandbox crash never overwrites a known-good prior snapshot with a
 //     truncated archive (incident: a 298-byte garbage upload bricked an
 //     active session for the rest of its lifetime)
-func (o *Orchestrator) snapshotSessionOnTurnSuccess(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) (string, int64, error) {
+func (o *Orchestrator) snapshotSessionOnTurnSuccess(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger, currentRuntimeID ...uuid.UUID) (string, int64, error) {
 	if result != nil && result.ExitCode != 0 {
 		log.Warn().
 			Int("exit_code", result.ExitCode).
 			Str("agent_error", truncateForLog(result.Error, 256)).
 			Msg("agent exited non-zero on the success path; skipping snapshot to preserve any prior good checkpoint")
 		return "", 0, nil
+	}
+	if o != nil && o.sandboxHolders != nil && session != nil {
+		active := 0
+		var err error
+		if len(currentRuntimeID) > 0 && currentRuntimeID[0] != uuid.Nil {
+			active, err = o.sandboxHolders.CountActiveThreadRuntimesBySessionExcluding(ctx, session.OrgID, session.ID, currentRuntimeID[0])
+		} else {
+			active, err = o.sandboxHolders.CountActiveThreadRuntimesBySession(ctx, session.OrgID, session.ID)
+		}
+		if err != nil {
+			return "", 0, fmt.Errorf("check active thread runtime holders before snapshot: %w", err)
+		}
+		if active > 0 {
+			log.Info().
+				Int("active_sibling_runtime_holders", active).
+				Str("session_id", session.ID.String()).
+				Msg("skipping turn-complete snapshot while sibling thread runtimes are mutating the shared sandbox")
+			return "", 0, nil
+		}
 	}
 	return o.snapshotSession(ctx, session, sandbox, result)
 }

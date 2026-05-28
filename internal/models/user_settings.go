@@ -8,6 +8,7 @@ import (
 
 // UserSettings is the strongly-typed representation of users.settings JSONB.
 type UserSettings struct {
+	CodingAgentModelDefault      string                        `json:"coding_agent_model_default,omitempty"`
 	CodingAgentReasoningDefaults map[AgentType]ReasoningEffort `json:"coding_agent_reasoning_defaults,omitempty"`
 }
 
@@ -42,6 +43,15 @@ func (s UserSettings) MarshalJSONB() (json.RawMessage, error) {
 
 // Validate returns an error if any user setting is invalid.
 func (s UserSettings) Validate() error {
+	if s.CodingAgentModelDefault != "" {
+		agentType := AgentTypeForModel(s.CodingAgentModelDefault)
+		if agentType == "" {
+			return fmt.Errorf("coding_agent_model_default: unknown model %q", s.CodingAgentModelDefault)
+		}
+		if err := ValidateModelForAgentType(agentType, s.CodingAgentModelDefault); err != nil {
+			return fmt.Errorf("coding_agent_model_default: %w", err)
+		}
+	}
 	for agentType, effort := range s.CodingAgentReasoningDefaults {
 		if err := agentType.Validate(); err != nil {
 			return fmt.Errorf("coding_agent_reasoning_defaults.%s: %w", agentType, err)

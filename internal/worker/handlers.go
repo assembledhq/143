@@ -315,6 +315,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
+		w.Register("cancel_thread", newCancelThreadHandler(stores, services, logger))
+		w.Register("deliver_thread_inbox", newDeliverThreadInboxHandler(services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
@@ -381,25 +383,49 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore                // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore            // nil-safe
-	Credentials         *db.OrgCredentialStore          // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore               // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore           // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore             // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore               // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore                // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore              // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore          // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore             // nil-safe: needed for eval repo lookup
-	SessionMessages     *db.SessionMessageStore         // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
+	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore    // nil-safe
+	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
+	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
+	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
+	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
+}
+
+func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run models.Session) error {
+	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+		return &RetryableError{Err: agent.ErrSnapshotPending}
+	}
+	if run.Status == models.SessionStatusRunning {
+		delay := 5 * time.Second
+		return &RetryableError{Err: fmt.Errorf("session %s has active runtime work; snapshot is not quiescent", run.ID), RetryAfter: &delay}
+	}
+	if stores == nil || stores.SandboxHolders == nil {
+		return nil
+	}
+	active, err := stores.SandboxHolders.CountActiveThreadRuntimesBySession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		return fmt.Errorf("check active thread runtime holders: %w", err)
+	}
+	if active > 0 {
+		delay := 5 * time.Second
+		return &RetryableError{Err: fmt.Errorf("session %s has %d active thread runtime holder(s); snapshot is not quiescent", run.ID, active), RetryAfter: &delay}
+	}
+	return nil
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -506,9 +532,11 @@ type previewStarter interface {
 type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
+	DeliverThreadInbox(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error
 	RecoverSession(ctx context.Context, session *models.Session) error
 	CancelSessionByID(sessionID uuid.UUID) bool
 	RequestSessionStopByID(sessionID uuid.UUID, reason agent.StopReason) bool
+	CancelThreadByID(threadID uuid.UUID) bool
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -1534,6 +1562,143 @@ func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.
 	}
 }
 
+func newCancelThreadHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			ThreadID  string `json:"thread_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal cancel_thread payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		threadID, err := uuid.Parse(input.ThreadID)
+		if err != nil {
+			return fmt.Errorf("parse thread ID: %w", err)
+		}
+		accepted := services.Orchestrator.CancelThreadByID(threadID)
+		if !accepted {
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("thread_id", threadID.String()).
+				Str("org_id", orgID.String()).
+				Msg("cancel_thread job found no live local cancel registry entry")
+		}
+		return nil
+	}
+}
+
+func newDeliverThreadInboxHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			ThreadID  string `json:"thread_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal deliver_thread_inbox payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		threadID, err := uuid.Parse(input.ThreadID)
+		if err != nil {
+			return fmt.Errorf("parse thread ID: %w", err)
+		}
+		if err := services.Orchestrator.DeliverThreadInbox(ctx, orgID, sessionID, threadID); err != nil {
+			var ownerErr *agent.ThreadRuntimeOwnedElsewhereError
+			if errors.As(err, &ownerErr) && ownerErr.OwnerNodeID != "" {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", threadID.String()).
+					Str("target_node_id", ownerErr.OwnerNodeID).
+					Msg("thread inbox delivery belongs to another worker; retargeting retry")
+				return &RetryableError{
+					Err:          err,
+					TargetNodeID: &ownerErr.OwnerNodeID,
+				}
+			}
+			if errors.Is(err, agent.ErrThreadRuntimeLeaseLost) {
+				delay := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", threadID.String()).
+					Dur("retry_after", delay).
+					Msg("thread inbox delivery lost runtime lease; retrying after recovery")
+				return &RetryableError{
+					Err:        err,
+					RetryAfter: &delay,
+				}
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID string, logger zerolog.Logger) (*uuid.UUID, error) {
+	if stores == nil || stores.HumanInputRequests == nil || stores.SessionMessages == nil {
+		return nil, nil
+	}
+	messageID, err := strconv.ParseInt(queuedMessageID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse queued message ID: %w", err)
+	}
+	queued, err := stores.SessionMessages.GetByID(ctx, orgID, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch queued message for human input answer: %w", err)
+	}
+	if queued.SessionID != sessionID {
+		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", messageID, queued.SessionID, sessionID)
+	}
+	if hasThread {
+		if queued.ThreadID == nil || *queued.ThreadID != threadID {
+			return nil, fmt.Errorf("queued message %d does not belong to thread %s", messageID, threadID)
+		}
+	}
+	if queued.UserID == nil {
+		return nil, nil
+	}
+	answerText := strings.TrimPrefix(queued.Content, "[PLAN_MODE]\n")
+	var request models.HumanInputRequest
+	if hasThread {
+		request, err = stores.HumanInputRequests.AnswerLatestPendingFreeTextByThread(ctx, orgID, sessionID, threadID, answerText, *queued.UserID)
+	} else {
+		request, err = stores.HumanInputRequests.AnswerLatestPendingFreeTextBySession(ctx, orgID, sessionID, answerText, *queued.UserID)
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("thread_id", threadID.String()).
+			Int64("queued_message_id", messageID).
+			Msg("failed to answer pending human-input request from queued message")
+		return nil, nil
+	}
+	return &request.ID, nil
+}
+
 // continue_session handler continues a multi-turn session with a follow-up message.
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
@@ -1549,6 +1714,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			WorkspaceMode       string `json:"workspace_mode"`
 			PullRequestNumber   int    `json:"pull_request_number"`
 			HumanInputRequestID string `json:"human_input_request_id"`
+			QueuedMessageID     string `json:"queued_message_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -1692,6 +1858,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts = threadOpts
 			}
 		}
+		if humanInputRequestID == nil && input.QueuedMessageID != "" {
+			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, input.QueuedMessageID, logger)
+			if answerErr != nil {
+				return answerErr
+			}
+			humanInputRequestID = answeredID
+		}
 		if continueOpts == nil && humanInputRequestID != nil {
 			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
 		} else if continueOpts != nil && humanInputRequestID != nil {
@@ -1793,6 +1966,19 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Err(err).
 					Msg("continue_session lost sandbox publish race to preview; retrying against the preview container")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxSiblingRace) {
+				// Another sibling tab published the shared sandbox first. This
+				// job is not a duplicate of the winner's work: it owns a
+				// different thread turn, so retry and attach to the recorded
+				// shared sandbox on the next attempt.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("continue_session lost sandbox publish race to sibling thread; retrying against the shared sandbox")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: models.SessionWorkerTarget(&session)}
 			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {
 				// A duplicate continue_session job lost the AcquireTurnHold
@@ -2022,6 +2208,13 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			}
 			return fmt.Errorf("session %s has no snapshot (status: %s)", runID, run.Status)
 		}
+		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
+			logger.Info().
+				Err(err).
+				Str("session_id", runID.String()).
+				Msg("open_pr waiting for shared sandbox quiescence")
+			return err
+		}
 
 		if stores.SessionIssueLinks != nil {
 			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
@@ -2159,6 +2352,13 @@ func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.L
 		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
+		}
+		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
+			logger.Info().
+				Err(err).
+				Str("session_id", runID.String()).
+				Msg("create_branch waiting for shared sandbox quiescence")
+			return err
 		}
 		if stores.SessionIssueLinks != nil {
 			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
@@ -2368,6 +2568,13 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				Str("pending_snapshot_key", *run.PendingSnapshotKey).
 				Msg("push_pr_changes waiting for post-PR snapshot upload to land")
 			return &RetryableError{Err: agent.ErrSnapshotPending}
+		}
+		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
+			logger.Info().
+				Err(err).
+				Str("session_id", runID.String()).
+				Msg("push_pr_changes waiting for shared sandbox quiescence")
+			return err
 		}
 
 		if stores.SessionIssueLinks != nil {

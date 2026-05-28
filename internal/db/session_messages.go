@@ -86,6 +86,24 @@ func (s *SessionMessageStore) Delete(ctx context.Context, id int64) error {
 	return err
 }
 
+func (s *SessionMessageStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) (models.SessionMessage, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+sessionMessageSelectColumns+`
+		FROM session_messages
+		WHERE org_id = @org_id AND id = @id`, pgx.NamedArgs{
+		"org_id": orgID,
+		"id":     id,
+	})
+	if err != nil {
+		return models.SessionMessage{}, fmt.Errorf("query session message: %w", err)
+	}
+	msg, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionMessage])
+	if err != nil {
+		return models.SessionMessage{}, err
+	}
+	return msg, nil
+}
+
 func (s *SessionMessageStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionMessage, error) {
 	query := `
 		SELECT ` + sessionMessageSelectColumns + `

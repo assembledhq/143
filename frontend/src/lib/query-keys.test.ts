@@ -45,6 +45,10 @@ describe("queryKeys", () => {
       expect(queryKeys.sessions.threadLogs("s-1", "t-1")).toEqual(["session", "s-1", "thread", "t-1", "logs"]);
     });
 
+    it("threadRecoverableInbox includes session and thread id", () => {
+      expect(queryKeys.sessions.threadRecoverableInbox("s-1", "t-1")).toEqual(["session", "s-1", "thread", "t-1", "recoverable-inbox"]);
+    });
+
     it("reviewLoops includes session id", () => {
       expect(queryKeys.sessions.reviewLoops("s-1")).toEqual(["session", "s-1", "review-loops"]);
     });
