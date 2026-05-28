@@ -59,6 +59,70 @@ func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.Provi
 	return &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "linear-token"}}, nil
 }
 
+type workerLinearClient struct {
+	fetch map[string]*linearservice.FetchedIssue
+	err   error
+}
+
+func (c workerLinearClient) FetchIssue(_ context.Context, identifier string) (*linearservice.FetchedIssue, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.fetch[identifier], nil
+}
+
+func (c workerLinearClient) ListTeamKeys(context.Context) ([]linearservice.TeamKeyInfo, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) CreateOrUpdateAttachment(context.Context, linearservice.AttachmentWriteInput) (linearservice.AttachmentResult, error) {
+	return linearservice.AttachmentResult{}, c.err
+}
+
+func (c workerLinearClient) CreateComment(context.Context, string, string) (string, error) {
+	return "", c.err
+}
+
+func (c workerLinearClient) UpdateComment(context.Context, string, string) error {
+	return c.err
+}
+
+func (c workerLinearClient) FindRecentBotCommentByURL(context.Context, string, string) (string, error) {
+	return "", c.err
+}
+
+func (c workerLinearClient) WorkflowStateForType(context.Context, string, []string, string) (*linearservice.WorkflowState, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) UpdateIssueState(context.Context, string, string) error {
+	return c.err
+}
+
+func (c workerLinearClient) IssueRecentHumanEdits(context.Context, string, time.Time) (bool, error) {
+	return false, c.err
+}
+
+func (c workerLinearClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
+	return false, c.err
+}
+
+func (c workerLinearClient) AgentActivityCreate(context.Context, linearservice.AgentActivityInput) (linearservice.AgentActivityResult, error) {
+	return linearservice.AgentActivityResult{}, c.err
+}
+
+func (c workerLinearClient) AgentSessionUpdate(context.Context, linearservice.AgentSessionUpdateInput) error {
+	return c.err
+}
+
+func (c workerLinearClient) AgentSessionGet(context.Context, string) (*linearservice.FetchedAgentSession, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) FetchComment(context.Context, string) (*linearservice.FetchedComment, error) {
+	return nil, c.err
+}
+
 // workerLinearIntegrationRecorder doubles as IntegrationReader and
 // IntegrationWriter so unauthorized-flow tests can both feed an active row
 // to MarkIntegrationUnauthorized's pre-write lookup and assert the resulting
@@ -830,6 +894,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		stores, mock := newTestStores(t)
 		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
 
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -860,6 +925,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		stores, mock := newTestStores(t)
 		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
 
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -887,6 +953,84 @@ func TestLinearJobHandlers(t *testing.T) {
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		jobctx.RunDeadLetterHooks(handlerCtx, err)
 		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
+	})
+
+	t.Run("prepare_linear_primary dead-letters fatally on invalid session issue link", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:     stores.Sessions,
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			Issues:       stores.Issues,
+			Links:        stores.SessionIssueLinks,
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return workerLinearClient{fetch: map[string]*linearservice.FetchedIssue{
+					"ACS-123": {
+						ID:            "linear-ACS-123",
+						Identifier:    "ACS-123",
+						Title:         "Fix ACS-123",
+						Description:   "issue body",
+						URL:           "https://linear.app/acme/issue/ACS-123",
+						StateName:     "Todo",
+						StateType:     "unstarted",
+						TeamID:        "team-1",
+						TeamKey:       "ACS",
+						WorkspaceSlug: "acme",
+					},
+				}}, nil
+			},
+			Logger: zerolog.Nop(),
+		})
+
+		mock.ExpectQuery("INSERT INTO issues").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, time.Now(), time.Now()))
+		mock.ExpectQuery("INSERT INTO session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectQuery("SELECT id FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("(?s).*UPDATE sessions.*RETURNING.*").
+			WithArgs(workerAnyArgs(11)...).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID, models.SessionStatusFailed, "failed")...,
+			))
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(handlerCtx, "prepare_linear_primary", payload)
+		require.Error(t, err, "invalid session issue links should surface as a handler error")
+		require.Contains(t, err.Error(), "Linear issue could not be linked", "invalid-link fatal error should explain the repository mismatch")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "invalid session issue links are permanent and must dead-letter immediately")
+		require.ErrorIs(t, err, db.ErrInvalidSessionIssueLink, "fatal wrapper should preserve the invalid-link sentinel")
+		var retryable *RetryableError
+		require.False(t, errors.As(err, &retryable), "invalid session issue links must not be classified as retryable")
+		require.NoError(t, mock.ExpectationsWereMet(), "fatal invalid-link handling should persist the specific message without retrying")
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should keep prepare state failed after the synchronous message write")
 	})
 
 	t.Run("prepare_linear_primary dead-letters fatally on missing integration", func(t *testing.T) {
