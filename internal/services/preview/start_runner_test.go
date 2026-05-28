@@ -58,11 +58,11 @@ func TestShouldReassignPreviewWorker(t *testing.T) {
 			expected:           false,
 		},
 		{
-			name:               "does not reassign when claim is not dead-target fallback",
+			name:               "reassigns when retry target moves to another worker",
 			deadTargetNode:     "",
 			reservationOwner:   "worker-a",
 			claimingWorkerNode: "worker-b",
-			expected:           false,
+			expected:           true,
 		},
 		{
 			name:               "does not reassign without claiming worker identity",

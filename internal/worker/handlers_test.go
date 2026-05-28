@@ -3092,7 +3092,7 @@ func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {
 
 	logger := zerolog.Nop()
 	starter := &mockPreviewStarter{}
-	handler := newStartBranchPreviewHandler(&Services{PreviewStarter: starter}, logger)
+	handler := newStartBranchPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
 
 	payload := previewsvc.StartBranchPreviewJobPayload{
 		OrgID:           uuid.New(),
@@ -3113,12 +3113,46 @@ func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {
 	require.Equal(t, payload, starter.branchPayload, "start_branch_preview handler should pass the decoded payload")
 }
 
+func TestStartBranchPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartBranchPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+	expectSandboxCapacityWorker(mock, "worker-with-space")
+
+	payload := previewsvc.StartBranchPreviewJobPayload{
+		OrgID:           uuid.New(),
+		UserID:          uuid.New(),
+		PreviewID:       uuid.New(),
+		PreviewTargetID: uuid.New(),
+		RepositoryID:    uuid.New(),
+		Branch:          "feature/previews",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_branch_preview payload should marshal")
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err = handler(handlerCtx, models.JobTypeStartBranchPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "branch preview capacity should requeue start_branch_preview instead of dead-lettering")
+	require.NotNil(t, retryable.TargetNodeID, "branch preview capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "branch preview capacity retry should avoid retrying the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "branch preview capacity retry should keep the selected replacement worker pin")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
 	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
-	handler := newStartPreviewHandler(&Services{PreviewStarter: starter}, logger)
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
 
 	payload := previewsvc.StartPreviewJobPayload{
 		OrgID:     uuid.New(),
@@ -3138,6 +3172,67 @@ func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
 	require.Equal(t, 5*time.Second, *retryable.RetryAfter, "preview capacity retry should run again quickly")
 	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+	expectSandboxCapacityWorker(mock, "worker-with-space")
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err = handler(handlerCtx, models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "preview capacity should requeue start_preview instead of dead-lettering the preview")
+	require.NotNil(t, retryable.TargetNodeID, "preview capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "preview capacity retry should avoid retrying the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "preview capacity retry should keep the selected replacement worker pin")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartPreviewHandler_PreviewCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+	expectSandboxCapacityWorker(mock, "")
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err = handler(handlerCtx, models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "preview capacity should requeue start_preview instead of dead-lettering the preview")
+	require.Nil(t, retryable.TargetNodeID, "preview capacity retries should not pin to a worker when none advertise available capacity")
+	require.True(t, retryable.ClearTargetNodeID, "preview capacity retries should clear a stale target pin when no replacement worker is available")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // automationRunRowColumns returns the column list used by scanAutomationRun in
