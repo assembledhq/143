@@ -289,7 +289,7 @@ describe("Account settings page", () => {
             name: "Alice Smith",
             role: "admin",
             settings: {
-              coding_agent_default_model: "claude-opus-4-7",
+              coding_agent_model_default: "claude-opus-4-7",
             },
             created_at: "2026-01-01T00:00:00Z",
           },
@@ -303,7 +303,7 @@ describe("Account settings page", () => {
     await user.click(screen.getByRole("option", { name: "claude-opus-4-7" }));
 
     expect(requestBody).toEqual({
-      coding_agent_default_model: "claude-opus-4-7",
+      coding_agent_model_default: "claude-opus-4-7",
     });
   });
 

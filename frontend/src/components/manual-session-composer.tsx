@@ -582,7 +582,7 @@ export function ManualSessionComposer({
 
   const codexAuthStatus = codexAuthResponse?.data;
   const codingAuths = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse]);
-  const userDefaultModel = user?.settings?.coding_agent_default_model ?? "";
+  const userDefaultModel = user?.settings?.coding_agent_model_default ?? "";
   // Sessions run under the user's own credentials, so we don't pass
   // orgAgentConfig — agents the org has keys for but the user doesn't are
   // intentionally hidden from the picker.

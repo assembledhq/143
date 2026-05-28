@@ -242,6 +242,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
+	sessionHandler.SetUserStore(userStore)
 	sessionHandler.SetTxStarter(pool)
 
 	// Inbound-agent metrics. Constructed once and shared between the

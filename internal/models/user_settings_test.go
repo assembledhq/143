@@ -23,9 +23,9 @@ func TestParseUserSettings(t *testing.T) {
 		},
 		{
 			name: "parses supported agent defaults",
-			raw:  json.RawMessage(`{"coding_agent_default_model":"claude-opus-4-7","coding_agent_reasoning_defaults":{"codex":"xhigh","claude_code":"max"}}`),
+			raw:  json.RawMessage(`{"coding_agent_model_default":"claude-opus-4-7","coding_agent_reasoning_defaults":{"codex":"xhigh","claude_code":"max"}}`),
 			want: UserSettings{
-				CodingAgentDefaultModel: "claude-opus-4-7",
+				CodingAgentModelDefault: "claude-opus-4-7",
 				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
 					AgentTypeCodex:      ReasoningEffortXHigh,
 					AgentTypeClaudeCode: ReasoningEffortMax,
@@ -54,7 +54,7 @@ func TestParseUserSettings(t *testing.T) {
 		},
 		{
 			name:    "rejects unsupported default model",
-			raw:     json.RawMessage(`{"coding_agent_default_model":"not-a-model"}`),
+			raw:     json.RawMessage(`{"coding_agent_model_default":"not-a-model"}`),
 			wantErr: true,
 		},
 	}
@@ -81,13 +81,13 @@ func TestUserSettings_MarshalJSONB(t *testing.T) {
 		t.Parallel()
 
 		raw, err := (UserSettings{
-			CodingAgentDefaultModel: "claude-opus-4-7",
+			CodingAgentModelDefault: "claude-opus-4-7",
 			CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
 				AgentTypeClaudeCode: ReasoningEffortMax,
 			},
 		}).MarshalJSONB()
 		require.NoError(t, err, "MarshalJSONB should accept valid settings")
-		require.JSONEq(t, `{"coding_agent_default_model":"claude-opus-4-7","coding_agent_reasoning_defaults":{"claude_code":"max"}}`, string(raw), "MarshalJSONB should encode the settings document")
+		require.JSONEq(t, `{"coding_agent_model_default":"claude-opus-4-7","coding_agent_reasoning_defaults":{"claude_code":"max"}}`, string(raw), "MarshalJSONB should encode the settings document")
 	})
 
 	t.Run("rejects invalid settings", func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestUserSettings_Validate(t *testing.T) {
 		{
 			name: "rejects invalid default model",
 			settings: UserSettings{
-				CodingAgentDefaultModel: "not-a-model",
+				CodingAgentModelDefault: "not-a-model",
 			},
 			wantErr: "unknown model",
 		},

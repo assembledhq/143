@@ -240,7 +240,7 @@ export default function AccountPage() {
 
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
-  const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_default_model ?? "";
+  const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
   const hasEffectiveReasoningDefaults = Object.keys(effectiveReasoningDefaults).length > 0;
 
   const createMutation = useMutation({
@@ -292,7 +292,7 @@ export default function AccountPage() {
   const updateReasoningDefaultsMutation = useMutation({
     mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
       api.auth.updateSettings({
-        ...(effectiveDefaultModel ? { coding_agent_default_model: effectiveDefaultModel } : {}),
+        ...(effectiveDefaultModel ? { coding_agent_model_default: effectiveDefaultModel } : {}),
         ...(defaults && Object.keys(defaults).length > 0 ? { coding_agent_reasoning_defaults: defaults } : {}),
       }),
     onMutate: (defaults) => {
@@ -337,7 +337,7 @@ export default function AccountPage() {
   const updateDefaultModelMutation = useMutation({
     mutationFn: (model: string) =>
       api.auth.updateSettings({
-        ...(model ? { coding_agent_default_model: model } : {}),
+        ...(model ? { coding_agent_model_default: model } : {}),
         ...(hasEffectiveReasoningDefaults ? { coding_agent_reasoning_defaults: effectiveReasoningDefaults } : {}),
       }),
     onMutate: (model) => {
