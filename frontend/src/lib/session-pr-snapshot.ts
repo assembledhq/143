@@ -63,5 +63,14 @@ export function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: 
   if (errorCode === "PR_RESUME_EXPIRED") {
     return "Couldn't resume PR creation";
   }
+  if (errorCode === "SNAPSHOT_PENDING") {
+    return "Snapshot still saving";
+  }
+  if (errorCode === "SESSION_RUNNING") {
+    return "Session still running";
+  }
+  if (errorCode === "SNAPSHOT_NOT_QUIESCENT") {
+    return "Active tabs still running";
+  }
   return "Couldn't create the PR";
 }

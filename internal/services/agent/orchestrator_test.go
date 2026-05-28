@@ -558,6 +558,10 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 	return nil
 }
 
+func (m *mockSessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
+	return nil
+}
+
 func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1345,6 +1349,10 @@ func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uui
 
 func (m *mockSessionThreadStore) ClearPendingMessages(_ context.Context, _, _ uuid.UUID) error {
 	return nil
+}
+
+func (m *mockSessionThreadStore) ClaimNextQueuedForSession(context.Context, uuid.UUID, uuid.UUID, int) (models.SessionThread, error) {
+	return models.SessionThread{}, pgx.ErrNoRows
 }
 
 func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
@@ -4259,6 +4267,66 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
 }
 
+func TestContinueSession_ThreadScopedAssistantUsesThreadTurnWhileSessionAdvancesSharedTurn(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusRunning
+	session.CurrentTurn = 10
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	threadID := uuid.New()
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &threadID,
+		TurnNumber: 2,
+		Role:       models.MessageRoleUser,
+		Content:    "Please continue this tab.",
+	}}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{
+		snapshotKey: []byte("restored-snapshot"),
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{Summary: "thread done", ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		ThreadID:  &threadID,
+		AgentType: models.AgentTypeClaudeCode,
+	})
+	require.NoError(t, err, "thread-scoped ContinueSession should succeed")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 2, "ContinueSession should append one assistant message")
+	assistant := messages[1]
+	require.Equal(t, models.MessageRoleAssistant, assistant.Role, "appended message should be the assistant response")
+	require.NotNil(t, assistant.ThreadID, "assistant response should remain scoped to the thread")
+	require.Equal(t, threadID, *assistant.ThreadID, "assistant response should target the requested thread")
+	require.Equal(t, 2, assistant.TurnNumber, "assistant response should use the thread-local turn number")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should persist one session turn update")
+	require.Equal(t, 11, updates[0].turn, "session completion should still advance the shared session turn")
+}
+
 func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -6568,6 +6636,51 @@ func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	for _, status := range d.sessions.statusUpdates {
 		require.NotEqual(t, string(models.SessionStatusIdle), status, "loser must not flip the session back to idle — winner is mid-turn")
 	}
+}
+
+func TestContinueSession_AcquireHoldLosesRaceForSiblingThreadRetries(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusRunning
+	session.CurrentTurn = 1
+	threadID := uuid.New()
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "run beside sibling"},
+	}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &threadID})
+	require.Error(t, err, "sibling thread should surface a retryable sandbox race when another tab published the shared container first")
+	require.ErrorIs(t, err, agent.ErrSandboxSiblingRace, "sibling thread should retry and attach to the winning shared sandbox instead of dead-lettering as a duplicate")
+	require.NotErrorIs(t, err, agent.ErrSandboxRaceLoser, "sibling thread race loss is not a duplicate of the winner's work")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive sibling winner must not be cleared")
 }
 
 // TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan covers the

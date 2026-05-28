@@ -48,6 +48,11 @@ const (
 	AuditActionSessionArchived             AuditAction = "session.archived"
 	AuditActionSessionUnarchived           AuditAction = "session.unarchived"
 	AuditActionSessionPreviewLifetimeSet   AuditAction = "session.preview_lifetime_set"
+	// AuditActionSessionThreadInboxReplayed is emitted when an operator
+	// forces an unknown_delivery inbox entry back into the delivery loop —
+	// the entry may already have reached the runtime, so the replay is a
+	// dual-write decision worth a paper trail.
+	AuditActionSessionThreadInboxReplayed AuditAction = "session.thread.inbox_replayed"
 
 	// Project actions
 	AuditActionProjectCreated        AuditAction = "project.created"
