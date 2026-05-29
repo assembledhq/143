@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -464,6 +464,18 @@ repair-worker-host:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-worker-host HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	ssh -i $(SSH_KEY) -o BatchMode=yes -o StrictHostKeyChecking=accept-new deploy@$(HOST) 'sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox'
+
+# Drain a worker host, stop its worker compose services, and optionally clear
+# worker-owned Docker state. Set CLEAR=true only when intentionally emptying
+# the machine for decommission/reprovision.
+# Usage:
+#   make spin-down-worker HOST=87.99.158.39
+#   make spin-down-worker HOST=87.99.158.39 CLEAR=true
+#   make spin-down-worker HOST=87.99.158.39 TIMEOUT=7200 EXECUTOR_TIMEOUT=600
+spin-down-worker:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make spin-down-worker HOST=<ip> [SSH_KEY=<path>] [CLEAR=true] [TIMEOUT=seconds] [EXECUTOR_TIMEOUT=seconds]"; exit 1; }
+	$(check-ssh-key)
+	./deploy/scripts/spin-down-worker.sh $(HOST) $(SSH_KEY) $(if $(filter true 1 yes,$(CLEAR)),--clear) $(if $(TIMEOUT),--timeout $(TIMEOUT)) $(if $(EXECUTOR_TIMEOUT),--executor-timeout $(EXECUTOR_TIMEOUT))
 
 TAG ?= latest
 ROLES ?= app,worker
