@@ -807,6 +807,20 @@ export function PreviewPanel({
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
   const freshnessCalloutText =
     isManageable && !isPreviewFreshnessUnknown ? freshnessText : undefined;
+  const previewRecoveryAction =
+    isPreviewOutOfDate && isReady
+      ? "refresh"
+      : status === "failed" || status === "unhealthy"
+        ? "retry"
+        : undefined;
+  const shouldShowRefreshPreview = previewRecoveryAction === "refresh";
+  const shouldShowRetryPreview = previewRecoveryAction === "retry";
+  const freshnessOutOfDateHelpText =
+    previewRecoveryAction === "refresh"
+      ? "Restart the preview to see the latest session changes."
+      : previewRecoveryAction === "retry"
+        ? "Retry the preview to use the latest session changes."
+        : undefined;
   const startupFreshnessText =
     showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupChecklist = useMemo(
@@ -929,7 +943,7 @@ export function PreviewPanel({
                 </Button>
               )}
 
-              {status === "failed" && (
+              {shouldShowRetryPreview && (
                 <Button
                   size="sm"
                   onClick={() => startMutation.mutate()}
@@ -939,7 +953,7 @@ export function PreviewPanel({
                   {!startMutation.isPending && (
                     <RotateCw className="size-3.5" />
                   )}
-                  Retry Preview
+                  Retry preview
                 </Button>
               )}
             </div>
@@ -976,14 +990,14 @@ export function PreviewPanel({
                 )}
                 <div className="min-w-0">
                   <div className="font-medium">{freshnessCalloutText}</div>
-                  {isPreviewOutOfDate && (
+                  {freshnessOutOfDateHelpText && (
                     <div className="text-muted-foreground">
-                      Restart the preview to see the latest session changes.
+                      {freshnessOutOfDateHelpText}
                     </div>
                   )}
                 </div>
               </div>
-              {isPreviewOutOfDate && (
+              {shouldShowRefreshPreview && (
                 <div className="flex shrink-0 justify-start sm:justify-end">
                   <Button
                     size="sm"
