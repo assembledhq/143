@@ -1,4 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { act } from "@testing-library/react";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
@@ -7,6 +8,14 @@ import NewProjectPage from "./page";
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -24,8 +33,13 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 
 describe("NewProjectPage", () => {
-  it("submits the selected base branch from the branch picker", async () => {
+  beforeEach(() => {
+    pushMock.mockReset();
+    replaceMock.mockReset();
     currentUserRole.value = "member";
+  });
+
+  it("submits the selected base branch from the branch picker", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
 
@@ -94,5 +108,58 @@ describe("NewProjectPage", () => {
     await waitFor(() => {
       expect(replaceMock).toHaveBeenCalledWith("/projects");
     });
+  });
+
+  it("keeps the create button loading after project creation succeeds while navigation is pending", async () => {
+    const user = userEvent.setup();
+    const createProject = deferred<Response>();
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Acme",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            full_name: "acme/api",
+            default_branch: "main",
+            github_id: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/projects", async () => createProject.promise),
+    );
+
+    renderWithProviders(<NewProjectPage />);
+
+    await user.type(screen.getByLabelText("Title"), "Keep loading");
+    await user.type(screen.getByLabelText("Goal"), "Keep create button loading until navigation");
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByText("acme/api"));
+
+    const createButton = screen.getByRole("button", { name: "Create project" });
+    await user.click(createButton);
+
+    expect(createButton).toBeDisabled();
+
+    await act(async () => {
+      createProject.resolve(HttpResponse.json({ data: { id: "proj-1" } }));
+      await createProject.promise;
+    });
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/projects/proj-1");
+    });
+    expect(createButton).toBeDisabled();
+    expect(createButton).toHaveTextContent("Creating...");
   });
 });
