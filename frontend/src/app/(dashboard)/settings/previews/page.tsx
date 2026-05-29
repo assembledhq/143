@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
-import { Copy, HelpCircle, KeyRound, Pencil, Plus, TestTube2, Trash2 } from "lucide-react";
+import { Copy, HelpCircle, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
@@ -51,6 +51,7 @@ import type {
   ListResponse,
   PreviewAPIToken,
   PreviewSecretBundleOutput,
+  PreviewSecretBundlePatchRequest,
   PreviewSecretBundleSummary,
   PreviewSecretBundleUpsertRequest,
   Repository,
@@ -59,6 +60,8 @@ import type {
 const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
 
 const SECRET_FILE_KEY = "SECRET_FILE_CONTENT";
+const JSON_FILE_VALIDATION_DEBOUNCE_MS = 400;
+const SECRET_FILE_JSON_ERROR = "Secret file contents must be valid JSON.";
 
 type SecretValueRow = {
   /** Stable identity used as a React key — never sent to the server. */
@@ -121,6 +124,7 @@ function PreviewSecretsSection() {
   const [dialogMode, setDialogMode] = useState<BundleDialogMode | null>(null);
   const [form, setForm] = useState<BundleFormState>(makeEmptyBundleForm);
   const [formError, setFormError] = useState<string | null>(null);
+  const [jsonValidationError, setJSONValidationError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<PreviewSecretBundleSummary | null>(null);
 
   const repositoriesQuery = useQuery<ListResponse<Repository>>({
@@ -160,11 +164,15 @@ function PreviewSecretsSection() {
   const bundles = bundlesQuery.data?.data ?? [];
 
   const saveMutation = useMutation({
-    mutationFn: ({ mode, body, repositoryId }: { mode: BundleDialogMode; body: PreviewSecretBundleUpsertRequest; repositoryId: string }) => {
+    mutationFn: ({ mode, body, repositoryId }: {
+      mode: BundleDialogMode;
+      body: PreviewSecretBundlePatchRequest | PreviewSecretBundleUpsertRequest;
+      repositoryId: string;
+    }) => {
       if (mode.type === "edit") {
         return api.repositories.previewSecretBundles.patch(mode.bundle.id, body);
       }
-      return api.repositories.previewSecretBundles.upsert(repositoryId, body);
+      return api.repositories.previewSecretBundles.upsert(repositoryId, body as PreviewSecretBundleUpsertRequest);
     },
     onSuccess: (_data, { repositoryId }) => {
       toast.success("Preview secret bundle saved");
@@ -175,20 +183,6 @@ function PreviewSecretsSection() {
     },
     onError: (error) => {
       setFormError(error instanceof ApiError ? error.message : "Preview secret bundle could not be saved.");
-    },
-  });
-
-  const testMutation = useMutation({
-    mutationFn: (bundleId: string) => api.repositories.previewSecretBundles.test(bundleId),
-    onSuccess: (response) => {
-      if (response.data.status === "ready") {
-        toast.success("Preview secret bundle is ready");
-      } else {
-        toast.error(response.data.error || "Preview secret bundle test failed");
-      }
-    },
-    onError: (error) => {
-      toast.error(error instanceof ApiError ? error.message : "Could not test preview secret bundle");
     },
   });
 
@@ -209,6 +203,7 @@ function PreviewSecretsSection() {
     setDialogMode({ type: "create" });
     setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
     setFormError(null);
+    setJSONValidationError(null);
   }
 
   function openEditDialog(bundle: PreviewSecretBundleSummary) {
@@ -225,13 +220,32 @@ function PreviewSecretsSection() {
       fileContent: "",
     });
     setFormError(null);
+    setJSONValidationError(null);
   }
 
   function closeBundleDialog() {
     setDialogMode(null);
     setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
     setFormError(null);
+    setJSONValidationError(null);
   }
+
+  useEffect(() => {
+    const timeoutID = window.setTimeout(() => {
+      if (!dialogMode || form.deliveryMode !== "file" || form.fileFormat !== "json" || !form.fileContent) {
+        setJSONValidationError(null);
+        return;
+      }
+      try {
+        JSON.parse(form.fileContent);
+        setJSONValidationError(null);
+      } catch {
+        setJSONValidationError(SECRET_FILE_JSON_ERROR);
+      }
+    }, JSON_FILE_VALIDATION_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timeoutID);
+  }, [dialogMode, form.deliveryMode, form.fileContent, form.fileFormat]);
 
   function updateRow(index: number, patch: Partial<SecretValueRow>) {
     setForm((current) => ({
@@ -256,9 +270,14 @@ function PreviewSecretsSection() {
   function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!dialogMode) return;
-    const body = buildBundleRequest(form);
+    const body = buildBundleRequest(form, dialogMode);
     if (body instanceof Error) {
-      setFormError(body.message);
+      if (body.message === SECRET_FILE_JSON_ERROR) {
+        setJSONValidationError(SECRET_FILE_JSON_ERROR);
+        setFormError(null);
+      } else {
+        setFormError(body.message);
+      }
       return;
     }
     if (!form.repositoryId) {
@@ -266,6 +285,7 @@ function PreviewSecretsSection() {
       return;
     }
     setFormError(null);
+    setJSONValidationError(null);
     saveMutation.mutate({ mode: dialogMode, body, repositoryId: form.repositoryId });
   }
 
@@ -319,9 +339,7 @@ function PreviewSecretsSection() {
           repositoryName={selectedRepository?.full_name ?? ""}
           onCreate={openCreateDialog}
           onEdit={openEditDialog}
-          onTest={(bundle) => testMutation.mutate(bundle.id)}
           onDelete={setDeleteTarget}
-          testing={testMutation.isPending}
         />
       )}
 
@@ -330,7 +348,7 @@ function PreviewSecretsSection() {
         form={form}
         repositories={activeRepositories}
         repositoryName={selectedRepository?.full_name ?? ""}
-        error={formError}
+        error={formError ?? jsonValidationError}
         saving={saveMutation.isPending}
         onOpenChange={(open) => {
           if (!open) closeBundleDialog();
@@ -339,8 +357,6 @@ function PreviewSecretsSection() {
         onRowChange={updateRow}
         onRowAdd={addRow}
         onRowRemove={removeRow}
-        onTest={(bundle) => testMutation.mutate(bundle.id)}
-        testing={testMutation.isPending}
         onSubmit={handleSave}
       />
 
@@ -374,18 +390,14 @@ function BundleInventory({
   repositoryName,
   onCreate,
   onEdit,
-  onTest,
   onDelete,
-  testing,
 }: {
   bundles: PreviewSecretBundleSummary[];
   isLoading: boolean;
   repositoryName: string;
   onCreate: () => void;
   onEdit: (bundle: PreviewSecretBundleSummary) => void;
-  onTest: (bundle: PreviewSecretBundleSummary) => void;
   onDelete: (bundle: PreviewSecretBundleSummary) => void;
-  testing: boolean;
 }) {
   if (isLoading) {
     return (
@@ -435,7 +447,7 @@ function BundleInventory({
                 </TableCell>
                 <TableCell>{formatDate(bundle.created_at)}</TableCell>
                 <TableCell>
-                  <BundleActions bundle={bundle} onEdit={onEdit} onTest={onTest} onDelete={onDelete} testing={testing} align="end" />
+                  <BundleActions bundle={bundle} onEdit={onEdit} onDelete={onDelete} align="end" />
                 </TableCell>
               </TableRow>
             ))}
@@ -453,7 +465,7 @@ function BundleInventory({
               </div>
               <LabeledMobileValue label="Outputs"><OutputBadges bundle={bundle} /></LabeledMobileValue>
               <LabeledMobileValue label="Last changed">{formatDate(bundle.created_at)}</LabeledMobileValue>
-              <BundleActions bundle={bundle} onEdit={onEdit} onTest={onTest} onDelete={onDelete} testing={testing} />
+              <BundleActions bundle={bundle} onEdit={onEdit} onDelete={onDelete} />
             </div>
           </div>
         ))}
@@ -465,24 +477,16 @@ function BundleInventory({
 function BundleActions({
   bundle,
   onEdit,
-  onTest,
   onDelete,
-  testing,
   align = "start",
 }: {
   bundle: PreviewSecretBundleSummary;
   onEdit: (bundle: PreviewSecretBundleSummary) => void;
-  onTest: (bundle: PreviewSecretBundleSummary) => void;
   onDelete: (bundle: PreviewSecretBundleSummary) => void;
-  testing: boolean;
   align?: "start" | "end";
 }) {
   return (
     <div className={`flex flex-wrap gap-2${align === "end" ? " justify-end" : ""}`}>
-      <Button type="button" variant="outline" size="sm" onClick={() => onTest(bundle)} disabled={testing} aria-label={`Test ${bundle.name}`}>
-        <TestTube2 className="h-4 w-4" />
-        Test
-      </Button>
       <Button type="button" variant="outline" size="sm" onClick={() => onEdit(bundle)} aria-label={`Edit ${bundle.name}`}>
         <Pencil className="h-4 w-4" />
         Edit
@@ -507,8 +511,6 @@ function BundleDialog({
   onRowChange,
   onRowAdd,
   onRowRemove,
-  onTest,
-  testing,
   onSubmit,
 }: {
   mode: BundleDialogMode | null;
@@ -522,8 +524,6 @@ function BundleDialog({
   onRowChange: (index: number, patch: Partial<SecretValueRow>) => void;
   onRowAdd: () => void;
   onRowRemove: (index: number) => void;
-  onTest: (bundle: PreviewSecretBundleSummary) => void;
-  testing: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const isEdit = mode?.type === "edit";
@@ -532,13 +532,14 @@ function BundleDialog({
   const editHasEnvOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "env") : false;
   const editHasBothOutputs = editHasFileOutputs && editHasEnvOutputs;
   const hasFilledValue = form.rows.some((row) => row.key.trim() && row.value);
-  const hasFileOutput = Boolean(form.filePath.trim()) && Boolean(form.fileContent);
+  const canPreserveFileContent = isEdit && editHasFileOutputs && form.deliveryMode === "file" && !form.fileContent;
+  const hasFileOutput = Boolean(form.filePath.trim()) && (Boolean(form.fileContent) || canPreserveFileContent);
   const canSave = Boolean(form.repositoryId)
     && Boolean(form.name.trim())
     && (form.deliveryMode === "env" ? hasFilledValue : hasFileOutput);
   const saveTooltip = form.deliveryMode === "file" && !form.filePath.trim()
     ? "Add the secret file path before saving"
-    : form.deliveryMode === "file" && !form.fileContent
+    : form.deliveryMode === "file" && !form.fileContent && !canPreserveFileContent
       ? "Paste the secret file contents before saving"
       : form.deliveryMode === "env" && isEdit && !hasFilledValue
         ? "Re-enter at least one secret value to save changes"
@@ -552,11 +553,11 @@ function BundleDialog({
         <DialogHeader>
           <DialogTitle>{isEdit ? "Edit bundle" : "New bundle"}</DialogTitle>
           <DialogDescription>
-            Secret values are only sent when you save and are not shown again after creation.
+            Secret values are not shown again after creation.
             {editHasBothOutputs
               ? " This bundle uses both env vars and a secret file. Choose which delivery method to keep — the other will be removed on save."
               : editHasFileOutputs && form.deliveryMode === "file"
-                ? " This bundle has file outputs — re-enter the file contents below to preserve them."
+                ? " Leave the file contents blank to keep the encrypted file already stored, or paste new contents to replace it."
                 : null}
           </DialogDescription>
         </DialogHeader>
@@ -620,17 +621,6 @@ function BundleDialog({
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
           <DialogFooter>
-            {isEdit ? (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onTest(mode.bundle)}
-                disabled={testing}
-              >
-                <TestTube2 className="h-4 w-4" />
-                Test bundle
-              </Button>
-            ) : null}
             <DialogClose asChild>
               <Button type="button" variant="outline" disabled={saving}>Cancel</Button>
             </DialogClose>
@@ -1068,7 +1058,10 @@ function OutputBadges({ bundle }: { bundle: PreviewSecretBundleSummary }) {
   );
 }
 
-function buildBundleRequest(form: BundleFormState): PreviewSecretBundleUpsertRequest | Error {
+function buildBundleRequest(
+  form: BundleFormState,
+  mode: BundleDialogMode,
+): PreviewSecretBundlePatchRequest | PreviewSecretBundleUpsertRequest | Error {
   const name = form.name.trim();
   if (!name) {
     return new Error("Bundle name is required.");
@@ -1081,23 +1074,31 @@ function buildBundleRequest(form: BundleFormState): PreviewSecretBundleUpsertReq
     if (!path) {
       return new Error("Secret file path is required.");
     }
+    const fileOutput: PreviewSecretBundleOutput = {
+      type: "file",
+      path,
+      format: form.fileFormat,
+      value: `secret:${SECRET_FILE_KEY}`,
+    };
     if (!form.fileContent) {
+      if (mode.type === "edit") {
+        return {
+          name,
+          outputs: [fileOutput],
+          exposure_policy: "preview_runtime",
+        };
+      }
       return new Error("Secret file contents are required.");
     }
     if (form.fileFormat === "json") {
       try {
         JSON.parse(form.fileContent);
       } catch {
-        return new Error("Secret file contents must be valid JSON.");
+        return new Error(SECRET_FILE_JSON_ERROR);
       }
     }
     values[SECRET_FILE_KEY] = form.fileContent;
-    outputs = [{
-      type: "file",
-      path,
-      format: form.fileFormat,
-      value: `secret:${SECRET_FILE_KEY}`,
-    }];
+    outputs = [fileOutput];
   } else {
     for (const row of form.rows) {
       const key = row.key.trim();

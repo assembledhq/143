@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,18 @@ type workerLinearMissingIntegrationReader struct{}
 
 func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	return models.Integration{}, pgx.ErrNoRows
+}
+
+func TestSessionHandlersRetryActiveThreadRuntimeConflict(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("handlers.go")
+	require.NoError(t, err, "test should read worker handlers source")
+
+	body := string(src)
+	require.Contains(t, body, "errors.Is(err, agent.ErrThreadRuntimeAlreadyActive)", "session handlers should classify active thread runtime conflicts as retryable")
+	require.Contains(t, body, "thread runtime already active; retrying after lease recovery", "active-runtime retries should be logged distinctly from sandbox races")
+	require.Contains(t, body, "BypassMaxRetryDuration: true", "active-runtime retries should allow bounded lease recovery without consuming the normal retry window")
 }
 
 type workerLinearCredentialReader struct{}

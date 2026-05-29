@@ -42,6 +42,7 @@ import (
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/ownerloss"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -1338,6 +1339,13 @@ func buildServices(
 		jobStore,
 		logger,
 	)
+	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
+		sessionStore,
+		db.NewSessionExecutorStore(pool),
+		jobStore,
+		jobStore,
+		logger,
+	))
 	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
 	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	reviewLoopSvc := reviewloopservice.NewService(

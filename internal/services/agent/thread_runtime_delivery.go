@@ -82,6 +82,8 @@ type ThreadRuntimeInputFormatter interface {
 	FormatThreadRuntimeInput(entry models.ThreadInboxEntry) ([]byte, error)
 }
 
+var ErrThreadRuntimeAlreadyActive = errors.New("thread runtime already active")
+
 type threadRuntimeControl struct {
 	runtime                   models.ThreadRuntime
 	leaseDuration             time.Duration
@@ -118,6 +120,9 @@ func (o *Orchestrator) startThreadRuntimeControl(ctx context.Context, session *m
 		LeaseDuration:              threadRuntimeLeaseDuration,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrActiveThreadRuntimeExists) {
+			return nil, fmt.Errorf("%w: %w", ErrThreadRuntimeAlreadyActive, err)
+		}
 		return nil, fmt.Errorf("create thread runtime: %w", err)
 	}
 	if runtime.LeaseToken == uuid.Nil {

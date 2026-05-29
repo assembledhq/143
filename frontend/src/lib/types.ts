@@ -425,6 +425,10 @@ export interface Session {
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
+  recovery_state?: '' | 'queued' | 'recovering' | 'unavailable';
+  recovery_queued_at?: string;
+  recovery_started_at?: string;
+  recovery_attempt_count?: number;
   pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";

@@ -533,6 +533,46 @@ func (s *OrgCredentialStore) GetAllLLM(ctx context.Context, orgID uuid.UUID) ([]
 	return creds, nil
 }
 
+// GetAllIntegrations loads active singleton integration credentials for an org,
+// keyed by provider. Missing providers are omitted from the returned map.
+func (s *OrgCredentialStore) GetAllIntegrations(ctx context.Context, orgID uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error) {
+	out := make(map[models.ProviderName]*models.DecryptedCredential, len(providers))
+	if len(providers) == 0 {
+		return out, nil
+	}
+
+	providerNames := make([]string, len(providers))
+	for i, p := range providers {
+		providerNames[i] = string(p)
+	}
+
+	query := `
+		SELECT ` + credentialColumns + `
+		FROM org_credentials
+		WHERE org_id = @org_id AND provider = ANY(@providers) AND label = '' AND status != 'disabled'`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":    orgID,
+		"providers": providerNames,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query integration credentials: %w", err)
+	}
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return nil, fmt.Errorf("collect integration credentials: %w", err)
+	}
+
+	for _, row := range dbRows {
+		cred, err := s.decryptRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out[cred.Provider] = cred
+	}
+	return out, nil
+}
+
 // ListSummaries returns masked credential info for all providers.
 // Returns a CredentialSummary for every known provider (configured or not).
 func (s *OrgCredentialStore) ListSummaries(ctx context.Context, orgID uuid.UUID) ([]models.CredentialSummary, error) {

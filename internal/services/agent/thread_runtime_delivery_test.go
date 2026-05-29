@@ -539,6 +539,26 @@ func TestOrchestrator_StartThreadRuntimeControlCreatesRuntimeHolderAndAcksSeedMe
 	require.Equal(t, []releaseHolderCall{{sessionID: sessionID, holderID: runtimeID, kind: models.SessionSandboxHolderKindThreadRuntime}}, holders.releaseCalls, "Close should release the sandbox holder")
 }
 
+func TestOrchestrator_StartThreadRuntimeControlClassifiesActiveRuntimeConflict(t *testing.T) {
+	t.Parallel()
+
+	session := &models.Session{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		AgentType: models.AgentTypeCodex,
+	}
+	threadID := uuid.New()
+	orch := &Orchestrator{
+		threadRuntimes: &fakeThreadRuntimeStore{createErr: db.ErrActiveThreadRuntimeExists},
+		nodeID:         "worker-1",
+	}
+
+	control, err := orch.startThreadRuntimeControl(context.Background(), session, threadID, &Sandbox{ID: "container-1"}, nil, zerolog.Nop())
+
+	require.Nil(t, control, "startThreadRuntimeControl should not return lifecycle control when another runtime is active")
+	require.ErrorIs(t, err, ErrThreadRuntimeAlreadyActive, "startThreadRuntimeControl should expose a retryable active-runtime sentinel")
+}
+
 func TestKeepSessionRunningIfSiblingRuntimesActive(t *testing.T) {
 	t.Parallel()
 
@@ -636,6 +656,7 @@ type fakeThreadRuntimeStore struct {
 	active         models.ThreadRuntime
 	getErr         error
 	createRuntime  models.ThreadRuntime
+	createErr      error
 	createCalls    []db.CreateThreadRuntimeParams
 	advanceCalls   []advanceDeliveryCall
 	commitCalls    []commitDeliveryCall
@@ -675,6 +696,9 @@ type terminalCall struct {
 
 func (s *fakeThreadRuntimeStore) CreateStarting(_ context.Context, orgID uuid.UUID, params db.CreateThreadRuntimeParams) (models.ThreadRuntime, error) {
 	s.createCalls = append(s.createCalls, params)
+	if s.createErr != nil {
+		return models.ThreadRuntime{}, s.createErr
+	}
 	runtime := s.createRuntime
 	if runtime.ID == uuid.Nil {
 		runtime.ID = uuid.New()

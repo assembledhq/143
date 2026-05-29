@@ -112,7 +112,9 @@ func (mockTx) Rollback(_ context.Context) error { return nil }
 // --- mock credential store ---
 
 type mockCredStore struct {
-	creds map[models.ProviderName]*models.DecryptedCredential
+	creds    map[models.ProviderName]*models.DecryptedCredential
+	getCalls []models.ProviderName
+	batch    []models.ProviderName
 }
 
 // withDefaultStatus applies Status="active" when the test fixture didn't set
@@ -130,10 +132,22 @@ func (m *mockCredStore) withDefaultStatus(cred *models.DecryptedCredential) *mod
 }
 
 func (m *mockCredStore) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	m.getCalls = append(m.getCalls, provider)
 	if c, ok := m.creds[provider]; ok {
 		return m.withDefaultStatus(c), nil
 	}
 	return nil, pgx.ErrNoRows
+}
+
+func (m *mockCredStore) GetAllIntegrations(_ context.Context, _ uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error) {
+	m.batch = append([]models.ProviderName(nil), providers...)
+	out := make(map[models.ProviderName]*models.DecryptedCredential, len(providers))
+	for _, provider := range providers {
+		if c, ok := m.creds[provider]; ok {
+			out[provider] = m.withDefaultStatus(c)
+		}
+	}
+	return out, nil
 }
 
 func (m *mockCredStore) ListByProvider(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
@@ -280,17 +294,25 @@ func TestFetchIntegrationCredentials_NilStore(t *testing.T) {
 func TestFetchIntegrationCredentials_WithCredentials(t *testing.T) {
 	t.Parallel()
 
-	svc := &Service{
-		credentials: &mockCredStore{
-			creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderSentry: {Config: models.SentryConfig{AccessToken: "sentry-tok"}},
-				models.ProviderLinear: {Config: models.LinearConfig{AccessToken: "linear-tok"}},
-			},
+	store := &mockCredStore{
+		creds: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSentry: {Config: models.SentryConfig{AccessToken: "sentry-tok"}},
+			models.ProviderLinear: {Config: models.LinearConfig{AccessToken: "linear-tok"}},
 		},
-		logger: zerolog.Nop(),
+	}
+	svc := &Service{
+		credentials: store,
+		logger:      zerolog.Nop(),
 	}
 
 	creds := svc.fetchIntegrationCredentials(context.Background(), uuid.New())
+	require.Equal(t, []models.ProviderName{
+		models.ProviderSentry,
+		models.ProviderLinear,
+		models.ProviderNotion,
+		models.ProviderCircleCI,
+	}, store.batch, "fetchIntegrationCredentials should request all integrations in one batch")
+	require.Empty(t, store.getCalls, "fetchIntegrationCredentials should not issue per-provider Get calls")
 	require.NotNil(t, creds.sentry)
 	require.NotNil(t, creds.linear)
 	require.Nil(t, creds.notion, "notion not configured")

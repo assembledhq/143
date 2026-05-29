@@ -2395,6 +2395,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox, threadRuntimeSeedMessageIDs(seedMessages), log)
 		if err != nil {
+			if errors.Is(err, ErrThreadRuntimeAlreadyActive) {
+				return fmt.Errorf("start thread runtime: %w", err)
+			}
 			o.failRun(ctx, run, fmt.Sprintf("start thread runtime: %s", err))
 			return fmt.Errorf("start thread runtime: %w", err)
 		}
@@ -3637,6 +3640,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
 		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, session, *opts.ThreadID, sandbox, threadRuntimeSeedMessageIDs(pendingMsgs), log)
 		if err != nil {
+			if errors.Is(err, ErrThreadRuntimeAlreadyActive) {
+				return fmt.Errorf("start thread runtime: %w", err)
+			}
 			o.failRun(ctx, session, fmt.Sprintf("start thread runtime: %s", err))
 			return fmt.Errorf("start thread runtime: %w", err)
 		}

@@ -41,6 +41,48 @@ func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
 }
 
+func TestThreadRuntimeAlreadyActiveDoesNotFailSessionBeforeRetry(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "orchestrator.go should be readable for active-runtime retry regression test")
+
+	body := string(src)
+	for _, tt := range []struct {
+		name      string
+		start     string
+		nextStart string
+	}{
+		{
+			name:      "RunAgent",
+			start:     "threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox",
+			nextStart: "if threadRuntimeCtl != nil {",
+		},
+		{
+			name:      "ContinueSession",
+			start:     "threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, session, *opts.ThreadID, sandbox",
+			nextStart: "if threadRuntimeCtl != nil {",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			start := strings.Index(body, tt.start)
+			require.NotEqual(t, -1, start, "orchestrator should start thread runtime control in "+tt.name)
+			remainder := body[start:]
+			end := strings.Index(remainder, tt.nextStart)
+			require.NotEqual(t, -1, end, "orchestrator should continue after thread runtime control in "+tt.name)
+
+			block := remainder[:end]
+			activeRuntimeCheck := strings.Index(block, "errors.Is(err, ErrThreadRuntimeAlreadyActive)")
+			failRun := strings.Index(block, "o.failRun")
+			require.NotEqual(t, -1, activeRuntimeCheck, "active runtime conflicts should be recognized before generic failure cleanup in "+tt.name)
+			require.NotEqual(t, -1, failRun, "non-retryable thread runtime startup errors should still use generic failure cleanup in "+tt.name)
+			require.Less(t, activeRuntimeCheck, failRun, "active runtime conflicts should return for worker retry before marking the session failed in "+tt.name)
+		})
+	}
+}
+
 func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
 	t.Parallel()
 

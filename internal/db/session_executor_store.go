@@ -299,6 +299,14 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 			 AND j.id = se.job_id
 			WHERE se.status IN ('starting', 'running', 'draining')
 			  AND se.heartbeat_at < $1
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM thread_runtimes tr
+				WHERE tr.org_id = se.org_id
+				  AND tr.thread_id = se.thread_id
+				  AND tr.status IN ('starting', 'live', 'paused', 'draining')
+				  AND tr.lease_expires_at > now()
+			  )
 			  AND (
 				(j.status = 'running' AND j.owner_kind = 'session_executor' AND j.lock_token = se.lock_token AND j.lease_expires_at < now())
 				OR
@@ -309,6 +317,153 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 			ORDER BY se.heartbeat_at ASC
 			FOR UPDATE SKIP LOCKED
 			LIMIT $2
+		),
+		pre_handoff_orphans AS (
+			UPDATE session_executors se
+			SET status = 'failed',
+				completed_at = now(),
+				exit_code = 1,
+				last_error = 'executor launch or handoff did not complete; cleared stale pre-handoff reservation',
+				updated_at = now()
+			FROM stale_active stale
+			WHERE se.id = stale.id
+			  AND (
+				stale.owner_kind = 'worker'
+				OR stale.job_status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter')
+			  )
+			RETURNING se.id
+		),
+		lost_executors AS (
+			UPDATE session_executors se
+			SET status = 'lost',
+				completed_at = now(),
+				last_error = 'executor heartbeat lost; queued for bounded recovery',
+				updated_at = now()
+			FROM stale_active stale
+			WHERE se.id = stale.id
+			  AND stale.owner_kind = 'session_executor'
+			  AND stale.job_status = 'running'
+			RETURNING stale.org_id, se.session_id, se.thread_id, stale.job_id, stale.lock_token
+		),
+		lost_thread_runtimes AS (
+			UPDATE thread_runtimes tr
+			SET status = 'lost',
+				closed_at = COALESCE(closed_at, now()),
+				stop_reason = COALESCE(stop_reason, 'executor_lease_lost'),
+				last_error = COALESCE(last_error, 'session executor lease was lost before runtime closed'),
+				updated_at = now()
+			FROM lost_executors lost
+			WHERE lost.thread_id IS NOT NULL
+			  AND tr.org_id = lost.org_id
+			  AND tr.session_id = lost.session_id
+			  AND tr.thread_id = lost.thread_id
+			  AND tr.status IN ('starting', 'live', 'paused', 'draining')
+			  AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at <= now())
+			RETURNING tr.id, tr.org_id, tr.session_id
+		),
+		lost_runtime_holders AS (
+			UPDATE session_sandbox_holders h
+			SET status = 'expired',
+				released_at = COALESCE(released_at, now()),
+				updated_at = now()
+			FROM lost_thread_runtimes lost
+			WHERE h.org_id = lost.org_id
+			  AND h.session_id = lost.session_id
+			  AND h.holder_kind = 'thread_runtime'
+			  AND h.holder_id = lost.id
+			  AND h.status IN ('active', 'draining')
+			RETURNING h.id
+		),
+		reset_inbox AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'pending',
+				runtime_id = NULL,
+				owner_node_id = NULL,
+				last_error = COALESCE(last_error, 'session executor lease lost before ack'),
+				updated_at = now()
+			FROM lost_thread_runtimes lost
+			WHERE e.org_id = lost.org_id
+			  AND e.runtime_id = lost.id
+			  AND e.delivery_state = 'delivering'
+			RETURNING e.id
+		),
+		unknown_inbox AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'unknown_delivery',
+				last_error = COALESCE(last_error, 'session executor lease lost after live delivery before ack'),
+				updated_at = now()
+			FROM lost_thread_runtimes lost
+			WHERE e.org_id = lost.org_id
+			  AND e.runtime_id = lost.id
+			  AND e.delivery_state = 'delivered'
+			RETURNING e.id
+		),
+		updated_jobs AS (
+			UPDATE jobs j
+			SET status = 'pending',
+				last_error = 'session executor ownership lost; queued for bounded recovery',
+				locked_by_node_id = NULL,
+				run_owner_id = NULL,
+				owner_kind = 'worker',
+				lock_token = NULL,
+				locked_at = NULL,
+				lease_expires_at = NULL,
+				run_at = now(),
+				updated_at = now()
+			FROM lost_executors lost
+			WHERE j.org_id = lost.org_id
+			  AND j.id = lost.job_id
+			  AND j.lock_token = lost.lock_token
+			RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id
+		),
+		updated_sessions AS (
+			UPDATE sessions s
+			SET recovery_state = 'queued',
+				recovery_queued_at = now(),
+				recovery_started_at = NULL,
+				runtime_stop_reason = 'worker_recovery'
+			FROM updated_jobs uj
+			WHERE uj.session_id IS NOT NULL
+			  AND s.org_id = uj.org_id
+			  AND s.id = uj.session_id::uuid
+		)
+		SELECT
+			(SELECT COUNT(*) FROM lost_executors)
+			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`, staleBefore, limit).Scan(&reclaimed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reclaim lost session executors: %w", err)
+	}
+	return reclaimed, nil
+}
+
+// ReclaimLostForSession is the targeted version of ReclaimLost used on user
+// input paths to recover one session's stale executor ownership immediately.
+func (s *SessionExecutorStore) ReclaimLostForSession(ctx context.Context, orgID, sessionID uuid.UUID, staleBefore time.Time, limit int) (int64, error) {
+	var reclaimed int64
+	err := s.db.QueryRow(ctx, `
+		WITH stale_active AS (
+			SELECT se.id, se.org_id, se.job_id, se.lock_token, j.owner_kind, j.status AS job_status
+			FROM session_executors se
+			JOIN jobs j
+			  ON j.org_id = se.org_id
+			 AND j.id = se.job_id
+			WHERE se.org_id = $1
+			  AND se.session_id = $2
+			  AND se.status IN ('starting', 'running', 'draining')
+			  AND se.heartbeat_at < $3
+			  AND (
+				(j.status = 'running' AND j.owner_kind = 'session_executor' AND j.lock_token = se.lock_token AND j.lease_expires_at < now())
+				OR
+				(se.status = 'starting' AND j.owner_kind = 'worker' AND (j.lock_token IS NULL OR j.lock_token = se.lock_token))
+				OR
+				(j.status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter') AND (j.lock_token IS NULL OR j.lock_token = se.lock_token))
+			  )
+			ORDER BY se.heartbeat_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $4
 		),
 		pre_handoff_orphans AS (
 			UPDATE session_executors se
@@ -368,12 +523,12 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 		)
 		SELECT
 			(SELECT COUNT(*) FROM lost_executors)
-			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`, staleBefore, limit).Scan(&reclaimed)
+			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`, orgID, sessionID, staleBefore, limit).Scan(&reclaimed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("reclaim lost session executors: %w", err)
+		return 0, fmt.Errorf("reclaim lost session executors for session: %w", err)
 	}
 	return reclaimed, nil
 }

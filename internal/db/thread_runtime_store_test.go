@@ -2,11 +2,14 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +69,41 @@ func TestThreadRuntimeStore_CreateStarting(t *testing.T) {
 	require.NoError(t, err, "CreateStarting should not return an error")
 	require.Equal(t, runtimeID, runtime.ID, "CreateStarting should return inserted runtime")
 	require.Equal(t, models.ThreadRuntimeStatusStarting, runtime.Status, "CreateStarting should create a starting runtime")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestThreadRuntimeStore_CreateStartingActiveRuntimeConflict(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should be created")
+	defer mock.Close()
+
+	mock.ExpectQuery(`WITH expired AS \(\s*UPDATE thread_runtimes[\s\S]+INSERT INTO thread_runtimes`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnError(&pgconn.PgError{
+			Code:           pgerrcode.UniqueViolation,
+			ConstraintName: "idx_thread_runtimes_one_active",
+		})
+
+	store := NewThreadRuntimeStore(mock)
+	_, err = store.CreateStarting(context.Background(), uuid.New(), CreateThreadRuntimeParams{
+		SessionID:     uuid.New(),
+		ThreadID:      uuid.New(),
+		ContainerID:   "container-1",
+		AgentType:     models.AgentTypeCodex,
+		OwnerNodeID:   "worker-1",
+		LeaseToken:    uuid.New(),
+		LeaseDuration: time.Minute,
+	})
+
+	require.ErrorIs(t, err, ErrActiveThreadRuntimeExists, "CreateStarting should classify active runtime uniqueness conflicts")
+	require.True(t, errors.As(err, new(*pgconn.PgError)), "CreateStarting should preserve the postgres error for diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
