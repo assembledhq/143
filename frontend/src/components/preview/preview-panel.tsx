@@ -805,7 +805,8 @@ export function PreviewPanel({
   const isPreviewOutOfDate = freshnessState === "out_of_date";
   const isPreviewFreshnessUnknown = freshnessState === "unknown";
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
-  const freshnessCalloutText = isPreviewFreshnessUnknown ? undefined : freshnessText;
+  const freshnessCalloutText =
+    isManageable && !isPreviewFreshnessUnknown ? freshnessText : undefined;
   const startupFreshnessText =
     showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupChecklist = useMemo(

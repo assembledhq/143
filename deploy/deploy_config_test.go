@@ -355,6 +355,31 @@ func TestWorkerDeployProtectsActiveExecutorImages(t *testing.T) {
 	require.Contains(t, deploy, "worker-deployctl release-retained-images", "worker deploy should release expired image retention records after pruning")
 }
 
+func TestWorkerSpinDownScriptDrainsBeforeClearingHost(t *testing.T) {
+	t.Parallel()
+
+	script, err := os.ReadFile("../deploy/scripts/spin-down-worker.sh")
+	require.NoError(t, err, "test should read the worker spin-down script")
+	text := string(script)
+
+	require.Contains(t, text, "docker kill --signal=TERM", "worker spin-down should request worker drain before stopping support services")
+	require.Contains(t, text, "wait_for_stopped \"worker\" \"$WORKER_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the worker drain with the drain timeout")
+	require.Contains(t, text, "docker stop -t \"$EXECUTOR_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the executor drain with Docker's stop timeout")
+	require.Contains(t, text, "label=com.143.role=session-executor", "worker spin-down should include durable session executor containers in cleanup")
+	require.Contains(t, text, "label=com.assembledhq.143.managed=true", "worker spin-down should include managed sandbox containers in cleanup")
+	require.Contains(t, text, "docker compose -f docker-compose.worker.yml down", "worker spin-down should stop worker compose services after worker drain")
+	require.Contains(t, text, "CLEAR_MACHINE=1", "destructive machine cleanup should require an explicit clear flag")
+	require.Contains(t, text, "docker volume prune -f", "explicit machine cleanup should reclaim unused Docker volumes")
+	require.Contains(t, text, "docker system prune -af", "explicit machine cleanup should reclaim unused Docker images and build cache")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read the Makefile")
+	require.Contains(t, string(makefile), "spin-down-worker", "Makefile should expose the worker spin-down script as an operator target")
+	require.Contains(t, string(makefile), "./deploy/scripts/spin-down-worker.sh", "Makefile target should invoke the worker spin-down script")
+	require.Contains(t, string(makefile), "--timeout $(TIMEOUT)", "Makefile target should expose the worker drain timeout")
+	require.Contains(t, string(makefile), "--executor-timeout $(EXECUTOR_TIMEOUT)", "Makefile target should expose the session executor drain timeout")
+}
+
 func TestWorkerRuntimeEndpointQueryUsesPsqlStdinVariables(t *testing.T) {
 	t.Parallel()
 

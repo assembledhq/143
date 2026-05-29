@@ -6043,6 +6043,7 @@ func TestContinueSessionHandler_StaleSandboxClearDeadLetterFailsSessionAndThread
 	require.Error(t, err, "stale sandbox clear should ask the worker to retry")
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "stale sandbox clear should remain retryable before queue exhaustion")
+	require.True(t, retryable.BypassMaxRetryDuration, "continue_session stale sandbox clear should retry even when the job was created before the generic retry window")
 	require.NoError(t, mock.ExpectationsWereMet(), "stale-clear retry should not mark the session failed before dead-letter")
 
 	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
