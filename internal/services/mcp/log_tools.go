@@ -24,8 +24,7 @@ func logToolDefinitions(providers []integration.LogProvider) []Tool {
 		"end_time":    {Type: "string", Description: "RFC3339 upper safety bound"},
 		"limit":       {Type: "number", Description: "Max results, default 100, max 1000", Default: integration.LogDefaultLimit},
 		"direction":   {Type: "string", Description: "Result order", Enum: []string{string(integration.LogDirectionDesc), string(integration.LogDirectionAsc)}, Default: string(integration.LogDirectionDesc)},
-		"fields":      {Type: "array", Description: "Comma-separated normalized field projection", Items: &SchemaProperty{Type: "string"}},
-		"cursor":      {Type: "string", Description: "Provider-opaque pagination cursor returned by a prior response"},
+		"fields":      {Type: "array", Description: "Field names to include in the response", Items: &SchemaProperty{Type: "string"}},
 		"include_raw": {Type: "boolean", Description: "Request redacted raw provider payloads when authorized", Default: false},
 	}
 	tools := []Tool{
@@ -81,9 +80,8 @@ func logToolDefinitions(providers []integration.LogProvider) []Tool {
 					"since":      props["since"],
 					"start_time": props["start_time"],
 					"end_time":   props["end_time"],
-					"group_by":   {Type: "array", Description: "Comma-separated fields to group by", Items: &SchemaProperty{Type: "string"}},
-					"interval":   {Type: "string", Description: "Bucket interval such as 5m or 1h"},
-					"limit":      {Type: "number", Description: "Max grouped rows", Default: 100},
+					"group_by": {Type: "array", Description: "Field names to group by", Items: &SchemaProperty{Type: "string"}},
+					"limit":    {Type: "number", Description: "Max grouped rows", Default: 100},
 				},
 				Required: []string{"query"},
 			},
@@ -287,21 +285,12 @@ func parseLogStatsRequest(args json.RawMessage) (integration.LogStatsRequest, er
 	if err != nil {
 		return integration.LogStatsRequest{}, err
 	}
-	var interval *time.Duration
-	if p.Interval != "" {
-		parsed, err := parseLogDuration(p.Interval)
-		if err != nil {
-			return integration.LogStatsRequest{}, err
-		}
-		interval = &parsed
-	}
 	return integration.LogStatsRequest{
 		Query:     p.Query,
 		Since:     since,
 		StartTime: start,
 		EndTime:   end,
 		GroupBy:   p.GroupBy,
-		Interval:  interval,
 		Limit:     limit,
 	}, nil
 }
@@ -429,6 +418,5 @@ type logStatsParams struct {
 	StartTime string   `json:"start_time"`
 	EndTime   string   `json:"end_time"`
 	GroupBy   []string `json:"group_by"`
-	Interval  string   `json:"interval"`
 	Limit     int      `json:"limit"`
 }

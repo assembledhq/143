@@ -65,8 +65,8 @@ func (p *VictoriaLogsProvider) QueryLogs(ctx context.Context, req LogQueryReques
 		return nil, err
 	}
 	entries := normalizeLogRecords(models.ProviderVictoriaLogs, records, req.Fields, req.IncludeRaw)
-	entries, truncated := trimEntries(entries, limit)
 	sortLogEntries(entries, direction)
+	entries, truncated := trimEntries(entries, limit)
 	return &LogQueryResult{
 		Provider:  p.Name(),
 		Query:     req.Query,
@@ -84,7 +84,10 @@ func (p *VictoriaLogsProvider) GetLogContext(ctx context.Context, req LogContext
 	if req.Query == nil || strings.TrimSpace(*req.Query) == "" {
 		return nil, fmt.Errorf("%w: victorialogs requires --query with timestamp context", ErrLogAnchorInsufficient)
 	}
-	limit := intValue(req.Before, 20) + intValue(req.After, 20) + 1
+	// Use LogMaxLimit so the time window is the primary constraint. A tight
+	// limit risks trimming the target entry when it falls near the newest end
+	// of sorted results; splitContextEntries caps the returned before/after counts.
+	limit := LogMaxLimit
 	queryReq := LogQueryRequest{
 		Query:      *req.Query,
 		Since:      req.Since,
@@ -124,7 +127,10 @@ func (p *VictoriaLogsProvider) QueryLogStats(ctx context.Context, req LogStatsRe
 	}
 	query := p.scopedQuery(req.Query)
 	if len(req.GroupBy) > 0 {
-		query += " | stats by (" + strings.Join(req.GroupBy, ",") + ") count()"
+		if err := validateLogGroupByFields(req.GroupBy); err != nil {
+			return nil, err
+		}
+		query += " | stats by (" + strings.Join(req.GroupBy, ", ") + ") count()"
 	} else {
 		query += " | stats count()"
 	}
@@ -136,13 +142,35 @@ func (p *VictoriaLogsProvider) QueryLogStats(ctx context.Context, req LogStatsRe
 	if err != nil {
 		return nil, err
 	}
+	series := statsFromRecords(records, req.GroupBy)
+	limit := intValue(req.Limit, 100)
+	truncated := false
+	if limit > 0 && len(series) > limit {
+		series = series[:limit]
+		truncated = true
+	}
 	return &LogStatsResult{
 		Provider:  p.Name(),
 		Query:     req.Query,
 		StartTime: start,
 		EndTime:   end,
-		Series:    statsFromRecords(records, req.GroupBy),
+		Series:    series,
+		Truncated: truncated,
 	}, nil
+}
+
+func validateLogGroupByFields(fields []string) error {
+	for _, field := range fields {
+		if field == "" {
+			return fmt.Errorf("group_by field name must not be empty")
+		}
+		for _, r := range field {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.') {
+				return fmt.Errorf("group_by field %q contains invalid character %q; only letters, digits, underscores, and dots are allowed", field, r)
+			}
+		}
+	}
+	return nil
 }
 
 func (p *VictoriaLogsProvider) scopedQuery(query string) string {
@@ -220,8 +248,8 @@ func (p *MezmoProvider) QueryLogs(ctx context.Context, req LogQueryRequest) (*Lo
 		direction = *req.Direction
 	}
 	entries := normalizeLogRecords(models.ProviderMezmo, records, req.Fields, req.IncludeRaw)
-	entries, truncated := trimEntries(entries, limit)
 	sortLogEntries(entries, direction)
+	entries, truncated := trimEntries(entries, limit)
 	return &LogQueryResult{Provider: p.Name(), Query: req.Query, StartTime: start, EndTime: end, Entries: entries, Truncated: truncated}, nil
 }
 
@@ -229,7 +257,8 @@ func (p *MezmoProvider) GetLogContext(ctx context.Context, req LogContextRequest
 	if req.Anchor.Timestamp == nil || req.Query == nil || strings.TrimSpace(*req.Query) == "" {
 		return nil, fmt.Errorf("%w: mezmo requires --timestamp and --query in v1", ErrLogAnchorInsufficient)
 	}
-	limit := intValue(req.Before, 20) + intValue(req.After, 20) + 1
+	// Use LogMaxLimit so the time window is the primary constraint; see VictoriaLogsProvider.GetLogContext.
+	limit := LogMaxLimit
 	queryReq := LogQueryRequest{Query: *req.Query, Since: req.Since, StartTime: req.StartTime, EndTime: req.EndTime, Limit: &limit, Direction: ptr(LogDirectionAsc), Fields: req.Fields, IncludeRaw: req.IncludeRaw}
 	result, err := p.QueryLogs(ctx, queryReq)
 	if err != nil {

@@ -2,7 +2,11 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -214,6 +218,155 @@ func TestValidateLogTimeBounds(t *testing.T) {
 			require.NoError(t, err, "NormalizeLogTimeBounds should accept bounded log requests")
 		})
 	}
+}
+
+// ndjsonBody encodes each record as a separate line (VictoriaLogs native format).
+func ndjsonBody(records []map[string]any) []byte {
+	var buf []byte
+	for _, r := range records {
+		line, _ := json.Marshal(r)
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+	return buf
+}
+
+func TestVictoriaLogsProviderSortsThenTrims(t *testing.T) {
+	t.Parallel()
+
+	// API returns 3 entries in descending order (newest first).
+	// With limit=2 and direction=asc, we must return the 2 oldest entries in ascending order.
+	records := []map[string]any{
+		{"timestamp": "2026-05-28T12:03:00Z", "message": "newest"},
+		{"timestamp": "2026-05-28T12:02:00Z", "message": "middle"},
+		{"timestamp": "2026-05-28T12:01:00Z", "message": "oldest"},
+	}
+	body := ndjsonBody(records)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:   server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	limit := 2
+	direction := LogDirectionAsc
+	result, err := provider.QueryLogs(context.Background(), LogQueryRequest{
+		Query:     "*",
+		Since:     durationPtr(time.Hour),
+		Limit:     &limit,
+		Direction: &direction,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Truncated, "should be truncated when 3 records exceed limit 2")
+	require.Len(t, result.Entries, 2, "should return exactly limit entries")
+	require.Equal(t, "oldest", result.Entries[0].Message, "ascending direction should start with the oldest entry")
+	require.Equal(t, "middle", result.Entries[1].Message, "ascending direction should continue with the middle entry")
+}
+
+func TestVictoriaLogsContextFindsTargetWhenResultsExceedContextWindow(t *testing.T) {
+	t.Parallel()
+
+	// Build before=2, after=2 → old internal limit was 5. Return 6 entries so the
+	// target (newest, index 5) would have been trimmed by the old tight limit.
+	base := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	records := make([]map[string]any, 6)
+	for i := range records {
+		records[i] = map[string]any{
+			"timestamp": base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+			"message":   fmt.Sprintf("entry-%d", i),
+		}
+	}
+	body := ndjsonBody(records)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:   server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	targetTime := base.Add(5 * time.Minute)
+	query := "*"
+	before := 2
+	after := 2
+	result, err := provider.GetLogContext(context.Background(), LogContextRequest{
+		Anchor:    LogAnchor{Timestamp: &targetTime},
+		Query:     &query,
+		Since:     durationPtr(time.Hour),
+		Before:    &before,
+		After:     &after,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result.Target, "target should be found even when it is the newest entry in the result set")
+	require.Equal(t, "entry-5", result.Target.Message, "should identify the correct entry by closest timestamp")
+	require.Len(t, result.Before, 2, "should return the requested number of before-context entries")
+	require.Len(t, result.After, 0, "no entries after the newest target")
+}
+
+func TestVictoriaLogsProviderRejectsInvalidGroupByField(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("\n"))
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:   server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	_, err := provider.QueryLogStats(context.Background(), LogStatsRequest{
+		Query:   "*",
+		Since:   durationPtr(time.Hour),
+		GroupBy: []string{"service) count(), count("},
+	})
+	require.Error(t, err, "QueryLogStats should reject group_by field names with injection characters")
+	require.Contains(t, err.Error(), "invalid character", "error should describe the invalid character")
+}
+
+func TestVictoriaLogsStatsTruncatesAndSetsFlag(t *testing.T) {
+	t.Parallel()
+
+	// Return 3 series records; ask for limit=2.
+	records := []map[string]any{
+		{"service": "api", "count": float64(10)},
+		{"service": "worker", "count": float64(5)},
+		{"service": "cron", "count": float64(1)},
+	}
+	body := ndjsonBody(records)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:   server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	limit := 2
+	result, err := provider.QueryLogStats(context.Background(), LogStatsRequest{
+		Query:   "*",
+		Since:   durationPtr(time.Hour),
+		GroupBy: []string{"service"},
+		Limit:   &limit,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Truncated, "Truncated should be set when series exceed limit")
+	require.Len(t, result.Series, 2, "series should be capped at limit")
 }
 
 func stringPtr(v string) *string                 { return &v }
