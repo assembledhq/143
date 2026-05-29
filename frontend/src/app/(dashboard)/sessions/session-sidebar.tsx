@@ -22,7 +22,7 @@ import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimi
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/session-linear-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { ListResponse, SessionListItem, User } from "@/lib/types";
+import type { ListResponse, SessionDetail, SessionListItem, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
@@ -240,6 +240,75 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
   );
 }
 
+function CurrentSessionContextRow({
+  session,
+  href,
+  ariaSelected,
+  optionRef,
+}: {
+  session: SessionDetail;
+  href: string;
+  ariaSelected: boolean;
+  optionRef?: (node: HTMLDivElement | null) => void;
+}) {
+  const cfg = statusConfig[session.status] || statusConfig.pending;
+  const isWorkingSession = workingSet.has(session.status);
+  const ts = session.completed_at || session.started_at || session.created_at;
+  const title = sessionTitle(session);
+
+  return (
+    <SessionSidebarOptionFrame
+      id={`session-sidebar-option-${session.id}`}
+      ariaLabel={title}
+      ariaSelected={ariaSelected}
+      optionRef={optionRef}
+      className="border-primary/20 bg-background shadow-sm ring-1 ring-primary/10"
+    >
+      <SessionSidebarRowSurface
+        href={href}
+        ariaCurrent="page"
+        className="border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+      >
+        <span
+          aria-hidden="true"
+          className="absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/55 transition-colors duration-150"
+        />
+        <div className="flex items-start gap-2.5 min-w-0">
+          <div className="mt-1.5 shrink-0">
+            {isWorkingSession ? (
+              <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+            ) : (
+              <span className="inline-flex rounded-full h-2 w-2 bg-primary/55" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-xs font-medium text-foreground truncate leading-snug">
+                {title}
+              </p>
+              <span className="shrink-0 rounded-md border border-primary/20 bg-background/70 px-1.5 py-0.5 text-xs font-medium text-primary">
+                Current
+              </span>
+            </div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+              <span className="text-xs text-muted-foreground shrink-0">
+                <span>{cfg.label}</span>
+                {isWorkingSession && <AnimatedEllipsis />}
+              </span>
+              <span className="text-xs text-muted-foreground/50 shrink-0">
+                {formatTimeAgo(ts)}
+              </span>
+              <span className="text-xs text-muted-foreground/70 shrink-0">
+                Not in this list
+              </span>
+            </div>
+          </div>
+        </div>
+      </SessionSidebarRowSurface>
+    </SessionSidebarOptionFrame>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Sidebar component
 // ---------------------------------------------------------------------------
@@ -437,6 +506,15 @@ export function SessionSidebar() {
   }, [firstPage, extraPages, search]);
 
   const isNewSession = pathname === "/sessions/new";
+  const selectedSessionIsDisplayed = !!selectedId && displayedSessions.some((session) => session.id === selectedId);
+  const shouldShowCurrentSessionContextRow = !!selectedId && !isNewSession && !selectedSessionIsDisplayed;
+  const { data: currentSessionData } = useQuery({
+    queryKey: queryKeys.sessions.detail(selectedId ?? ""),
+    queryFn: () => api.sessions.get(selectedId!),
+    enabled: isResolved && shouldShowCurrentSessionContextRow,
+    retry: false,
+  });
+  const currentSessionContext = shouldShowCurrentSessionContextRow ? currentSessionData?.data : undefined;
   const activeSessionId = activeSessionFocus?.id ?? null;
   const hasNavigatedFromNewSessionDraft = isNewSession && activeSessionFocus?.pathname === pathname;
 
@@ -450,11 +528,14 @@ export function SessionSidebar() {
     if (activeSessionId && displayedSessions.some((session) => session.id === activeSessionId)) {
       return activeSessionId;
     }
-    if (selectedId && displayedSessions.some((session) => session.id === selectedId)) {
+    if (selectedId) {
+      if (!selectedSessionIsDisplayed) {
+        return null;
+      }
       return selectedId;
     }
     return displayedSessions[0]?.id ?? null;
-  }, [activeSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, selectedId]);
+  }, [activeSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, selectedId, selectedSessionIsDisplayed]);
   // Hide optimistic rows whose real session is already in the list — prevents
   // the double-render flash between "optimistic added" and "server refetch
   // lands". Resolved-but-not-yet-visible rows stay until the real row arrives.
@@ -485,7 +566,9 @@ export function SessionSidebar() {
 
   const showDefaultEmptyState =
     currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
-  const activeOptionId = isNewSession && !currentActiveSessionId
+  const activeOptionId = currentSessionContext && !currentActiveSessionId
+    ? currentSessionContext.id
+    : isNewSession && !currentActiveSessionId
     ? newSessionOptionId
     : currentActiveSessionId;
 
@@ -518,12 +601,29 @@ export function SessionSidebar() {
       setActiveByIndex(delta >= 0 ? 0 : displayedSessions.length - 1);
       return;
     }
+    // Context row acts as a virtual slot above the saved-session list.
+    if (currentSessionContext && !currentActiveSessionId) {
+      if (delta >= 0) setActiveByIndex(0);
+      // Upward movement from context row: nothing above it, stay put.
+      return;
+    }
     const currentIndex = currentActiveSessionId
       ? displayedSessions.findIndex((session) => session.id === currentActiveSessionId)
       : -1;
     const baseIndex = currentIndex >= 0 ? currentIndex : 0;
-    setActiveByIndex(baseIndex + delta);
-  }, [currentActiveSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, setActiveByIndex]);
+    const nextIndex = baseIndex + delta;
+    // Upward movement past the first saved session when context row exists:
+    // return keyboard focus to the context row.
+    if (currentSessionContext && nextIndex < 0) {
+      setActiveSessionFocus(null);
+      focusList();
+      requestAnimationFrame(() => {
+        optionRefs.current.get(currentSessionContext.id)?.scrollIntoView({ block: "nearest" });
+      });
+      return;
+    }
+    setActiveByIndex(nextIndex);
+  }, [currentActiveSessionId, currentSessionContext, displayedSessions, focusList, hasNavigatedFromNewSessionDraft, isNewSession, setActiveByIndex]);
 
   const activeSession = useMemo(
     () => displayedSessions.find((session) => session.id === currentActiveSessionId) ?? null,
@@ -751,6 +851,23 @@ export function SessionSidebar() {
                 </div>
               </SessionSidebarRowSurface>
             </SessionSidebarOptionFrame>
+          </div>
+        )}
+
+        {currentSessionContext && (
+          <div className="mb-2 border-b border-border/60 pb-2">
+            <CurrentSessionContextRow
+              session={currentSessionContext}
+              href={`/sessions/${currentSessionContext.id}${filterSuffix}`}
+              ariaSelected={!currentActiveSessionId}
+              optionRef={(node) => {
+                if (node) {
+                  optionRefs.current.set(currentSessionContext.id, node);
+                } else {
+                  optionRefs.current.delete(currentSessionContext.id);
+                }
+              }}
+            />
           </div>
         )}
 
