@@ -5273,17 +5273,16 @@ export function SessionDetailContent({ id }: { id: string }) {
                       variant="outline"
                       size="sm"
                       className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                       onClick={() => createPRMutation.mutate(undefined)}
                     >
-                      {prActionSpinning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : prState === "failed" || localPRActionError ? (
+                      {!prActionSpinning && (prState === "failed" || localPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
                       ) : (
                         <GitPullRequest className="h-3 w-3" />
-                      )}
+                      ))}
                       {prActionLabel}
                     </Button>
                     <DropdownMenu>

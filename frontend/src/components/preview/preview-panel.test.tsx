@@ -1154,6 +1154,25 @@ describe("PreviewPanel component", () => {
     expect(mockRestart).not.toHaveBeenCalled();
   });
 
+  it("keeps Retry Preview at full opacity while retrying", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "failed" }));
+    mockEnsure.mockReturnValue(new Promise(() => {}));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    const retryButton = await screen.findByRole("button", {
+      name: "Retry Preview",
+    });
+    await user.click(retryButton);
+
+    expect(retryButton).toBeDisabled();
+    expect(retryButton).toHaveAttribute("data-loading", "true");
+    expect(retryButton).toHaveClass(
+      "disabled:data-[loading=true]:opacity-100",
+    );
+  });
+
   /* ---------- Mutation error banner ---------- */
 
   it("shows mutation error banner when start fails", async () => {
