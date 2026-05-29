@@ -74,6 +74,7 @@ export default function NewProjectPage() {
   const [agentType, setAgentType] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [hasGenerated, setHasGenerated] = useState(false);
+  const [isNavigatingAfterCreate, setIsNavigatingAfterCreate] = useState(false);
 
   // Advanced section
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -142,8 +143,15 @@ export default function NewProjectPage() {
         agent_type: agentType || undefined,
         model: selectedModel || undefined,
       }),
+    onMutate: () => {
+      setIsNavigatingAfterCreate(false);
+    },
     onSuccess: (response) => {
+      setIsNavigatingAfterCreate(true);
       router.push(`/projects/${response.data.id}`);
+    },
+    onError: () => {
+      setIsNavigatingAfterCreate(false);
     },
   });
 
@@ -168,6 +176,7 @@ export default function NewProjectPage() {
     title.trim().length > 0 &&
     goal.trim().length > 0 &&
     repositoryId.length > 0;
+  const isCreatingProject = createMutation.isPending || isNavigatingAfterCreate;
 
   return (
     <div className="p-6 max-w-2xl mx-auto">
@@ -462,9 +471,9 @@ export default function NewProjectPage() {
           <div className="flex items-center gap-3 pt-2">
             <Button
               onClick={() => createMutation.mutate()}
-              disabled={!canSubmit || createMutation.isPending}
+              disabled={!canSubmit || isCreatingProject}
             >
-              {createMutation.isPending ? (
+              {isCreatingProject ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Creating...
