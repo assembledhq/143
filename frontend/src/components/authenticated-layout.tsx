@@ -3,7 +3,6 @@
 import {
   Zap,
   Play,
-  FolderKanban,
   RefreshCw,
   LogOut,
   ChevronsUpDown,
@@ -28,7 +27,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Sheet,
   SheetClose,
@@ -48,8 +46,6 @@ import {
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
 import { useCallback, useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
@@ -118,21 +114,18 @@ type NavItem = {
   label: string;
   icon: LucideIcon;
   href: string;
-  showProposalBadge: boolean;
 };
 
 const navItems: NavItem[] = [
-  { label: "Sessions", icon: Play, href: "/sessions", showProposalBadge: false },
-  { label: "Automations", icon: RefreshCw, href: "/automations", showProposalBadge: false },
-  { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
-  { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
+  { label: "Sessions", icon: Play, href: "/sessions" },
+  { label: "Automations", icon: RefreshCw, href: "/automations" },
+  { label: "Autopilot", icon: Zap, href: "/autopilot" },
 ];
 
 type SidebarBodyProps = {
   variant: "desktop" | "mobile";
   user: SidebarUser;
   pathname: string;
-  proposalCount: number;
   onPaletteOpen: () => void;
   onCreateSession: () => void;
   onNavigate?: () => void;
@@ -143,7 +136,6 @@ function SidebarBody({
   variant,
   user,
   pathname,
-  proposalCount,
   onPaletteOpen,
   onCreateSession,
   onNavigate,
@@ -242,11 +234,6 @@ function SidebarBody({
             >
               <item.icon className="h-4 w-4 shrink-0" />
               {item.label}
-              {item.showProposalBadge && proposalCount > 0 && (
-                <Badge variant="secondary" className="ml-auto text-xs px-1.5 py-0 h-5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
-                  {proposalCount}
-                </Badge>
-              )}
             </Link>
           );
         })}
@@ -315,7 +302,6 @@ function SidebarBody({
 type CompactSidebarRailProps = {
   user: SidebarUser;
   pathname: string;
-  proposalCount: number;
   onPaletteOpen: () => void;
   onCreateSession: () => void;
   onLogout: () => void;
@@ -324,7 +310,6 @@ type CompactSidebarRailProps = {
 function CompactSidebarRail({
   user,
   pathname,
-  proposalCount,
   onPaletteOpen,
   onCreateSession,
   onLogout,
@@ -385,9 +370,6 @@ function CompactSidebarRail({
                     )}
                   >
                     <item.icon className="h-4 w-4" />
-                    {item.showProposalBadge && proposalCount > 0 ? (
-                      <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />
-                    ) : null}
                   </Link>
                 </TooltipTrigger>
                 <TooltipContent side="right" sideOffset={8}>{item.label}</TooltipContent>
@@ -539,20 +521,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     user,
     isLoading,
     isFetching,
-    isAuthenticated,
     isUnauthorized,
     isTransientError,
     refetchUser,
     logout,
   } = useAuth();
-
-  const { data: proposalSummary } = useQuery({
-    queryKey: ["proposalSummary"],
-    queryFn: () => api.projects.proposalSummary(),
-    refetchInterval: 30000,
-    enabled: isAuthenticated,
-  });
-  const proposalCount = proposalSummary?.data?.count ?? 0;
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -709,7 +682,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       <CompactSidebarRail
         user={user}
         pathname={pathname}
-        proposalCount={proposalCount}
         onPaletteOpen={handlePaletteOpen}
         onCreateSession={handleCreateSessionOpen}
         onLogout={logout}
@@ -725,7 +697,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           variant="desktop"
           user={user}
           pathname={pathname}
-          proposalCount={proposalCount}
           onPaletteOpen={handlePaletteOpen}
           onCreateSession={handleCreateSessionOpen}
           onLogout={logout}
@@ -748,7 +719,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             variant="mobile"
             user={user}
             pathname={pathname}
-            proposalCount={proposalCount}
             onPaletteOpen={handlePaletteOpen}
             onCreateSession={handleCreateSessionOpen}
             onNavigate={handleCloseMobileMenu}
