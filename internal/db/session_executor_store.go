@@ -22,7 +22,8 @@ func NewSessionExecutorStore(db DBTX) *SessionExecutorStore {
 
 const sessionExecutorColumns = `id, org_id, session_id, thread_id, job_id, job_type,
 	host_node_id, owner_id, lock_token, status, image, build_sha, heartbeat_at,
-	lease_expires_at, started_at, completed_at, exit_code, last_error, created_at, updated_at`
+	lease_expires_at, runtime_deadline_at, drain_intent, drain_requested_at,
+	drain_deadline_at, started_at, completed_at, exit_code, last_error, created_at, updated_at`
 
 func (s *SessionExecutorStore) ClearPreHandoffReservation(ctx context.Context, orgID, sessionID, jobID uuid.UUID) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
@@ -53,24 +54,25 @@ func (s *SessionExecutorStore) CreateStarting(ctx context.Context, orgID uuid.UU
 		INSERT INTO session_executors (
 			org_id, session_id, thread_id, job_id, job_type, host_node_id,
 			owner_id, lock_token, status, image, build_sha, heartbeat_at,
-			lease_expires_at
+			lease_expires_at, runtime_deadline_at
 		)
 		VALUES (
 			@org_id, @session_id, @thread_id, @job_id, @job_type, @host_node_id,
 			@owner_id, @lock_token, 'starting', @image, @build_sha, now(),
-			now() + interval '60 seconds'
+			now() + interval '60 seconds', @runtime_deadline_at
 		)
 		RETURNING id`, pgx.NamedArgs{
-		"org_id":       orgID,
-		"session_id":   params.SessionID,
-		"thread_id":    params.ThreadID,
-		"job_id":       params.JobID,
-		"job_type":     params.JobType,
-		"host_node_id": params.HostNodeID,
-		"owner_id":     params.OwnerID,
-		"lock_token":   params.LockToken,
-		"image":        params.Image,
-		"build_sha":    params.BuildSHA,
+		"org_id":              orgID,
+		"session_id":          params.SessionID,
+		"thread_id":           params.ThreadID,
+		"job_id":              params.JobID,
+		"job_type":            params.JobType,
+		"host_node_id":        params.HostNodeID,
+		"owner_id":            params.OwnerID,
+		"lock_token":          params.LockToken,
+		"image":               params.Image,
+		"build_sha":           params.BuildSHA,
+		"runtime_deadline_at": params.RuntimeDeadlineAt,
 	}).Scan(&id)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("create session executor: %w", err)
@@ -78,8 +80,9 @@ func (s *SessionExecutorStore) CreateStarting(ctx context.Context, orgID uuid.UU
 	return id, nil
 }
 
-func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
+func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, error) {
+	var drainIntent string
+	err := s.db.QueryRow(ctx, `
 		UPDATE session_executors
 		SET heartbeat_at = now(),
 			lease_expires_at = now() + ($4 * interval '1 second'),
@@ -87,11 +90,19 @@ func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, ex
 		WHERE org_id = $1
 		  AND id = $2
 		  AND lock_token = $3
-		  AND status IN ('starting', 'running', 'draining')`, orgID, executorID, lockToken, int(leaseDuration.Seconds()))
-	if err != nil {
-		return false, fmt.Errorf("heartbeat session executor: %w", err)
+		  AND status IN ('starting', 'running', 'draining')
+		RETURNING drain_intent`, orgID, executorID, lockToken, int(leaseDuration.Seconds())).Scan(&drainIntent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, models.DrainIntentNone, nil
 	}
-	return tag.RowsAffected() == 1, nil
+	if err != nil {
+		return false, models.DrainIntentNone, fmt.Errorf("heartbeat session executor: %w", err)
+	}
+	intent := models.DrainIntent(drainIntent)
+	if intent == "" {
+		intent = models.DrainIntentNone
+	}
+	return true, intent, nil
 }
 
 // GetByID loads an executor by its globally unique id during executor boot,
@@ -114,6 +125,10 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 	var status string
 	var heartbeatAt pgtype.Timestamptz
 	var leaseExpiresAt pgtype.Timestamptz
+	var runtimeDeadlineAt pgtype.Timestamptz
+	var drainIntent string
+	var drainRequestedAt pgtype.Timestamptz
+	var drainDeadlineAt pgtype.Timestamptz
 	var completedAt pgtype.Timestamptz
 	var exitCode pgtype.Int4
 	var lastError pgtype.Text
@@ -132,6 +147,10 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 		&executor.BuildSHA,
 		&heartbeatAt,
 		&leaseExpiresAt,
+		&runtimeDeadlineAt,
+		&drainIntent,
+		&drainRequestedAt,
+		&drainDeadlineAt,
 		&executor.StartedAt,
 		&completedAt,
 		&exitCode,
@@ -151,6 +170,19 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 	}
 	if leaseExpiresAt.Valid {
 		executor.LeaseExpiresAt = &leaseExpiresAt.Time
+	}
+	if runtimeDeadlineAt.Valid {
+		executor.RuntimeDeadlineAt = &runtimeDeadlineAt.Time
+	}
+	executor.DrainIntent = models.DrainIntent(drainIntent)
+	if executor.DrainIntent == "" {
+		executor.DrainIntent = models.DrainIntentNone
+	}
+	if drainRequestedAt.Valid {
+		executor.DrainRequestedAt = &drainRequestedAt.Time
+	}
+	if drainDeadlineAt.Valid {
+		executor.DrainDeadlineAt = &drainDeadlineAt.Time
 	}
 	if completedAt.Valid {
 		executor.CompletedAt = &completedAt.Time
@@ -186,6 +218,8 @@ func (s *SessionExecutorStore) MarkDrainingWithLease(ctx context.Context, orgID,
 	tag, err := s.db.Exec(ctx, `
 		UPDATE session_executors
 		SET status = 'draining',
+			drain_intent = 'host_maintenance',
+			drain_requested_at = COALESCE(drain_requested_at, now()),
 			updated_at = now()
 		WHERE org_id = $1
 		  AND id = $2
@@ -195,6 +229,40 @@ func (s *SessionExecutorStore) MarkDrainingWithLease(ctx context.Context, orgID,
 		return false, fmt.Errorf("mark session executor draining: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// MarkDeployBudgetExpiredByNode asks active executors on a draining worker to
+// enter the deploy-budget-expired graceful checkpoint path.
+// lint:allow-no-orgid reason="worker deploy budget expiry is node-scoped across all orgs"
+func (s *SessionExecutorStore) MarkDeployBudgetExpiredByNode(ctx context.Context, nodeID string, now time.Time, graceWindow time.Duration) (int64, error) {
+	if nodeID == "" {
+		return 0, fmt.Errorf("node id is required")
+	}
+	graceSeconds := int(graceWindow.Seconds())
+	if graceSeconds <= 0 {
+		graceSeconds = 30
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_executors
+		SET status = 'draining',
+			drain_intent = 'deploy_budget_expired',
+			drain_requested_at = COALESCE(drain_requested_at, @now),
+			drain_deadline_at = @now + (@grace_seconds * interval '1 second'),
+			updated_at = now()
+		WHERE host_node_id = @node_id
+		  AND status IN ('starting', 'running', 'draining')
+		  AND drain_intent <> 'deploy_budget_expired'
+		  AND runtime_deadline_at IS NOT NULL
+		  AND runtime_deadline_at <= @now`,
+		pgx.NamedArgs{
+			"node_id":       nodeID,
+			"now":           now.UTC(),
+			"grace_seconds": graceSeconds,
+		})
+	if err != nil {
+		return 0, fmt.Errorf("mark deploy budget expired executors: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *SessionExecutorStore) MarkTerminalWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, status models.SessionExecutorStatus, exitCode *int, lastError string) (bool, error) {

@@ -502,10 +502,18 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 			FROM nodes
 			WHERE status = 'dead' OR last_heartbeat_at < @dead_before
 		),
+		claiming_node AS (
+			SELECT id
+			FROM nodes
+			WHERE id = @node_id
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+		),
 		next_job AS (
 			SELECT j.id
 			FROM jobs j
 			LEFT JOIN dead_target_nodes d ON d.id = j.target_node_id
+			JOIN claiming_node cn ON TRUE
 			WHERE j.status = 'pending' AND j.run_at <= now()
 			  AND (
 			    j.target_node_id IS NULL

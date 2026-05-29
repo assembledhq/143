@@ -582,6 +582,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
   const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
+  const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
 
   const triggeredByMember = session.triggered_by_user_id
@@ -606,6 +607,22 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
           </CardHeader>
           <CardContent>
             <MarkdownContent content={session.result_summary} className="text-xs" />
+          </CardContent>
+        </Card>
+      )}
+
+      {isDeployRecovery && (
+        <Card className="border-l-2 border-l-amber-500 bg-amber-50/30 dark:bg-amber-950/10">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs flex items-center gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+              Resumed after deploy
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-muted-foreground">
+              This turn was checkpointed because its old worker reached the deploy runtime ceiling, then requeued onto a replacement worker.
+            </p>
           </CardContent>
         </Card>
       )}

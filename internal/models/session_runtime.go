@@ -51,14 +51,15 @@ func (t RuntimeProgressType) Validate() error {
 type RuntimeStopReason string
 
 const (
-	RuntimeStopReasonNone            RuntimeStopReason = ""
-	RuntimeStopReasonUserCancel      RuntimeStopReason = "user_cancel"
-	RuntimeStopReasonSoftBudget      RuntimeStopReason = "soft_budget"
-	RuntimeStopReasonNoProgress      RuntimeStopReason = "no_progress"
-	RuntimeStopReasonAbsoluteCeiling RuntimeStopReason = "absolute_ceiling"
-	RuntimeStopReasonForceKill       RuntimeStopReason = "force_kill"
-	RuntimeStopReasonWorkerRecovery  RuntimeStopReason = "worker_recovery"
-	RuntimeStopReasonWorkerDrain     RuntimeStopReason = "worker_drain"
+	RuntimeStopReasonNone                RuntimeStopReason = ""
+	RuntimeStopReasonUserCancel          RuntimeStopReason = "user_cancel"
+	RuntimeStopReasonSoftBudget          RuntimeStopReason = "soft_budget"
+	RuntimeStopReasonNoProgress          RuntimeStopReason = "no_progress"
+	RuntimeStopReasonAbsoluteCeiling     RuntimeStopReason = "absolute_ceiling"
+	RuntimeStopReasonForceKill           RuntimeStopReason = "force_kill"
+	RuntimeStopReasonWorkerRecovery      RuntimeStopReason = "worker_recovery"
+	RuntimeStopReasonWorkerDrain         RuntimeStopReason = "worker_drain"
+	RuntimeStopReasonDeployBudgetExpired RuntimeStopReason = "deploy_budget_expired"
 )
 
 func (r RuntimeStopReason) Validate() error {
@@ -70,7 +71,8 @@ func (r RuntimeStopReason) Validate() error {
 		RuntimeStopReasonAbsoluteCeiling,
 		RuntimeStopReasonForceKill,
 		RuntimeStopReasonWorkerRecovery,
-		RuntimeStopReasonWorkerDrain:
+		RuntimeStopReasonWorkerDrain,
+		RuntimeStopReasonDeployBudgetExpired:
 		return nil
 	default:
 		return fmt.Errorf("invalid RuntimeStopReason: %q", r)

@@ -579,6 +579,9 @@ func main() {
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
 		}
+		if cfg.NodeID != "" {
+			go worker.RunNodeDrainWatcher(ctx, db.NewNodeStore(pool), processWorkers, cfg.NodeID, logger, 5*time.Second)
+		}
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
@@ -1014,12 +1017,14 @@ func configureSessionExecutorDispatch(
 				"/var/run/docker.sock:/var/run/docker.sock",
 				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 			},
-			GroupAdd: sessionExecutorGroupAddFromEnv(),
-			Env:      os.Environ(),
+			GroupAdd:    sessionExecutorGroupAddFromEnv(),
+			Env:         os.Environ(),
+			StopTimeout: cfg.SessionExecutorStopTimeout,
 		}),
-		NodeID:   cfg.NodeID,
-		Image:    cfg.SessionExecutorImage,
-		BuildSHA: version.BuildSHA,
+		NodeID:                cfg.NodeID,
+		Image:                 cfg.SessionExecutorImage,
+		BuildSHA:              version.BuildSHA,
+		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
 	}
 }
 

@@ -467,6 +467,8 @@ export interface Session {
   linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;
+  runtime_stop_reason?: string;
+  runtime_graceful_stop_at?: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;

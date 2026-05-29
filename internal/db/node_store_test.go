@@ -14,7 +14,8 @@ import (
 )
 
 var nodeStoreTestCols = []string{
-	"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at",
+	"id", "mode", "host", "status", "drain_intent", "metadata", "started_at", "last_heartbeat_at",
+	"drain_requested_at", "drain_budget_expires_at", "drain_requested_by", "drain_reason",
 }
 
 func TestNodeStore_GetByID(t *testing.T) {
@@ -35,7 +36,7 @@ func TestNodeStore_GetByID(t *testing.T) {
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(nodeStoreTestCols).
-					AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, now, now),
+					AddRow("worker-1", "worker", "worker-1.internal", "active", "none", metadata, now, now, nil, nil, "", ""),
 			)
 
 		store := NewNodeStore(mock)
@@ -104,8 +105,8 @@ func TestNodeStore_ListActive(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(nodeStoreTestCols).
-					AddRow("worker-1", "worker", "worker-1.internal", "active", firstMeta, now, now).
-					AddRow("worker-2", "api", "api-1.internal", "active", secondMeta, now, now),
+					AddRow("worker-1", "worker", "worker-1.internal", "active", "none", firstMeta, now, now, nil, nil, "", "").
+					AddRow("worker-2", "api", "api-1.internal", "active", "none", secondMeta, now, now, nil, nil, "", ""),
 			)
 
 		store := NewNodeStore(mock)
@@ -148,7 +149,7 @@ func TestNodeStore_ListActive(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(nodeStoreTestCols).
-					AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, "not-a-time", now),
+					AddRow("worker-1", "worker", "worker-1.internal", "active", "none", metadata, "not-a-time", now, nil, nil, "", ""),
 			)
 
 		store := NewNodeStore(mock)

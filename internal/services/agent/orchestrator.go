@@ -181,6 +181,9 @@ func interruptedStopReason(ctx context.Context, stopReason StopReason) StopReaso
 	if errors.Is(context.Cause(ctx), ErrWorkerDrainCause) {
 		return StopReasonWorkerDrain
 	}
+	if errors.Is(context.Cause(ctx), ErrDeployBudgetExpiredCause) {
+		return StopReasonDeployBudgetExpired
+	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return StopReasonWorkerDrain
 	}

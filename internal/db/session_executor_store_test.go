@@ -27,20 +27,22 @@ func TestSessionExecutorStore_CreateStarting(t *testing.T) {
 	jobID := uuid.New()
 	lockToken := uuid.New()
 	executorID := uuid.New()
+	deadline := time.Now().Add(90 * time.Minute).UTC()
 
 	mock.ExpectQuery("INSERT INTO session_executors").
-		WithArgs(orgID, sessionID, (*uuid.UUID)(nil), jobID, "run_agent", "worker-1", "worker-1", lockToken, "143:sha", "build-sha").
+		WithArgs(orgID, sessionID, (*uuid.UUID)(nil), jobID, "run_agent", "worker-1", "worker-1", lockToken, "143:sha", "build-sha", &deadline).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(executorID))
 
 	id, err := store.CreateStarting(context.Background(), orgID, models.CreateSessionExecutorParams{
-		SessionID:  sessionID,
-		JobID:      jobID,
-		JobType:    "run_agent",
-		HostNodeID: "worker-1",
-		OwnerID:    "worker-1",
-		LockToken:  lockToken,
-		Image:      "143:sha",
-		BuildSHA:   "build-sha",
+		SessionID:         sessionID,
+		JobID:             jobID,
+		JobType:           "run_agent",
+		HostNodeID:        "worker-1",
+		OwnerID:           "worker-1",
+		LockToken:         lockToken,
+		Image:             "143:sha",
+		BuildSHA:          "build-sha",
+		RuntimeDeadlineAt: &deadline,
 	})
 	require.NoError(t, err, "CreateStarting should insert an org-scoped executor row")
 	require.Equal(t, executorID, id, "CreateStarting should return the inserted executor id")
@@ -181,13 +183,14 @@ func TestSessionExecutorStore_HeartbeatWithLease(t *testing.T) {
 	executorID := uuid.New()
 	lockToken := uuid.New()
 
-	mock.ExpectExec("UPDATE session_executors").
+	mock.ExpectQuery("UPDATE session_executors[\\s\\S]+RETURNING drain_intent").
 		WithArgs(orgID, executorID, lockToken, int((2 * time.Minute).Seconds())).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"drain_intent"}).AddRow("none"))
 
-	ok, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
+	ok, intent, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
 	require.NoError(t, err, "HeartbeatWithLease should persist the executor heartbeat")
 	require.True(t, ok, "HeartbeatWithLease should report that the fenced update landed")
+	require.Equal(t, models.DrainIntentNone, intent, "HeartbeatWithLease should return the current executor drain intent")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -211,12 +214,13 @@ func TestSessionExecutorStore_GetByID(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "thread_id", "job_id", "job_type",
 			"host_node_id", "owner_id", "lock_token", "status", "image", "build_sha",
-			"heartbeat_at", "lease_expires_at", "started_at", "completed_at",
+			"heartbeat_at", "lease_expires_at", "runtime_deadline_at", "drain_intent",
+			"drain_requested_at", "drain_deadline_at", "started_at", "completed_at",
 			"exit_code", "last_error", "created_at", "updated_at",
 		}).AddRow(
 			executorID, orgID, sessionID, nil, jobID, "run_agent",
 			"worker-1", "worker-1", lockToken, string(models.SessionExecutorStatusStarting), "143:sha", "build-sha",
-			now, now.Add(time.Minute), now, nil, nil, nil, now, now,
+			now, now.Add(time.Minute), now.Add(90*time.Minute), "none", nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	executor, err := store.GetByID(context.Background(), executorID)
@@ -300,6 +304,46 @@ func TestSessionExecutorStore_StateTransitionsWithLease(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionExecutorStore_MarkDeployBudgetExpiredByNode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	now := time.Date(2026, 5, 28, 17, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec("UPDATE session_executors[\\s\\S]+drain_intent <> 'deploy_budget_expired'").
+		WithArgs(now, 45, "worker-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	updated, err := store.MarkDeployBudgetExpiredByNode(context.Background(), "worker-1", now, 45*time.Second)
+	require.NoError(t, err, "MarkDeployBudgetExpiredByNode should update over-budget active executors")
+	require.Equal(t, int64(2), updated, "MarkDeployBudgetExpiredByNode should return updated executor count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionExecutorStore_MarkDeployBudgetExpiredByNodeSkipsAlreadyMarkedExecutors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	now := time.Date(2026, 5, 28, 17, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec("UPDATE session_executors[\\s\\S]+drain_intent <> 'deploy_budget_expired'").
+		WithArgs(now, 45, "worker-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	updated, err := store.MarkDeployBudgetExpiredByNode(context.Background(), "worker-1", now, 45*time.Second)
+	require.NoError(t, err, "MarkDeployBudgetExpiredByNode should not error when every expired executor was already marked")
+	require.Equal(t, int64(0), updated, "MarkDeployBudgetExpiredByNode should return zero once budget expiry has already been recorded")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionExecutorStore_ReclaimLost(t *testing.T) {

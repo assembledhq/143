@@ -92,6 +92,30 @@ groups:
           summary: 'Worker fatal failures critical'
           description: 'Workers logged {{ $value }} fatal job failures in the last 10 minutes.'
           runbook: 'Treat this as an async pipeline incident and inspect worker logs, job backlog, and DB health.'
+      - alert: WorkerDeployBudgetExpiredStops
+        expr: '_time:30m service:worker AND _msg:"deploy budget expired; requested typed session stop" | stats count() as stops | filter stops:>0'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Worker deploy budget expired active sessions'
+          description: '{{ $value }} session executor(s) hit the deploy runtime ceiling during a routine blue/green drain in the last 30 minutes.'
+          runbook: 'Inspect worker_deploy_events and session runtime_stop_reason=deploy_budget_expired. This should checkpoint/requeue, not lose work; investigate if it fires frequently.'
+      - alert: WorkerDeployStopRejected
+        expr: '_time:15m service:worker AND _msg:"deploy budget expired but session stop request was not accepted" | stats count() as rejected | filter rejected:>0'
+        for: 1m
+        labels:
+          service: worker
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Worker deploy stop request rejected'
+          description: '{{ $value }} over-budget session executor(s) could not request the typed checkpoint stop during drain.'
+          runbook: 'Check worker logs for executor_id/session_id, confirm the session is still live, and manually recover or force maintenance if it cannot checkpoint.'
 
   - name: pr-pipeline-errors
     type: vlogs

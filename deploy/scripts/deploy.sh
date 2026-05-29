@@ -405,8 +405,8 @@ else
   fi
 fi
 
-if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
-  echo "Skipping docker daemon DNS check on app deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 for explicit maintenance."
+if { [ "$ROLE" = "app" ] || { [ "$ROLE" = "worker" ] && [ "${DEPLOY_MODE:-routine}" = "routine" ]; }; } && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  echo "Skipping docker daemon DNS check on $ROLE deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 and DEPLOY_MODE=maintenance for explicit maintenance."
 else
   # --- Docker daemon DNS resolvers (idempotent) ---
   # Pin /etc/docker/daemon.json's `dns` list to multiple independent
@@ -472,6 +472,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "WORKER_BLUE_GREEN_PORT_END=${WORKER_BLUE_GREEN_PORT_END:-}" \
   "WORKER_BASE_NODE_ID=${WORKER_BASE_NODE_ID:-}" \
   "WORKER_DRAIN_TIMEOUT=${WORKER_DRAIN_TIMEOUT:-}" \
+  "DEPLOY_MODE=${DEPLOY_MODE:-routine}" \
+  "DEPLOY_REQUESTED_BY=${DEPLOY_REQUESTED_BY:-deploy-script}" \
+  "DEPLOY_REASON=${DEPLOY_REASON:-routine worker rollout}" \
   "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
   "SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}" \
   "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
@@ -950,6 +953,53 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker ps --filter "label=com.docker.compose.service=worker" --format '{{.ID}}'
   }
 
+  worker_container_node_id() {
+    local cid="$1"
+    docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null \
+      | awk -F= '$1=="NODE_ID"{print $2; exit}'
+  }
+
+  first_running_worker_node_id() {
+    local containers="${1:-}" cid node_id
+    for cid in $containers; do
+      if ! docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+        continue
+      fi
+      node_id="$(worker_container_node_id "$cid")"
+      if [ -n "$node_id" ]; then
+        echo "$node_id"
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  run_worker_deployctl() {
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps \
+      -e "IMAGE_TAG=${IMAGE_TAG:-}" \
+      "$HEALTH_SERVICE" /bin/worker-deployctl "$@" < /dev/null
+  }
+
+  run_worker_deployctl_in_container() {
+    local cid="$1"
+    shift
+    docker exec -e "IMAGE_TAG=${IMAGE_TAG:-}" "$cid" /bin/worker-deployctl "$@"
+  }
+
+  wait_worker_db_heartbeat() {
+    local node_id="$1" timeout="${2:-120}" deadline
+    deadline=$((SECONDS + timeout))
+    echo "Waiting for worker node $node_id to register a fresh DB heartbeat (timeout ${timeout}s)..."
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      if run_worker_deployctl status --node-id "$node_id" --require-fresh --json; then
+        return 0
+      fi
+      sleep 2
+    done
+    echo "ERROR: worker node $node_id did not publish a fresh DB heartbeat before the rollout deadline." >&2
+    return 1
+  }
+
   worker_port_in_use() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
@@ -1064,8 +1114,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   drain_old_worker_containers() {
     local new_cid="$1"
     local old_containers="${2:-}"
-    local timeout
-    timeout="$(resolve_worker_drain_timeout_seconds)"
+    local deploy_id="${3:-worker-rollout-$(date -u +%Y%m%d%H%M%S)}"
     if [ -z "$old_containers" ]; then
       echo "No old worker containers to drain."
       return 0
@@ -1073,21 +1122,60 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
     mkdir -p /var/log/143
     for cid in $old_containers; do
+      local node_id
       if [ "$cid" = "$new_cid" ]; then
         continue
       fi
       if ! docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
         continue
       fi
-      echo "Requesting background drain for old worker container ${cid:0:12} (timeout ${timeout}s)..."
-      nohup docker stop -t "$timeout" "$cid" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
+      node_id="$(worker_container_node_id "$cid")"
+      if [ -z "$node_id" ]; then
+        echo "WARNING: old worker container ${cid:0:12} has no NODE_ID; leaving it untouched for operator review." >&2
+        continue
+      fi
+      echo "Marking old worker node $node_id (${cid:0:12}) as draining; retirement will wait for owned runtimes."
+      run_worker_deployctl_in_container "$new_cid" mark-draining \
+        --node-id "$node_id" \
+        --intent planned_rollout \
+        --deploy-id "$deploy_id" \
+        --reason "${DEPLOY_REASON:-routine worker rollout}" \
+        --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
+        --build-sha "${IMAGE_TAG:-}" \
+        --json
+      nohup bash -c '
+        set -euo pipefail
+        node_id="$1"
+        cid="$2"
+        ctl_cid="$3"
+        deploy_id="$4"
+        build_sha="$5"
+        requested_by="$6"
+        reason="$7"
+        while true; do
+          docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl expire-budget \
+            --node-id "$node_id" \
+            --deploy-id "$deploy_id" \
+            --reason "$reason" \
+            --requested-by "$requested_by" \
+            --build-sha "$build_sha" \
+            --json || true
+          if docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl retire-ready --node-id "$node_id" --json; then
+            echo "Worker node $node_id is retire-ready; stopping container ${cid:0:12}."
+            docker stop -t 60 "$cid"
+            exit 0
+          fi
+          sleep 30
+        done
+      ' _ "$node_id" "$cid" "$new_cid" "$deploy_id" "${IMAGE_TAG:-}" "${DEPLOY_REQUESTED_BY:-deploy-script}" "${DEPLOY_REASON:-routine worker rollout}" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
     done
   }
 
   deploy_worker_blue_green() {
-    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid
+    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id
 
     old_containers="$(list_running_worker_containers || true)"
+    preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"
     base_node_id="${WORKER_BASE_NODE_ID:-$(read_worker_env_value NODE_ID)}"
     worker_private_ip="$(read_worker_env_value WORKER_PRIVATE_IP)"
     if [ -z "$base_node_id" ] || [ -z "$worker_private_ip" ]; then
@@ -1097,24 +1185,37 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
     generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
     node_id="${base_node_id}-g${generation}"
+    deploy_id="worker-${generation}"
     if ! host_port="$(find_free_worker_port "$worker_private_ip")"; then
-      if [ -n "$old_containers" ] && ! worker_blue_green_extra_ports_configured; then
-        echo "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain."
-        drain_worker_containers_blocking "$old_containers"
-        old_containers=""
-        host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")" || return 1
-      else
-        return 1
-      fi
+      echo "ERROR: no free worker generation port; routine blue/green deploy refuses blocking drain fallback." >&2
+      echo "Configure WORKER_BLUE_GREEN_PORT_START/END or run an explicit maintenance deploy." >&2
+      return 1
     fi
     base_url="http://${worker_private_ip}:${host_port}"
     project="$(sanitize_compose_project "143-${node_id}")"
 
+    if [ -n "$preflight_node_id" ]; then
+      run_worker_deployctl preflight \
+        --mode "${DEPLOY_MODE:-routine}" \
+        --node-id "$preflight_node_id" \
+        --candidate-port "$host_port" \
+        --build-sha "${IMAGE_TAG:-}" \
+        --json
+    else
+      echo "No existing worker node id found for preflight; continuing first-generation deploy after local port checks."
+    fi
+
     STARTED_WORKER_CID=""
     start_worker_generation "$node_id" "$host_port" "$base_url" "$project"
     new_cid="$STARTED_WORKER_CID"
-    drain_old_worker_containers "$new_cid" "$old_containers"
-    echo "Worker generation ${new_cid:0:12} is healthy; old workers are draining in the background."
+    if ! wait_worker_db_heartbeat "$node_id" "${WORKER_BLUE_GREEN_DB_HEARTBEAT_TIMEOUT_SECONDS:-120}"; then
+      echo "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure..."
+      docker stop "$new_cid" >/dev/null 2>&1 || true
+      docker rm "$new_cid" >/dev/null 2>&1 || true
+      return 1
+    fi
+    drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id"
+    echo "Worker generation ${new_cid:0:12} is healthy; old workers are admission-draining until owned runtimes retire."
   }
 
   dump_diagnostics() {
@@ -1277,6 +1378,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   if [ "$ROLE" = "worker" ] && command -v runsc &>/dev/null; then
     DAEMON_JSON="/etc/docker/daemon.json"
     if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -Eq -- '--host-uds(=|[[:space:]]+)open' "$DAEMON_JSON"; then
+      if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
+        echo "ERROR: routine worker deploy would restart Docker to patch runsc; rerun with DEPLOY_MODE=maintenance after reviewing active runtimes." >&2
+        exit 1
+      fi
       echo "Patching runsc runtime with --ignore-cgroups --host-uds=open..."
       sudo runsc install -- --ignore-cgroups --host-uds=open
       sudo systemctl restart docker
@@ -1334,8 +1439,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "Updating supporting services..."
     recreate_other_services "api frontend caddy"
   elif [ "$ROLE" = "worker" ]; then
-    echo "Updating supporting services..."
-    recreate_other_services "$HEALTH_SERVICE"
+    if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
+      echo "Skipping supporting-service recreation for routine worker deploy; use DEPLOY_MODE=maintenance for host/runtime dependency changes."
+    else
+      echo "Updating supporting services for ${DEPLOY_MODE:-maintenance} worker deploy..."
+      recreate_other_services "$HEALTH_SERVICE"
+    fi
   fi
 
   # Rolling deploy for both api and frontend on the app role. Order matters:
@@ -1378,11 +1487,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl run_worker_deployctl_in_container wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
 IMAGE_TAG='$IMAGE_TAG'
+DEPLOY_MODE='${DEPLOY_MODE:-routine}'
+DEPLOY_REQUESTED_BY='${DEPLOY_REQUESTED_BY:-deploy-script}'
+DEPLOY_REASON='${DEPLOY_REASON:-routine worker rollout}'
 DB_HOST=$(printf '%q' "$(read_worker_env_value DB_HOST)")
 DB_PASSWORD=$(printf '%q' "$(read_worker_env_value DB_PASSWORD)")
 DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'

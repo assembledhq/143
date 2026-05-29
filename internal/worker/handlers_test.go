@@ -620,6 +620,7 @@ type orchestratorServiceStub struct {
 	stopSessionID        uuid.UUID
 	stopReason           agent.StopReason
 	stopSessionResult    bool
+	stopSessionFn        func(sessionID uuid.UUID, reason agent.StopReason) bool
 	cancelThreadCalls    int
 	cancelThreadID       uuid.UUID
 	cancelThreadResult   bool
@@ -727,6 +728,9 @@ func (s *orchestratorServiceStub) RequestSessionStopByID(sessionID uuid.UUID, re
 	s.stopSessionCalls++
 	s.stopSessionID = sessionID
 	s.stopReason = reason
+	if s.stopSessionFn != nil {
+		return s.stopSessionFn(sessionID, reason)
+	}
 	return s.stopSessionResult
 }
 
