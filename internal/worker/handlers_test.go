@@ -3307,6 +3307,34 @@ func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
 }
 
+func TestStartPreviewHandler_StaleSandboxClearedRetries(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("cleared stale sandbox: %w", agent.ErrStaleSandboxIDCleared)}
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "stale sandbox cleanup should requeue start_preview instead of dead-lettering the preview")
+	require.ErrorIs(t, retryable.Err, agent.ErrStaleSandboxIDCleared, "retryable error should preserve the stale sandbox sentinel")
+	require.NotNil(t, retryable.RetryAfter, "stale sandbox retry should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "stale sandbox retry should run after the cleanup settles")
+	require.True(t, retryable.BypassMaxRetryDuration, "stale sandbox retry should bypass the generic retry window")
+	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
 func TestStartPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
 	t.Parallel()
 

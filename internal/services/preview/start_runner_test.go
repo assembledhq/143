@@ -7,9 +7,11 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -134,6 +136,101 @@ func TestNewStartRunner_SnapshotCacheDoesNotUseTypedNilInterface(t *testing.T) {
 	got, ok := withManagerCache.snapshotCache.(*SnapshotCache)
 	require.True(t, ok, "runner should receive the manager snapshot cache when config cache is omitted")
 	require.Same(t, cache, got, "runner should use the manager snapshot cache instead of a typed nil interface")
+}
+
+type acquireSandboxProvider struct {
+	aliveByID map[string]bool
+	probedIDs []string
+}
+
+func (p *acquireSandboxProvider) Name() string { return "fake" }
+func (p *acquireSandboxProvider) Create(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, string, string, string) error {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) Exec(context.Context, *agent.Sandbox, string, io.Writer, io.Writer) (int, error) {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) WriteFile(context.Context, *agent.Sandbox, string, []byte) error {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) Destroy(context.Context, *agent.Sandbox) error {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) IsAlive(_ context.Context, sb *agent.Sandbox) (bool, error) {
+	p.probedIDs = append(p.probedIDs, sb.ID)
+	return p.aliveByID[sb.ID], nil
+}
+func (p *acquireSandboxProvider) ConnectionInfo(context.Context, *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) Snapshot(context.Context, *agent.Sandbox) (io.ReadCloser, error) {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) Restore(context.Context, *agent.Sandbox, io.Reader) error {
+	panic("not used")
+}
+func (p *acquireSandboxProvider) ExecStream(context.Context, *agent.Sandbox, string, func([]byte), io.Writer) (int, error) {
+	panic("not used")
+}
+
+func TestStartRunnerAcquireSandbox_ClearsStaleContainerIDBeforeHydrateRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	staleContainerID := "stale-container"
+	snapshotKey := "snapshots/session.tar.zst"
+	provider := &acquireSandboxProvider{aliveByID: map[string]bool{staleContainerID: false}}
+	runner := &StartRunner{
+		sessions:        db.NewSessionStore(mock),
+		sandboxProvider: provider,
+		snapshots:       acquireSandboxSnapshotStore{},
+		logger:          zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &staleContainerID,
+		SandboxState: models.SandboxStateRunning,
+		SnapshotKey:  &snapshotKey,
+	}
+
+	mock.ExpectQuery(`SELECT COALESCE\(container_id, ''\)\s+FROM sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(staleContainerID))
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+turn_holding_container = FALSE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	result := runner.acquireSandbox(context.Background(), orgID, session, nil)
+
+	require.ErrorIs(t, result.Err, agent.ErrStaleSandboxIDCleared, "stale container cleanup should ask the caller to retry")
+	require.Equal(t, "STALE_SANDBOX_CLEARED", result.ErrCode, "stale cleanup should return a stable preview error code")
+	require.Nil(t, result.Sandbox, "stale cleanup should not hydrate in the same attempt")
+	require.Equal(t, []string{staleContainerID, staleContainerID}, provider.probedIDs, "runner should probe the recorded container before clearing it")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type acquireSandboxSnapshotStore struct{}
+
+func (acquireSandboxSnapshotStore) Save(context.Context, string, io.Reader) error {
+	panic("not used")
+}
+func (acquireSandboxSnapshotStore) Load(context.Context, string, io.Writer) error {
+	panic("not used")
+}
+func (acquireSandboxSnapshotStore) Delete(context.Context, string) error {
+	panic("not used")
 }
 
 type fakePreviewStartupCache struct {
