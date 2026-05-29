@@ -85,6 +85,7 @@ export default function CreateEvalTaskPage() {
   // Step 3: Scoring
   const [criteria, setCriteria] = useState<CriterionForm[]>([emptyCriterion()]);
   const [passThreshold, setPassThreshold] = useState(0.7);
+  const [isNavigatingAfterCreate, setIsNavigatingAfterCreate] = useState(false);
 
   const { data: reposResponse } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
@@ -110,11 +111,19 @@ export default function CreateEvalTaskPage() {
           .map((t) => t.trim())
           .filter(Boolean),
       }),
+    onMutate: () => {
+      setIsNavigatingAfterCreate(false);
+    },
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.evals.tasks() });
+      setIsNavigatingAfterCreate(true);
       router.push(`/settings/evals/${response.data.id}`);
     },
+    onError: () => {
+      setIsNavigatingAfterCreate(false);
+    },
   });
+  const isCreatingEvalTask = createMutation.isPending || isNavigatingAfterCreate;
 
   const stepLabels = ["Source", "Problem", "Scoring", "Review"];
 
@@ -358,8 +367,8 @@ export default function CreateEvalTaskPage() {
               )}
               <div className="flex justify-between">
                 <Button variant="outline" onClick={() => setStep(3)}>Back</Button>
-                <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
-                  {createMutation.isPending ? "Creating..." : "Create eval task"}
+                <Button onClick={() => createMutation.mutate()} disabled={isCreatingEvalTask}>
+                  {isCreatingEvalTask ? "Creating..." : "Create eval task"}
                 </Button>
               </div>
             </CardContent>
