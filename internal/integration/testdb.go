@@ -126,6 +126,7 @@ func resolveMigrationSource() (string, error) {
 // schema_migrations is intentionally excluded — re-running migrations between
 // tests would dominate the wall-clock budget.
 var truncatedTables = []string{
+	"nodes",
 	"jobs",
 	"session_messages",
 	"session_logs",

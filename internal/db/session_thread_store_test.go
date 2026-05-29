@@ -21,6 +21,7 @@ var sessionThreadTestColumns = []string{
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
 func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now time.Time) []interface{} {
@@ -31,6 +32,7 @@ func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now
 		nil, nil, nil, nil,
 		nil, nil, now,
 		nil, nil, float64(0), 0, nil,
+		"", nil, "", "", []byte("[]"),
 	}
 }
 
@@ -64,6 +66,26 @@ func TestSessionThreadStore_Create(t *testing.T) {
 	require.NoError(t, err, "Create should not return an error")
 	require.Equal(t, threadID, thread.ID, "should set the thread ID from RETURNING clause")
 	require.Equal(t, now, thread.CreatedAt, "should set the created_at from RETURNING clause")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionThreadStore_RecordRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	threadID := uuid.New()
+	stopAfter := time.Now().UTC().Add(5 * time.Minute)
+	mock.ExpectExec("UPDATE session_threads[\\s\\S]+runtime_stop_reason = @runtime_stop_reason[\\s\\S]+recovery_event_history").
+		WithArgs(anyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := NewSessionThreadStore(mock)
+	err = store.RecordRecoveryMetadata(context.Background(), orgID, threadID, models.RuntimeStopReasonDeployBudgetExpired, stopAfter, "queued", "deploy budget expired")
+	require.NoError(t, err, "RecordRecoveryMetadata should persist thread-level deploy recovery metadata")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -197,8 +219,8 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 			switch tt.name {
 			case "returns threads for session":
 				expected := []models.SessionThread{
-					{ID: threadID1, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Backend", Status: "pending", CreatedAt: now},
-					{ID: threadID2, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Frontend", Status: "pending", CreatedAt: now},
+					{ID: threadID1, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Backend", Status: "pending", CreatedAt: now, RecoveryEventHistory: []byte("[]")},
+					{ID: threadID2, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Frontend", Status: "pending", CreatedAt: now, RecoveryEventHistory: []byte("[]")},
 				}
 				require.Equal(t, expected, threads, "should return the expected threads for session")
 			case "returns empty for session with no threads":

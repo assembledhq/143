@@ -29,6 +29,7 @@ func TestRuntimeStopReason_Validate(t *testing.T) {
 	require.NoError(t, RuntimeStopReasonSoftBudget.Validate(), "soft budget runtime stop reason should be valid")
 	require.NoError(t, RuntimeStopReasonNoProgress.Validate(), "no progress runtime stop reason should be valid")
 	require.NoError(t, RuntimeStopReasonWorkerDrain.Validate(), "worker drain runtime stop reason should be valid")
+	require.NoError(t, RuntimeStopReasonDeployBudgetExpired.Validate(), "deploy budget expired runtime stop reason should be valid")
 	require.Error(t, RuntimeStopReason("bad").Validate(), "unknown runtime stop reason should be rejected")
 }
 

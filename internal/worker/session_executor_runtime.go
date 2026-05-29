@@ -24,8 +24,9 @@ var (
 type executorRuntimeExecutorStore interface {
 	GetByID(ctx context.Context, executorID uuid.UUID) (models.SessionExecutor, error)
 	MarkRunningWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, error)
-	HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, error)
+	HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, error)
 	MarkDrainingWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID) (bool, error)
+	MarkHumanInputCheckpointByJob(ctx context.Context, orgID, jobID, lockToken uuid.UUID) (bool, error)
 	MarkTerminalWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, status models.SessionExecutorStatus, exitCode *int, lastError string) (bool, error)
 }
 
@@ -121,13 +122,16 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	var lostOwnership atomic.Bool
 	var drainHandled atomic.Bool
 	var wg sync.WaitGroup
-	r.startOwnershipLoops(handlerCtx, &wg, executor, job, leaseDuration, &lostOwnership, cancelHandler)
+	r.startOwnershipLoops(handlerCtx, &wg, executor, job, leaseDuration, &lostOwnership, &drainHandled, cancelHandler)
 	drainDone := r.startDrainWatcher(ctx, executor, &drainHandled)
 
 	r.loggerPtr().Info().
 		Str("executor_id", executor.ID.String()).
 		Str("job_id", job.ID.String()).
 		Str("job_type", job.JobType).
+		Str("deploy_generation", executor.BuildSHA).
+		Str("host_node_id", executor.HostNodeID).
+		Str("drain_intent", string(executor.DrainIntent)).
 		Msg("session executor processing job")
 
 	runErr := handler(handlerCtx, job.JobType, job.Payload)
@@ -212,12 +216,12 @@ func (r *SessionExecutorRuntime) handlerFor(jobType string) (JobHandler, bool) {
 	}
 }
 
-func (r *SessionExecutorRuntime) startOwnershipLoops(ctx context.Context, wg *sync.WaitGroup, executor models.SessionExecutor, job *models.Job, leaseDuration time.Duration, lostOwnership *atomic.Bool, cancel context.CancelFunc) {
+func (r *SessionExecutorRuntime) startOwnershipLoops(ctx context.Context, wg *sync.WaitGroup, executor models.SessionExecutor, job *models.Job, leaseDuration time.Duration, lostOwnership *atomic.Bool, drainHandled *atomic.Bool, cancel context.CancelFunc) {
 	if r.HeartbeatInterval > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.heartbeatLoop(ctx, executor, leaseDuration, lostOwnership, cancel)
+			r.heartbeatLoop(ctx, executor, leaseDuration, lostOwnership, drainHandled, cancel)
 		}()
 	}
 	if r.RenewInterval > 0 {
@@ -229,15 +233,16 @@ func (r *SessionExecutorRuntime) startOwnershipLoops(ctx context.Context, wg *sy
 	}
 }
 
-func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor models.SessionExecutor, leaseDuration time.Duration, lostOwnership *atomic.Bool, cancel context.CancelFunc) {
+func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor models.SessionExecutor, leaseDuration time.Duration, lostOwnership *atomic.Bool, drainHandled *atomic.Bool, cancel context.CancelFunc) {
 	ticker := time.NewTicker(r.HeartbeatInterval)
 	defer ticker.Stop()
+	budgetStopRequested := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ok, err := r.Executors.HeartbeatWithLease(ctx, executor.OrgID, executor.ID, executor.LockToken, leaseDuration)
+			ok, drainIntent, err := r.Executors.HeartbeatWithLease(ctx, executor.OrgID, executor.ID, executor.LockToken, leaseDuration)
 			if err != nil {
 				r.loggerPtr().Warn().Err(err).Str("executor_id", executor.ID.String()).Msg("failed to heartbeat session executor")
 				continue
@@ -246,6 +251,33 @@ func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor mod
 				lostOwnership.Store(true)
 				cancel()
 				return
+			}
+			if budgetStopRequested {
+				continue
+			}
+			if drainIntent == models.DrainIntentDeployBudgetExpired {
+				budgetStopRequested = true
+				drainHandled.Store(true)
+				if r.Services == nil || r.Services.Orchestrator == nil {
+					r.loggerPtr().Warn().
+						Str("executor_id", executor.ID.String()).
+						Str("session_id", executor.SessionID.String()).
+						Msg("deploy budget expired but orchestrator service is unavailable")
+					cancel()
+					return
+				}
+				if !r.Services.Orchestrator.RequestSessionStopByID(executor.SessionID, agent.StopReasonDeployBudgetExpired) {
+					r.loggerPtr().Warn().
+						Str("executor_id", executor.ID.String()).
+						Str("session_id", executor.SessionID.String()).
+						Msg("deploy budget expired but session stop request was not accepted")
+					cancel()
+					return
+				}
+				r.loggerPtr().Info().
+					Str("executor_id", executor.ID.String()).
+					Str("session_id", executor.SessionID.String()).
+					Msg("deploy budget expired; requested typed session stop")
 			}
 		}
 	}
@@ -282,11 +314,6 @@ func (r *SessionExecutorRuntime) startDrainWatcher(ctx context.Context, executor
 	go func() {
 		defer close(done)
 		<-ctx.Done()
-		if r.Services != nil && r.Services.Orchestrator != nil {
-			if r.Services.Orchestrator.RequestSessionStopByID(executor.SessionID, agent.StopReasonWorkerDrain) && drainHandled != nil {
-				drainHandled.Store(true)
-			}
-		}
 		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if ok, err := r.Executors.MarkDrainingWithLease(drainCtx, executor.OrgID, executor.ID, executor.LockToken); err != nil {
@@ -303,6 +330,19 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 	defer cancel()
 
 	if err == nil {
+		if marked, markErr := r.Executors.MarkHumanInputCheckpointByJob(writeCtx, executor.OrgID, job.ID, executor.LockToken); markErr != nil {
+			r.loggerPtr().Warn().
+				Err(markErr).
+				Str("executor_id", executor.ID.String()).
+				Str("job_id", job.ID.String()).
+				Msg("failed to record human-input checkpoint drain intent")
+		} else if marked {
+			r.loggerPtr().Info().
+				Str("executor_id", executor.ID.String()).
+				Str("job_id", job.ID.String()).
+				Str("drain_intent", string(models.DrainIntentHumanInputCheckpoint)).
+				Msg("session executor released ownership at human-input checkpoint")
+		}
 		if ok := r.markJobSucceeded(writeCtx, executor, job); ok {
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusCompleted, 0, "")
 		}
