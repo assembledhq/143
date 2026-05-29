@@ -64,6 +64,10 @@ type Config struct {
 	// SessionExecutorDockerNetwork optionally attaches executor containers to
 	// the same Docker network as worker-side dependencies such as chrome.
 	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
+	// SessionExecutorStopTimeout is the Docker stop timeout for executor
+	// containers. Routine deploys should not stop active executors, but this
+	// keeps maintenance/emergency stops aligned with runtime policy.
+	SessionExecutorStopTimeout time.Duration `env:"SESSION_EXECUTOR_STOP_TIMEOUT" envDefault:"2h"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
@@ -24,6 +25,7 @@ type DockerExecutorLauncherConfig struct {
 	Binds       []string
 	GroupAdd    []string
 	Env         []string
+	StopTimeout time.Duration
 }
 
 type DockerExecutorLauncher struct {
@@ -72,11 +74,17 @@ func (l *DockerExecutorLauncher) Launch(ctx context.Context, spec ExecutorLaunch
 	if l.cfg.NetworkMode != "" {
 		hostConfig.NetworkMode = container.NetworkMode(l.cfg.NetworkMode)
 	}
+	var stopTimeoutSeconds *int
+	if l.cfg.StopTimeout > 0 {
+		seconds := int(l.cfg.StopTimeout.Seconds())
+		stopTimeoutSeconds = &seconds
+	}
 	resp, err := l.client.ContainerCreate(ctx, &container.Config{
-		Image:  image,
-		Cmd:    []string{"/bin/session-executor", "--executor-id", spec.ExecutorID.String()},
-		Env:    append(append([]string{}, l.cfg.Env...), "SESSION_EXECUTOR_ID="+spec.ExecutorID.String()),
-		Labels: labels,
+		Image:       image,
+		Cmd:         []string{"/bin/session-executor", "--executor-id", spec.ExecutorID.String()},
+		Env:         append(append([]string{}, l.cfg.Env...), "SESSION_EXECUTOR_ID="+spec.ExecutorID.String()),
+		Labels:      labels,
+		StopTimeout: stopTimeoutSeconds,
 	}, hostConfig, nil, nil, name)
 	if err != nil {
 		return fmt.Errorf("create session executor container: %w", err)

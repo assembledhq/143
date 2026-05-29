@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,18 +19,29 @@ import (
 )
 
 type executorRuntimeExecutorStoreStub struct {
-	executor       models.SessionExecutor
-	getErr         error
-	markRunningOK  bool
-	terminalStatus models.SessionExecutorStatus
-	terminalToken  uuid.UUID
-	terminalCalls  int
-	drainingCalls  int
+	mu                        sync.Mutex
+	executor                  models.SessionExecutor
+	getSequence               []models.SessionExecutor
+	getErr                    error
+	heartbeatIntent           models.DrainIntent
+	markRunningOK             bool
+	terminalStatus            models.SessionExecutorStatus
+	terminalToken             uuid.UUID
+	terminalCalls             int
+	drainingCalls             int
+	humanInputCheckpointCalls int
 }
 
 func (s *executorRuntimeExecutorStoreStub) GetByID(context.Context, uuid.UUID) (models.SessionExecutor, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.getErr != nil {
 		return models.SessionExecutor{}, s.getErr
+	}
+	if len(s.getSequence) > 0 {
+		executor := s.getSequence[0]
+		s.getSequence = s.getSequence[1:]
+		return executor, nil
 	}
 	return s.executor, nil
 }
@@ -38,16 +50,30 @@ func (s *executorRuntimeExecutorStoreStub) MarkRunningWithLease(context.Context,
 	return s.markRunningOK, nil
 }
 
-func (s *executorRuntimeExecutorStoreStub) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
-	return true, nil
+func (s *executorRuntimeExecutorStoreStub) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, models.DrainIntent, error) {
+	if s.heartbeatIntent == "" {
+		return true, models.DrainIntentNone, nil
+	}
+	return true, s.heartbeatIntent, nil
 }
 
 func (s *executorRuntimeExecutorStoreStub) MarkDrainingWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.drainingCalls++
 	return true, nil
 }
 
+func (s *executorRuntimeExecutorStoreStub) MarkHumanInputCheckpointByJob(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.humanInputCheckpointCalls++
+	return false, nil
+}
+
 func (s *executorRuntimeExecutorStoreStub) MarkTerminalWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, lockToken uuid.UUID, status models.SessionExecutorStatus, _ *int, _ string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.terminalCalls++
 	s.terminalStatus = status
 	s.terminalToken = lockToken
@@ -584,6 +610,83 @@ func TestSessionExecutorRuntime_UsesDetachedContextForTerminalJobWrites(t *testi
 	require.False(t, jobs.sawCanceledCtx, "runtime should detach final job writes from executor parent cancellation")
 }
 
+func TestSessionExecutorRuntime_DeployBudgetExpiredRequestsTypedSystemStopAndRequeues(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	handlerStarted := make(chan struct{})
+	stopRequested := make(chan struct{})
+	baseExecutor := models.SessionExecutor{
+		ID:          executorID,
+		OrgID:       orgID,
+		SessionID:   sessionID,
+		JobID:       jobID,
+		JobType:     "run_agent",
+		LockToken:   lockToken,
+		Status:      models.SessionExecutorStatusStarting,
+		DrainIntent: models.DrainIntentNone,
+	}
+	orch := &orchestratorServiceStub{
+		stopSessionResult: true,
+		stopSessionFn: func(uuid.UUID, agent.StopReason) bool {
+			close(stopRequested)
+			return true
+		},
+	}
+	executors := &executorRuntimeExecutorStoreStub{
+		executor:        baseExecutor,
+		heartbeatIntent: models.DrainIntentDeployBudgetExpired,
+		markRunningOK:   true,
+	}
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "run_agent",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    1,
+			MaxAttempts: 3,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now(),
+		},
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors:         executors,
+		Jobs:              jobs,
+		Services:          &Services{Orchestrator: orch},
+		HeartbeatInterval: time.Millisecond,
+		Handlers: map[string]JobHandler{
+			"run_agent": func(context.Context, string, json.RawMessage) error {
+				close(handlerStarted)
+				<-stopRequested
+				return context.Canceled
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Run(context.Background(), executorID)
+	}()
+	<-handlerStarted
+
+	err := <-done
+	require.NoError(t, err, "runtime should persist a deploy-budget-expired requeue")
+	require.Equal(t, 1, orch.stopSessionCalls, "deploy budget expiry should request a typed session stop")
+	require.Equal(t, sessionID, orch.stopSessionID, "deploy budget expiry should target the owned session")
+	require.Equal(t, agent.StopReasonDeployBudgetExpired, orch.stopReason, "deploy budget expiry should preserve its stop reason")
+	require.Equal(t, 1, jobs.retryCalls, "deploy budget expiry should retry the original turn")
+	require.Equal(t, 0, jobs.succeededCalls, "deploy budget expiry should not mark the job succeeded")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "deploy budget expiry should requeue the executor")
+}
+
 func TestSessionExecutorRuntime_DrainRequestsTypedSystemStopAndRequeues(t *testing.T) {
 	t.Parallel()
 
@@ -643,13 +746,13 @@ func TestSessionExecutorRuntime_DrainRequestsTypedSystemStopAndRequeues(t *testi
 
 	err := <-done
 	require.NoError(t, err, "runtime should persist the drain retry decision successfully")
-	require.Equal(t, 0, orch.cancelSessionCalls, "drain watcher must not route worker drain through the user-cancel API")
-	require.Equal(t, 1, orch.stopSessionCalls, "drain watcher should request a typed system stop")
-	require.Equal(t, sessionID, orch.stopSessionID, "drain watcher should stop the executor session")
-	require.Equal(t, agent.StopReasonWorkerDrain, orch.stopReason, "drain watcher should preserve worker-drain as the stop reason")
-	require.Equal(t, 1, jobs.retryCalls, "drained sessions should retry the original turn instead of closing it as succeeded")
-	require.Equal(t, 0, jobs.succeededCalls, "drained sessions should not close the accepted job as succeeded")
-	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "drained executors should finish as requeued")
+	require.Equal(t, 0, orch.cancelSessionCalls, "executor context cancellation must not route through the user-cancel API")
+	require.Equal(t, 0, orch.stopSessionCalls, "executor context cancellation should not synthesize a planned-rollout worker drain stop")
+	require.Equal(t, uuid.Nil, orch.stopSessionID, "executor context cancellation should not target a session stop")
+	require.Equal(t, agent.StopReasonNone, orch.stopReason, "executor context cancellation should not record worker-drain as the stop reason")
+	require.Equal(t, 1, jobs.retryCalls, "cancelled executor handlers should retry the original turn through the normal retry path")
+	require.Equal(t, 0, jobs.succeededCalls, "cancelled executor handlers should not close the accepted job as succeeded")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "cancelled executors should finish as requeued")
 }
 
 func TestSessionExecutorRuntime_DrainPreservesHandlerRetryableError(t *testing.T) {

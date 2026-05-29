@@ -15,17 +15,19 @@ import (
 type StopReason string
 
 const (
-	StopReasonNone            StopReason = ""
-	StopReasonUserCancel      StopReason = "user_cancel"
-	StopReasonSoftBudget      StopReason = "soft_budget"
-	StopReasonNoProgress      StopReason = "no_progress"
-	StopReasonAbsoluteCeiling StopReason = "absolute_ceiling"
-	StopReasonWorkerDrain     StopReason = "worker_drain"
+	StopReasonNone                StopReason = ""
+	StopReasonUserCancel          StopReason = "user_cancel"
+	StopReasonSoftBudget          StopReason = "soft_budget"
+	StopReasonNoProgress          StopReason = "no_progress"
+	StopReasonAbsoluteCeiling     StopReason = "absolute_ceiling"
+	StopReasonWorkerDrain         StopReason = "worker_drain"
+	StopReasonDeployBudgetExpired StopReason = "deploy_budget_expired"
 )
 
 var (
-	ErrUserCancelCause  = errors.New("user requested session cancellation")
-	ErrWorkerDrainCause = errors.New("worker drain interrupted session")
+	ErrUserCancelCause          = errors.New("user requested session cancellation")
+	ErrWorkerDrainCause         = errors.New("worker drain interrupted session")
+	ErrDeployBudgetExpiredCause = errors.New("deploy budget expired interrupted session")
 )
 
 // cancelEntry holds the cancellation state for a single running session.
@@ -402,6 +404,8 @@ func cancelCauseForStopReason(reason StopReason) error {
 		return ErrUserCancelCause
 	case StopReasonWorkerDrain:
 		return ErrWorkerDrainCause
+	case StopReasonDeployBudgetExpired:
+		return ErrDeployBudgetExpiredCause
 	default:
 		return context.Canceled
 	}

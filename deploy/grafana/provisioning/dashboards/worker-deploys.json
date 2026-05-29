@@ -1,0 +1,77 @@
+{
+  "uid": "worker-deploys",
+  "title": "143 - Worker Deploys",
+  "tags": ["143", "worker", "deploy"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Deploy Budget Expirations",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "service:worker AND _msg:\"deploy budget expired; requested typed session stop\" | stats count() as stops",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Human Input Releases",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "service:worker AND _msg:\"session executor released ownership at human-input checkpoint\" | stats count() as releases",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Endpoint Reuse Blocks",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "service:worker AND _msg:\"no reusable worker host port\" | stats count() as blocks",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "logs",
+      "title": "Recent Worker Deploy Events",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "service:worker AND (\"worker deploy\" OR \"node_marked_draining\" OR \"retire-ready\" OR \"deploy budget expired\")"
+        }
+      ],
+      "options": { "showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": true, "prettifyLogMessage": false, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 4 }
+    }
+  ]
+}

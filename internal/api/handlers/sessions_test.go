@@ -732,6 +732,7 @@ var sessionThreadHandlerColumns = []string{
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at", "archived_at",
 	"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
 func sessionThreadHandlerRow(threadID, sessionID, orgID uuid.UUID, status models.ThreadStatus, turn int, now time.Time) []interface{} {
@@ -741,6 +742,7 @@ func sessionThreadHandlerRow(threadID, sessionID, orgID uuid.UUID, status models
 		nil, nil, nil, nil,
 		nil, nil, now, nil,
 		nil, float64(0), 0, nil,
+		"", nil, "", "", []byte("[]"),
 	}
 }
 
@@ -1637,6 +1639,7 @@ func TestSessionHandler_Get_AttachesThreadInboxDeliverySummary(t *testing.T) {
 			nil, nil, nil, nil,
 			&now, nil, now,
 			nil, nil, float64(0), 0, nil,
+			"", nil, "", "", []byte("[]"),
 		))
 	mock.ExpectQuery("(?s)SELECT .* FROM thread_inbox_entries").
 		WithArgs(orgID, runID).
@@ -1679,6 +1682,7 @@ func sessionThreadHandlerTestColumns() []string {
 		"result_summary", "diff", "failure_explanation", "failure_category",
 		"started_at", "completed_at", "created_at",
 		"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+		"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 	}
 }
 
@@ -3263,6 +3267,7 @@ var sessionHandlerThreadColumns = []string{
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
 func sessionHandlerThreadRow(threadID, sessionID, orgID uuid.UUID, label string, status models.ThreadStatus, turn int, now time.Time) []any {
@@ -3273,6 +3278,7 @@ func sessionHandlerThreadRow(threadID, sessionID, orgID uuid.UUID, label string,
 		nil, nil, nil, nil,
 		nil, nil, now,
 		nil, nil, float64(0), 0, nil,
+		"", nil, "", "", []byte("[]"),
 	}
 }
 
@@ -3417,16 +3423,17 @@ func TestSessionHandler_StreamLogsViaRedis_StatusPayloadIncludesThreads(t *testi
 	require.NoError(t, json.Unmarshal([]byte(extractSSEData(t, rec.BodyString(), "status")), &payload), "status event data should decode as SessionDetail")
 	require.Equal(t, runID, payload.ID, "status payload should preserve the session id")
 	require.Equal(t, []models.SessionThread{{
-		ID:                  threadID,
-		SessionID:           runID,
-		OrgID:               orgID,
-		AgentType:           models.AgentTypeCodex,
-		Label:               "Main",
-		Status:              models.ThreadStatusRunning,
-		CurrentTurn:         2,
-		CreatedAt:           now,
-		CostCents:           0,
-		PendingMessageCount: 0,
+		ID:                   threadID,
+		SessionID:            runID,
+		OrgID:                orgID,
+		AgentType:            models.AgentTypeCodex,
+		Label:                "Main",
+		Status:               models.ThreadStatusRunning,
+		CurrentTurn:          2,
+		CreatedAt:            now,
+		CostCents:            0,
+		PendingMessageCount:  0,
+		RecoveryEventHistory: []byte("[]"),
 	}}, payload.Threads, "status payload should include current session thread state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
