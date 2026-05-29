@@ -1465,6 +1465,33 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("hides stale freshness action when the preview failed to start", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "failed",
+        error: "Container crashed",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "out_of_date",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        preview_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        reason: "session_changed_after_preview_start",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Preview failed to start")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry Preview" })).toBeInTheDocument();
+    expect(screen.queryByText("New changes available")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("preview-freshness-callout")).not.toBeInTheDocument();
+  });
+
   it("shows unknown freshness as quiet metadata instead of a callout", async () => {
     mockGet.mockResolvedValue({
       ...makePreviewStatus({ status: "ready" }),
