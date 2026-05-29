@@ -13,6 +13,8 @@ The user should be able to trust the Preview tab answer to:
 
 When a preview is current, the tab stays quiet and keeps `Open Preview` as the primary action. When a preview is stale, the command header adds a compact warning and exposes `Update preview` as the primary lifecycle action until the preview is restarted from the latest workspace revision.
 
+The stale-state action label follows preview health. If the preview is still openable (`ready` or `partially_ready`), the action is `Refresh preview` because the user is updating a working preview to newer code. If the preview is failed or unhealthy, the action is `Retry preview`; retrying still launches against the current workspace revision, so the UI must not show both `Refresh preview` and `Retry preview` at the same time.
+
 Suggested copy:
 
 - Current: no extra freshness badge; ready-state metadata remains quiet.
