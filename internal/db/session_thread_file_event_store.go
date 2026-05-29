@@ -14,9 +14,8 @@ import (
 
 // SessionThreadFileEventStore persists tab-level file write attribution.
 // These rows are operational evidence — they power overlap badges in the tab
-// strip and "Touched by tab" / "Overlap with another tab" filters in the
-// Changes view. They are not security attribution and are best-effort: a
-// missed event is recoverable by re-sampling git status on the next turn.
+// strip. They are not security attribution and are best-effort: a missed event
+// is recoverable by re-sampling git status on the next turn.
 type SessionThreadFileEventStore struct {
 	db DBTX
 }

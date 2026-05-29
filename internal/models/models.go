@@ -780,8 +780,7 @@ type SessionThread struct {
 
 // SessionThreadFileEvent is operational write attribution: which thread
 // touched which path, with optional git blob hashes before/after. Used to
-// power overlap badges in the tab strip and the "Touched by tab" / "Overlap
-// with another tab" filters in the Changes view. Not security attribution.
+// power overlap badges in the tab strip. Not security attribution.
 type SessionThreadFileEvent struct {
 	ID         int64                      `db:"id" json:"id"`
 	OrgID      uuid.UUID                  `db:"org_id" json:"org_id"`
