@@ -133,11 +133,6 @@ import {
 } from "@/lib/session-thread-views";
 import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
-import {
-  ThreadAttributionFilter,
-  useAttributionAllowedPaths,
-  type ThreadAttributionFilterValue,
-} from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -868,9 +863,6 @@ const ChangesTab = memo(function ChangesTab({
   onPassRangeChange,
   emptyStatusText,
   isMobile,
-  threads,
-  attributionFilter,
-  onAttributionFilterChange,
   diffLoadErrorText,
   diffTruncationText,
   onRetryDiffLoad,
@@ -886,9 +878,6 @@ const ChangesTab = memo(function ChangesTab({
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
   isMobile: boolean;
-  threads: SessionThread[];
-  attributionFilter: ThreadAttributionFilterValue;
-  onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
   diffLoadErrorText?: string;
   diffTruncationText?: string;
   onRetryDiffLoad?: () => void;
@@ -913,20 +902,6 @@ const ChangesTab = memo(function ChangesTab({
             passes={passes}
             selectedRange={passRange}
             onRangeChange={onPassRangeChange}
-          />
-        </div>
-      )}
-
-      {/* Tab attribution filter — visible only when the session has more
-          than one tab. Lets the user scope the diff to one tab's outputs,
-          the overlap, or unattributed paths. */}
-      {threads.length > 1 && (
-        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
-          <span className="text-xs text-muted-foreground">Filter by tab:</span>
-          <ThreadAttributionFilter
-            threads={threads}
-            value={attributionFilter}
-            onChange={onAttributionFilterChange}
           />
         </div>
       )}
@@ -4669,10 +4644,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  // Session-wide file event timeline powers the tab-strip overlap badges and
-  // the Changes-view attribution filters. Polled at the same cadence as the
-  // session detail so a user-perceptible "tab touched a file" lands within
-  // one polling cycle.
+  // Session-wide file event timeline powers tab-strip overlap badges. Polled
+  // at the same cadence as the session detail so a user-perceptible "tab
+  // touched a file" lands within one polling cycle.
   //
   // Polling is incremental: the first request fetches the whole timeline,
   // subsequent requests pass `?since=<latest observed_at>` so a long session
@@ -4707,22 +4681,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => computeThreadOverlap(chromeThreads, accumulatedFileEvents),
     [chromeThreads, accumulatedFileEvents],
   );
-  const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
-  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
-  const visibleDiffFiles = useMemo(
-    () =>
-      attributionAllowedPaths == null
-        ? diffFiles
-        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
-    [attributionAllowedPaths, diffFiles],
-  );
-  const visibleFilteredFiles = useMemo(
-    () =>
-      attributionAllowedPaths == null
-        ? filteredFiles
-        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
-    [attributionAllowedPaths, filteredFiles],
-  );
+  const visibleDiffFiles = diffFiles;
+  const visibleFilteredFiles = filteredFiles;
 
   useEffect(() => {
     if (visibleFilteredFiles.length === 0) {
@@ -5375,9 +5335,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               : "This session did not produce any file changes."
           }
           isMobile={isMobileReviewViewport}
-          threads={threads}
-          attributionFilter={attributionFilter}
-          onAttributionFilterChange={setAttributionFilter}
           diffLoadErrorText={diffLoadErrorText}
           diffTruncationText={diffTruncationText}
           onRetryDiffLoad={retryDiffLoad}
