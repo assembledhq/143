@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,39 +14,40 @@ import (
 
 // PreviewInstance is the core preview lifecycle record.
 type PreviewInstance struct {
-	ID                               uuid.UUID       `db:"id" json:"id"`
-	SessionID                        uuid.UUID       `db:"session_id" json:"session_id"`
-	PreviewTargetID                  *uuid.UUID      `db:"preview_target_id" json:"preview_target_id,omitempty"`
-	OrgID                            uuid.UUID       `db:"org_id" json:"org_id"`
-	UserID                           uuid.UUID       `db:"user_id" json:"user_id"`
-	ProfileName                      string          `db:"profile_name" json:"profile_name"`
-	Name                             string          `db:"name" json:"name"`
-	Status                           PreviewStatus   `db:"status" json:"status"`
-	Provider                         string          `db:"provider" json:"provider"`
-	WorkerNodeID                     string          `db:"worker_node_id" json:"worker_node_id"`
-	PreviewHandle                    string          `db:"preview_handle" json:"preview_handle"`
-	PrimaryService                   string          `db:"primary_service" json:"primary_service"`
-	Port                             int             `db:"port" json:"port"`
-	ConfigDigest                     string          `db:"config_digest" json:"config_digest"`
-	BaseCommitSHA                    string          `db:"base_commit_sha" json:"base_commit_sha"`
-	LastAccessedAt                   time.Time       `db:"last_accessed_at" json:"last_accessed_at"`
-	ExpiresAt                        time.Time       `db:"expires_at" json:"expires_at"`
-	StoppedAt                        *time.Time      `db:"stopped_at" json:"stopped_at,omitempty"`
-	LastPath                         string          `db:"last_path" json:"last_path"`
-	MemoryLimitMB                    int             `db:"memory_limit_mb" json:"memory_limit_mb"`
-	CPULimitMillis                   int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
-	DiskLimitMB                      int             `db:"disk_limit_mb" json:"disk_limit_mb"`
-	RecycleConfig                    json.RawMessage `db:"recycle_config" json:"-"`
-	RecycleSandbox                   json.RawMessage `db:"recycle_sandbox" json:"-"`
-	CurrentPhase                     string          `db:"current_phase" json:"current_phase,omitempty"`
-	RequestID                        *string         `db:"request_id" json:"request_id,omitempty"`
-	Error                            string          `db:"error" json:"error,omitempty"`
-	CreatedAt                        time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt                        time.Time       `db:"updated_at" json:"updated_at"`
-	RecycledAt                       time.Time       `db:"recycled_at" json:"recycled_at"`
-	RecycleScheduledAt               *time.Time      `db:"recycle_scheduled_at" json:"recycle_scheduled_at,omitempty"`
-	SourceWorkspaceRevision          *int64          `db:"source_workspace_revision" json:"source_workspace_revision,omitempty"`
-	SourceWorkspaceRevisionUpdatedAt *time.Time      `db:"source_workspace_revision_updated_at" json:"source_workspace_revision_updated_at,omitempty"`
+	ID                               uuid.UUID                `db:"id" json:"id"`
+	SessionID                        uuid.UUID                `db:"session_id" json:"session_id"`
+	PreviewTargetID                  *uuid.UUID               `db:"preview_target_id" json:"preview_target_id,omitempty"`
+	OrgID                            uuid.UUID                `db:"org_id" json:"org_id"`
+	UserID                           uuid.UUID                `db:"user_id" json:"user_id"`
+	ProfileName                      string                   `db:"profile_name" json:"profile_name"`
+	Name                             string                   `db:"name" json:"name"`
+	Status                           PreviewStatus            `db:"status" json:"status"`
+	Provider                         string                   `db:"provider" json:"provider"`
+	WorkerNodeID                     string                   `db:"worker_node_id" json:"worker_node_id"`
+	PreviewHandle                    string                   `db:"preview_handle" json:"preview_handle"`
+	PrimaryService                   string                   `db:"primary_service" json:"primary_service"`
+	Port                             int                      `db:"port" json:"port"`
+	ConfigDigest                     string                   `db:"config_digest" json:"config_digest"`
+	BaseCommitSHA                    string                   `db:"base_commit_sha" json:"base_commit_sha"`
+	LastAccessedAt                   time.Time                `db:"last_accessed_at" json:"last_accessed_at"`
+	ExpiresAt                        time.Time                `db:"expires_at" json:"expires_at"`
+	StoppedAt                        *time.Time               `db:"stopped_at" json:"stopped_at,omitempty"`
+	LastPath                         string                   `db:"last_path" json:"last_path"`
+	MemoryLimitMB                    int                      `db:"memory_limit_mb" json:"memory_limit_mb"`
+	CPULimitMillis                   int                      `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	DiskLimitMB                      int                      `db:"disk_limit_mb" json:"disk_limit_mb"`
+	RecycleConfig                    json.RawMessage          `db:"recycle_config" json:"-"`
+	RecycleSandbox                   json.RawMessage          `db:"recycle_sandbox" json:"-"`
+	CurrentPhase                     string                   `db:"current_phase" json:"current_phase,omitempty"`
+	RequestID                        *string                  `db:"request_id" json:"request_id,omitempty"`
+	Error                            string                   `db:"error" json:"error,omitempty"`
+	CreatedAt                        time.Time                `db:"created_at" json:"created_at"`
+	UpdatedAt                        time.Time                `db:"updated_at" json:"updated_at"`
+	RecycledAt                       time.Time                `db:"recycled_at" json:"recycled_at"`
+	RecycleScheduledAt               *time.Time               `db:"recycle_scheduled_at" json:"recycle_scheduled_at,omitempty"`
+	SourceWorkspaceRevision          *int64                   `db:"source_workspace_revision" json:"source_workspace_revision,omitempty"`
+	SourceWorkspaceRevisionUpdatedAt *time.Time               `db:"source_workspace_revision_updated_at" json:"source_workspace_revision_updated_at,omitempty"`
+	UnavailableReason                PreviewUnavailableReason `db:"unavailable_reason" json:"unavailable_reason,omitempty"`
 	// PreviewHoldingContainer marks this preview as a holder of the session's
 	// sandbox container. It pairs with Session.TurnHoldingContainer as the
 	// durable refcount that keeps the container alive between turns.
@@ -56,22 +58,48 @@ type PreviewInstance struct {
 // instances are durable user-facing records; runtimes are leased worker-owned
 // serving attachments and are authoritative for preview proxy routing.
 type PreviewRuntime struct {
-	ID                uuid.UUID            `db:"id" json:"id"`
-	OrgID             uuid.UUID            `db:"org_id" json:"org_id"`
-	PreviewInstanceID uuid.UUID            `db:"preview_instance_id" json:"preview_instance_id"`
-	RuntimeEpoch      int                  `db:"runtime_epoch" json:"runtime_epoch"`
-	WorkerNodeID      string               `db:"worker_node_id" json:"worker_node_id"`
-	EndpointURL       string               `db:"endpoint_url" json:"endpoint_url"`
-	PreviewHandle     string               `db:"preview_handle" json:"preview_handle"`
-	PrimaryPort       int                  `db:"primary_port" json:"primary_port"`
-	Status            PreviewRuntimeStatus `db:"status" json:"status"`
-	LeaseExpiresAt    time.Time            `db:"lease_expires_at" json:"lease_expires_at"`
-	LastHeartbeatAt   time.Time            `db:"last_heartbeat_at" json:"last_heartbeat_at"`
-	DrainRequestedAt  *time.Time           `db:"drain_requested_at" json:"drain_requested_at,omitempty"`
-	StoppedAt         *time.Time           `db:"stopped_at" json:"stopped_at,omitempty"`
-	Error             string               `db:"error" json:"error,omitempty"`
-	CreatedAt         time.Time            `db:"created_at" json:"created_at"`
-	UpdatedAt         time.Time            `db:"updated_at" json:"updated_at"`
+	ID                uuid.UUID                `db:"id" json:"id"`
+	OrgID             uuid.UUID                `db:"org_id" json:"org_id"`
+	PreviewInstanceID uuid.UUID                `db:"preview_instance_id" json:"preview_instance_id"`
+	RuntimeEpoch      int                      `db:"runtime_epoch" json:"runtime_epoch"`
+	WorkerNodeID      string                   `db:"worker_node_id" json:"worker_node_id"`
+	EndpointURL       string                   `db:"endpoint_url" json:"endpoint_url"`
+	PreviewHandle     string                   `db:"preview_handle" json:"preview_handle"`
+	PrimaryPort       int                      `db:"primary_port" json:"primary_port"`
+	Status            PreviewRuntimeStatus     `db:"status" json:"status"`
+	LeaseExpiresAt    time.Time                `db:"lease_expires_at" json:"lease_expires_at"`
+	LastHeartbeatAt   time.Time                `db:"last_heartbeat_at" json:"last_heartbeat_at"`
+	DrainRequestedAt  *time.Time               `db:"drain_requested_at" json:"drain_requested_at,omitempty"`
+	StoppedAt         *time.Time               `db:"stopped_at" json:"stopped_at,omitempty"`
+	Error             string                   `db:"error" json:"error,omitempty"`
+	UnavailableReason PreviewUnavailableReason `db:"unavailable_reason" json:"unavailable_reason,omitempty"`
+	CreatedAt         time.Time                `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time                `db:"updated_at" json:"updated_at"`
+}
+
+type PreviewUnavailableReason string
+
+const (
+	PreviewUnavailableReasonNone               PreviewUnavailableReason = ""
+	PreviewUnavailableReasonOwnerLost          PreviewUnavailableReason = "owner_lost"
+	PreviewUnavailableReasonDeployDrainTimeout PreviewUnavailableReason = "deploy_drain_timeout"
+	PreviewUnavailableReasonHostMaintenance    PreviewUnavailableReason = "host_maintenance"
+	PreviewUnavailableReasonEmergencyForce     PreviewUnavailableReason = "emergency_force"
+	PreviewUnavailableReasonLeaseExpired       PreviewUnavailableReason = "lease_expired"
+)
+
+func (r PreviewUnavailableReason) Validate() error {
+	switch r {
+	case PreviewUnavailableReasonNone,
+		PreviewUnavailableReasonOwnerLost,
+		PreviewUnavailableReasonDeployDrainTimeout,
+		PreviewUnavailableReasonHostMaintenance,
+		PreviewUnavailableReasonEmergencyForce,
+		PreviewUnavailableReasonLeaseExpired:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewUnavailableReason: %q", r)
+	}
 }
 
 // PreviewTarget is the branch/commit/config tuple a preview runtime attempts

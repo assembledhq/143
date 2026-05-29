@@ -62,11 +62,11 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
-	source_workspace_revision, source_workspace_revision_updated_at, preview_holding_container`
+	source_workspace_revision, source_workspace_revision_updated_at, unavailable_reason, preview_holding_container`
 
 const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, worker_node_id,
 	endpoint_url, preview_handle, primary_port, status, lease_expires_at,
-	last_heartbeat_at, drain_requested_at, stopped_at, error, created_at, updated_at`
+	last_heartbeat_at, drain_requested_at, stopped_at, error, unavailable_reason, created_at, updated_at`
 
 const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
 	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
@@ -1638,11 +1638,22 @@ func (s *PreviewStore) HeartbeatPreviewRuntimesByWorker(ctx context.Context, wor
 // transitions their preview instances to unavailable.
 // lint:allow-no-orgid reason="cross-org worker shutdown/recovery marks runtimes owned by this node"
 func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorker(ctx context.Context, workerNodeID, reason string) (int64, error) {
+	return s.MarkActivePreviewRuntimesLostByWorkerWithReason(ctx, workerNodeID, reason, models.PreviewUnavailableReasonOwnerLost)
+}
+
+// MarkActivePreviewRuntimesLostByWorkerWithReason marks a worker's live
+// runtimes lost and persists a typed user/operator-facing unavailable reason.
+// lint:allow-no-orgid reason="cross-org worker shutdown/recovery marks runtimes owned by this node"
+func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx context.Context, workerNodeID, reason string, unavailableReason models.PreviewUnavailableReason) (int64, error) {
+	if err := unavailableReason.Validate(); err != nil {
+		return 0, err
+	}
 	tag, err := s.db.Exec(ctx,
 		fmt.Sprintf(`WITH lost AS (
 			UPDATE preview_runtimes
 			SET status = 'lost',
 				error = @reason,
+				unavailable_reason = @unavailable_reason,
 				stopped_at = COALESCE(stopped_at, now()),
 				updated_at = now()
 			WHERE worker_node_id = @worker AND status IN %s
@@ -1651,13 +1662,14 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorker(ctx context.Context
 		UPDATE preview_instances pi
 		SET status = 'unavailable',
 			error = @reason,
+			unavailable_reason = @unavailable_reason,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost
 		WHERE pi.id = lost.preview_instance_id
 		  AND pi.org_id = lost.org_id
 		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
-		pgx.NamedArgs{"worker": workerNodeID, "reason": reason},
+		pgx.NamedArgs{"worker": workerNodeID, "reason": reason, "unavailable_reason": unavailableReason},
 	)
 	if err != nil {
 		return 0, fmt.Errorf("mark active preview runtimes lost by worker: %w", err)
@@ -1674,6 +1686,7 @@ func (s *PreviewStore) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutof
 			UPDATE preview_runtimes
 			SET status = 'lost',
 				error = @reason,
+				unavailable_reason = 'lease_expired',
 				stopped_at = COALESCE(stopped_at, now()),
 				updated_at = now()
 			WHERE lease_expires_at < @cutoff AND status IN %s
@@ -1682,6 +1695,7 @@ func (s *PreviewStore) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutof
 		UPDATE preview_instances pi
 		SET status = 'unavailable',
 			error = @reason,
+			unavailable_reason = 'lease_expired',
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost

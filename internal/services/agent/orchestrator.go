@@ -181,6 +181,9 @@ func interruptedStopReason(ctx context.Context, stopReason StopReason) StopReaso
 	if errors.Is(context.Cause(ctx), ErrWorkerDrainCause) {
 		return StopReasonWorkerDrain
 	}
+	if errors.Is(context.Cause(ctx), ErrDeployBudgetExpiredCause) {
+		return StopReasonDeployBudgetExpired
+	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return StopReasonWorkerDrain
 	}
@@ -424,6 +427,10 @@ type SessionThreadStore interface {
 	// Called from drainQueuedMessages after the in-flight turn completes.
 	ClearPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
 	ClaimNextQueuedForSession(ctx context.Context, orgID, sessionID uuid.UUID, maxRunning int) (models.SessionThread, error)
+}
+
+type sessionThreadRecoveryMetadataStore interface {
+	RecordRecoveryMetadata(ctx context.Context, orgID, threadID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time, recoveryState, recoveryReason string) error
 }
 
 type SessionIssueLinkStore interface {
@@ -5970,6 +5977,13 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus); err != nil {
 		log.Warn().Err(err).Str("status", string(fallbackStatus)).Msg("failed to restore session status after system interruption")
 	}
+	if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+		if recorder, ok := o.sessionThreads.(sessionThreadRecoveryMetadataStore); ok {
+			if err := recorder.RecordRecoveryMetadata(bgCtx, session.OrgID, *session.PrimaryThreadID, runtimeReason, time.Now().UTC(), string(models.RecoveryStateQueued), string(runtimeReason)); err != nil {
+				log.Warn().Err(err).Str("thread_id", session.PrimaryThreadID.String()).Str("runtime_stop_reason", string(runtimeReason)).Msg("failed to persist thread recovery metadata")
+			}
+		}
+	}
 }
 
 func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, threadID *uuid.UUID, log zerolog.Logger) error {
@@ -6026,6 +6040,11 @@ func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *model
 	if threadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateStatus(bgCtx, session.OrgID, *threadID, models.ThreadStatusAwaitingInput); err != nil {
 			log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to mark thread awaiting human input")
+		}
+		if recorder, ok := o.sessionThreads.(sessionThreadRecoveryMetadataStore); ok {
+			if err := recorder.RecordRecoveryMetadata(bgCtx, session.OrgID, *threadID, models.RuntimeStopReasonNone, checkpointedAt, string(models.RecoveryStateQueued), string(models.DrainIntentHumanInputCheckpoint)); err != nil {
+				log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to persist human-input checkpoint thread metadata")
+			}
 		}
 	}
 	log.Info().Int("turn", turnNumber).Bool("snapshot", snapshotKey != "").Msg("session paused for human input")

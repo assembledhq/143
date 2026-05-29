@@ -14,7 +14,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/session-executor ./cmd/server && \
     CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate && \
     CGO_ENABLED=0 go build -o /bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split && \
-    CGO_ENABLED=0 go build -o /bin/deploy-guardrail ./cmd/deploy-guardrail
+    CGO_ENABLED=0 go build -o /bin/deploy-guardrail ./cmd/deploy-guardrail && \
+    CGO_ENABLED=0 go build -o /bin/worker-deployctl ./cmd/worker-deployctl
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -38,6 +39,7 @@ COPY --from=go-builder /bin/session-executor /bin/session-executor
 COPY --from=go-builder /bin/migrate /bin/migrate
 COPY --from=go-builder /bin/migrate-coding-credentials-anthropic-split /bin/migrate-coding-credentials-anthropic-split
 COPY --from=go-builder /bin/deploy-guardrail /bin/deploy-guardrail
+COPY --from=go-builder /bin/worker-deployctl /bin/worker-deployctl
 COPY --from=go-builder /app/migrations /migrations
 
 # Copy entrypoint and encrypted production secrets
