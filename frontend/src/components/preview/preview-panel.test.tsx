@@ -1523,6 +1523,7 @@ describe("PreviewPanel component", () => {
     mockGet.mockResolvedValue({
       ...makePreviewStatus({
         status: "failed",
+        error: "Container crashed",
         source_workspace_revision: 4,
         source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
       }),
@@ -1540,9 +1541,8 @@ describe("PreviewPanel component", () => {
 
     expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
-    expect(
-      screen.getByText("Retry the preview to use the latest session changes."),
-    ).toBeInTheDocument();
+    expect(screen.queryByText("New changes available")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("preview-freshness-callout")).not.toBeInTheDocument();
   });
 
   it("uses refresh instead of retry when an openable preview is stale", async () => {
