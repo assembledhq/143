@@ -605,6 +605,16 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 					Msg("preview capacity reached; retrying start_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
 			}
+			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview cleared stale sandbox container_id; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
 			return &FatalError{Err: err}
 		}
 		return nil
