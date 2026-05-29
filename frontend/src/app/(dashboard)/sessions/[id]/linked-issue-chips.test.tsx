@@ -12,7 +12,7 @@ function makeSession(overrides: Partial<Session>): Session {
     id: 'sess-1',
     org_id: 'org-1',
     agent_type: 'codex',
-    status: 'active',
+    status: 'idle',
     autonomy_level: 'auto',
     token_mode: 'standard',
     current_turn: 0,

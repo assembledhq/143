@@ -3758,6 +3758,47 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
   });
 
+  it('uses merged health as terminal while the cached PR row still says open', async () => {
+    const prCreatedSession: Session = {
+      ...mockSessions[0],
+      status: 'pr_created',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: prCreatedSession,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPR,
+            status: 'open',
+            merged_at: null,
+          },
+        } satisfies SingleResponse<PullRequest>);
+      }),
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            status: 'merged',
+            can_merge: false,
+            summary: 'PR #42 was merged successfully.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findAllByText('PR merged')).toHaveLength(2);
+    expect(screen.getByText('PR #42 merged')).toBeInTheDocument();
+    expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
+    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+  });
+
   it('updates the header status when the PR stream reports a merge', async () => {
     const prCreatedSession: Session = {
       ...mockSessions[0],

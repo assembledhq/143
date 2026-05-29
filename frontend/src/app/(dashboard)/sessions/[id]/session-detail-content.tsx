@@ -131,7 +131,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import {
   ThreadAttributionFilter,
@@ -240,7 +240,9 @@ export function invalidateSessionHumanInputRequests(queryClient: QueryInvalidato
   queryClient.invalidateQueries({ queryKey: ["session", sessionId, "human-input-requests"] });
 }
 
-const statusConfig: Record<string, { color: string; label: string }> = {
+type DisplayStatusKey = SessionStatus | "pr_merged" | "pr_closed";
+
+const statusConfig: Record<DisplayStatusKey, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
   idle: { color: "bg-primary/10 text-primary", label: "Idle" },
@@ -255,7 +257,7 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
 
-function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+function getDisplayStatus(sessionStatus: SessionStatus, prStatus?: PullRequestStatus | null): { color: string; label: string } {
   if (sessionStatus === "pr_created") {
     if (prStatus === "merged") {
       return statusConfig.pr_merged;
@@ -265,6 +267,16 @@ function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { co
     }
   }
   return statusConfig[sessionStatus] || statusConfig.pending;
+}
+
+function deriveEffectivePRStatus(prStatus?: PullRequestStatus | null, healthStatus?: PullRequestStatus | null): PullRequestStatus | undefined {
+  if (healthStatus === "merged" || prStatus === "merged") {
+    return "merged";
+  }
+  if (healthStatus === "closed" || prStatus === "closed") {
+    return "closed";
+  }
+  return prStatus ?? undefined;
 }
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
@@ -513,7 +525,7 @@ type PendingThreadPreview = Pick<
   "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override" | "inbox_delivery"
 >;
 
-const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
 function mergePendingMessages(
   baseMessages: SessionMessage[],
@@ -574,7 +586,7 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
   );
 }
 
-function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -2922,7 +2934,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const canListTeamMembers = user?.role === "admin" || user?.role === "member";
   const canShipPR = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canManagePR = user?.role === "admin" || user?.role === "member";
-  const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+  const terminalStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
@@ -3549,7 +3561,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
   const prHealth = prHealthData?.data;
-  const prStatus = prData?.data?.status;
+  const rawPRStatus = prData?.data?.status;
+  const prStatus = deriveEffectivePRStatus(rawPRStatus, prHealth?.status);
   const prNumber = prData?.data?.github_pr_number;
   const closedPRNumber = prNumber;
   const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
@@ -3794,7 +3807,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
     };
   }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
-  const previousSessionStatusRef = useRef<string | undefined>(undefined);
+  const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
     if (!session?.id || !currentStatus) {
@@ -3825,7 +3838,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
+  const isTerminalSession = session ? terminalSessionStatuses.has(session.status) : false;
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canUseNativeReviewLoop = !!session && session.agent_type !== "pm_agent";
