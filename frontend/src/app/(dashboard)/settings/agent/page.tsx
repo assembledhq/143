@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import { apiKeyHelp, ORG_PROVIDER_OPTIONS } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
-import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_47 } from "@/lib/model-constants";
+import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_48 } from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
 import type { CodingAuth, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
@@ -139,7 +139,7 @@ export default function AgentPage() {
   const [insertionMode, setInsertionMode] = useState<InsertionMode>("next_fallback");
   const [renameValue, setRenameValue] = useState("");
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
-  const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_47);
+  const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
 
   const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
     queryKey: ["coding-auths"],
@@ -271,7 +271,7 @@ export default function AgentPage() {
     setAuthType("subscription");
     setInsertionMode("next_fallback");
     setAmpMode(AVAILABLE_AMP_MODES[0] ?? "smart");
-    setPiModel(PI_MODEL_CLAUDE_OPUS_47);
+    setPiModel(PI_MODEL_CLAUDE_OPUS_48);
   }
 
   function openAddModal(nextProvider: ModalProvider) {

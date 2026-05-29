@@ -4,6 +4,7 @@ import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_GEMINI_CLI_MODELS,
+  AVAILABLE_PI_MODELS,
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
   CODEX_MODEL_GPT_5_4,
@@ -19,6 +20,7 @@ describe("model constants", () => {
 
   it("includes latest Claude Code models", () => {
     expect(AVAILABLE_CLAUDE_CODE_MODELS).toEqual([
+      "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-opus-4-6",
       "claude-sonnet-4-6",
@@ -33,6 +35,17 @@ describe("model constants", () => {
       "gemini-3-flash-preview",
       "gemini-2.5-pro",
       "gemini-2.5-flash",
+    ]);
+  });
+
+  it("includes latest Pi curated models", () => {
+    expect(AVAILABLE_PI_MODELS).toEqual([
+      "anthropic/claude-opus-4-8",
+      "anthropic/claude-opus-4-7",
+      "anthropic/claude-sonnet-4-6",
+      "anthropic/claude-haiku-4-5",
+      "openai/gpt-5.4",
+      "google/gemini-2.5-pro",
     ]);
   });
 
@@ -61,7 +74,7 @@ describe("model constants", () => {
 
   it("LLM_MODELS_BY_PROVIDER maps providers to their models", () => {
     expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "gemini", "openrouter"]);
-    expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toEqual(["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]);
+    expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toEqual(["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]);
     expect(LLM_MODELS_BY_PROVIDER.openai.models).toEqual(["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]);
     expect(LLM_MODELS_BY_PROVIDER.gemini.models).toEqual(["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]);
   });
