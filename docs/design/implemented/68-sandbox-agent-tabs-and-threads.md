@@ -8,8 +8,7 @@
 > per-session running cap of 3, thread-start checkpoint stamping via
 > `base_snapshot_key`, file-touch attribution via `session_thread_file_events`,
 > and overlap badges in the tab strip). Phase 3 added per-tab cost
-> accounting (`cost_cents`), the `Touched by tab` /
-> `Overlap` filter in the Changes view, and a queued-message counter
+> accounting (`cost_cents`) and a queued-message counter
 > (`pending_message_count`). Phase 4 added "Summarize all tabs" (a side panel
 > that rolls up status + result_summary + touched files + overlap) and "Revert
 > this tab's changes" (enqueues `revert_session_thread`). The legacy
@@ -295,13 +294,9 @@ Each tab header should show:
 
 ### Combined Review
 
-`Changes` remains branch-level by default. It should add tab filters:
-
-- All changes
-- Since tab started
-- Touched by tab
-- Overlap with another tab
-- Unattributed workspace changes
+`Changes` remains branch-level. Per-tab attribution stays advisory in tab
+surfaces such as overlap badges and should not add filtering controls to the
+file changes view.
 
 Tab attribution is advisory, not a substitute for the final branch diff. The
 PR should always be created from the actual sandbox filesystem.
