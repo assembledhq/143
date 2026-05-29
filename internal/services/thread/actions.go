@@ -63,9 +63,7 @@ func (s *Service) CancelThread(ctx context.Context, orgID, sessionID, threadID u
 }
 
 // ListFileEvents returns the raw file-event timeline for a session. Used by
-// the Changes view to power the "Touched by tab" / "Overlap" filters. We
-// expose the timeline (not a pre-rolled view) so the frontend can switch
-// between filter shapes without round-tripping for each.
+// the tab strip to detect overlapping file touches between active tabs.
 //
 // since, when non-nil, scopes the result to events observed at-or-after
 // that time. Frontend polling passes the most recent observed_at it has

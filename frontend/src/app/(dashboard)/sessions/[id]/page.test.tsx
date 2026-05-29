@@ -7982,7 +7982,7 @@ describe('SessionDetailPage', () => {
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
-  it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
+  it('opens review from the Changes tab without a tab attribution filter', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
     const codexThread: SessionThread = {
       id: 'thread-codex',
@@ -8100,19 +8100,15 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: /^Changes/ }));
 
     const changesPanel = screen.getByRole('tabpanel', { name: /^Changes/ });
-    await user.click(within(changesPanel).getByRole('combobox'));
-    await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
+    expect(within(changesPanel).queryByRole('combobox')).not.toBeInTheDocument();
 
-    expect(screen.queryByRole('button', { name: 'Review 2 files' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review 3 files' })).not.toBeInTheDocument();
 
     await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
 
     expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
     expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();
-    expect(
-      screen.queryByText('frontend/src/components/automation-model-select.tsx')
-    ).not.toBeInTheDocument();
+    expect(screen.getByText('frontend/src/components/automation-model-select.tsx')).toBeInTheDocument();
   });
 
   it('shows model selector for agents with available models', async () => {

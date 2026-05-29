@@ -107,8 +107,8 @@ type ThreadStore interface {
 	MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error
 }
 
-// FileEventStore defines the operations the thread service needs for the
-// file-attribution surfaces (overlap detection, Changes-view filters).
+// FileEventStore defines the operations the thread service needs for
+// file-attribution surfaces such as overlap detection.
 type FileEventStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID, since *time.Time) ([]models.SessionThreadFileEvent, error)
 }
