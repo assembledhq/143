@@ -883,22 +883,7 @@ export function PreviewPanel({
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
-              {isPreviewOutOfDate && (
-                <Button
-                  size="sm"
-                  variant="default"
-                  onClick={() => startMutation.mutate()}
-                  disabled={isMutating}
-                  loading={startMutation.isPending}
-                >
-                  {!startMutation.isPending && (
-                    <RefreshCw className="size-3.5" />
-                  )}
-                  Refresh preview
-                </Button>
-              )}
-
+            <div className="flex max-w-full shrink-0 flex-wrap items-center justify-start gap-2 sm:justify-end">
               {isReady && (
                 <TooltipProvider>
                   <Tooltip>
@@ -971,30 +956,49 @@ export function PreviewPanel({
             <div
               data-testid="preview-freshness-callout"
               className={cn(
-                "flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs",
+                "flex flex-col gap-3 rounded-md border px-2.5 py-2 text-xs sm:flex-row sm:items-center sm:justify-between",
                 isPreviewOutOfDate
                   ? "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200"
                   : "border-border bg-muted/40 text-muted-foreground",
               )}
             >
-              {isPreviewOutOfDate ? (
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              ) : (
-                <RefreshCw
-                  className={cn(
-                    "mt-0.5 size-3.5 shrink-0",
-                    startMutation.isPending && "animate-spin",
-                  )}
-                />
-              )}
-              <div className="min-w-0">
-                <div className="font-medium">{freshnessCalloutText}</div>
-                {isPreviewOutOfDate && (
-                  <div className="text-muted-foreground">
-                    Restart the preview to see the latest session changes.
-                  </div>
+              <div className="flex min-w-0 items-start gap-2">
+                {isPreviewOutOfDate ? (
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                ) : (
+                  <RefreshCw
+                    className={cn(
+                      "mt-0.5 size-3.5 shrink-0",
+                      startMutation.isPending && "animate-spin",
+                    )}
+                  />
                 )}
+                <div className="min-w-0">
+                  <div className="font-medium">{freshnessCalloutText}</div>
+                  {isPreviewOutOfDate && (
+                    <div className="text-muted-foreground">
+                      Restart the preview to see the latest session changes.
+                    </div>
+                  )}
+                </div>
               </div>
+              {isPreviewOutOfDate && (
+                <div className="flex shrink-0 justify-start sm:justify-end">
+                  <Button
+                    size="sm"
+                    variant="default"
+                    className="w-full sm:w-auto"
+                    onClick={() => startMutation.mutate()}
+                    disabled={isMutating}
+                    loading={startMutation.isPending}
+                  >
+                    {!startMutation.isPending && (
+                      <RefreshCw className="size-3.5" />
+                    )}
+                    Refresh preview
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </div>
