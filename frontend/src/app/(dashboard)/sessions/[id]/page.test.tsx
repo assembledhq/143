@@ -4779,6 +4779,49 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('keeps Create PR at full opacity while the request is queueing', async () => {
+    let releaseCreatePR: (() => void) | undefined;
+    const createPRResponse = new Promise<Response>((resolve) => {
+      releaseCreatePR = () => resolve(HttpResponse.json({ status: 'queued' }, { status: 202 }));
+    });
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', async () => {
+        return createPRResponse;
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const user = userEvent.setup();
+    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
+    await user.click(createPRButton);
+
+    const queueingButton = await screen.findByRole('button', { name: /Queueing PR/ });
+    expect(queueingButton).toBeDisabled();
+    expect(queueingButton).toHaveAttribute('data-loading', 'true');
+    expect(queueingButton).toHaveClass('disabled:data-[loading=true]:opacity-100');
+
+    releaseCreatePR?.();
+  });
+
   it('does not queue duplicate create PR requests from the keyboard while one is pending', async () => {
     let createPRCalls = 0;
 
