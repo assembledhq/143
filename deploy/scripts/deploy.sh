@@ -980,12 +980,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       "$HEALTH_SERVICE" /bin/worker-deployctl "$@" < /dev/null
   }
 
-  run_worker_deployctl_in_container() {
-    local cid="$1"
-    shift
-    docker exec -e "IMAGE_TAG=${IMAGE_TAG:-}" "$cid" /bin/worker-deployctl "$@"
-  }
-
   wait_worker_db_heartbeat() {
     local node_id="$1" timeout="${2:-120}" deadline
     deadline=$((SECONDS + timeout))
@@ -1038,6 +1032,99 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"
 
     [ "$start" != "8080" ] || [ "$end" != "$start" ]
+  }
+
+  worker_host_capacity_preflight() {
+    local min_mem="${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}"
+    local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}"
+    local free_mem idle_cpu idle1 total1 idle2 total2 delta
+
+    free_mem="$(awk '/MemAvailable:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 0)"
+    read -r idle1 total1 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+    sleep 1
+    read -r idle2 total2 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+    idle1="${idle1:-0}"
+    total1="${total1:-0}"
+    idle2="${idle2:-0}"
+    total2="${total2:-0}"
+    delta=$((total2 - total1))
+    if [ "$delta" -le 0 ]; then
+      idle_cpu=0
+    else
+      idle_cpu=$((((idle2 - idle1) * 1000) / delta))
+    fi
+
+    if [ "$free_mem" -lt "$min_mem" ]; then
+      echo "ERROR: insufficient free memory for worker blue/green overlap: free=${free_mem}MB min=${min_mem}MB" >&2
+      return 1
+    fi
+    if [ "$idle_cpu" -lt "$min_cpu" ]; then
+      echo "ERROR: insufficient idle CPU for worker blue/green overlap: idle=${idle_cpu}m min=${min_cpu}m" >&2
+      return 1
+    fi
+    WORKER_BLUE_GREEN_FREE_MEMORY_MB="$free_mem"
+    WORKER_BLUE_GREEN_IDLE_CPU_MILLIS="$idle_cpu"
+  }
+
+  worker_support_service_fingerprint() {
+    local inputs=(
+      /opt/143/deploy/scripts/reconcile-worker-host.sh
+      /opt/143/deploy/scripts/install-docker-dns.sh
+      /opt/143/deploy/scripts/install-log-rotation.sh
+      /opt/143/docker-compose.worker.yml
+      /opt/143/docker-compose.dns-probe.yml
+    )
+    local existing=()
+    local path
+    for path in "${inputs[@]}"; do
+      if [ -e "$path" ]; then
+        existing+=("$path")
+      fi
+    done
+    if [ "${#existing[@]}" -eq 0 ]; then
+      echo "none"
+      return 0
+    fi
+    sha256sum "${existing[@]}" | sha256sum | awk '{print $1}'
+  }
+
+  ensure_routine_support_service_fingerprint_unchanged() {
+    local mode="${DEPLOY_MODE:-routine}"
+    local current_file="/opt/143/.worker-support-services.fingerprint"
+    local candidate current
+    candidate="$(worker_support_service_fingerprint)"
+    WORKER_SUPPORT_SERVICE_FINGERPRINT="$candidate"
+    if [ ! -f "$current_file" ]; then
+      printf '%s\n' "$candidate" > "$current_file"
+      return 0
+    fi
+    current="$(cat "$current_file")"
+    WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT="$current"
+    if [ "$mode" = "routine" ] && [ "$current" != "$candidate" ]; then
+      echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+      echo "current=$current candidate=$candidate" >&2
+      return 1
+    fi
+  }
+
+  worker_expected_schema_version() {
+    local version
+    version="$(find /opt/143/migrations -maxdepth 1 -name '*.up.sql' -printf '%f\n' 2>/dev/null \
+      | sed -E 's/^([0-9]+).*/\1/' \
+      | sort -n \
+      | tail -1)"
+    echo "${version:-0}"
+  }
+
+  protect_active_executor_images() {
+    local node_id="$1" deploy_id="$2"
+    # worker-deployctl retain-images records active executor image refs before pruning.
+    run_worker_deployctl retain-images \
+      --node-id "$node_id" \
+      --deploy-id "$deploy_id" \
+      --reason "active executor image retention before worker deploy prune" \
+      --retain-for "${WORKER_ACTIVE_EXECUTOR_IMAGE_RETAIN_FOR:-24h}" \
+      --json || true
   }
 
   find_free_worker_port() {
@@ -1135,7 +1222,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         continue
       fi
       echo "Marking old worker node $node_id (${cid:0:12}) as draining; retirement will wait for owned runtimes."
-      run_worker_deployctl_in_container "$new_cid" mark-draining \
+      run_worker_deployctl mark-draining \
         --node-id "$node_id" \
         --intent planned_rollout \
         --deploy-id "$deploy_id" \
@@ -1147,27 +1234,33 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         set -euo pipefail
         node_id="$1"
         cid="$2"
-        ctl_cid="$3"
+        compose_file="$3"
         deploy_id="$4"
         build_sha="$5"
         requested_by="$6"
         reason="$7"
+        health_service="$8"
+        run_ctl() {
+          docker compose -f "$compose_file" run --rm -T --no-deps \
+            -e "IMAGE_TAG=$build_sha" \
+            "$health_service" /bin/worker-deployctl "$@" < /dev/null
+        }
         while true; do
-          docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl expire-budget \
+          run_ctl expire-budget \
             --node-id "$node_id" \
             --deploy-id "$deploy_id" \
             --reason "$reason" \
             --requested-by "$requested_by" \
             --build-sha "$build_sha" \
             --json || true
-          if docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl retire-ready --node-id "$node_id" --json; then
+          if run_ctl retire-ready --node-id "$node_id" --json; then
             echo "Worker node $node_id is retire-ready; stopping container ${cid:0:12}."
             docker stop -t 60 "$cid"
             exit 0
           fi
           sleep 30
         done
-      ' _ "$node_id" "$cid" "$new_cid" "$deploy_id" "${IMAGE_TAG:-}" "${DEPLOY_REQUESTED_BY:-deploy-script}" "${DEPLOY_REASON:-routine worker rollout}" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
+      ' _ "$node_id" "$cid" "$COMPOSE_FILE" "$deploy_id" "${IMAGE_TAG:-}" "${DEPLOY_REQUESTED_BY:-deploy-script}" "${DEPLOY_REASON:-routine worker rollout}" "$HEALTH_SERVICE" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
     done
   }
 
@@ -1182,6 +1275,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       echo "ERROR: NODE_ID and WORKER_PRIVATE_IP must be present in /opt/143/.env for worker blue/green deploy." >&2
       return 1
     fi
+    worker_host_capacity_preflight
+    ensure_routine_support_service_fingerprint_unchanged
 
     generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
     node_id="${base_node_id}-g${generation}"
@@ -1195,11 +1290,20 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     project="$(sanitize_compose_project "143-${node_id}")"
 
     if [ -n "$preflight_node_id" ]; then
+      run_worker_deployctl impact --node-id "$preflight_node_id" --json
       run_worker_deployctl preflight \
         --mode "${DEPLOY_MODE:-routine}" \
         --node-id "$preflight_node_id" \
         --candidate-port "$host_port" \
         --build-sha "${IMAGE_TAG:-}" \
+        --expected-schema-version "$(worker_expected_schema_version)" \
+        --support-services-fingerprint "${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}" \
+        --expected-support-services-fingerprint "${WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT:-${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}}" \
+        --free-memory-mb "${WORKER_BLUE_GREEN_FREE_MEMORY_MB:-0}" \
+        --min-free-memory-mb "${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}" \
+        --idle-cpu-millis "${WORKER_BLUE_GREEN_IDLE_CPU_MILLIS:-0}" \
+        --min-idle-cpu-millis "${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}" \
+        --include-impact \
         --json
     else
       echo "No existing worker node id found for preflight; continuing first-generation deploy after local port checks."
@@ -1214,7 +1318,11 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       docker rm "$new_cid" >/dev/null 2>&1 || true
       return 1
     fi
+    if [ -n "$preflight_node_id" ]; then
+      protect_active_executor_images "$preflight_node_id" "$deploy_id"
+    fi
     drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id"
+    printf '%s\n' "${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}" > /opt/143/.worker-support-services.fingerprint
     echo "Worker generation ${new_cid:0:12} is healthy; old workers are admission-draining until owned runtimes retire."
   }
 
@@ -1256,6 +1364,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
     docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
     if [ "$role" = "worker" ] && [ -n "${IMAGE_TAG:-}" ]; then
+      # worker-deployctl release-retained-images clears expired DB retention records.
+      run_worker_deployctl release-retained-images --json || true
       local sandbox_image="ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
       if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
         echo "Re-pulling required sandbox image after prune: $sandbox_image"
@@ -1487,7 +1597,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl run_worker_deployctl_in_container wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight worker_support_service_fingerprint ensure_routine_support_service_fingerprint_unchanged worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'

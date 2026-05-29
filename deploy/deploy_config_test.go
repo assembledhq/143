@@ -309,10 +309,11 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, `wait_worker_db_heartbeat "$node_id"`, "worker deploy should verify the green generation has registered a fresh DB heartbeat before draining blue")
 	require.Contains(t, deploy, "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure", "worker deploy should clean up green if DB heartbeat readiness fails")
 	require.Contains(t, deploy, "drain_old_worker_containers", "worker deploy should drain old worker containers after the new generation is healthy")
-	require.Contains(t, deploy, "/bin/worker-deployctl expire-budget", "worker deploy should mark over-budget blue executors for deploy-specific checkpoint/requeue")
+	require.Contains(t, deploy, "run_ctl expire-budget", "worker deploy should mark over-budget blue executors for deploy-specific checkpoint/requeue")
 	require.Contains(t, deploy, "--reason \"$reason\"", "worker deploy should pass the deploy reason into budget-expiry audit events")
-	require.Contains(t, deploy, `run_worker_deployctl_in_container "$new_cid" mark-draining`, "post-green drain control should reuse the green worker container instead of launching one-off compose helper containers")
-	require.Contains(t, deploy, `docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl retire-ready`, "retire polling should avoid repeated docker compose run helper containers")
+	require.Contains(t, deploy, `run_worker_deployctl mark-draining`, "post-green drain control should run from a deploy-control helper instead of depending on the green worker container")
+	require.Contains(t, deploy, `run_ctl retire-ready --node-id "$node_id" --json`, "retire polling should use a stable deploy-control helper so later worker generations cannot orphan older drains")
+	require.NotContains(t, deploy, `docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl retire-ready`, "retire polling must not depend on a worker generation that future deploys may stop")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PORT_START", "worker deploy should allocate worker generation ports from a configurable range")
 	require.Contains(t, deploy, "WORKER_HOST_PORT", "worker deploy should pass the allocated host port into docker compose")
 	require.Contains(t, deploy, `local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"`, "worker deploy should default to the existing worker port only unless operators explicitly open a blue/green range")
@@ -324,6 +325,34 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "refusing to reuse it", "worker deploy should fail closed when runtime endpoint ownership cannot be verified")
 	require.NotContains(t, deploy, "falling back to blocking worker drain", "routine worker deploy should not interrupt old workers when no extra blue/green port is configured")
 	require.Contains(t, deploy, "routine blue/green deploy refuses blocking drain fallback", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
+}
+
+func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, "worker_host_capacity_preflight", "worker deploy should run a local CPU/memory capacity preflight before starting green")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB", "worker deploy should let operators set the minimum free memory needed for temporary worker overlap")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS", "worker deploy should let operators set the minimum idle CPU budget needed for temporary worker overlap")
+	require.Contains(t, deploy, "worker_support_service_fingerprint", "worker deploy should fingerprint support-service config inputs during preflight")
+	require.Contains(t, deploy, "--support-services-fingerprint", "worker deploy preflight should pass support-service fingerprints into worker-deployctl")
+	require.Contains(t, deploy, "--expected-schema-version", "worker deploy preflight should pass the expected migration/schema version into worker-deployctl")
+	require.Contains(t, deploy, "impact --node-id", "worker deploy should emit a dry-run impact report for the old generation before routine drain")
+}
+
+func TestWorkerDeployProtectsActiveExecutorImages(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, "protect_active_executor_images", "worker deploy should record active executor image retention before pruning")
+	require.Contains(t, deploy, "worker-deployctl retain-images", "worker deploy should use DB-backed image retention before docker image prune")
+	require.Contains(t, deploy, "worker-deployctl release-retained-images", "worker deploy should release expired image retention records after pruning")
 }
 
 func TestWorkerRuntimeEndpointQueryUsesPsqlStdinVariables(t *testing.T) {
@@ -816,6 +845,7 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
 	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
 	require.Contains(t, deployText, `deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the blue/green and prune helpers in the host-side script")
+	require.NotContains(t, deployText, "run_worker_deployctl_in_container", "detached worker rollovers should not embed worker-container-bound deploy control helpers")
 	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")

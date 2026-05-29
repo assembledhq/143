@@ -1,6 +1,6 @@
 # Non-Disruptive Worker Blue/Green Deploys
 
-> **Status:** Partially implemented foundation | **Last reviewed:** 2026-05-28
+> **Status:** Implemented v1 foundation with durable fleet-control primitives | **Last reviewed:** 2026-05-28
 >
 > **Related docs:** [overall.md](../overall.md), [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md), [82-durable-session-executors.md](../implemented/82-durable-session-executors.md), [88-preview-runtime-ownership-drain.md](88-preview-runtime-ownership-drain.md), [60-agent-runtime-timeouts-and-checkpointed-shutdown.md](60-agent-runtime-timeouts-and-checkpointed-shutdown.md)
 
@@ -22,9 +22,12 @@ the same ownership and drain tables.
 
 ## Implementation Status
 
-This design is **not yet completely implemented**. The current code implements
-the safety-critical foundation for routine worker admission drain, but several
-requirements below remain partial or future work.
+This design is implemented for the current SSH/script-driven worker deploy
+path. The code now covers the safety-critical routine admission drain path plus
+durable primitives for maintenance impact reporting, fleet waves, drain
+extensions, image retention, thread-level recovery metadata, and deploy
+observability. A future always-on controller can replace the SSH loop without
+changing runtime ownership semantics.
 
 ### Implemented
 
@@ -70,43 +73,35 @@ requirements below remain partial or future work.
 
 ### Partially Implemented
 
-- **Preflight:** deploy script and `worker-deployctl preflight` verify a safe
-  candidate port path, but preflight does not yet verify spare CPU/memory,
-  DB schema compatibility, or support-service config diffs.
-- **Human-input release:** the orchestrator already checkpoints and marks
-  sessions `awaiting_input`; there is not yet a drain-aware path that explicitly
-  records `human_input_checkpoint` intent or proves blue ownership is released
-  immediately because the node is draining.
-- **Preview preservation:** active preview routing and endpoint ownership are
-  preserved, but there are no deploy-specific preview unavailable reasons,
-  dashboards, or alerts.
-- **Maintenance mode:** `DEPLOY_MODE=maintenance` and `worker-deployctl
-  force-maintenance` exist as primitives and require an explicit force override
-  before crossing active runtime ownership, but maintenance preflight does not
-  yet render a complete dry-run impact report by runtime identity.
-- **Retire readiness:** `retire-ready` counts executors, active previews,
-  DB-owned jobs, session container holds, sandbox holders, and endpoint
-  blockers. It does not yet account for post-PR uploads or all detached cleanup
-  work described in the Phase 4 target lifecycle.
-- **Observability:** DB audit events, status output, and core log alerts exist,
-  but the deploy metrics and dashboards in this document are not yet
-  implemented.
+- **Preflight:** deploy script and `worker-deployctl preflight` verify safe
+  candidate port reuse, spare CPU/memory, DB schema compatibility, and
+  support-service config fingerprints before routine drain.
+- **Human-input release:** when a turn pauses for human input, the executor
+  records `human_input_checkpoint`, terminalizes normally, and thread-level
+  recovery metadata records the checkpoint release.
+- **Preview preservation:** active preview routing and endpoint ownership remain
+  preserved, preview unavailable transitions can carry typed deploy/owner-loss
+  reasons, and deploy alerts/dashboard panels expose preview/runtime loss
+  signals.
+- **Maintenance mode:** `worker-deployctl impact` renders affected executors
+  and previews by runtime identity; `force-maintenance` still blocks active
+  ownership unless an explicit force override, reason, and operator are present.
+- **Retire readiness:** `retire-ready` accounts for executors, active previews,
+  DB-owned jobs, session container holds, sandbox holders, endpoint blockers,
+  pending snapshot uploads, and detached cleanup jobs.
+- **Observability:** DB audit events, status/impact output, log alerts, and a
+  provisioned worker deploy dashboard cover the core deploy-safety signals.
 
-### Not Yet Implemented
+### Future Scale Work
 
-- Deploy-induced recovery metadata is persisted at the session runtime-stop
-  level, but thread-level recovery metadata and richer operator-facing event
-  history are not yet implemented.
-- Fleet deploy waves, canaries, pause/resume, rollback orchestration, regional
-  rate limits, and durable deploy-wave state are not implemented.
-- A dedicated deploy controller service is not implemented; v1 remains
-  SSH-script-driven.
-- Operator controls for per-session drain extension and full dry-run impact
-  reports are not implemented.
-- Explicit active-executor image/tag retention for rollback beyond Docker's
-  active-container protections is not implemented.
-- Executor logs do not yet consistently include deploy generation and drain
-  intent.
+- CI/SSH remains the v1 executor of host changes. Durable deploy-wave state,
+  canary sizing, concurrency fields, pause controls, and host-state tables now
+  exist so an always-on controller can take over orchestration later.
+- Regional rate limits and automated rollback execution are represented in the
+  deploy-wave model but are not yet driven by a long-running controller loop.
+- Operator-facing event history is queryable through `worker_deploy_events`,
+  thread recovery metadata, preview unavailable reasons, and deploy dashboards;
+  richer product UI for browsing that history can be layered on top.
 
 ## Problem
 

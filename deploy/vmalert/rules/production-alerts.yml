@@ -116,6 +116,42 @@ groups:
           summary: 'Worker deploy stop request rejected'
           description: '{{ $value }} over-budget session executor(s) could not request the typed checkpoint stop during drain.'
           runbook: 'Check worker logs for executor_id/session_id, confirm the session is still live, and manually recover or force maintenance if it cannot checkpoint.'
+      - alert: WorkerDeployPreviewUnavailable
+        expr: '_time:30m (service:worker OR service:api) AND ("deploy_drain_timeout" OR "preview runtime unavailable") | stats count() as unavailable | filter unavailable:>0'
+        for: 1m
+        labels:
+          service: worker
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Preview became unavailable during deploy'
+          description: '{{ $value }} preview unavailable event(s) carried deploy-specific reasons in the last 30 minutes.'
+          runbook: 'Inspect preview_instances.unavailable_reason and worker_deploy_events for the affected node before reusing endpoints.'
+      - alert: WorkerDeployEndpointReuseBlocked
+        expr: '_time:30m service:worker AND _msg:"no reusable worker host port" | stats count() as blocked | filter blocked:>2'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Worker endpoint reuse repeatedly blocked'
+          description: '{{ $value }} routine worker deploy attempts could not find a safe blue/green endpoint in the last 30 minutes.'
+          runbook: 'Check active preview_runtimes by endpoint_url and expand WORKER_BLUE_GREEN_PORT_START/END before forcing maintenance.'
+      - alert: WorkerDeployHumanInputCheckpointRelease
+        expr: '_time:30m service:worker AND _msg:"session executor released ownership at human-input checkpoint" | stats count() as releases | filter releases:>0'
+        for: 1m
+        labels:
+          service: worker
+          severity: info
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Worker drain released executor at human input'
+          description: '{{ $value }} draining executor(s) released ownership after committing a human-input checkpoint.'
+          runbook: 'Use this as a positive deploy-drain signal; spikes are expected only during long routine worker rollouts.'
 
   - name: pr-pipeline-errors
     type: vlogs

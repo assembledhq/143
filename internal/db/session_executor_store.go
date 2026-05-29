@@ -265,6 +265,33 @@ func (s *SessionExecutorStore) MarkDeployBudgetExpiredByNode(ctx context.Context
 	return tag.RowsAffected(), nil
 }
 
+func (s *SessionExecutorStore) MarkHumanInputCheckpointByJob(ctx context.Context, orgID, jobID, lockToken uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_executors se
+		SET drain_intent = 'human_input_checkpoint',
+			drain_requested_at = COALESCE(drain_requested_at, now()),
+			updated_at = now()
+		FROM sessions sess
+		LEFT JOIN session_threads th
+		  ON th.org_id = se.org_id
+		 AND th.id = se.thread_id
+		WHERE se.org_id = $1
+		  AND se.job_id = $2
+		  AND se.lock_token = $3
+		  AND se.session_id = sess.id
+		  AND sess.org_id = se.org_id
+		  AND se.status IN ('starting', 'running', 'draining')
+		  AND se.drain_intent IN ('none', 'planned_rollout')
+		  AND (
+			sess.status = 'awaiting_input'
+			OR th.status = 'awaiting_input'
+		  )`, orgID, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("mark human input checkpoint executor: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *SessionExecutorStore) MarkTerminalWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, status models.SessionExecutorStatus, exitCode *int, lastError string) (bool, error) {
 	if status != models.SessionExecutorStatusCompleted && status != models.SessionExecutorStatusRequeued && status != models.SessionExecutorStatusFailed && status != models.SessionExecutorStatusLost {
 		return false, fmt.Errorf("terminal session executor status required: %s", status)

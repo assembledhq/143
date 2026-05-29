@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -184,5 +186,94 @@ func TestNodeStore_WorkerHeartbeatHealth(t *testing.T) {
 		StaleWorkers:              2,
 		NewestHeartbeatAgeSeconds: 125,
 	}, health, "WorkerHeartbeatHealth should scan the aggregate counts")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestNodeStore_WorkerDeployStatusCountsDetachedRetireBlockers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	deadline := now.Add(30 * time.Minute)
+	mock.ExpectQuery("WITH node_row AS").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "host", "status", "drain_intent", "last_heartbeat_at",
+				"drain_requested_at", "drain_budget_expires_at",
+				"active_executor_count", "max_deadline_at",
+				"active_preview_count", "max_lease_expires_at",
+				"running_count", "active_session_hold_count", "active_sandbox_holder_count",
+				"endpoint_blocker_count", "pending_snapshot_upload_count", "detached_cleanup_job_count",
+			}).AddRow(
+				"worker-1", "worker.internal", "draining", "planned_rollout", now,
+				now.Add(-time.Minute), deadline,
+				int64(0), nil,
+				int64(0), nil,
+				int64(0), int64(0), int64(0),
+				int64(0), int64(1), int64(2),
+			),
+		)
+
+	store := NewNodeStore(mock)
+	status, err := store.WorkerDeployStatus(context.Background(), "worker-1")
+	require.NoError(t, err, "WorkerDeployStatus should return status with detached blockers")
+	require.Equal(t, int64(1), status.PendingSnapshotUploadCount, "pending snapshot uploads should be counted as retire blockers")
+	require.Equal(t, int64(2), status.DetachedCleanupJobCount, "detached cleanup jobs should be counted as retire blockers")
+	require.False(t, status.RetireReady, "retire readiness should stay false while detached work exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestNodeStore_WorkerDeployImpactListsRuntimeIdentities(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	executorID := uuid.New()
+	jobID := uuid.New()
+	runtimeID := uuid.New()
+	expires := time.Now().UTC().Add(10 * time.Minute)
+
+	mock.ExpectQuery("WITH active_executors AS").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"kind", "org_id", "session_id", "thread_id", "runtime_id", "job_id", "status", "deadline_at", "endpoint_url", "reason"}).
+				AddRow("executor", orgID, pgtype.UUID{Bytes: sessionID, Valid: true}, pgtype.UUID{Bytes: threadID, Valid: true}, executorID, pgtype.UUID{Bytes: jobID, Valid: true}, "running", expires, "", "").
+				AddRow("preview", orgID, pgtype.UUID{Bytes: sessionID, Valid: true}, pgtype.UUID{}, runtimeID, pgtype.UUID{}, "ready", expires, "http://10.0.0.5:8080", "preview-1"),
+		)
+
+	store := NewNodeStore(mock)
+	impact, err := store.WorkerDeployImpact(context.Background(), "worker-1")
+	require.NoError(t, err, "WorkerDeployImpact should return runtime identities")
+	require.Equal(t, []WorkerDeployImpactItem{
+		{
+			Kind:       "executor",
+			OrgID:      orgID,
+			SessionID:  &sessionID,
+			ThreadID:   &threadID,
+			RuntimeID:  executorID,
+			JobID:      &jobID,
+			Status:     "running",
+			DeadlineAt: &expires,
+		},
+		{
+			Kind:        "preview",
+			OrgID:       orgID,
+			SessionID:   &sessionID,
+			RuntimeID:   runtimeID,
+			Status:      "ready",
+			DeadlineAt:  &expires,
+			EndpointURL: "http://10.0.0.5:8080",
+			Reason:      "preview-1",
+		},
+	}, impact.Items, "WorkerDeployImpact should preserve affected runtime identities")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

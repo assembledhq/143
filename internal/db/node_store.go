@@ -25,23 +25,43 @@ type WorkerHeartbeatHealth struct {
 }
 
 type WorkerDeployStatus struct {
-	NodeID                   string             `json:"node_id"`
-	Host                     string             `json:"host"`
-	Status                   models.NodeStatus  `json:"status"`
-	DrainIntent              models.DrainIntent `json:"drain_intent"`
-	LastHeartbeatAt          *time.Time         `json:"last_heartbeat_at,omitempty"`
-	FreshHeartbeat           bool               `json:"fresh_heartbeat"`
-	DrainRequestedAt         *time.Time         `json:"drain_requested_at,omitempty"`
-	DrainBudgetExpiresAt     *time.Time         `json:"drain_budget_expires_at,omitempty"`
-	ActiveExecutorCount      int64              `json:"active_executor_count"`
-	MaxExecutorDeadlineAt    *time.Time         `json:"max_executor_deadline_at,omitempty"`
-	ActivePreviewCount       int64              `json:"active_preview_count"`
-	MaxPreviewLeaseExpiresAt *time.Time         `json:"max_preview_lease_expires_at,omitempty"`
-	OwnedRunningJobCount     int64              `json:"owned_running_job_count"`
-	ActiveSessionHoldCount   int64              `json:"active_session_hold_count"`
-	ActiveSandboxHolderCount int64              `json:"active_sandbox_holder_count"`
-	EndpointBlockerCount     int64              `json:"endpoint_blocker_count"`
-	RetireReady              bool               `json:"retire_ready"`
+	NodeID                     string             `json:"node_id"`
+	Host                       string             `json:"host"`
+	Status                     models.NodeStatus  `json:"status"`
+	DrainIntent                models.DrainIntent `json:"drain_intent"`
+	LastHeartbeatAt            *time.Time         `json:"last_heartbeat_at,omitempty"`
+	FreshHeartbeat             bool               `json:"fresh_heartbeat"`
+	DrainRequestedAt           *time.Time         `json:"drain_requested_at,omitempty"`
+	DrainBudgetExpiresAt       *time.Time         `json:"drain_budget_expires_at,omitempty"`
+	ActiveExecutorCount        int64              `json:"active_executor_count"`
+	MaxExecutorDeadlineAt      *time.Time         `json:"max_executor_deadline_at,omitempty"`
+	ActivePreviewCount         int64              `json:"active_preview_count"`
+	MaxPreviewLeaseExpiresAt   *time.Time         `json:"max_preview_lease_expires_at,omitempty"`
+	OwnedRunningJobCount       int64              `json:"owned_running_job_count"`
+	ActiveSessionHoldCount     int64              `json:"active_session_hold_count"`
+	ActiveSandboxHolderCount   int64              `json:"active_sandbox_holder_count"`
+	EndpointBlockerCount       int64              `json:"endpoint_blocker_count"`
+	PendingSnapshotUploadCount int64              `json:"pending_snapshot_upload_count"`
+	DetachedCleanupJobCount    int64              `json:"detached_cleanup_job_count"`
+	RetireReady                bool               `json:"retire_ready"`
+}
+
+type WorkerDeployImpact struct {
+	NodeID string                   `json:"node_id"`
+	Items  []WorkerDeployImpactItem `json:"items"`
+}
+
+type WorkerDeployImpactItem struct {
+	Kind        string     `json:"kind"`
+	OrgID       uuid.UUID  `json:"org_id"`
+	SessionID   *uuid.UUID `json:"session_id,omitempty"`
+	ThreadID    *uuid.UUID `json:"thread_id,omitempty"`
+	RuntimeID   uuid.UUID  `json:"runtime_id"`
+	JobID       *uuid.UUID `json:"job_id,omitempty"`
+	Status      string     `json:"status"`
+	DeadlineAt  *time.Time `json:"deadline_at,omitempty"`
+	EndpointURL string     `json:"endpoint_url,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
 }
 
 type MarkNodeDrainingParams struct {
@@ -53,6 +73,13 @@ type MarkNodeDrainingParams struct {
 	BudgetExpiresAt *time.Time
 	BuildSHA        string
 	Metadata        map[string]any
+}
+
+type RetainWorkerImagesParams struct {
+	NodeID    string
+	DeployID  string
+	Reason    string
+	ExpiresAt time.Time
 }
 
 func NewNodeStore(db DBTX) *NodeStore {
@@ -273,6 +300,20 @@ func (s *NodeStore) WorkerDeployStatus(ctx context.Context, nodeID string) (Work
 			JOIN node_row n ON pr.worker_node_id = n.id
 			WHERE pr.status IN ('starting', 'ready', 'draining')
 			  AND pr.lease_expires_at > now()
+		),
+		pending_snapshot_uploads AS (
+			SELECT COUNT(*) AS active_count
+			FROM sessions
+			WHERE worker_node_id = @node_id
+			  AND pending_snapshot_key IS NOT NULL
+			  AND pending_snapshot_set_at IS NOT NULL
+		),
+		detached_cleanup_jobs AS (
+			SELECT COUNT(*) AS active_count
+			FROM jobs
+			WHERE locked_by_node_id = @node_id
+			  AND status = 'running'
+			  AND job_type IN ('open_pr', 'push_pr_changes', 'create_branch', 'start_preview', 'stop_preview', 'cleanup_stale_sandbox')
 		)
 		SELECT
 			n.id,
@@ -289,14 +330,18 @@ func (s *NodeStore) WorkerDeployStatus(ctx context.Context, nodeID string) (Work
 			jobs_owned.running_count,
 			session_holds.active_count,
 			sandbox_holders.active_count,
-			endpoint_blockers.blocker_count
+			endpoint_blockers.blocker_count,
+			pending_snapshot_uploads.active_count,
+			detached_cleanup_jobs.active_count
 		FROM node_row n
 		CROSS JOIN executors
 		CROSS JOIN previews
 		CROSS JOIN jobs_owned
 		CROSS JOIN session_holds
 		CROSS JOIN sandbox_holders
-		CROSS JOIN endpoint_blockers`,
+		CROSS JOIN endpoint_blockers
+		CROSS JOIN pending_snapshot_uploads
+		CROSS JOIN detached_cleanup_jobs`,
 		pgx.NamedArgs{"node_id": nodeID},
 	).Scan(
 		&status.NodeID,
@@ -314,6 +359,8 @@ func (s *NodeStore) WorkerDeployStatus(ctx context.Context, nodeID string) (Work
 		&status.ActiveSessionHoldCount,
 		&status.ActiveSandboxHolderCount,
 		&status.EndpointBlockerCount,
+		&status.PendingSnapshotUploadCount,
+		&status.DetachedCleanupJobCount,
 	)
 	if err != nil {
 		return WorkerDeployStatus{}, fmt.Errorf("worker deploy status: %w", err)
@@ -341,6 +388,196 @@ func (s *NodeStore) WorkerDeployStatus(ctx context.Context, nodeID string) (Work
 		status.OwnedRunningJobCount == 0 &&
 		status.ActiveSessionHoldCount == 0 &&
 		status.ActiveSandboxHolderCount == 0 &&
-		status.EndpointBlockerCount == 0
+		status.EndpointBlockerCount == 0 &&
+		status.PendingSnapshotUploadCount == 0 &&
+		status.DetachedCleanupJobCount == 0
 	return status, nil
+}
+
+// WorkerDeployImpact returns runtime identities that a maintenance dry run or
+// deploy status surface can show to operators.
+// lint:allow-no-orgid reason="worker deploy impact is node-scoped across all orgs"
+func (s *NodeStore) WorkerDeployImpact(ctx context.Context, nodeID string) (WorkerDeployImpact, error) {
+	rows, err := s.db.Query(ctx, `
+		WITH active_executors AS (
+			SELECT
+				'executor'::text AS kind,
+				se.org_id,
+				se.session_id,
+				se.thread_id,
+				se.id AS runtime_id,
+				se.job_id,
+				se.status::text AS status,
+				COALESCE(ext.extend_until, se.runtime_deadline_at) AS deadline_at,
+				''::text AS endpoint_url,
+				se.drain_intent::text AS reason
+			FROM session_executors se
+			LEFT JOIN deploy_drain_extensions ext
+			  ON ext.org_id = se.org_id
+			 AND ext.session_id = se.session_id
+			 AND (ext.thread_id IS NULL OR ext.thread_id = se.thread_id)
+			 AND ext.active = true
+			 AND ext.extend_until > now()
+			WHERE se.host_node_id = @node_id
+			  AND se.status IN ('starting', 'running', 'draining')
+		),
+		active_previews AS (
+			SELECT
+				'preview'::text AS kind,
+				pr.org_id,
+				pi.session_id,
+				NULL::uuid AS thread_id,
+				pr.id AS runtime_id,
+				NULL::uuid AS job_id,
+				pr.status::text AS status,
+				pr.lease_expires_at AS deadline_at,
+				pr.endpoint_url,
+				pi.name AS reason
+			FROM preview_runtimes pr
+			JOIN preview_instances pi
+			  ON pi.org_id = pr.org_id
+			 AND pi.id = pr.preview_instance_id
+			WHERE pr.worker_node_id = @node_id
+			  AND pr.status IN ('starting', 'ready', 'draining')
+			  AND pr.lease_expires_at > now()
+		)
+		SELECT kind, org_id, session_id, thread_id, runtime_id, job_id, status, deadline_at, endpoint_url, reason
+		FROM active_executors
+		UNION ALL
+		SELECT kind, org_id, session_id, thread_id, runtime_id, job_id, status, deadline_at, endpoint_url, reason
+		FROM active_previews
+		ORDER BY kind, deadline_at NULLS LAST`,
+		pgx.NamedArgs{"node_id": nodeID},
+	)
+	if err != nil {
+		return WorkerDeployImpact{}, fmt.Errorf("query worker deploy impact: %w", err)
+	}
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (WorkerDeployImpactItem, error) {
+		var item WorkerDeployImpactItem
+		var sessionID pgtype.UUID
+		var threadID pgtype.UUID
+		var jobID pgtype.UUID
+		var deadlineAt pgtype.Timestamptz
+		if err := row.Scan(
+			&item.Kind,
+			&item.OrgID,
+			&sessionID,
+			&threadID,
+			&item.RuntimeID,
+			&jobID,
+			&item.Status,
+			&deadlineAt,
+			&item.EndpointURL,
+			&item.Reason,
+		); err != nil {
+			return WorkerDeployImpactItem{}, err
+		}
+		if sessionID.Valid {
+			id := uuid.UUID(sessionID.Bytes)
+			item.SessionID = &id
+		}
+		if threadID.Valid {
+			id := uuid.UUID(threadID.Bytes)
+			item.ThreadID = &id
+		}
+		if jobID.Valid {
+			id := uuid.UUID(jobID.Bytes)
+			item.JobID = &id
+		}
+		if deadlineAt.Valid {
+			item.DeadlineAt = &deadlineAt.Time
+		}
+		return item, nil
+	})
+	if err != nil {
+		return WorkerDeployImpact{}, fmt.Errorf("scan worker deploy impact: %w", err)
+	}
+	return WorkerDeployImpact{NodeID: nodeID, Items: items}, nil
+}
+
+// MigrationVersion returns the current golang-migrate schema version.
+// lint:allow-no-orgid reason="schema_migrations is process-global deploy state"
+func (s *NodeStore) MigrationVersion(ctx context.Context) (int, bool, error) {
+	var version int
+	var dirty bool
+	if err := s.db.QueryRow(ctx, `SELECT version, dirty FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &dirty); err != nil {
+		return 0, false, fmt.Errorf("load schema migration version: %w", err)
+	}
+	return version, dirty, nil
+}
+
+// RetainActiveExecutorImages records active executor images that must remain
+// available for running turns and rollback decisions before deploy pruning.
+// lint:allow-no-orgid reason="worker image retention is cluster-scoped infrastructure state"
+func (s *NodeStore) RetainActiveExecutorImages(ctx context.Context, params RetainWorkerImagesParams) (int64, error) {
+	if params.NodeID == "" {
+		return 0, fmt.Errorf("node id is required")
+	}
+	if params.ExpiresAt.IsZero() {
+		params.ExpiresAt = time.Now().UTC().Add(24 * time.Hour)
+	}
+	tag, err := s.db.Exec(ctx, `
+		INSERT INTO worker_image_retention (
+			image, build_sha, node_id, executor_id, deploy_id, reason, expires_at
+		)
+		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, @expires_at
+		FROM session_executors
+		WHERE host_node_id = @node_id
+		  AND status IN ('starting', 'running', 'draining')
+		  AND image <> ''`,
+		pgx.NamedArgs{
+			"node_id":    params.NodeID,
+			"deploy_id":  params.DeployID,
+			"reason":     params.Reason,
+			"expires_at": params.ExpiresAt.UTC(),
+		})
+	if err != nil {
+		return 0, fmt.Errorf("retain active executor images: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ReleaseExpiredImageRetention marks expired image retention rows inactive.
+// lint:allow-no-orgid reason="worker image retention is cluster-scoped infrastructure state"
+func (s *NodeStore) ReleaseExpiredImageRetention(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE worker_image_retention
+		SET active = false,
+			released_at = COALESCE(released_at, @now)
+		WHERE active = true
+		  AND expires_at <= @now`,
+		pgx.NamedArgs{"now": now.UTC()})
+	if err != nil {
+		return 0, fmt.Errorf("release expired worker image retention: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ExtendSessionDrain records an operator-approved per-session drain extension.
+func (s *NodeStore) ExtendSessionDrain(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, nodeID, deployID, requestedBy, reason string, extendUntil time.Time) error {
+	if requestedBy == "" || reason == "" {
+		return fmt.Errorf("requested_by and reason are required")
+	}
+	if extendUntil.IsZero() {
+		return fmt.Errorf("extend_until is required")
+	}
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO deploy_drain_extensions (
+			org_id, session_id, thread_id, node_id, deploy_id, requested_by, reason, extend_until
+		)
+		VALUES (@org_id, @session_id, @thread_id, @node_id, @deploy_id, @requested_by, @reason, @extend_until)`,
+		pgx.NamedArgs{
+			"org_id":       orgID,
+			"session_id":   sessionID,
+			"thread_id":    threadID,
+			"node_id":      nodeID,
+			"deploy_id":    deployID,
+			"requested_by": requestedBy,
+			"reason":       reason,
+			"extend_until": extendUntil.UTC(),
+		})
+	if err != nil {
+		return fmt.Errorf("extend session drain: %w", err)
+	}
+	return nil
 }

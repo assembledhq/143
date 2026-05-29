@@ -35,7 +35,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -66,7 +66,7 @@ var previewAccessSessionTestCols = []string{
 var previewRuntimeTestCols = []string{
 	"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
 	"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
-	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
 }
 
 var previewStartupCacheTestCols = []string{
@@ -98,7 +98,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", previewStringPtr("req-1"), "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil),
+		(*int64)(nil), (*time.Time)(nil), "",
 		false,
 	}
 }
@@ -122,7 +122,7 @@ func newPreviewRuntimeRow(id, orgID, previewID uuid.UUID, now time.Time) []any {
 	return []any{
 		id, orgID, previewID, 1, "worker-1",
 		"http://worker-runtime:8080", "handle-1", 3000, "ready", now.Add(45 * time.Second),
-		now, nil, nil, "", now, now,
+		now, nil, nil, "", "", now, now,
 	}
 }
 
@@ -2278,12 +2278,31 @@ func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerMarksPreviewUnavailab
 	store := NewPreviewStore(mock)
 
 	mock.ExpectExec("WITH lost AS").
-		WithArgs(previewAnyArgs(2)...).
+		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
 	updated, err := store.MarkActivePreviewRuntimesLostByWorker(context.Background(), "worker-1", "drain timeout")
 	require.NoError(t, err, "MarkActivePreviewRuntimesLostByWorker should mark runtimes lost")
 	require.Equal(t, int64(2), updated, "MarkActivePreviewRuntimesLostByWorker should return affected preview count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerRecordsUnavailableReason(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	updated, err := store.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), "worker-1", "drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout)
+	require.NoError(t, err, "MarkActivePreviewRuntimesLostByWorkerWithReason should persist a deploy-specific reason")
+	require.Equal(t, int64(1), updated, "MarkActivePreviewRuntimesLostByWorkerWithReason should report updated previews")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

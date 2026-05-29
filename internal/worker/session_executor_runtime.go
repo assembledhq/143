@@ -26,6 +26,7 @@ type executorRuntimeExecutorStore interface {
 	MarkRunningWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, error)
 	HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, error)
 	MarkDrainingWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID) (bool, error)
+	MarkHumanInputCheckpointByJob(ctx context.Context, orgID, jobID, lockToken uuid.UUID) (bool, error)
 	MarkTerminalWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, status models.SessionExecutorStatus, exitCode *int, lastError string) (bool, error)
 }
 
@@ -128,6 +129,9 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 		Str("executor_id", executor.ID.String()).
 		Str("job_id", job.ID.String()).
 		Str("job_type", job.JobType).
+		Str("deploy_generation", executor.BuildSHA).
+		Str("host_node_id", executor.HostNodeID).
+		Str("drain_intent", string(executor.DrainIntent)).
 		Msg("session executor processing job")
 
 	runErr := handler(handlerCtx, job.JobType, job.Payload)
@@ -326,6 +330,19 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 	defer cancel()
 
 	if err == nil {
+		if marked, markErr := r.Executors.MarkHumanInputCheckpointByJob(writeCtx, executor.OrgID, job.ID, executor.LockToken); markErr != nil {
+			r.loggerPtr().Warn().
+				Err(markErr).
+				Str("executor_id", executor.ID.String()).
+				Str("job_id", job.ID.String()).
+				Msg("failed to record human-input checkpoint drain intent")
+		} else if marked {
+			r.loggerPtr().Info().
+				Str("executor_id", executor.ID.String()).
+				Str("job_id", job.ID.String()).
+				Str("drain_intent", string(models.DrainIntentHumanInputCheckpoint)).
+				Msg("session executor released ownership at human-input checkpoint")
+		}
 		if ok := r.markJobSucceeded(writeCtx, executor, job); ok {
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusCompleted, 0, "")
 		}

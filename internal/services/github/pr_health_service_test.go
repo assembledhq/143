@@ -2070,6 +2070,7 @@ var prHealthSessionThreadColumns = []string{
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
 var prHealthSessionColumns = []string{
@@ -2123,6 +2124,7 @@ func newPRHealthSessionThreadRow(threadID, sessionID, orgID uuid.UUID, now time.
 		nil, nil, nil, nil,
 		nil, nil, now,
 		nil, nil, float64(0), 0, nil,
+		"", nil, "", "", []byte(`[]`),
 	}
 }
 

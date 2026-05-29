@@ -69,7 +69,9 @@ func TestIntegration_WorkerDispatch_PicksUpAndCallsHandler(t *testing.T) {
 		Payload json.RawMessage
 	}
 	received := make(chan recvJob, 1)
-	w := worker.New(pool, zerolog.Nop(), "test-node-"+jobID.String()[:8])
+	nodeID := "test-node-" + jobID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	w := worker.New(pool, zerolog.Nop(), nodeID)
 	w.Register("continue_session", func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		received <- recvJob{JobType: jobType, Payload: payload}
 		return nil
@@ -132,7 +134,9 @@ func TestIntegration_WorkerDispatch_UnknownJobTypeDeadLetters(t *testing.T) {
 	jobID, err := jobStore.Enqueue(context.Background(), orgID, "agent", "no_such_handler", payload, 5, nil)
 	require.NoError(t, err)
 
-	w := worker.New(pool, zerolog.Nop(), "test-node-deadletter")
+	nodeID := "test-node-deadletter-" + jobID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	w := worker.New(pool, zerolog.Nop(), nodeID)
 	// Deliberately do *not* Register a handler for "no_such_handler".
 
 	ctx, cancel := context.WithCancel(context.Background())

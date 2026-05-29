@@ -19,16 +19,17 @@ import (
 )
 
 type executorRuntimeExecutorStoreStub struct {
-	mu              sync.Mutex
-	executor        models.SessionExecutor
-	getSequence     []models.SessionExecutor
-	getErr          error
-	heartbeatIntent models.DrainIntent
-	markRunningOK   bool
-	terminalStatus  models.SessionExecutorStatus
-	terminalToken   uuid.UUID
-	terminalCalls   int
-	drainingCalls   int
+	mu                        sync.Mutex
+	executor                  models.SessionExecutor
+	getSequence               []models.SessionExecutor
+	getErr                    error
+	heartbeatIntent           models.DrainIntent
+	markRunningOK             bool
+	terminalStatus            models.SessionExecutorStatus
+	terminalToken             uuid.UUID
+	terminalCalls             int
+	drainingCalls             int
+	humanInputCheckpointCalls int
 }
 
 func (s *executorRuntimeExecutorStoreStub) GetByID(context.Context, uuid.UUID) (models.SessionExecutor, error) {
@@ -61,6 +62,13 @@ func (s *executorRuntimeExecutorStoreStub) MarkDrainingWithLease(context.Context
 	defer s.mu.Unlock()
 	s.drainingCalls++
 	return true, nil
+}
+
+func (s *executorRuntimeExecutorStoreStub) MarkHumanInputCheckpointByJob(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.humanInputCheckpointCalls++
+	return false, nil
 }
 
 func (s *executorRuntimeExecutorStoreStub) MarkTerminalWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, lockToken uuid.UUID, status models.SessionExecutorStatus, _ *int, _ string) (bool, error) {
