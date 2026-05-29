@@ -300,6 +300,9 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 			r.registerCapacityDeadLetter(ctx, reservation)
 			return fmt.Errorf("%s: %w", acq.ErrCode, acq.Err)
 		}
+		if errors.Is(acq.Err, agent.ErrStaleSandboxIDCleared) {
+			return fmt.Errorf("%s: %w", acq.ErrCodeOr("STALE_SANDBOX_CLEARED"), acq.Err)
+		}
 		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
@@ -511,6 +514,11 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	case freshErr != nil:
 		r.logger.Warn().Err(freshErr).Str("session_id", session.ID.String()).Msg("preview hydrate: pre-hydrate peek failed; falling through to CAS race detection")
 	case winningID != "":
+		if cleared, clearErr := r.clearStalePreviewContainer(ctx, orgID, session, winningID, workDir); clearErr != nil {
+			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEAR_FAILED", Err: clearErr}
+		} else if cleared {
+			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEARED", Err: fmt.Errorf("%w", agent.ErrStaleSandboxIDCleared)}
+		}
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
 	}
 
@@ -549,6 +557,51 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
+}
+
+func (r *StartRunner) clearStalePreviewContainer(ctx context.Context, orgID uuid.UUID, session *models.Session, containerID, workDir string) (bool, error) {
+	if r == nil || r.sandboxProvider == nil || r.sessions == nil || session == nil || containerID == "" {
+		return false, nil
+	}
+	candidate := &agent.Sandbox{
+		ID:        containerID,
+		Provider:  "docker",
+		WorkDir:   workDir,
+		SessionID: session.ID.String(),
+		OrgID:     session.OrgID.String(),
+		Purpose:   "preview_hydrate",
+	}
+	alive, inspectErr := r.sandboxProvider.IsAlive(ctx, candidate)
+	if inspectErr != nil {
+		r.logger.Warn().Err(inspectErr).
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: stale container probe failed; leaving row for retry/reconciler")
+		return false, nil
+	}
+	if alive {
+		return false, nil
+	}
+	cleared, clearErr := r.sessions.ClearContainerID(ctx, orgID, session.ID, containerID)
+	if clearErr != nil {
+		r.logger.Warn().Err(clearErr).
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: failed to clear stale container_id")
+		return false, fmt.Errorf("clear stale container_id: %w", clearErr)
+	}
+	if !cleared {
+		r.logger.Info().
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: stale container clear lost CAS")
+		return false, nil
+	}
+	r.logger.Info().
+		Str("session_id", session.ID.String()).
+		Str("container_id", containerID).
+		Msg("preview hydrate: cleared stale container_id; retrying against clean row")
+	return true, nil
 }
 
 func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID, previewConfigName string) (*models.PreviewConfig, error) {
