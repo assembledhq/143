@@ -1453,9 +1453,12 @@ describe("PreviewPanel component", () => {
     expect(
       screen.getByText("Restart the preview to see the latest session changes."),
     ).toBeInTheDocument();
+    const freshnessCallout = screen.getByTestId("preview-freshness-callout");
+    const refreshButton = screen.getByRole("button", { name: "Refresh preview" });
+    expect(freshnessCallout).toContainElement(refreshButton);
     expect(screen.getByRole("link", { name: "Open Preview" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Refresh preview" }));
+    await user.click(refreshButton);
 
     await waitFor(() => {
       expect(mockEnsure).toHaveBeenCalledTimes(1);
