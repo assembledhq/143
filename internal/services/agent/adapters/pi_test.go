@@ -291,7 +291,7 @@ func TestPiAdapter_ShellModelResolution(t *testing.T) {
 
 	// Same expansion pattern the adapter emits; isolated so we can drive it
 	// through bash with different env var combinations.
-	const expr = `echo "${PI_MODEL_CUSTOM:-${PI_MODEL:-anthropic/claude-opus-4-7}}"`
+	const expr = `echo "${PI_MODEL_CUSTOM:-${PI_MODEL:-anthropic/claude-opus-4-8}}"`
 
 	tests := []struct {
 		name string
@@ -301,7 +301,7 @@ func TestPiAdapter_ShellModelResolution(t *testing.T) {
 		{
 			name: "falls back to default when nothing set",
 			env:  nil,
-			want: "anthropic/claude-opus-4-7",
+			want: "anthropic/claude-opus-4-8",
 		},
 		{
 			name: "uses PI_MODEL when only PI_MODEL is set",
