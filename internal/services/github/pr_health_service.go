@@ -918,10 +918,14 @@ func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, 
 }
 
 func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.PullRequest) {
+	s.enqueuePullRequestStateSyncWithScope(ctx, pr, "")
+}
+
+func (s *PRService) enqueuePullRequestStateSyncWithScope(ctx context.Context, pr models.PullRequest, scope string) {
 	if s.jobs == nil {
 		return
 	}
-	dedupeKey := fmt.Sprintf("%s:%s", prHealthSyncJobType, pr.ID.String())
+	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID, scope)
 	_, err := s.jobs.Enqueue(ctx, pr.OrgID, prHealthSyncQueue, prHealthSyncJobType, map[string]string{
 		"org_id":          pr.OrgID.String(),
 		"pull_request_id": pr.ID.String(),
@@ -929,6 +933,14 @@ func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.P
 	if err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health sync")
 	}
+}
+
+func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID, scope string) string {
+	dedupeKey := fmt.Sprintf("%s:%s", prHealthSyncJobType, pullRequestID.String())
+	if scope != "" {
+		dedupeKey = fmt.Sprintf("%s:%s", dedupeKey, scope)
+	}
+	return dedupeKey
 }
 
 func (s *PRService) enqueuePullRequestHealthEnrichment(ctx context.Context, pr models.PullRequest, version int64) {

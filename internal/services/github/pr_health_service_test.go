@@ -520,6 +520,36 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all stale health expectations should be met")
 }
 
+func TestPullRequestStateSyncDedupeKey(t *testing.T) {
+	t.Parallel()
+
+	prID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	tests := []struct {
+		name     string
+		scope    string
+		expected string
+	}{
+		{
+			name:     "generic per pull request sync key",
+			scope:    "",
+			expected: "sync_pull_request_state:11111111-1111-1111-1111-111111111111",
+		},
+		{
+			name:     "check completion sync key",
+			scope:    "check_run_completed",
+			expected: "sync_pull_request_state:11111111-1111-1111-1111-111111111111:check_run_completed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, pullRequestStateSyncDedupeKey(prID, tt.scope), "dedupe key should include the optional sync wake-up scope")
+		})
+	}
+}
+
 func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPending(t *testing.T) {
 	t.Parallel()
 
