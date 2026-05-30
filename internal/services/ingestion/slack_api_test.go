@@ -267,6 +267,103 @@ func TestSlackAPIClient_FetchThreadReplies(t *testing.T) {
 	}
 }
 
+func TestSlackAPIClient_WriteMethods(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		call     func(ctx context.Context, client *SlackAPIClient) error
+		wantPath string
+	}{
+		{
+			name: "post message",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				_, err := client.PostMessage(ctx, "test-token", "C123", "1000.1", "hello")
+				return err
+			},
+			wantPath: "/chat.postMessage",
+		},
+		{
+			name: "update message",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.UpdateMessage(ctx, "test-token", "C123", "1000.2", "updated")
+			},
+			wantPath: "/chat.update",
+		},
+		{
+			name: "post message with blocks",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				_, err := client.PostMessageWithBlocks(ctx, "test-token", "C123", "1000.1", "hello", []SlackBlock{
+					{Type: "section", Text: &SlackTextObject{Type: "mrkdwn", Text: "hello"}},
+				})
+				return err
+			},
+			wantPath: "/chat.postMessage",
+		},
+		{
+			name: "post ephemeral",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.PostEphemeral(ctx, "test-token", "C123", "U123", "private")
+			},
+			wantPath: "/chat.postEphemeral",
+		},
+		{
+			name: "publish app home",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.PublishHome(ctx, "test-token", "U123", SlackHomeView{Type: "home"})
+			},
+			wantPath: "/views.publish",
+		},
+		{
+			name: "open modal",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.OpenView(ctx, "test-token", "trigger", SlackHomeView{Type: "modal"})
+			},
+			wantPath: "/views.open",
+		},
+		{
+			name: "update modal",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.UpdateView(ctx, "test-token", "V123", SlackHomeView{Type: "modal"})
+			},
+			wantPath: "/views.update",
+		},
+		{
+			name: "delete message",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.DeleteMessage(ctx, "test-token", "C123", "1000.2")
+			},
+			wantPath: "/chat.delete",
+		},
+		{
+			name: "unfurl",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.Unfurl(ctx, "test-token", "C123", "1000.2", map[string]any{"https://143.dev/sessions/1": map[string]string{"text": "Session"}})
+			},
+			wantPath: "/chat.unfurl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, tt.wantPath, r.URL.Path, "should call expected Slack method")
+				require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "should send auth header")
+				require.Equal(t, "application/json", r.Header.Get("Content-Type"), "should send JSON content type")
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C123", "ts": "1000.2"})
+				require.NoError(t, err, "test response should encode")
+			}))
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			require.NoError(t, tt.call(context.Background(), client), "Slack write method should succeed")
+		})
+	}
+}
+
 func TestSlackAPIClient_ListChannels(t *testing.T) {
 	t.Parallel()
 
@@ -352,6 +449,56 @@ func TestSlackAPIClient_ListChannels(t *testing.T) {
 
 			require.NoError(t, err, "ListChannels should not return an error")
 			require.Equal(t, tt.expected, channels, "should return expected channels")
+		})
+	}
+}
+
+func TestSlackAPIClient_ReadHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		call     func(ctx context.Context, client *SlackAPIClient) error
+		wantPath string
+	}{
+		{
+			name: "auth test",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				_, err := client.AuthTest(ctx, "test-token")
+				return err
+			},
+			wantPath: "/auth.test",
+		},
+		{
+			name: "file info",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				_, err := client.FetchFileInfo(ctx, "test-token", "F123")
+				return err
+			},
+			wantPath: "/files.info",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, tt.wantPath, r.URL.Path, "should call expected Slack read method")
+				require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "should send auth header")
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"ok":      true,
+					"user_id": "U143",
+					"team_id": "T123",
+					"file":    map[string]string{"id": "F123", "name": "trace.txt", "url_private": "https://files.slack.com/F123"},
+				})
+				require.NoError(t, err, "test response should encode")
+			}))
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			require.NoError(t, tt.call(context.Background(), client), "Slack read helper should succeed")
 		})
 	}
 }

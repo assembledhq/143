@@ -133,6 +133,7 @@ type Config struct {
 	// Slack OAuth
 	SlackOAuthClientID     string `env:"SLACK_OAUTH_CLIENT_ID"`
 	SlackOAuthClientSecret string `env:"SLACK_OAUTH_CLIENT_SECRET"`
+	SlackSigningSecret     string `env:"SLACK_SIGNING_SECRET"`
 	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5.4-nano"`
 
 	// GitHub App
