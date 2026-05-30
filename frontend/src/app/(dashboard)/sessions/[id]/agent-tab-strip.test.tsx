@@ -105,6 +105,44 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 message queued");
   });
 
+  it("shows durable inbox delivery state in the tab tooltip", async () => {
+    const user = userEvent.setup();
+    const thread = makeThread({
+      inbox_delivery: {
+        thread_id: "thread-1",
+        state: "pending",
+        pending_count: 2,
+        delivering_count: 0,
+        delivered_count: 1,
+        unknown_delivery_count: 0,
+        acked_count: 4,
+        dead_letter_count: 0,
+        last_sequence_no: 7,
+      },
+    });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.hover(screen.getByText("Main tab"));
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Delivery pending");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("2 waiting");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("1 delivered");
+  });
+
   it("keeps the single-agent tooltip trigger scoped to the visible tab label", () => {
     const thread = makeThread({ label: "Main" });
 

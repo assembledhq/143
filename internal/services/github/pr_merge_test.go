@@ -171,6 +171,36 @@ func TestMergePullRequestOnGitHubRejectsMalformedJSON(t *testing.T) {
 	require.Contains(t, err.Error(), "decode GitHub merge response", "mergePullRequestOnGitHub should wrap decode failures")
 }
 
+func TestValidateExpectedMergeHead(t *testing.T) {
+	t.Parallel()
+
+	expected := "queued-head"
+	tests := []struct {
+		name        string
+		currentHead string
+		expected    *string
+		expectErr   bool
+	}{
+		{name: "allows matching expected head", currentHead: "queued-head", expected: &expected},
+		{name: "allows direct merge without expected head", currentHead: "new-head", expected: nil},
+		{name: "allows empty expected head", currentHead: "new-head", expected: ptrString("")},
+		{name: "rejects changed head", currentHead: "new-head", expected: &expected, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateExpectedMergeHead(tt.currentHead, tt.expected)
+			if tt.expectErr {
+				require.ErrorIs(t, err, ErrPullRequestHeadChanged, "validateExpectedMergeHead should reject a changed queued head")
+				return
+			}
+			require.NoError(t, err, "validateExpectedMergeHead should allow safe head states")
+		})
+	}
+}
+
 // TestGitHubAPIErrorMessage covers the Message() helper, which the HTTP
 // handler relies on to surface a useful message in the toast.
 func TestGitHubAPIErrorMessage(t *testing.T) {
@@ -311,14 +341,14 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 
 	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
@@ -386,7 +416,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "success", &headSHA, nil, &baseSHA,
-			models.PullRequestMergeStateClean, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateClean, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).

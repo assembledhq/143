@@ -151,9 +151,11 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	sessionStreams := cache.NewSessionStreams(redisClient, logger, redisMetrics)
 	sessionStore.SetLogger(logger)
 	sessionLogStore.SetLogger(logger)
+	sessionThreadStore.SetLogger(logger)
 	if sessionStreams != nil {
 		sessionStore.SetStreams(sessionStreams)
 		sessionLogStore.SetStreams(sessionStreams)
+		sessionThreadStore.SetStreams(sessionStreams)
 	}
 
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -255,6 +257,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		orgSettingsCache,
 		sandboxCapacity,
 		redisClient,
+		sessionStreams,
 		fileReader,
 	)
 	if services == nil {

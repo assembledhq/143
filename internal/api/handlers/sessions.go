@@ -69,6 +69,7 @@ type SessionHandler struct {
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
 	orgStore           *db.OrganizationStore
+	userStore          *db.UserStore
 	jobStore           *db.JobStore
 	txStarter          db.TxStarter
 	messageStore       *db.SessionMessageStore
@@ -77,6 +78,8 @@ type SessionHandler struct {
 	linkStore          *db.SessionIssueLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
+	threadInboxStore   *db.ThreadInboxStore
+	sandboxHolders     *db.SessionSandboxHolderStore
 	viewStore          *db.SessionViewStore
 	memberships        sessionMembershipStore
 	prCredentials      githubStatusCredentialStore
@@ -467,6 +470,14 @@ func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRe
 	)
 }
 
+func (h *SessionHandler) SetThreadInboxStore(store *db.ThreadInboxStore) {
+	h.threadInboxStore = store
+}
+
+func (h *SessionHandler) SetSessionSandboxHolderStore(store *db.SessionSandboxHolderStore) {
+	h.sandboxHolders = store
+}
+
 func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
@@ -496,6 +507,10 @@ func NewSessionHandler(
 		llmClient:        llmClient,
 		logger:           logger,
 	}
+}
+
+func (h *SessionHandler) SetUserStore(store *db.UserStore) {
+	h.userStore = store
 }
 
 type publishActionTxError struct {
@@ -789,12 +804,58 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if threads == nil {
 			threads = []models.SessionThread{}
 		}
+		if err := h.attachThreadInboxDeliverySummaries(r.Context(), orgID, runID, threads); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", runID.String()).Msg("failed to load thread inbox delivery summaries for session")
+		}
 		detail.Threads = threads
 	} else {
 		detail.Threads = []models.SessionThread{}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) attachThreadInboxDeliverySummaries(ctx context.Context, orgID, sessionID uuid.UUID, threads []models.SessionThread) error {
+	if h.threadInboxStore == nil || len(threads) == 0 {
+		return nil
+	}
+	summaries, err := h.threadInboxStore.ListDeliverySummariesBySession(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("list thread inbox delivery summaries: %w", err)
+	}
+	for i := range threads {
+		summary, ok := summaries[threads[i].ID]
+		if !ok {
+			summary = models.ThreadInboxDeliverySummary{ThreadID: threads[i].ID}
+			summary.Normalize()
+		}
+		threads[i].InboxDelivery = &summary
+	}
+	return nil
+}
+
+func (h *SessionHandler) requireSnapshotQuiescent(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, action string) bool {
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return false
+	}
+	if session.Status == models.SessionStatusRunning {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before "+action)
+		return false
+	}
+	if h.sandboxHolders == nil {
+		return true
+	}
+	active, err := h.sandboxHolders.CountActiveThreadRuntimesBySession(r.Context(), orgID, session.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "QUIESCENCE_CHECK_FAILED", "failed to check active thread runtimes", err)
+		return false
+	}
+	if active > 0 {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_QUIESCENT", "wait for active tabs to finish before "+action)
+		return false
+	}
+	return true
 }
 
 func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
@@ -1523,6 +1584,13 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 	}
 	defer statusSub.Close()
 
+	eventSub, err := h.streams.SubscribeEvents(run.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to subscribe to Redis session event stream")
+		return false
+	}
+	defer eventSub.Close()
+
 	logs, err := h.catchUpLogs(ctx, orgID, run.ID, lastEventID)
 	if err != nil {
 		logger.Warn().Err(err).Str("session_id", run.ID.String()).Str("last_event_id", lastEventID).Msg("failed to catch up logs from Redis-backed stream")
@@ -1608,6 +1676,21 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				sw.Flush()
 				return true
 			}
+		case event, ok := <-eventSub.C:
+			if !ok {
+				closeReason := eventSub.CloseReason()
+				logger.Warn().Str("session_id", run.ID.String()).Str("reason", closeReason).Msg("Redis event subscription closed; client should reconnect")
+				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
+					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis event subscription closed")
+				}
+				sw.Flush()
+				return true
+			}
+			if err := writeSessionStreamSSEEvent(sw, event); err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Str("event_type", string(event.Type)).Msg("failed to write Redis session event to SSE stream")
+				return true
+			}
+			sw.Flush()
 		}
 	}
 }
@@ -1699,6 +1782,21 @@ func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.S
 		}
 	}
 	return nil
+}
+
+func writeSessionStreamSSEEvent(sw *sse.Writer, event models.SessionStreamEvent) error {
+	switch event.Type {
+	case models.SessionStreamEventThreadInboxQueued:
+		return sw.WriteEvent(sse.EventThreadInboxQueued, event.Data)
+	case models.SessionStreamEventThreadInboxCleared:
+		return sw.WriteEvent(sse.EventThreadInboxCleared, event.Data)
+	case models.SessionStreamEventThreadRuntimeUpdated:
+		return sw.WriteEvent(sse.EventThreadRuntimeUpdated, event.Data)
+	case models.SessionStreamEventWorkspaceGenerationChanged:
+		return sw.WriteEvent(sse.EventSessionWorkspaceGenerationChanged, event.Data)
+	default:
+		return fmt.Errorf("unsupported session stream event type: %s", event.Type)
+	}
 }
 
 func humanInputSSEEventType(log models.SessionLog) (sse.EventType, bool) {
@@ -1802,6 +1900,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
+		return
+	}
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a PR") {
 		return
 	}
 
@@ -1946,12 +2047,7 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
-		return
-	}
-	if session.Status == models.SessionStatusRunning {
-		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before creating a branch")
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a branch") {
 		return
 	}
 	switch session.BranchCreationState {
@@ -2073,17 +2169,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
-		return
-	}
-	// Defense-in-depth against the frontend's isRunning gate: pushing while a
-	// turn is in flight would race the active sandbox and the snapshot we'd
-	// hydrate could be stale relative to commits the running turn is about
-	// to make. Reject server-side so a racing client (or a stale tab whose
-	// session.status hadn't refreshed) can't slip through.
-	if session.Status == models.SessionStatusRunning {
-		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "pushing changes") {
 		return
 	}
 
@@ -3301,6 +3387,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentType := models.AgentType(body.AgentType)
+	if body.Model == "" && agentType == "" && h.userStore != nil {
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			userWithSettings, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+			if err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to load user settings for default model")
+			} else if userWithSettings.Settings.CodingAgentModelDefault != "" {
+				resolvedAgentType := models.AgentTypeForModel(userWithSettings.Settings.CodingAgentModelDefault)
+				if resolvedAgentType != "" {
+					body.Model = userWithSettings.Settings.CodingAgentModelDefault
+					agentType = resolvedAgentType
+				}
+			}
+		}
+	}
 	if agentType == "" {
 		agentType = orgSettings.DefaultAgentType
 		if agentType == "" {
@@ -3470,6 +3570,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			SessionTitle:            title,
 			BranchName:              body.Branch,
 			ReferenceText:           linearReferenceText(body.References),
+			RepositoryID:            repoID,
 			UserID:                  userID,
 			LinearPrivate:           body.LinearPrivate,
 			LinearStateSyncDisabled: body.LinearStateSyncDisabled,

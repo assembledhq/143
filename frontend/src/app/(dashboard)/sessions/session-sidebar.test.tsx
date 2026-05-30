@@ -8,7 +8,7 @@ import { fireEvent, renderWithProviders, screen, waitFor } from '@/test/test-uti
 import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
 import { SessionSidebar } from './session-sidebar';
-import type { SessionListItem } from '@/lib/types';
+import type { SessionDetail, SessionListItem } from '@/lib/types';
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -81,6 +81,14 @@ function serveSessions(sessions: SessionListItem[]) {
   server.use(
     http.get('/api/v1/sessions', () => {
       return HttpResponse.json({ data: sessions, meta: {} });
+    }),
+  );
+}
+
+function serveSessionDetail(session: SessionDetail) {
+  server.use(
+    http.get(`/api/v1/sessions/${session.id}`, () => {
+      return HttpResponse.json({ data: session });
     }),
   );
 }
@@ -1079,6 +1087,116 @@ describe('SessionSidebar', () => {
     const savedOption = screen.getByText('Saved session below draft').closest('[role="option"]');
     expect(savedOption).toHaveAttribute('aria-selected', 'false');
     expect(savedOption?.className).not.toContain('ring-ring/20');
+  });
+
+  it('shows the open session as a contextual selected row when it is missing from the saved list', async () => {
+    mockPathname = '/sessions/current-session';
+    mockSelectedSegment = 'current-session';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'First visible saved session' }),
+      makeSession({ id: 's2', result_summary: 'Second visible saved session' }),
+    ]);
+    serveSessionDetail(makeSession({
+      id: 'current-session',
+      result_summary: 'Open session outside the list',
+      status: 'running',
+    }) as SessionDetail);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('First visible saved session');
+    await screen.findByText('Open session outside the list');
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute(
+      'aria-activedescendant',
+      'session-sidebar-option-current-session',
+    );
+
+    const currentOption = screen.getByRole('option', { name: 'Open session outside the list' });
+    expect(currentOption).toHaveAttribute('aria-selected', 'true');
+    expect(currentOption).toHaveTextContent('Current');
+    expect(currentOption).toHaveTextContent('Not in this list');
+
+    const firstSavedOption = screen.getByText('First visible saved session').closest('[role="option"]');
+    expect(firstSavedOption).toHaveAttribute('aria-selected', 'false');
+    expect(firstSavedOption?.className).not.toContain('ring-ring/20');
+  });
+
+  it('does not render a contextual current-session row when the open session is already visible', async () => {
+    mockPathname = '/sessions/current-session';
+    mockSelectedSegment = 'current-session';
+    serveSessions([
+      makeSession({ id: 'current-session', result_summary: 'Visible current session' }),
+      makeSession({ id: 's2', result_summary: 'Second visible saved session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Visible current session');
+
+    expect(screen.queryByText('Not in this list')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Visible current session')).toHaveLength(1);
+    expect(screen.getByText('Visible current session').closest('[role="option"]')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+  });
+
+  it('pressing j from the context row moves focus to the first saved session, not the second', async () => {
+    const user = userEvent.setup();
+    mockPathname = '/sessions/current-session';
+    mockSelectedSegment = 'current-session';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'First saved session' }),
+      makeSession({ id: 's2', result_summary: 'Second saved session' }),
+    ]);
+    serveSessionDetail(makeSession({
+      id: 'current-session',
+      result_summary: 'Open session outside the list',
+      status: 'running',
+    }) as SessionDetail);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Open session outside the list');
+    await screen.findByText('First saved session');
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute('aria-activedescendant', 'session-sidebar-option-current-session');
+
+    await user.keyboard('j');
+
+    expect(listbox).toHaveAttribute('aria-activedescendant', 'session-sidebar-option-s1');
+    expect(screen.getByText('First saved session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Second saved session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('pressing k from the first saved session returns focus to the context row', async () => {
+    const user = userEvent.setup();
+    mockPathname = '/sessions/current-session';
+    mockSelectedSegment = 'current-session';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'First saved session' }),
+      makeSession({ id: 's2', result_summary: 'Second saved session' }),
+    ]);
+    serveSessionDetail(makeSession({
+      id: 'current-session',
+      result_summary: 'Open session outside the list',
+      status: 'running',
+    }) as SessionDetail);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Open session outside the list');
+    await screen.findByText('First saved session');
+
+    await user.keyboard('j');
+
+    const listbox = screen.getByRole('listbox', { name: 'Sessions' });
+    expect(listbox).toHaveAttribute('aria-activedescendant', 'session-sidebar-option-s1');
+
+    await user.keyboard('k');
+
+    expect(listbox).toHaveAttribute('aria-activedescendant', 'session-sidebar-option-current-session');
+    expect(screen.getByRole('option', { name: 'Open session outside the list' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('First saved session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
   });
 
   it('clears stale saved-session focus when navigating into the new-session draft', async () => {

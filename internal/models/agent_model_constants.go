@@ -33,10 +33,11 @@ const (
 var AvailableAmpModes = []string{AmpModeSmart, AmpModeDeep, AmpModeLarge, AmpModeRush}
 
 // Pi accepts provider/model patterns. Curated short list; users with niche needs
-// can override per-session via PI_MODEL_CUSTOM in agent_config. Opus 4.7 is
+// can override per-session via PI_MODEL_CUSTOM in agent_config. Opus 4.8 is
 // listed first because it's the current top model and doubles as the hardcoded
 // default in piStreamingConfig.BuildCmd when no PI_MODEL is set.
 const (
+	PiModelClaudeOpus48   = "anthropic/claude-opus-4-8"
 	PiModelClaudeOpus47   = "anthropic/claude-opus-4-7"
 	PiModelClaudeSonnet46 = "anthropic/claude-sonnet-4-6"
 	PiModelClaudeHaiku45  = "anthropic/claude-haiku-4-5"
@@ -45,6 +46,7 @@ const (
 )
 
 var AvailablePiModels = []string{
+	PiModelClaudeOpus48,
 	PiModelClaudeOpus47,
 	PiModelClaudeSonnet46,
 	PiModelClaudeHaiku45,
@@ -53,6 +55,7 @@ var AvailablePiModels = []string{
 }
 
 const (
+	ClaudeCodeModelOpus48   = "claude-opus-4-8"
 	ClaudeCodeModelOpus47   = "claude-opus-4-7"
 	ClaudeCodeModelOpus46   = "claude-opus-4-6"
 	ClaudeCodeModelSonnet46 = "claude-sonnet-4-6"
@@ -60,7 +63,7 @@ const (
 	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
 	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
@@ -295,7 +298,7 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 			return fmt.Errorf("model must be non-empty for agent type %s", AgentTypePi)
 		}
 		if !strings.Contains(model, "/") {
-			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeOpus47)
+			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeOpus48)
 		}
 	default:
 		return fmt.Errorf("unknown agent type: %s", agentType)
@@ -335,6 +338,7 @@ const DefaultLLMModel = "gpt-5.4-mini"
 // Keep in sync with frontend/src/lib/model-constants.ts (LLM_MODELS_BY_PROVIDER).
 // Models are listed most-capable → least-capable within each provider family.
 var AvailableLLMModels = []string{
+	"claude-opus-4-8",
 	"claude-opus-4-7",
 	"claude-sonnet-4-6",
 	"claude-haiku-4-5",
@@ -357,11 +361,11 @@ var AvailableLLMModels = []string{
 // GET /api/v1/settings/llm-models endpoint.
 func LLMModelsByProvider() map[string][]string {
 	return map[string][]string{
-		"anthropic": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
+		"anthropic": {"claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
 		"openai":    {"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"},
 		"gemini":    {"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"},
 		"openrouter": {
-			"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
+			"claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
 			"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
 			"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash",
 			// OpenRouter-exclusive Qwen models.

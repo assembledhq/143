@@ -26,7 +26,10 @@ type agentStreamEvent struct {
 	Result       json.RawMessage `json:"result,omitempty"`
 	Error        string          `json:"error,omitempty"`
 	Model        string          `json:"model,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Path         string          `json:"path,omitempty"`
 	SessionID    string          `json:"session_id,omitempty"`
+	SessionPath  string          `json:"session_path,omitempty"`
 	TotalCostUSD *float64        `json:"total_cost_usd,omitempty"`
 	CostUSD      *float64        `json:"cost_usd,omitempty"`
 	Usage        *struct {
@@ -76,6 +79,16 @@ func parseAgentStreamLine(
 	}
 
 	switch {
+	case cfg.CaptureSessionID && isSessionEvent(event.Type):
+		if sessionID := firstNonEmpty(event.SessionID, event.ID, event.SessionPath, event.Path); sessionID != "" {
+			result.AgentSessionID = sessionID
+		}
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   string(line),
+		}
+
 	case event.Type == "assistant" || event.Type == "text" ||
 		(cfg.MessageAsAssistant && event.Type == "message"):
 		content := event.Content
@@ -211,8 +224,10 @@ func parseAgentStreamLine(
 		if event.CostUSD != nil {
 			setDirectUSDCost(&result.TokenUsage, *event.CostUSD, "stream_event_cost_usd")
 		}
-		if cfg.CaptureSessionID && event.SessionID != "" {
-			result.AgentSessionID = event.SessionID
+		if cfg.CaptureSessionID {
+			if sessionID := firstNonEmpty(event.SessionID, event.ID, event.SessionPath, event.Path); sessionID != "" {
+				result.AgentSessionID = sessionID
+			}
 		}
 
 	default:
@@ -224,19 +239,39 @@ func parseAgentStreamLine(
 	}
 }
 
+func isSessionEvent(eventType string) bool {
+	switch eventType {
+	case "session", "session_start", "session_created":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // streamingAgentConfig drives runStreamingAgent. BuildCmd receives the already
-// shell-escaped prompt file path and returns the full command line.
+// shell-escaped prompt file path and returns the full command line. BuildResumeCmd
+// also receives the already shell-escaped upstream session/thread ID.
 type streamingAgentConfig struct {
-	DisplayName string // "Amp" / "Pi" — used in start/completion log messages.
-	CLIName     string // "amp" / "pi" — used in the exec error message.
-	BuildCmd    func(escapedPromptPath string) string
-	ParseConfig streamParseConfig
-	Profile     agent.AgentRuntimeProfile
+	DisplayName    string // "Amp" / "Pi" — used in start/completion log messages.
+	CLIName        string // "amp" / "pi" — used in the exec error message.
+	BuildCmd       func(escapedPromptPath string) string
+	BuildResumeCmd func(escapedPromptPath, escapedResumeSessionID string) string
+	ParseConfig    streamParseConfig
+	Profile        agent.AgentRuntimeProfile
 }
 
 // runStreamingAgent implements the shared Execute flow for agents that (a)
 // take their prompt via a file on disk, (b) emit Claude Code-compatible
-// stream JSON, and (c) don't have a headless continuation flag.
+// stream JSON, and (c) can optionally continue an upstream session by ID.
 func runStreamingAgent(
 	ctx context.Context,
 	cfg streamingAgentConfig,
@@ -250,23 +285,9 @@ func runStreamingAgent(
 		return nil, fmt.Errorf("sandbox provider not found in context")
 	}
 
-	var promptContent string
-	if prompt.Continuation {
-		promptContent = prompt.UserMessage
-		// Amp/Pi have no headless resume flag, so continuation replays against
-		// the restored filesystem with only the new user message as the prompt.
-		// Emit an explicit log so "the agent forgot the original task" reports
-		// are debuggable without reading the adapter source.
-		logCh <- agent.LogEntry{
-			Timestamp: time.Now(),
-			Level:     "info",
-			Message: fmt.Sprintf(
-				"%s has no headless resume; continuation prompt is the new user message only (prior conversation context is not replayed)",
-				cfg.DisplayName,
-			),
-		}
-	} else {
-		promptContent = fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+	promptContent, err := streamingPromptContent(prompt)
+	if err != nil {
+		return nil, err
 	}
 	// Write under $HOME (not WorkDir) so the file doesn't pollute the cloned
 	// repo's git status.
@@ -275,7 +296,11 @@ func runStreamingAgent(
 		return nil, fmt.Errorf("write prompt file: %w", err)
 	}
 
-	cmd := cfg.BuildCmd(shellEscapeSingle(promptPath))
+	escapedPromptPath := shellEscapeSingle(promptPath)
+	cmd := cfg.BuildCmd(escapedPromptPath)
+	if prompt.Continuation && prompt.ResumeSessionID != "" && cfg.BuildResumeCmd != nil {
+		cmd = cfg.BuildResumeCmd(escapedPromptPath, shellEscapeSingle(prompt.ResumeSessionID))
+	}
 
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
@@ -359,4 +384,24 @@ func runStreamingAgent(
 	result.TokenUsage = agent.FinalizeTokenUsage(result.TokenUsage, prompt.UsageHint)
 
 	return result, nil
+}
+
+func streamingPromptContent(prompt *agent.AgentPrompt) (string, error) {
+	var content string
+	if prompt.Continuation {
+		content = prompt.UserMessage
+	} else {
+		content = fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
+	}
+	if prompt.HumanInputAnswer == nil {
+		return content, nil
+	}
+	answerJSON, err := json.MarshalIndent(prompt.HumanInputAnswer, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal human input answer: %w", err)
+	}
+	if strings.TrimSpace(content) == "" {
+		content = "Continue with the following human input answer."
+	}
+	return fmt.Sprintf("%s\n\n---\n\nHuman input answer:\n```json\n%s\n```\n\nUse this answer to continue the blocked request.", content, answerJSON), nil
 }

@@ -805,7 +805,22 @@ export function PreviewPanel({
   const isPreviewOutOfDate = freshnessState === "out_of_date";
   const isPreviewFreshnessUnknown = freshnessState === "unknown";
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
-  const freshnessCalloutText = isPreviewFreshnessUnknown ? undefined : freshnessText;
+  const freshnessCalloutText =
+    isManageable && !isPreviewFreshnessUnknown ? freshnessText : undefined;
+  const previewRecoveryAction =
+    isPreviewOutOfDate && isReady
+      ? "refresh"
+      : status === "failed" || status === "unhealthy"
+        ? "retry"
+        : undefined;
+  const shouldShowRefreshPreview = previewRecoveryAction === "refresh";
+  const shouldShowRetryPreview = previewRecoveryAction === "retry";
+  const freshnessOutOfDateHelpText =
+    previewRecoveryAction === "refresh"
+      ? "Restart the preview to see the latest session changes."
+      : previewRecoveryAction === "retry"
+        ? "Retry the preview to use the latest session changes."
+        : undefined;
   const startupFreshnessText =
     showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupChecklist = useMemo(
@@ -883,22 +898,7 @@ export function PreviewPanel({
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
-              {isPreviewOutOfDate && (
-                <Button
-                  size="sm"
-                  variant="default"
-                  onClick={() => startMutation.mutate()}
-                  disabled={isMutating}
-                  loading={startMutation.isPending}
-                >
-                  {!startMutation.isPending && (
-                    <RefreshCw className="size-3.5" />
-                  )}
-                  Refresh preview
-                </Button>
-              )}
-
+            <div className="flex max-w-full shrink-0 flex-wrap items-center justify-start gap-2 sm:justify-end">
               {isReady && (
                 <TooltipProvider>
                   <Tooltip>
@@ -943,7 +943,7 @@ export function PreviewPanel({
                 </Button>
               )}
 
-              {status === "failed" && (
+              {shouldShowRetryPreview && (
                 <Button
                   size="sm"
                   onClick={() => startMutation.mutate()}
@@ -953,7 +953,7 @@ export function PreviewPanel({
                   {!startMutation.isPending && (
                     <RotateCw className="size-3.5" />
                   )}
-                  Retry Preview
+                  Retry preview
                 </Button>
               )}
             </div>
@@ -971,30 +971,49 @@ export function PreviewPanel({
             <div
               data-testid="preview-freshness-callout"
               className={cn(
-                "flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs",
+                "flex flex-col gap-3 rounded-md border px-2.5 py-2 text-xs sm:flex-row sm:items-center sm:justify-between",
                 isPreviewOutOfDate
                   ? "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200"
                   : "border-border bg-muted/40 text-muted-foreground",
               )}
             >
-              {isPreviewOutOfDate ? (
-                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              ) : (
-                <RefreshCw
-                  className={cn(
-                    "mt-0.5 size-3.5 shrink-0",
-                    startMutation.isPending && "animate-spin",
-                  )}
-                />
-              )}
-              <div className="min-w-0">
-                <div className="font-medium">{freshnessCalloutText}</div>
-                {isPreviewOutOfDate && (
-                  <div className="text-muted-foreground">
-                    Restart the preview to see the latest session changes.
-                  </div>
+              <div className="flex min-w-0 items-start gap-2">
+                {isPreviewOutOfDate ? (
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                ) : (
+                  <RefreshCw
+                    className={cn(
+                      "mt-0.5 size-3.5 shrink-0",
+                      startMutation.isPending && "animate-spin",
+                    )}
+                  />
                 )}
+                <div className="min-w-0">
+                  <div className="font-medium">{freshnessCalloutText}</div>
+                  {freshnessOutOfDateHelpText && (
+                    <div className="text-muted-foreground">
+                      {freshnessOutOfDateHelpText}
+                    </div>
+                  )}
+                </div>
               </div>
+              {shouldShowRefreshPreview && (
+                <div className="flex shrink-0 justify-start sm:justify-end">
+                  <Button
+                    size="sm"
+                    variant="default"
+                    className="w-full sm:w-auto"
+                    onClick={() => startMutation.mutate()}
+                    disabled={isMutating}
+                    loading={startMutation.isPending}
+                  >
+                    {!startMutation.isPending && (
+                      <RefreshCw className="size-3.5" />
+                    )}
+                    Refresh preview
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1161,66 +1180,63 @@ export function PreviewPanel({
             errorSurfaceClassNames.container,
           )}
         >
-          <CardContent className="space-y-3 p-3">
-            <div className="flex items-start gap-2.5">
-              <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-destructive/20 bg-background/80 text-destructive">
-                <AlertTriangle className="size-3.5" aria-hidden="true" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-sm font-medium leading-5 text-foreground">
-                  Preview failed to start
+          <CardContent className="space-y-3.5 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-2.5">
+                <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-destructive/20 bg-background/80 text-destructive">
+                  <AlertTriangle className="size-3.5" aria-hidden="true" />
                 </div>
-                <div className="text-xs leading-5 text-muted-foreground">
-                  The app never became reachable during startup.
+                <div className="min-w-0">
+                  <div className="text-sm font-medium leading-5 text-foreground">
+                    Preview failed to start
+                  </div>
+                  <div className="text-xs leading-5 text-muted-foreground">
+                    The app never became reachable during startup.
+                  </div>
                 </div>
               </div>
+              {visibleStartupErrorLogs &&
+                (startupErrorLogs ||
+                  previewLogsQuery.isLoading ||
+                  previewLogsQuery.isError) && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="h-7 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    aria-expanded={showFullStartupLogs}
+                    aria-controls={startupErrorLogsId}
+                    onClick={() => setShowFullStartupLogs((open) => !open)}
+                  >
+                    {showFullStartupLogs
+                      ? "Show startup summary"
+                      : "View full error log"}
+                    <ChevronDown
+                      className={cn(
+                        "size-3 transition-transform duration-200",
+                        showFullStartupLogs && "rotate-180",
+                      )}
+                      aria-hidden="true"
+                    />
+                  </Button>
+                )}
             </div>
 
             {visibleStartupErrorLogs && (
-              <div
-                role="group"
-                aria-label="Preview startup diagnostics"
-                className="overflow-hidden rounded-md border border-destructive/15 bg-background/80 shadow-sm"
-              >
-                <div className="flex min-h-9 items-center justify-between gap-2 border-b border-border/60 px-3 py-1.5">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span
-                      className="size-1.5 shrink-0 rounded-full bg-destructive"
-                      aria-hidden="true"
-                    />
-                    <div className="truncate text-xs font-medium text-foreground">
-                      {showFullStartupLogs ? "Full error log" : "Startup summary"}
-                    </div>
+              <div className="border-t border-destructive/10 pt-3">
+                <div className="mb-1.5 flex min-w-0 items-center gap-2">
+                  <span
+                    className="size-1.5 shrink-0 rounded-full bg-destructive"
+                    aria-hidden="true"
+                  />
+                  <div className="truncate text-xs font-medium text-foreground">
+                    {showFullStartupLogs ? "Full error log" : "Startup summary"}
                   </div>
-                  {(startupErrorLogs ||
-                    previewLogsQuery.isLoading ||
-                    previewLogsQuery.isError) && (
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      className="h-6 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground"
-                      aria-expanded={showFullStartupLogs}
-                      aria-controls={startupErrorLogsId}
-                      onClick={() => setShowFullStartupLogs((open) => !open)}
-                    >
-                      {showFullStartupLogs
-                        ? "Show startup summary"
-                        : "View full error log"}
-                      <ChevronDown
-                        className={cn(
-                          "size-3 transition-transform duration-200",
-                          showFullStartupLogs && "rotate-180",
-                        )}
-                        aria-hidden="true"
-                      />
-                    </Button>
-                  )}
                 </div>
                 <pre
                   id={startupErrorLogsId}
                   aria-label="Preview startup error logs"
                   className={cn(
-                    "whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs leading-5 text-foreground/85",
+                    "whitespace-pre-wrap break-words font-mono text-xs leading-5 text-foreground/85",
                     showFullStartupLogs
                       ? "max-h-[min(56vh,28rem)] overflow-y-auto"
                       : "max-h-28 overflow-hidden [mask-image:linear-gradient(to_bottom,black_75%,transparent_100%)]",

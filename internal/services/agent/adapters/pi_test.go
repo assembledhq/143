@@ -21,6 +21,13 @@ func TestPiAdapter_Name(t *testing.T) {
 	require.Equal(t, models.AgentTypePi, adapter.Name(), "adapter name should be pi")
 }
 
+func TestPiAdapter_ResumeMode(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewPiAdapter(zerolog.Nop())
+	require.Equal(t, agent.ResumeBySessionID, adapter.ResumeMode(), "pi should support deterministic continuation by session id")
+}
+
 func TestPiAdapter_PreparePrompt(t *testing.T) {
 	t.Parallel()
 
@@ -40,7 +47,8 @@ func TestPiAdapter_PreparePrompt(t *testing.T) {
 func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 	t.Parallel()
 
-	streamOutput := `{"type":"assistant","content":"Reading the file."}
+	streamOutput := `{"type":"session","session_id":"pi-session-1"}
+{"type":"assistant","content":"Reading the file."}
 {"type":"tool_use","name":"read","input":{"path":"x.go"},"model":"anthropic/claude-sonnet-4-6"}
 {"type":"tool_result","name":"read","output":"contents"}
 {"type":"done","content":"complete","usage":{"input_tokens":900,"output_tokens":150}}
@@ -95,6 +103,7 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 	require.Equal(t, 0, result.ExitCode)
 	require.Equal(t, 900, result.TokenUsage.InputTokens)
 	require.Equal(t, 150, result.TokenUsage.OutputTokens)
+	require.Equal(t, "pi-session-1", result.AgentSessionID, "pi should capture session_id from the session header")
 	require.Contains(t, result.Diff, "diff --git")
 
 	var logs []agent.LogEntry
@@ -168,7 +177,7 @@ func TestPiAdapter_Execute_NonZeroExit_IncludesMergedOutputWhenStderrEmpty(t *te
 		"non-zero exits should preserve failure detail even when the wrapper only exposes it on the merged output stream")
 }
 
-func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
+func TestPiAdapter_Execute_ContinuationResumesSession(t *testing.T) {
 	t.Parallel()
 
 	provider := newMockProvider()
@@ -176,6 +185,8 @@ func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 		require.NotContains(t, cmd, ".143-agent.pid", "pi continuation must not embed pidfile scaffolding (provider internal)")
 		require.NotContains(t, cmd, ".143-agent.tty", "pi continuation must not embed ttyfile scaffolding (provider internal)")
 		require.NotContains(t, cmd, "python3 -c", "pi continuation must not embed PTY shim (provider internal)")
+		require.Contains(t, cmd, "--session 'pi-session-123'", "pi continuation should resume the upstream session")
+		require.Contains(t, cmd, "-p \"$(cat '/home/sandbox/.143-prompt.md')\"", "pi continuation should pass the follow-up prompt file")
 		return 0, nil
 	}
 	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
@@ -187,9 +198,10 @@ func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 	ctx := WithSandboxProvider(context.Background(), provider)
 
 	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "abc123"}}, &agent.AgentPrompt{
-		Continuation: true,
-		UserMessage:  "follow-up instruction",
-		MaxTokens:    50_000,
+		Continuation:    true,
+		ResumeSessionID: "pi-session-123",
+		UserMessage:     "follow-up instruction",
+		MaxTokens:       50_000,
 	}, logCh)
 	require.NoError(t, err)
 	close(logCh)
@@ -279,7 +291,7 @@ func TestPiAdapter_ShellModelResolution(t *testing.T) {
 
 	// Same expansion pattern the adapter emits; isolated so we can drive it
 	// through bash with different env var combinations.
-	const expr = `echo "${PI_MODEL_CUSTOM:-${PI_MODEL:-anthropic/claude-opus-4-7}}"`
+	const expr = `echo "${PI_MODEL_CUSTOM:-${PI_MODEL:-anthropic/claude-opus-4-8}}"`
 
 	tests := []struct {
 		name string
@@ -289,7 +301,7 @@ func TestPiAdapter_ShellModelResolution(t *testing.T) {
 		{
 			name: "falls back to default when nothing set",
 			env:  nil,
-			want: "anthropic/claude-opus-4-7",
+			want: "anthropic/claude-opus-4-8",
 		},
 		{
 			name: "uses PI_MODEL when only PI_MODEL is set",

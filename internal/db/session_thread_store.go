@@ -2,30 +2,48 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
 )
 
 type SessionThreadStore struct {
-	db DBTX
+	db      DBTX
+	streams *cache.SessionStreams
+	logger  zerolog.Logger
 }
 
 func NewSessionThreadStore(db DBTX) *SessionThreadStore {
-	return &SessionThreadStore{db: db}
+	return &SessionThreadStore{db: db, logger: zerolog.Nop()}
+}
+
+// SetStreams injects the Redis stream helper used for live thread event fan-out.
+// lint:allow-no-orgid reason="process-wide dependency injection for Redis session event streaming"
+func (s *SessionThreadStore) SetStreams(streams *cache.SessionStreams) {
+	s.streams = streams
+}
+
+// SetLogger injects the structured logger used for best-effort stream publishing.
+// lint:allow-no-orgid reason="process-wide dependency injection for store logging"
+func (s *SessionThreadStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	result_summary, diff, failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
-	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
+	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
+	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
 
 // sessionThreadListColumns omits the raw diff while preserving a lightweight
 // truthy marker for UI affordances such as "Revert tab". Server-side actions
@@ -36,7 +54,8 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
 	failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
-	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
+	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
+	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
 
 func qualifiedSessionThreadSelectColumns(alias string) string {
 	columns := strings.Split(sessionThreadSelectColumns, ",")
@@ -219,6 +238,55 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+	return nil
+}
+
+func (s *SessionThreadStore) RecordRecoveryMetadata(ctx context.Context, orgID, threadID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time, recoveryState, recoveryReason string) error {
+	if err := reason.Validate(); err != nil {
+		return err
+	}
+	if recoveryState == "" {
+		recoveryState = string(models.RecoveryStateQueued)
+	}
+	state := models.RecoveryState(recoveryState)
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	event := map[string]any{
+		"runtime_stop_reason": string(reason),
+		"recovery_state":      recoveryState,
+		"recovery_reason":     recoveryReason,
+		"recorded_at":         time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	rawEvent, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal thread recovery metadata event: %w", err)
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_threads
+		SET runtime_stop_reason = @runtime_stop_reason,
+			runtime_graceful_stop_at = @runtime_graceful_stop_at,
+			recovery_state = @recovery_state,
+			recovery_reason = @recovery_reason,
+			recovery_event_history = COALESCE(recovery_event_history, '[]'::jsonb) || jsonb_build_array(@event::jsonb),
+			last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND archived_at IS NULL`,
+		pgx.NamedArgs{
+			"id":                       threadID,
+			"org_id":                   orgID,
+			"runtime_stop_reason":      string(reason),
+			"runtime_graceful_stop_at": stopAfter,
+			"recovery_state":           recoveryState,
+			"recovery_reason":          recoveryReason,
+			"event":                    rawEvent,
+		})
+	if err != nil {
+		return fmt.Errorf("record thread recovery metadata: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("record thread recovery metadata: thread %s not found", threadID)
+	}
 	return nil
 }
 
@@ -283,6 +351,7 @@ func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -333,6 +402,7 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -478,6 +548,58 @@ func (s *SessionThreadStore) ClaimForResumeInSession(ctx context.Context, orgID,
 	})
 }
 
+func (s *SessionThreadStore) ClaimNextQueuedForSession(ctx context.Context, orgID, sessionID uuid.UUID, maxRunning int) (models.SessionThread, error) {
+	if maxRunning <= 0 {
+		maxRunning = models.MaxRunningThreadsPerSession
+	}
+	claimableStatuses := append([]string{"idle"}, threadStatusStrings(models.ResumableThreadStatuses)...)
+	rows, err := s.db.Query(ctx, `
+		WITH locked_threads AS (
+			SELECT id, status, pending_message_count, last_activity_at, created_at
+			FROM session_threads
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND archived_at IS NULL
+			FOR UPDATE
+		), running_count AS (
+			SELECT count(*) AS n
+			FROM locked_threads
+			WHERE status IN ('pending', 'running', 'awaiting_input')
+		), candidate AS (
+			SELECT id, status
+			FROM locked_threads, running_count
+			WHERE pending_message_count > 0
+			  AND status = ANY(@claimable_statuses)
+			  AND running_count.n < @max_running
+			ORDER BY COALESCE(last_activity_at, created_at), created_at, id
+			LIMIT 1
+		)
+		UPDATE session_threads st
+		SET status = 'running',
+		    started_at = now(),
+		    completed_at = CASE WHEN st.status = 'idle' THEN st.completed_at ELSE NULL END,
+		    last_activity_at = now(),
+		    cancel_requested_at = NULL
+		WHERE st.org_id = @org_id
+		  AND st.session_id = @session_id
+		  AND st.id = (SELECT id FROM candidate)
+		  AND st.archived_at IS NULL
+		RETURNING `+sessionThreadSelectColumns, pgx.NamedArgs{
+		"org_id":             orgID,
+		"session_id":         sessionID,
+		"max_running":        maxRunning,
+		"claimable_statuses": claimableStatuses,
+	})
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("claim next queued session thread: %w", err)
+	}
+	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	if err != nil {
+		return models.SessionThread{}, err
+	}
+	return thread, nil
+}
+
 // claimForSessionArgs bundles inputs for claimForSession so each call site
 // stays readable and additions don't ripple across positional argument lists.
 type claimForSessionArgs struct {
@@ -592,6 +714,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		}
 		return models.SessionThread{}, err
 	}
+	s.publishThreadRuntime(ctx, thread)
 	return thread, nil
 }
 
@@ -685,6 +808,9 @@ func (s *SessionThreadStore) IncrementPendingMessages(ctx context.Context, orgID
 		`UPDATE session_threads SET pending_message_count = pending_message_count + 1 WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID},
 	)
+	if err == nil {
+		s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxQueued)
+	}
 	return err
 }
 
@@ -696,6 +822,9 @@ func (s *SessionThreadStore) ClearPendingMessages(ctx context.Context, orgID, th
 		`UPDATE session_threads SET pending_message_count = 0 WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID},
 	)
+	if err == nil {
+		s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxCleared)
+	}
 	return err
 }
 
@@ -737,5 +866,53 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
+}
+
+func (s *SessionThreadStore) publishThreadRuntimeByID(ctx context.Context, orgID, threadID uuid.UUID) {
+	if s.streams == nil {
+		return
+	}
+	thread, err := s.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to load thread for runtime event")
+		return
+	}
+	s.publishThreadRuntime(ctx, thread)
+}
+
+func (s *SessionThreadStore) publishThreadRuntime(ctx context.Context, thread models.SessionThread) {
+	if s.streams == nil {
+		return
+	}
+	event := models.SessionStreamEvent{
+		Type:      models.SessionStreamEventThreadRuntimeUpdated,
+		SessionID: thread.SessionID,
+		OrgID:     thread.OrgID,
+		Data:      models.NewThreadRuntimeEvent(thread),
+	}
+	if err := s.streams.PublishEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", thread.ID.String()).Msg("failed to publish thread runtime event")
+	}
+}
+
+func (s *SessionThreadStore) publishThreadInboxByID(ctx context.Context, orgID, threadID uuid.UUID, eventType models.SessionStreamEventType) {
+	if s.streams == nil {
+		return
+	}
+	thread, err := s.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to load thread for inbox event")
+		return
+	}
+	event := models.SessionStreamEvent{
+		Type:      eventType,
+		SessionID: thread.SessionID,
+		OrgID:     thread.OrgID,
+		Data:      models.NewThreadInboxEvent(thread),
+	}
+	if err := s.streams.PublishEvent(ctx, event); err != nil {
+		s.logger.Warn().Err(err).Str("thread_id", thread.ID.String()).Str("event_type", string(eventType)).Msg("failed to publish thread inbox event")
+	}
 }

@@ -558,6 +558,10 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 	return nil
 }
 
+func (m *mockSessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
+	return nil
+}
+
 func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1345,6 +1349,10 @@ func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uui
 
 func (m *mockSessionThreadStore) ClearPendingMessages(_ context.Context, _, _ uuid.UUID) error {
 	return nil
+}
+
+func (m *mockSessionThreadStore) ClaimNextQueuedForSession(context.Context, uuid.UUID, uuid.UUID, int) (models.SessionThread, error) {
+	return models.SessionThread{}, pgx.ErrNoRows
 }
 
 func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
@@ -3867,6 +3875,57 @@ func TestRunAgent_PersistsDiffWorkspaceDirtyOnResult(t *testing.T) {
 	require.True(t, last.result.DiffWorkspaceDirty, "RunAgent should persist whether the session workspace still had uncommitted changes")
 }
 
+func TestRunAgent_RecomputesDiffWhenAdapterLeavesDiffEmpty(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TargetBranch = strPtr("main")
+	expectedDiff := "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n"
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  "done",
+			ExitCode: 0,
+		}, nil
+	}
+
+	headCalls := 0
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		switch cmd {
+		case "git rev-parse HEAD":
+			headCalls++
+			if headCalls == 1 {
+				_, _ = io.WriteString(stdout, "base123\n")
+			} else {
+				_, _ = io.WriteString(stdout, "result456\n")
+			}
+		case "git rev-parse --is-inside-work-tree":
+			_, _ = io.WriteString(stdout, "true\n")
+		case "git fetch --quiet --no-tags origin 'main'":
+			return 0, nil
+		case "git merge-base 'origin/main' HEAD":
+			_, _ = io.WriteString(stdout, "base123\n")
+		case "git diff --find-renames --binary base123 -- .":
+			_, _ = io.WriteString(stdout, expectedDiff)
+		case "git ls-files --others --exclude-standard -- .":
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed when the orchestrator can recompute the diff")
+
+	results := d.sessions.getResultUpdates()
+	require.NotEmpty(t, results, "RunAgent should persist a final result update")
+	last := results[len(results)-1]
+	require.NotNil(t, last.result.Diff, "RunAgent should persist the recomputed diff when the adapter leaves it empty")
+	require.Equal(t, expectedDiff, *last.result.Diff, "RunAgent should persist the fallback diff computed from the session base commit")
+}
+
 func TestRunAgent_UsesDesignatedWorkingBranchForSandboxAndSession(t *testing.T) {
 	t.Parallel()
 
@@ -4208,6 +4267,66 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
 }
 
+func TestContinueSession_ThreadScopedAssistantUsesThreadTurnWhileSessionAdvancesSharedTurn(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusRunning
+	session.CurrentTurn = 10
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	threadID := uuid.New()
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &threadID,
+		TurnNumber: 2,
+		Role:       models.MessageRoleUser,
+		Content:    "Please continue this tab.",
+	}}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{
+		snapshotKey: []byte("restored-snapshot"),
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{Summary: "thread done", ExitCode: 0}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		ThreadID:  &threadID,
+		AgentType: models.AgentTypeClaudeCode,
+	})
+	require.NoError(t, err, "thread-scoped ContinueSession should succeed")
+
+	messages := d.messages.getMessages()
+	require.Len(t, messages, 2, "ContinueSession should append one assistant message")
+	assistant := messages[1]
+	require.Equal(t, models.MessageRoleAssistant, assistant.Role, "appended message should be the assistant response")
+	require.NotNil(t, assistant.ThreadID, "assistant response should remain scoped to the thread")
+	require.Equal(t, threadID, *assistant.ThreadID, "assistant response should target the requested thread")
+	require.Equal(t, 2, assistant.TurnNumber, "assistant response should use the thread-local turn number")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should persist one session turn update")
+	require.Equal(t, 11, updates[0].turn, "session completion should still advance the shared session turn")
+}
+
 func TestContinueSession_EmbedsHistoryWhenResumeBySessionIDAdapterHasNoCapturedSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -4390,6 +4509,128 @@ func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStal
 	}
 	require.Len(t, assistantMessages, 2, "only the original assistant message and the successful fallback reply should exist")
 	require.Equal(t, "fixed", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
+}
+
+func TestContinueSession_FallsBackToFreshCodexExecWhenSnapshotRolloutIsMissing(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeCodex
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	snapshotKey := "existing-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = nil
+	staleThreadRolloutID := "019e6f1f-7207-7df0-b96e-5a6eccd86dd6"
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeCodex,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.codexAuth = &mockCodexAuthProvider{
+		cfg: &models.OpenAIChatGPTConfig{
+			AccessToken:  "chatgpt-access-token",
+			RefreshToken: "chatgpt-refresh-token",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review my changes.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "I found one gap in the log provider implementation.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please finish the missing provider work",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "codex CLI exited with code 1: Error: thread/resume: thread/resume failed: no rollout found for thread id 019e6f1f-7207-7df0-b96e-5a6eccd86dd6 (code -32600)",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:        "finished",
+			ExitCode:       0,
+			AgentSessionID: "fresh-codex-rollout",
+		}, nil
+	}
+
+	var resultAgentSessionID string
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType:            models.AgentTypeCodex,
+		ThreadAgentSessionID: &staleThreadRolloutID,
+		ResultAgentSessionID: &resultAgentSessionID,
+		ThreadID:             &threadID,
+	})
+	require.NoError(t, err, "ContinueSession should recover from a missing Codex rollout by retrying with reconstructed context")
+	require.Len(t, prompts, 2, "the Codex adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.True(t, prompts[0].Continuation, "the first attempt should use deterministic Codex resume")
+	require.Equal(t, "019e6f1f-7207-7df0-b96e-5a6eccd86dd6", prompts[0].ResumeSessionID, "the first attempt should use the persisted Codex rollout id")
+	require.False(t, prompts[1].Continuation, "the fallback should run a fresh exec against the restored workspace")
+	require.Empty(t, prompts[1].ResumeSessionID, "the fallback must not retry the same missing Codex rollout id")
+	require.Contains(t, prompts[1].UserPrompt, "Previous conversation history", "the fallback should reconstruct prior conversation context")
+	require.Contains(t, prompts[1].UserPrompt, "Please review my changes.", "the fallback should include the earlier user turn")
+	require.Contains(t, prompts[1].UserPrompt, "log provider implementation", "the fallback should include the earlier assistant summary")
+	require.Contains(t, prompts[1].UserPrompt, "please finish the missing provider work", "the fallback should end with the new user message")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should still persist a single completed turn")
+	require.Empty(t, updates[0].agentSessionID, "thread fallback should not overwrite the parent session agent session id")
+	require.Equal(t, "fresh-codex-rollout", resultAgentSessionID, "successful fallback should report the fresh Codex rollout id to the thread caller")
+	require.Len(t, d.sessions.checkpoints, 1, "successful fallback should publish a checkpoint")
+	require.Empty(t, d.sessions.checkpoints[0].agentSessionID, "thread fallback checkpoint should not overwrite the parent session agent session id")
+
+	messages := d.messages.getMessages()
+	var assistantMessages []models.SessionMessage
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleAssistant {
+			assistantMessages = append(assistantMessages, msg)
+		}
+	}
+	require.Len(t, assistantMessages, 2, "only the original assistant message and the successful fallback reply should exist")
+	require.Equal(t, "finished", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
 }
 
 func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale_ScopesHistoryToRequestedThread(t *testing.T) {
@@ -5766,6 +6007,74 @@ func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
 	require.Equal(t, 2, completedTurns[0].turn, "cancelled continue_session should advance the triggering thread turn")
 }
 
+func TestContinueSession_ContextCanceledWithoutUserCancelIsInterruptedNotCancelled(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.cancels = agent.NewCancelRegistry(zerolog.Nop())
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &threadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue this interrupted turn.",
+		},
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return nil, errors.New("snapshot unavailable")
+	}
+
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:  "partial work from a system interruption",
+			ExitCode: 1,
+		}, ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- buildOrchestrator(d).ContinueSession(ctx, session, &agent.ContinueSessionOptions{ThreadID: &threadID})
+	}()
+
+	<-adapterStarted
+	cancel()
+
+	err := <-done
+	require.ErrorIs(t, err, agent.ErrSessionInterrupted, "plain parent context cancellation should be a system interruption")
+	require.NotErrorIs(t, err, agent.ErrSessionCancelled, "plain parent context cancellation should not be classified as user cancellation")
+	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusCancelled), "system interruptions must not mark the session cancelled")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "system interruptions without a checkpoint should restore the pre-turn status")
+}
+
 // TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
 // regression test for the multi-tab dispatch bug: a sibling thread further
 // along in turns (Main on turn 9 with assistant replies through turn 11) used
@@ -6517,6 +6826,51 @@ func TestContinueSession_AcquireHoldLosesRaceSelfHeals(t *testing.T) {
 	for _, status := range d.sessions.statusUpdates {
 		require.NotEqual(t, string(models.SessionStatusIdle), status, "loser must not flip the session back to idle — winner is mid-turn")
 	}
+}
+
+func TestContinueSession_AcquireHoldLosesRaceForSiblingThreadRetries(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusRunning
+	session.CurrentTurn = 1
+	threadID := uuid.New()
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "run beside sibling"},
+	}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &threadID})
+	require.Error(t, err, "sibling thread should surface a retryable sandbox race when another tab published the shared container first")
+	require.ErrorIs(t, err, agent.ErrSandboxSiblingRace, "sibling thread should retry and attach to the winning shared sandbox instead of dead-lettering as a duplicate")
+	require.NotErrorIs(t, err, agent.ErrSandboxRaceLoser, "sibling thread race loss is not a duplicate of the winner's work")
+	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "alive sibling winner must not be cleared")
 }
 
 // TestContinueSession_AcquireHoldLosesRaceClearsStaleOrphan covers the

@@ -10,7 +10,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
@@ -54,6 +56,18 @@ func seedUser(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID) models.User {
 		t.Fatalf("seed user: %v", err)
 	}
 	return user
+}
+
+// seedWorkerNode registers the worker node precondition required by the real
+// claim path. Production workers are wrapped by NodeManager heartbeat; these
+// integration tests construct Worker directly, so they must provide the active
+// nodes row explicitly.
+func seedWorkerNode(t *testing.T, pool *pgxpool.Pool, nodeID string) {
+	t.Helper()
+	manager := cluster.NewNodeManager(pool, zerolog.Nop(), nodeID, "worker")
+	if err := manager.Register(context.Background(), "integration-test-host"); err != nil {
+		t.Fatalf("seed worker node: %v", err)
+	}
 }
 
 // sessionOpts tunes which fields seedSession overrides on the default session

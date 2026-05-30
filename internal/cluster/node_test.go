@@ -229,8 +229,8 @@ func TestNodeManager_RequestDrain(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE nodes SET status = 'draining'").
-		WithArgs("node-1", pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE nodes").
+		WithArgs("node-1", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
@@ -247,8 +247,8 @@ func TestNodeManager_RequestDrain_ReturnsDatabaseErrors(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE nodes SET status = 'draining'").
-		WithArgs("node-1", pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE nodes").
+		WithArgs("node-1", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(fmt.Errorf("write failed"))
 
 	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")

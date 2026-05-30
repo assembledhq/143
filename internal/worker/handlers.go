@@ -308,19 +308,22 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
 	if services != nil && services.PreviewStarter != nil {
-		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(services, logger))
-		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(services, logger))
+		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(stores, services, logger))
+		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(stores, services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
+		w.Register("cancel_thread", newCancelThreadHandler(stores, services, logger))
+		w.Register("deliver_thread_inbox", newDeliverThreadInboxHandler(services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
+		w.Register("merge_pull_request_when_ready", newMergePullRequestWhenReadyHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
 		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
 		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
@@ -381,25 +384,49 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore                // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore            // nil-safe
-	Credentials         *db.OrgCredentialStore          // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore               // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore           // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore             // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore               // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore                // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore              // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore          // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore             // nil-safe: needed for eval repo lookup
-	SessionMessages     *db.SessionMessageStore         // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore          // nil-safe: needed for thread-scoped continuation status
+	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore    // nil-safe
+	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
+	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
+	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
+	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
 	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
+}
+
+func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run models.Session) error {
+	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+		return &RetryableError{Err: agent.ErrSnapshotPending}
+	}
+	if run.Status == models.SessionStatusRunning {
+		delay := 5 * time.Second
+		return &RetryableError{Err: fmt.Errorf("session %s has active runtime work; snapshot is not quiescent", run.ID), RetryAfter: &delay}
+	}
+	if stores == nil || stores.SandboxHolders == nil {
+		return nil
+	}
+	active, err := stores.SandboxHolders.CountActiveThreadRuntimesBySession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		return fmt.Errorf("check active thread runtime holders: %w", err)
+	}
+	if active > 0 {
+		delay := 5 * time.Second
+		return &RetryableError{Err: fmt.Errorf("session %s has %d active thread runtime holder(s); snapshot is not quiescent", run.ID, active), RetryAfter: &delay}
+	}
+	return nil
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -415,6 +442,7 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
 	// snapshot uploads (spawned by CreatePR) have either promoted or
 	// cleared their pending_snapshot_key. Called by the server's graceful
@@ -506,8 +534,11 @@ type previewStarter interface {
 type orchestratorService interface {
 	RunAgent(ctx context.Context, run *models.Session) error
 	ContinueSession(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
+	DeliverThreadInbox(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error
 	RecoverSession(ctx context.Context, session *models.Session) error
 	CancelSessionByID(sessionID uuid.UUID) bool
+	RequestSessionStopByID(sessionID uuid.UUID, reason agent.StopReason) bool
+	CancelThreadByID(threadID uuid.UUID) bool
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
@@ -548,7 +579,7 @@ func newIngestWebhookHandler(stores *Stores, logger zerolog.Logger) JobHandler {
 	}
 }
 
-func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		if services == nil || services.PreviewStarter == nil {
 			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
@@ -567,13 +598,24 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 		if err := services.PreviewStarter.StartReservedPreview(ctx, input); err != nil {
 			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
 				retryAfter := previewCapacityRetryDelay
+				targetNodeID, clearTarget := sandboxCapacityRetryTarget(ctx, stores, logger)
 				logger.Info().
 					Err(err).
 					Str("preview_id", input.PreviewID.String()).
 					Str("session_id", input.SessionID.String()).
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_preview")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
+			}
+			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview cleared stale sandbox container_id; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			return &FatalError{Err: err}
 		}
@@ -581,7 +623,7 @@ func newStartPreviewHandler(services *Services, logger zerolog.Logger) JobHandle
 	}
 }
 
-func newStartBranchPreviewHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		if services == nil || services.PreviewStarter == nil {
 			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
@@ -600,13 +642,14 @@ func newStartBranchPreviewHandler(services *Services, logger zerolog.Logger) Job
 		if err := services.PreviewStarter.StartReservedBranchPreview(ctx, input); err != nil {
 			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
 				retryAfter := previewCapacityRetryDelay
+				targetNodeID, clearTarget := sandboxCapacityRetryTarget(ctx, stores, logger)
 				logger.Info().
 					Err(err).
 					Str("preview_id", input.PreviewID.String()).
 					Str("preview_target_id", input.PreviewTargetID.String()).
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_branch_preview")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
 			}
 			return &FatalError{Err: err}
 		}
@@ -1344,6 +1387,9 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			// Don't start blind. Surface to the user via the recoverable
 			// failure path so they can retry.
 			errMsg := "Linear context could not be loaded. Retry the session to fetch it again."
+			if run.Error != nil && strings.TrimSpace(*run.Error) != "" {
+				errMsg = *run.Error
+			}
 			_ = stores.Sessions.UpdateResult(ctx, orgID, runID, models.SessionStatusFailed, &models.SessionResult{Error: &errMsg})
 			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
 		}
@@ -1393,6 +1439,22 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					Err(err).
 					Msg("run_agent recovery exhausted; dead-lettering without another restart")
 				return &FatalError{Err: err}
+			}
+			if errors.Is(err, agent.ErrSessionInterrupted) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("run_agent interrupted by system stop; retrying turn")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
+			if errors.Is(err, agent.ErrThreadRuntimeAlreadyActive) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", runID.String()).
+					Err(err).
+					Msg("thread runtime already active; retrying after lease recovery")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
 				retryAfter := 5 * time.Second
@@ -1520,6 +1582,143 @@ func newCancelSessionHandler(stores *Stores, services *Services, logger zerolog.
 	}
 }
 
+func newCancelThreadHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			ThreadID  string `json:"thread_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal cancel_thread payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		threadID, err := uuid.Parse(input.ThreadID)
+		if err != nil {
+			return fmt.Errorf("parse thread ID: %w", err)
+		}
+		accepted := services.Orchestrator.CancelThreadByID(threadID)
+		if !accepted {
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("thread_id", threadID.String()).
+				Str("org_id", orgID.String()).
+				Msg("cancel_thread job found no live local cancel registry entry")
+		}
+		return nil
+	}
+}
+
+func newDeliverThreadInboxHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.Orchestrator == nil {
+			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+			ThreadID  string `json:"thread_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal deliver_thread_inbox payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse session ID: %w", err)
+		}
+		threadID, err := uuid.Parse(input.ThreadID)
+		if err != nil {
+			return fmt.Errorf("parse thread ID: %w", err)
+		}
+		if err := services.Orchestrator.DeliverThreadInbox(ctx, orgID, sessionID, threadID); err != nil {
+			var ownerErr *agent.ThreadRuntimeOwnedElsewhereError
+			if errors.As(err, &ownerErr) && ownerErr.OwnerNodeID != "" {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", threadID.String()).
+					Str("target_node_id", ownerErr.OwnerNodeID).
+					Msg("thread inbox delivery belongs to another worker; retargeting retry")
+				return &RetryableError{
+					Err:          err,
+					TargetNodeID: &ownerErr.OwnerNodeID,
+				}
+			}
+			if errors.Is(err, agent.ErrThreadRuntimeLeaseLost) {
+				delay := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", threadID.String()).
+					Dur("retry_after", delay).
+					Msg("thread inbox delivery lost runtime lease; retrying after recovery")
+				return &RetryableError{
+					Err:        err,
+					RetryAfter: &delay,
+				}
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID string, logger zerolog.Logger) (*uuid.UUID, error) {
+	if stores == nil || stores.HumanInputRequests == nil || stores.SessionMessages == nil {
+		return nil, nil
+	}
+	messageID, err := strconv.ParseInt(queuedMessageID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse queued message ID: %w", err)
+	}
+	queued, err := stores.SessionMessages.GetByID(ctx, orgID, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch queued message for human input answer: %w", err)
+	}
+	if queued.SessionID != sessionID {
+		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", messageID, queued.SessionID, sessionID)
+	}
+	if hasThread {
+		if queued.ThreadID == nil || *queued.ThreadID != threadID {
+			return nil, fmt.Errorf("queued message %d does not belong to thread %s", messageID, threadID)
+		}
+	}
+	if queued.UserID == nil {
+		return nil, nil
+	}
+	answerText := strings.TrimPrefix(queued.Content, "[PLAN_MODE]\n")
+	var request models.HumanInputRequest
+	if hasThread {
+		request, err = stores.HumanInputRequests.AnswerLatestPendingFreeTextByThread(ctx, orgID, sessionID, threadID, answerText, *queued.UserID)
+	} else {
+		request, err = stores.HumanInputRequests.AnswerLatestPendingFreeTextBySession(ctx, orgID, sessionID, answerText, *queued.UserID)
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("thread_id", threadID.String()).
+			Int64("queued_message_id", messageID).
+			Msg("failed to answer pending human-input request from queued message")
+		return nil, nil
+	}
+	return &request.ID, nil
+}
+
 // continue_session handler continues a multi-turn session with a follow-up message.
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
@@ -1535,6 +1734,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			WorkspaceMode       string `json:"workspace_mode"`
 			PullRequestNumber   int    `json:"pull_request_number"`
 			HumanInputRequestID string `json:"human_input_request_id"`
+			QueuedMessageID     string `json:"queued_message_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -1678,6 +1878,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts = threadOpts
 			}
 		}
+		if humanInputRequestID == nil && input.QueuedMessageID != "" {
+			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, input.QueuedMessageID, logger)
+			if answerErr != nil {
+				return answerErr
+			}
+			humanInputRequestID = answeredID
+		}
 		if continueOpts == nil && humanInputRequestID != nil {
 			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
 		} else if continueOpts != nil && humanInputRequestID != nil {
@@ -1715,6 +1922,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			if errors.Is(err, agent.ErrSnapshotPending) {
 				return &RetryableError{Err: err}
 			}
+			if errors.Is(err, agent.ErrSessionInterrupted) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("continue_session interrupted by system stop; retrying turn")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
+			if errors.Is(err, agent.ErrThreadRuntimeAlreadyActive) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("thread runtime already active; retrying after lease recovery")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
 			if errors.Is(err, agent.ErrStalePullRequestHead) {
 				if input.PullRequestID != "" && services.PR != nil {
 					if syncErr := services.PR.SyncPullRequestState(ctx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
@@ -1727,11 +1951,17 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				// Stale orphan container_id cleared; retry against the clean
 				// row. See newRunAgentHandler for full rationale.
 				retryAfter := 2 * time.Second
+				var staleThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					staleThreadID = &threadIDLocal
+				}
+				registerStaleSandboxDeadLetter(ctx, stores, logger, session, staleThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).
 					Msg("continue_session cleared stale orphan container_id; retrying against the clean row")
-				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
 				// We claimed a job whose session sandbox lives on a sibling
@@ -1765,6 +1995,19 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Err(err).
 					Msg("continue_session lost sandbox publish race to preview; retrying against the preview container")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			if errors.Is(err, agent.ErrSandboxSiblingRace) {
+				// Another sibling tab published the shared sandbox first. This
+				// job is not a duplicate of the winner's work: it owns a
+				// different thread turn, so retry and attach to the recorded
+				// shared sandbox on the next attempt.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("continue_session lost sandbox publish race to sibling thread; retrying against the shared sandbox")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: models.SessionWorkerTarget(&session)}
 			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {
 				// A duplicate continue_session job lost the AcquireTurnHold
@@ -1955,6 +2198,31 @@ func newEnrichPullRequestHealthHandler(services *Services, logger zerolog.Logger
 	}
 }
 
+func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID         string `json:"org_id"`
+			PullRequestID string `json:"pull_request_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal merge_pull_request_when_ready payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		pullRequestID, err := uuid.Parse(input.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("parse pull request ID: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Msg("starting merge_pull_request_when_ready job")
+		return services.PR.ProcessMergeWhenReady(ctx, orgID, pullRequestID)
+	}
+}
+
 // open_pr handler creates a GitHub PR from a completed agent run by pushing
 // the restored sandbox snapshot to GitHub. Drives the session's
 // pr_creation_state through pushing -> succeeded/failed so the UI can reflect
@@ -1993,6 +2261,13 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				return &RetryableError{Err: agent.ErrSnapshotPending}
 			}
 			return fmt.Errorf("session %s has no snapshot (status: %s)", runID, run.Status)
+		}
+		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
+			logger.Info().
+				Err(err).
+				Str("session_id", runID.String()).
+				Msg("open_pr waiting for shared sandbox quiescence")
+			return err
 		}
 
 		if stores.SessionIssueLinks != nil {
@@ -2131,6 +2406,13 @@ func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.L
 		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
+		}
+		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
+			logger.Info().
+				Err(err).
+				Str("session_id", runID.String()).
+				Msg("create_branch waiting for shared sandbox quiescence")
+			return err
 		}
 		if stores.SessionIssueLinks != nil {
 			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
@@ -2340,6 +2622,13 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				Str("pending_snapshot_key", *run.PendingSnapshotKey).
 				Msg("push_pr_changes waiting for post-PR snapshot upload to land")
 			return &RetryableError{Err: agent.ErrSnapshotPending}
+		}
+		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
+			logger.Info().
+				Err(err).
+				Str("session_id", runID.String()).
+				Msg("push_pr_changes waiting for shared sandbox quiescence")
+			return err
 		}
 
 		if stores.SessionIssueLinks != nil {
@@ -3588,11 +3877,12 @@ func bootstrapAgentCommand(prompt string) string {
 func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID       string           `json:"org_id"`
-			SessionID   string           `json:"session_id"`
-			Identifiers []string         `json:"identifiers"`
-			Refs        []linear.LinkRef `json:"refs,omitempty"`
-			UserID      string           `json:"user_id,omitempty"`
+			OrgID                   string           `json:"org_id"`
+			SessionID               string           `json:"session_id"`
+			Identifiers             []string         `json:"identifiers"`
+			Refs                    []linear.LinkRef `json:"refs,omitempty"`
+			UserID                  string           `json:"user_id,omitempty"`
+			AllowRepositoryMismatch bool             `json:"allow_repository_mismatch,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal prepare_linear_primary payload: %w", err)
@@ -3624,6 +3914,7 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		if len(refs) == 0 {
 			refs = linearRefsFromIdentifiers(input.Identifiers)
 		}
+		invalidLinkMessage := "Linear issue could not be linked to this session's repository. The Linear issue appears to belong to another repository; choose the matching repository or start a manual session with your intended repository selected."
 		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
 			if err := svc.MarkLinearPrepareFailed(hookCtx, orgID, sessionID); err != nil {
 				logger.Warn().Err(err).
@@ -3631,7 +3922,7 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 					Msg("prepare_linear_primary dead-letter hook failed to mark prepare state failed")
 			}
 		})
-		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
+		if err := svc.PrepareLinearPrimaryRefsWithOptions(ctx, orgID, sessionID, refs, userID, linear.LinkOptions{AllowRepositoryMismatch: input.AllowRepositoryMismatch}); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
 			if errors.Is(err, linear.ErrIntegrationNotFound) {
 				// Integration was disconnected/removed between enqueue and
@@ -3652,6 +3943,14 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 				// don't fire the dead-letter hook minutes after the user
 				// already saw "Reconnect" in settings.
 				return &FatalError{Err: err}
+			}
+			if errors.Is(err, db.ErrInvalidSessionIssueLink) {
+				if markErr := svc.MarkLinearPrepareFailedWithError(ctx, orgID, sessionID, invalidLinkMessage); markErr != nil {
+					logger.Warn().Err(markErr).
+						Str("session_id", sessionID.String()).
+						Msg("prepare_linear_primary failed to persist invalid-link message")
+				}
+				return &FatalError{Err: fmt.Errorf("%s: %w", invalidLinkMessage, err)}
 			}
 			return &RetryableError{Err: err}
 		}

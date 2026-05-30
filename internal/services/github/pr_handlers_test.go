@@ -29,7 +29,9 @@ var handlerPRColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-	"health_version", "merged_at", "created_at", "updated_at",
+	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 }
 
 // sessionColumns matches the SELECT columns from SessionStore queries
@@ -44,7 +46,7 @@ var sessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
 	"model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -67,7 +69,9 @@ func handlerPRRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo st
 	return []any{
 		prID, sessionID, orgID, 42, "https://github.com/" + repo + "/pull/42", repo,
 		"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-		models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), (*time.Time)(nil), now, now,
+		models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
+		models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil),
+		(*time.Time)(nil), now, now,
 	}
 }
 
@@ -176,10 +180,10 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, nil, nil, false,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,
-					nil,                      // model_override
-					nil,                      // reasoning_effort
-					nil,                      // triggered_by_user_id
-					nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+					nil,                                // model_override
+					nil,                                // reasoning_effort
+					nil,                                // triggered_by_user_id
+					nil, 0, now, "none", int64(0), nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, workspace_generation, snapshot_key
 					nil,      // pending_snapshot_key
 					nil,      // pending_snapshot_set_at
 					nil,      // runtime_soft_deadline_at

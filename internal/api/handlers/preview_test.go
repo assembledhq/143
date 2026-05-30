@@ -544,7 +544,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -581,6 +581,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil,
+		"",
 		false,
 	}
 }
@@ -644,14 +645,14 @@ func previewAnyArgs(n int) []any {
 var handlerPreviewRuntimeTestCols = []string{
 	"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
 	"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
-	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
 }
 
 func newHandlerPreviewRuntimeRow(runtimeID, orgID, previewID uuid.UUID, now time.Time) []any {
 	return []any{
 		runtimeID, orgID, previewID, 1, "worker-a",
 		"http://worker-a.internal", "", 0, string(models.PreviewRuntimeStatusStarting), now.Add(90 * time.Second),
-		now, nil, nil, "", now, now,
+		now, nil, nil, "", "", now, now,
 	}
 }
 
@@ -710,7 +711,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, recycleConfig, recycleSandbox, "ready", strPtr("req-1"), "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil),
+		(*int64)(nil), (*time.Time)(nil), "",
 		false,
 	}
 }
@@ -1011,7 +1012,7 @@ var sessionRowColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
-	"sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -1046,6 +1047,7 @@ func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *st
 		"current_turn":                   0,
 		"last_activity_at":               now,
 		"sandbox_state":                  sandboxState,
+		"workspace_generation":           int64(0),
 		"snapshot_key":                   snapshotKey,
 		"runtime_last_progress_type":     "",
 		"runtime_last_progress_strength": "",

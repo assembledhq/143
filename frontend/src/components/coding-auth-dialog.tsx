@@ -3,8 +3,15 @@
 import type { ReactNode } from "react";
 import { CodingAuthProviderCards, type CodingAuthProviderOption } from "@/components/coding-auth-provider-cards";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import {
+  ResponsiveModal,
+  ResponsiveModalBody,
+  ResponsiveModalDescription,
+  ResponsiveModalFooter,
+  ResponsiveModalHeader,
+  ResponsiveModalTitle,
+} from "@/components/ui/responsive-modal";
 
 interface CodingAuthDialogProps<T extends string> {
   open: boolean;
@@ -38,13 +45,13 @@ export function CodingAuthDialog<T extends string>({
   onCancel,
 }: CodingAuthDialogProps<T>) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
+    <ResponsiveModal open={open} onOpenChange={onOpenChange} desktopClassName="sm:max-w-2xl">
+      <ResponsiveModalHeader>
+        <ResponsiveModalTitle>{title}</ResponsiveModalTitle>
+        <ResponsiveModalDescription>{description}</ResponsiveModalDescription>
+      </ResponsiveModalHeader>
 
+      <ResponsiveModalBody>
         <div className="space-y-6">
           <div className="space-y-2">
             <Label>Provider</Label>
@@ -57,12 +64,12 @@ export function CodingAuthDialog<T extends string>({
 
           {children}
         </div>
+      </ResponsiveModalBody>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onCancel}>{cancelLabel}</Button>
-          <Button onClick={onPrimary} disabled={primaryDisabled}>{primaryLabel}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <ResponsiveModalFooter>
+        <Button variant="outline" onClick={onCancel}>{cancelLabel}</Button>
+        <Button onClick={onPrimary} disabled={primaryDisabled}>{primaryLabel}</Button>
+      </ResponsiveModalFooter>
+    </ResponsiveModal>
   );
 }

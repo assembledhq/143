@@ -1,5 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { act } from "@testing-library/react";
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { ManualSessionCreatePageContent } from "./manual-session-create-page-content";
 
@@ -43,6 +44,7 @@ const mocks = vi.hoisted(() => ({
   createSessionMock: vi.fn().mockResolvedValue({
     data: { id: "new-sess" },
   }),
+  routerPushMock: vi.fn(),
   addOptimisticSessionMock: vi.fn().mockReturnValue("optimistic-1"),
   removeOptimisticSessionMock: vi.fn(),
   markOptimisticResolvedMock: vi.fn(),
@@ -157,7 +159,7 @@ vi.mock("@/lib/errors", () => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
-    push: vi.fn(),
+    push: mocks.routerPushMock,
     replace: vi.fn(),
     prefetch: vi.fn(),
   }),
@@ -325,6 +327,36 @@ describe("ManualSessionCreatePageContent", () => {
     expect(await screen.findByRole("dialog", { name: "Session settings" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: /Model override/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
+  });
+
+  it("submits the user's default coding-agent model when no per-session model is selected", async () => {
+    const user = userEvent.setup();
+    mocks.authMeMock.mockResolvedValueOnce({
+      data: {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        settings: {
+          coding_agent_model_default: "claude-opus-4-7",
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const prompt = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    fireEvent.change(prompt, { target: { value: "Use my default model" } });
+    await user.click(screen.getByRole("button", { name: /start session/i }));
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+        model: "claude-opus-4-7",
+        agent_type: "claude_code",
+      }));
+    });
   });
 
   it("renders the message input area", async () => {
@@ -526,6 +558,33 @@ describe("ManualSessionCreatePageContent", () => {
       );
     });
     expect(mocks.addOptimisticSessionMock).toHaveBeenCalledWith("Manual Session");
+  });
+
+  it("keeps the start button loading after create succeeds while navigation is pending", async () => {
+    const user = userEvent.setup();
+    const createSession = deferred<{ data: { id: string } }>();
+    mocks.createSessionMock.mockImplementationOnce(() => createSession.promise);
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    await user.type(textarea, "Investigate slow checkout");
+
+    const startButton = screen.getByRole("button", { name: "Start session" });
+    await user.click(startButton);
+
+    expect(startButton).toBeDisabled();
+
+    await act(async () => {
+      createSession.resolve({ data: { id: "new-sess" } });
+      await createSession.promise;
+    });
+
+    await waitFor(() => {
+      expect(mocks.routerPushMock).toHaveBeenCalledWith("/sessions/new-sess");
+    });
+    expect(startButton).toBeDisabled();
+    expect(startButton.querySelector(".animate-spin")).not.toBeNull();
   });
 
   it("shows slash command suggestions when the user types a slash trigger", async () => {

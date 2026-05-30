@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,13 +84,69 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
-	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at").
+	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(2), collectedAt))
 	mock.ExpectCommit()
 
 	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
 	require.NoError(t, err, "UpdateResult should persist a diff snapshot when provenance is present")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateResult_WithDiffSnapshotDoesNotPublishWorkspaceEventOnCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	defer client.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	snapshotID := uuid.New()
+	collectedAt := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	diff := "--- a/a.go\n+++ b/a.go\n"
+	headSHA := "head123"
+	baseSHA := "base123"
+	result := &models.SessionResult{
+		Diff:               &diff,
+		DiffBaseCommitSHA:  &baseSHA,
+		DiffHeadCommitSHA:  &headSHA,
+		DiffWorkspaceDirty: true,
+		DiffCollectedAt:    &collectedAt,
+		DiffSource:         "review",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(anyDBArgs(11)...).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
+	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(2), collectedAt))
+	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
+	require.Error(t, err, "UpdateResult should return the commit error")
+
+	streamKey := "143:stream:{ses:" + sessionID.String() + "}:events"
+	require.False(t, mr.Exists(streamKey), "workspace generation event should not publish before the transaction commits")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -134,9 +193,9 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
-	mock.ExpectExec("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at").
+	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(2), time.Now()))
 	mock.ExpectCommit()
 
 	err = store.UpdateTurnComplete(context.Background(), orgID, sessionID, 2, result, "agent-123", "snap-key")

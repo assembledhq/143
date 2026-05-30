@@ -131,13 +131,8 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadMessageWindowResponse, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
-import {
-  ThreadAttributionFilter,
-  useAttributionAllowedPaths,
-  type ThreadAttributionFilterValue,
-} from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -164,6 +159,7 @@ import { deriveCreatePRActionState, derivePushChangesActionState } from "@/lib/s
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
+import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
@@ -239,7 +235,9 @@ export function invalidateSessionHumanInputRequests(queryClient: QueryInvalidato
   queryClient.invalidateQueries({ queryKey: ["session", sessionId, "human-input-requests"] });
 }
 
-const statusConfig: Record<string, { color: string; label: string }> = {
+type DisplayStatusKey = SessionStatus | "pr_merged" | "pr_closed";
+
+const statusConfig: Record<DisplayStatusKey, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
   idle: { color: "bg-primary/10 text-primary", label: "Idle" },
@@ -254,7 +252,7 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
 
-function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+function getDisplayStatus(sessionStatus: SessionStatus, prStatus?: PullRequestStatus | null): { color: string; label: string } {
   if (sessionStatus === "pr_created") {
     if (prStatus === "merged") {
       return statusConfig.pr_merged;
@@ -264,6 +262,16 @@ function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { co
     }
   }
   return statusConfig[sessionStatus] || statusConfig.pending;
+}
+
+function deriveEffectivePRStatus(prStatus?: PullRequestStatus | null, healthStatus?: PullRequestStatus | null): PullRequestStatus | undefined {
+  if (healthStatus === "merged" || prStatus === "merged") {
+    return "merged";
+  }
+  if (healthStatus === "closed" || prStatus === "closed") {
+    return "closed";
+  }
+  return prStatus ?? undefined;
 }
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
@@ -391,6 +399,36 @@ function reconcileThreadsForOmittedStatusUpdate(
   });
 }
 
+export function applyThreadInboxEventToThreads(
+  threads: SessionThread[],
+  event: ThreadInboxEvent,
+): SessionThread[] {
+  return threads.map((thread) => (
+    thread.id === event.thread_id
+      ? { ...thread, pending_message_count: event.pending_message_count }
+      : thread
+  ));
+}
+
+export function applyThreadRuntimeEventToThreads(
+  threads: SessionThread[],
+  event: ThreadRuntimeEvent,
+): SessionThread[] {
+  return threads.map((thread) => {
+    if (thread.id !== event.thread_id) return thread;
+    return {
+      ...thread,
+      status: event.status,
+      agent_session_id: event.agent_session_id ?? thread.agent_session_id,
+      current_turn: event.current_turn,
+      pending_message_count: event.pending_message_count,
+      last_activity_at: event.last_activity_at ?? thread.last_activity_at,
+      started_at: event.started_at ?? thread.started_at,
+      completed_at: event.completed_at ?? thread.completed_at,
+    };
+  });
+}
+
 export function trackInFlightAgentUpdate(
   ref: { current: Promise<unknown> | null },
   promise: Promise<unknown>,
@@ -479,10 +517,10 @@ type PRActionErrorState = {
 
 type PendingThreadPreview = Pick<
   SessionThread,
-  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override"
+  "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override" | "inbox_delivery"
 >;
 
-const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
 function mergePendingMessages(
   baseMessages: SessionMessage[],
@@ -526,7 +564,24 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
     typeof details.can_fallback_to_app === "boolean";
 }
 
-function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
+function isRuntimeRecoveryActive(session: Session): boolean {
+  return session.recovery_state === "queued" || session.recovery_state === "recovering";
+}
+
+function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
+  return (
+    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300`}>
+      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+      <span>
+        <span className="font-medium">Restoring runtime from checkpoint</span>
+        <span className="mx-1">·</span>
+        <span>Follow-up messages will be queued and delivered after the runtime is restored.</span>
+      </span>
+    </div>
+  );
+}
+
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -547,10 +602,12 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
       queryClient.invalidateQueries({ queryKey: ["session", session.id] });
     },
   });
-  const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed";
+  const recoveryActive = isRuntimeRecoveryActive(session);
+  const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
   const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
+  const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
 
   const triggeredByMember = session.triggered_by_user_id
@@ -579,7 +636,24 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
         </Card>
       )}
 
+      {isDeployRecovery && (
+        <Card className="border-l-2 border-l-amber-500 bg-amber-50/30 dark:bg-amber-950/10">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs flex items-center gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+              Resumed after deploy
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-muted-foreground">
+              This turn was checkpointed because its old worker reached the deploy runtime ceiling, then requeued onto a replacement worker.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Failure card — shown prominently at top for failed sessions */}
+      {recoveryActive && <RuntimeRecoveryNotice border="border" />}
       {session.status === "failed" && (session.failure_explanation || session.error) && (
         <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
           <CardHeader className="pb-0">
@@ -597,7 +671,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
                 <div className="inline-flex">
                   <DisabledTooltip
                     disabled={retryMutation.isPending || checkpointRetryUnavailable}
-                    content={checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
+                    content={recoveryActive ? "Runtime recovery is already in progress." : checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
                   >
                     <Button
                       size="xs"
@@ -801,9 +875,6 @@ const ChangesTab = memo(function ChangesTab({
   onPassRangeChange,
   emptyStatusText,
   isMobile,
-  threads,
-  attributionFilter,
-  onAttributionFilterChange,
   diffLoadErrorText,
   diffTruncationText,
   onRetryDiffLoad,
@@ -819,9 +890,6 @@ const ChangesTab = memo(function ChangesTab({
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
   isMobile: boolean;
-  threads: SessionThread[];
-  attributionFilter: ThreadAttributionFilterValue;
-  onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
   diffLoadErrorText?: string;
   diffTruncationText?: string;
   onRetryDiffLoad?: () => void;
@@ -850,20 +918,6 @@ const ChangesTab = memo(function ChangesTab({
         </div>
       )}
 
-      {/* Tab attribution filter — visible only when the session has more
-          than one tab. Lets the user scope the diff to one tab's outputs,
-          the overlap, or unattributed paths. */}
-      {threads.length > 1 && (
-        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
-          <span className="text-xs text-muted-foreground">Filter by tab:</span>
-          <ThreadAttributionFilter
-            threads={threads}
-            value={attributionFilter}
-            onChange={onAttributionFilterChange}
-          />
-        </div>
-      )}
-
       {/* Comments summary */}
       {comments.length > 0 && (
         <CommentsSummary
@@ -879,19 +933,6 @@ const ChangesTab = memo(function ChangesTab({
             <div className="mx-4 mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">
               <p className="font-medium">Large diff truncated</p>
               <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
-            </div>
-          ) : null}
-          {!isMobile ? (
-            <div className="px-4 py-3">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenReview()}
-                className="w-full gap-2 text-xs"
-              >
-                <FileCode2 className="h-3.5 w-3.5" />
-                Review {filteredFiles.length} {filteredFiles.length === 1 ? "file" : "files"}
-              </Button>
             </div>
           ) : null}
           <div className="flex-1 overflow-hidden">
@@ -1961,6 +2002,14 @@ function loadedTurnNumbers(messages: SessionMessage[]): number[] {
   return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
 }
 
+export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: SessionThread): number[] {
+  const turns = new Set(loadedTurnNumbers(messages));
+  if (thread && thread.status !== "idle" && Number.isInteger(thread.current_turn) && thread.current_turn >= 0) {
+    turns.add(thread.current_turn + 1);
+  }
+  return Array.from(turns).sort((a, b) => a - b);
+}
+
 function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
   return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
 }
@@ -2086,17 +2135,10 @@ function ChatPanel({
   const threadMessages = useMemo(() => {
     return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
   }, [threadMessagesQuery.data?.pages]);
-  const loadedThreadTurns = useMemo(() => loadedTurnNumbers(threadMessages), [threadMessages]);
-  const activeThreadLogTurn = activeThread && workingStatusesSet.has(activeThread.status)
-    ? activeThread.current_turn + 1
-    : null;
-  const visibleThreadLogTurns = useMemo(() => {
-    const turns = new Set(loadedThreadTurns);
-    if (activeThreadLogTurn !== null) {
-      turns.add(activeThreadLogTurn);
-    }
-    return Array.from(turns).sort((a, b) => a - b);
-  }, [activeThreadLogTurn, loadedThreadTurns]);
+  const visibleThreadLogTurns = useMemo(
+    () => getVisibleThreadLogTurns(threadMessages, activeThread),
+    [activeThread, threadMessages],
+  );
   const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
 
   const threadLogsQuery = useQuery({
@@ -2197,7 +2239,7 @@ function ChatPanel({
       const loadedThreadLogs = filterThreadLogsForLoadedMessages(
         threadLogsQuery.data?.data ?? [],
         threadMessages,
-        activeThreadLogTurn !== null ? [activeThreadLogTurn] : [],
+        visibleThreadLogTurns,
       );
       return sortTimelineEntries([...buildTimeline(
         mergePendingMessages(threadMessages, optimisticForCurrentView),
@@ -2223,7 +2265,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, activeThreadLogTurn, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data]);
+  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data, visibleThreadLogTurns]);
 
   // Walk baseTimelineEntries once when it changes to derive the dedup keys
   // used to filter streamedLogs. Splitting this out of the timelineEntries
@@ -2477,6 +2519,47 @@ function ChatPanel({
     });
   }, [queryClient, sessionId]);
 
+  const mergeThreadInboxUpdate = useCallback((event: ThreadInboxEvent) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing || existing.data.id !== event.session_id) return existing;
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          threads: applyThreadInboxEventToThreads(existing.data.threads ?? [], event),
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
+  const mergeThreadRuntimeUpdate = useCallback((event: ThreadRuntimeEvent) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing || existing.data.id !== event.session_id) return existing;
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          threads: applyThreadRuntimeEventToThreads(existing.data.threads ?? [], event),
+        },
+      };
+    });
+  }, [queryClient, sessionId]);
+
+  const mergeWorkspaceGenerationUpdate = useCallback((event: SessionWorkspaceGenerationChangedEvent) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
+      if (!existing || existing.data.id !== event.session_id) return existing;
+      return {
+        ...existing,
+        data: {
+          ...existing.data,
+          workspace_revision: event.workspace_revision,
+          workspace_revision_updated_at: event.workspace_revision_updated_at,
+        },
+      };
+    });
+    queryClient.invalidateQueries({ queryKey: ["preview-status", sessionId] });
+  }, [queryClient, sessionId]);
+
   useEffect(() => {
     // Pause the SSE stream while the tab is hidden. EventSource handlers fire
     // even in a hidden tab and trigger setState/re-renders on this large
@@ -2543,6 +2626,11 @@ function ChatPanel({
         }
       });
 
+      addSSEListener(eventSource, SSE_EVENT.THREAD_INBOX_QUEUED, mergeThreadInboxUpdate);
+      addSSEListener(eventSource, SSE_EVENT.THREAD_INBOX_CLEARED, mergeThreadInboxUpdate);
+      addSSEListener(eventSource, SSE_EVENT.THREAD_RUNTIME_UPDATED, mergeThreadRuntimeUpdate);
+      addSSEListener(eventSource, SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED, mergeWorkspaceGenerationUpdate);
+
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
@@ -2581,7 +2669,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -2826,7 +2914,7 @@ const SESSION_HEADER_HEIGHT_CLASSNAME = "h-14";
 const TRANSCRIPT_STEP_PX = 72;
 const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
-const REVIEW_AGENT_KEYS = ["codex", "claude_code"] as const;
+const REVIEW_AGENT_KEYS = ["codex", "claude_code", "amp", "pi"] as const;
 
 function getDefaultReviewAgentType(sessionAgentType?: string): string {
   return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";
@@ -2838,7 +2926,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const canListTeamMembers = user?.role === "admin" || user?.role === "member";
   const canShipPR = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canManagePR = user?.role === "admin" || user?.role === "member";
-  const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+  const terminalStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
@@ -2990,6 +3078,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
+  const [pendingMergeWhenReady, setPendingMergeWhenReady] = useState(false);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
@@ -3141,6 +3230,109 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+  const activeThreadDelivery = activeThread?.inbox_delivery;
+  const activeThreadHasRecoverableInbox =
+    !!activeThreadDelivery &&
+    (activeThreadDelivery.dead_letter_count > 0 || activeThreadDelivery.unknown_delivery_count > 0);
+  const recoverableInboxThreadId =
+    activeThreadHasRecoverableInbox && activeThread && !nonInteractiveThreadIds.has(activeThread.id)
+      ? activeThread.id
+      : null;
+  const recoverableInboxQuery = useQuery({
+    queryKey: recoverableInboxThreadId
+      ? queryKeys.sessions.threadRecoverableInbox(id, recoverableInboxThreadId)
+      : ["session", id, "thread", null, "recoverable-inbox"],
+    queryFn: () => {
+      if (!recoverableInboxThreadId) {
+        throw new Error("Recoverable inbox query requires an active thread");
+      }
+      return api.sessions.listRecoverableThreadInboxEntries(id, recoverableInboxThreadId);
+    },
+    enabled: recoverableInboxThreadId !== null,
+    // Recoverable entries don't change without either (a) user action, which
+    // already invalidates the query in the retry mutation's onSuccess, or
+    // (b) backend state changes (new failure, reaper marking unknown
+    // delivery). Poll slowly to catch (b), and pause completely when the
+    // tab is hidden — refetchIntervalInBackground=false (the default) stops
+    // the interval; refetchOnWindowFocus=true (the default) picks up any
+    // changes when the user returns.
+    refetchInterval: recoverableInboxThreadId ? 30_000 : false,
+    refetchIntervalInBackground: false,
+  });
+  const recoverableInboxEntries = useMemo(
+    () => recoverableInboxQuery.data?.data ?? [],
+    [recoverableInboxQuery.data?.data],
+  );
+  const retryRecoverableInboxMutation = useMutation({
+    mutationFn: async ({ threadId, entryIds, replayUnknownDelivery }: { threadId: string; entryIds: string[]; replayUnknownDelivery?: boolean }) => {
+      // Drive retries sequentially, not via Promise.all. The server-side
+      // RetryRecoverable flips delivery_state and then enqueues a delivery
+      // notification; firing N concurrent calls against the same thread
+      // races those steps against each other for no benefit. The retry
+      // budget is tiny (one entry per click for individual retries; the
+      // current failed-entry list for "Retry all"), so the latency cost is
+      // negligible compared to the consistency win.
+      for (const entryId of entryIds) {
+        await api.sessions.retryThreadInboxEntry(id, threadId, entryId, { replayUnknownDelivery });
+      }
+    },
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threads(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadRecoverableInbox(id, variables.threadId) });
+      toast.success(variables.entryIds.length === 1 ? "Message queued for retry" : "Messages queued for retry");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to retry message delivery");
+    },
+  });
+  const handleRetryRecoverableInboxEntry = useCallback((entryId: string, replayUnknownDelivery = false) => {
+    if (!recoverableInboxThreadId) {
+      return;
+    }
+    retryRecoverableInboxMutation.mutate({
+      threadId: recoverableInboxThreadId,
+      entryIds: [entryId],
+      replayUnknownDelivery,
+    });
+  }, [recoverableInboxThreadId, retryRecoverableInboxMutation]);
+  const handleRetryAllRecoverableInbox = useCallback(() => {
+    if (!recoverableInboxThreadId || recoverableInboxEntries.length === 0) {
+      return;
+    }
+    const failedEntryIds = recoverableInboxEntries.filter((entry) => entry.delivery_state === "dead_letter").map((entry) => entry.id);
+    if (failedEntryIds.length === 0) {
+      return;
+    }
+    retryRecoverableInboxMutation.mutate({
+      threadId: recoverableInboxThreadId,
+      entryIds: failedEntryIds,
+      replayUnknownDelivery: false,
+    });
+  }, [recoverableInboxEntries, recoverableInboxThreadId, retryRecoverableInboxMutation]);
+  const renderRecoverableInboxNotice = useCallback(() => {
+    if (!activeThreadDelivery || !activeThreadHasRecoverableInbox) {
+      return null;
+    }
+    return (
+      <RecoverableInboxNotice
+        summary={activeThreadDelivery}
+        entries={recoverableInboxEntries}
+        isLoading={recoverableInboxQuery.isFetching && recoverableInboxEntries.length === 0}
+        isRetrying={retryRecoverableInboxMutation.isPending}
+        onRetryEntry={handleRetryRecoverableInboxEntry}
+        onRetryAll={handleRetryAllRecoverableInbox}
+      />
+    );
+  }, [
+    activeThreadDelivery,
+    activeThreadHasRecoverableInbox,
+    handleRetryAllRecoverableInbox,
+    handleRetryRecoverableInboxEntry,
+    recoverableInboxEntries,
+    recoverableInboxQuery.isFetching,
+    retryRecoverableInboxMutation.isPending,
+  ]);
   const optimisticMessageIDRef = useRef(-1_000_000);
   const [optimisticMessages, setOptimisticMessages] = useState<PendingFollowUpMessage[]>([]);
   const [sessionStopRequest, setSessionStopRequest] = useState<{ sessionId: string; requestedAt: string } | null>(null);
@@ -3279,9 +3471,10 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   type SendMutationArgs = {
     activeThreadId?: string;
-    body: {
-      message: string;
-      images?: string[];
+	    body: {
+	      message: string;
+	      clientMessageID?: string;
+	      images?: string[];
       references?: SessionInputReference[];
       commands?: SessionInputCommand[];
       planMode?: boolean;
@@ -3357,11 +3550,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     staleTime: 30_000,
     refetchInterval: (query) => {
       const mergeState = query.state.data?.data?.merge_state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" ? 5_000 : false;
+      const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? 5_000 : false;
     },
   });
   const prHealth = prHealthData?.data;
-  const prStatus = prData?.data?.status;
+  const rawPRStatus = prData?.data?.status;
+  const prStatus = deriveEffectivePRStatus(rawPRStatus, prHealth?.status);
   const prNumber = prData?.data?.github_pr_number;
   const closedPRNumber = prNumber;
   const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
@@ -3545,6 +3740,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(message);
     },
   });
+  const mergeWhenReadyMutation = useMutation({
+    mutationFn: async (action: "queue" | "cancel") => {
+      if (!pullRequestId) {
+        throw new Error("Pull request not found");
+      }
+      return action === "queue"
+        ? api.pullRequests.queueMergeWhenReady(pullRequestId)
+        : api.pullRequests.cancelMergeWhenReady(pullRequestId);
+    },
+    onMutate: () => {
+      setRepairActionError(null);
+      setPendingMergeWhenReady(true);
+    },
+    onSuccess: (_response, action) => {
+      setPendingMergeWhenReady(false);
+      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      toast.success(action === "queue" ? "Merge when ready enabled" : "Merge when ready cancelled");
+    },
+    onError: (err) => {
+      setPendingMergeWhenReady(false);
+      const message = err instanceof ApiError ? err.message : "Failed to update merge when ready";
+      toast.error(message);
+    },
+  });
   useEffect(() => {
     // Pause the PR health SSE stream while the tab is hidden — same reasoning
     // as the session log stream above. The onerror branch already invalidates
@@ -3606,7 +3825,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
     };
   }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
-  const previousSessionStatusRef = useRef<string | undefined>(undefined);
+  const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
     if (!session?.id || !currentStatus) {
@@ -3637,7 +3856,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
+  const isTerminalSession = session ? terminalSessionStatuses.has(session.status) : false;
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canUseNativeReviewLoop = !!session && session.agent_type !== "pm_agent";
@@ -4074,6 +4293,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
   const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
+  const runtimeRecoveryActive = session ? isRuntimeRecoveryActive(session) : false;
   const localStopRequested = sessionStopRequest?.sessionId === id && composerIsRunning;
   const threadStopRequested = !!activeThread?.cancel_requested_at && workingStatusesSet.has(activeThread.status);
   const isStopRequested = localStopRequested || threadStopRequested;
@@ -4178,7 +4398,13 @@ export function SessionDetailContent({ id }: { id: string }) {
           ...vars.body,
           resolveReviewCommentIDs: vars.resolvedIDs.length > 0 ? vars.resolvedIDs : undefined,
         });
-        return { response, resolvedIDs: vars.resolvedIDs };
+        return {
+          response: {
+            ...response,
+            data: response.data.message,
+          },
+          resolvedIDs: vars.resolvedIDs,
+        };
       }
 
       const response = await api.sessions.sendMessage(id, {
@@ -4325,11 +4551,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     setSessionStopOutcome(null);
     const optimisticID = optimisticMessageIDRef.current;
     optimisticMessageIDRef.current -= 1;
+    const clientMessageID =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${id}:${activeThread?.id ?? "session"}:${Date.now()}:${Math.random()}`;
 
     sendMutation.mutate({
       activeThreadId: activeThread?.id,
       body: {
         message: userFacingMessage,
+        clientMessageID,
         images: composerAttachments.length > 0 ? composerAttachments : undefined,
         references: composerReferences.length > 0 ? composerReferences : undefined,
         commands: composerCommands.length > 0 ? composerCommands : undefined,
@@ -4452,10 +4683,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  // Session-wide file event timeline powers the tab-strip overlap badges and
-  // the Changes-view attribution filters. Polled at the same cadence as the
-  // session detail so a user-perceptible "tab touched a file" lands within
-  // one polling cycle.
+  // Session-wide file event timeline powers tab-strip overlap badges. Polled
+  // at the same cadence as the session detail so a user-perceptible "tab
+  // touched a file" lands within one polling cycle.
   //
   // Polling is incremental: the first request fetches the whole timeline,
   // subsequent requests pass `?since=<latest observed_at>` so a long session
@@ -4490,22 +4720,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => computeThreadOverlap(chromeThreads, accumulatedFileEvents),
     [chromeThreads, accumulatedFileEvents],
   );
-  const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
-  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
-  const visibleDiffFiles = useMemo(
-    () =>
-      attributionAllowedPaths == null
-        ? diffFiles
-        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
-    [attributionAllowedPaths, diffFiles],
-  );
-  const visibleFilteredFiles = useMemo(
-    () =>
-      attributionAllowedPaths == null
-        ? filteredFiles
-        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
-    [attributionAllowedPaths, filteredFiles],
-  );
+  const visibleDiffFiles = diffFiles;
+  const visibleFilteredFiles = filteredFiles;
 
   useEffect(() => {
     if (visibleFilteredFiles.length === 0) {
@@ -4969,6 +5185,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     mergeMutation.mutate();
   }
 
+  function handleQueueMergeWhenReady() {
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "merge_pr" });
+      return;
+    }
+    mergeWhenReadyMutation.mutate("queue");
+  }
+
+  function handleCancelMergeWhenReady() {
+    mergeWhenReadyMutation.mutate("cancel");
+  }
+
   const prErrorNotice = prActionError ? {
     title: prErrorTitle(snapshotState, localPRActionError?.code),
     description: prActionError,
@@ -5012,11 +5240,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     >
       <div
         data-testid="session-detail-header"
-        className={cn("border-b border-border shrink-0", SESSION_HEADER_HEIGHT_CLASSNAME)}
+        className={cn(
+          "border-b border-border shrink-0",
+          prErrorNotice ? "min-h-14" : SESSION_HEADER_HEIGHT_CLASSNAME,
+        )}
       >
         <div
           data-testid="session-detail-header-bar"
-          className="flex h-full items-center gap-2 min-w-0 px-2"
+          className={cn("flex items-center gap-2 min-w-0 px-2", SESSION_HEADER_HEIGHT_CLASSNAME)}
         >
           <div
             ref={detailTabsRef}
@@ -5070,17 +5301,16 @@ export function SessionDetailContent({ id }: { id: string }) {
                       variant="outline"
                       size="sm"
                       className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                       onClick={() => createPRMutation.mutate(undefined)}
                     >
-                      {prActionSpinning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : prState === "failed" || localPRActionError ? (
+                      {!prActionSpinning && (prState === "failed" || localPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
                       ) : (
                         <GitPullRequest className="h-3 w-3" />
-                      )}
+                      ))}
                       {prActionLabel}
                     </Button>
                     <DropdownMenu>
@@ -5156,9 +5386,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               : "This session did not produce any file changes."
           }
           isMobile={isMobileReviewViewport}
-          threads={threads}
-          attributionFilter={attributionFilter}
-          onAttributionFilterChange={setAttributionFilter}
           diffLoadErrorText={diffLoadErrorText}
           diffTruncationText={diffTruncationText}
           onRetryDiffLoad={retryDiffLoad}
@@ -5213,9 +5440,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
+                mergeWhenReadyPending={pendingMergeWhenReady}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                onQueueMergeWhenReady={handleQueueMergeWhenReady}
+                onCancelMergeWhenReady={handleCancelMergeWhenReady}
                 onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
@@ -5521,6 +5751,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             )}
+            {runtimeRecoveryActive && !composerIsSnapshotExpired && (
+              <RuntimeRecoveryNotice />
+            )}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -5529,6 +5762,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             )}
+            {renderRecoverableInboxNotice()}
             <SessionComposer
               sessionId={session.id}
               message={composerMessage}
@@ -5762,6 +5996,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             ) : null}
+            {runtimeRecoveryActive && !composerIsSnapshotExpired ? (
+              <RuntimeRecoveryNotice border="border-b" />
+            ) : null}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
               <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -5770,6 +6007,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </span>
               </div>
             ) : null}
+            {renderRecoverableInboxNotice()}
             <SessionComposer
               sessionId={session.id}
               message={composerMessage}

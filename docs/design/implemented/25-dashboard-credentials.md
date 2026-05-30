@@ -704,6 +704,16 @@ func (s *OrgCredentialStore) GetAllLLM(ctx context.Context, orgID uuid.UUID) ([]
     // ...
 }
 
+// GetAllIntegrations loads the requested singleton integration credentials in
+// one query and returns them keyed by provider. PM bootstrap and sandbox env
+// resolution use this instead of issuing one Get round-trip per integration.
+func (s *OrgCredentialStore) GetAllIntegrations(ctx context.Context, orgID uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error) {
+    // SELECT ... WHERE org_id = @org_id AND provider = ANY(@providers)
+    //   AND label = '' AND status != 'disabled'
+    // decrypt + ParseProviderConfig each row
+    // ...
+}
+
 // ListSummaries returns masked credential info for all providers for an org.
 // Returns a CredentialSummary for every known provider (configured or not).
 func (s *OrgCredentialStore) ListSummaries(ctx context.Context, orgID uuid.UUID) ([]models.CredentialSummary, error) {

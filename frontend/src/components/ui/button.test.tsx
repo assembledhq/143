@@ -22,6 +22,16 @@ describe('Button', () => {
     expect(container.querySelector('[data-slot="button-spinner"]')).toBeInTheDocument();
   });
 
+  it('keeps loading buttons at full opacity', () => {
+    renderWithProviders(
+      <Button loading>Submit</Button>,
+    );
+
+    const button = screen.getByRole('button', { name: 'Submit' });
+    expect(button).toHaveAttribute('data-loading', 'true');
+    expect(button).toHaveClass('disabled:data-[loading=true]:opacity-100');
+  });
+
   it('does not show a spinner when not loading', () => {
     const { container } = renderWithProviders(
       <Button>Submit</Button>,

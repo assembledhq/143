@@ -20,10 +20,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
 import { useAuth } from "@/hooks/use-auth";
+import { AGENTS } from "@/lib/agents";
 import {
   CODING_AGENT_REASONING_OPTIONS_BY_AGENT,
   getCodingAgentReasoningDefaultsFromSettings,
@@ -218,6 +219,7 @@ export default function AccountPage() {
   // user's attention during the device-code or paste-back flow.
   const [showCodexModal, setShowCodexModal] = useState(false);
   const [showClaudeModal, setShowClaudeModal] = useState(false);
+  const [pendingDefaultModel, setPendingDefaultModel] = useState<string | null>(null);
   const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
   const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
@@ -238,6 +240,8 @@ export default function AccountPage() {
 
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
+  const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
+  const hasEffectiveReasoningDefaults = Object.keys(effectiveReasoningDefaults).length > 0;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -287,7 +291,10 @@ export default function AccountPage() {
 
   const updateReasoningDefaultsMutation = useMutation({
     mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
-      api.auth.updateSettings({ coding_agent_reasoning_defaults: defaults }),
+      api.auth.updateSettings({
+        ...(effectiveDefaultModel ? { coding_agent_model_default: effectiveDefaultModel } : {}),
+        ...(defaults && Object.keys(defaults).length > 0 ? { coding_agent_reasoning_defaults: defaults } : {}),
+      }),
     onMutate: (defaults) => {
       reasoningSaveInFlightRef.current = true;
       setPendingReasoningDefaults(defaults);
@@ -326,6 +333,27 @@ export default function AccountPage() {
     }
     updateReasoningDefaultsMutation.mutate(defaults);
   }
+
+  const updateDefaultModelMutation = useMutation({
+    mutationFn: (model: string) =>
+      api.auth.updateSettings({
+        ...(model ? { coding_agent_model_default: model } : {}),
+        ...(hasEffectiveReasoningDefaults ? { coding_agent_reasoning_defaults: effectiveReasoningDefaults } : {}),
+      }),
+    onMutate: (model) => {
+      setPendingDefaultModel(model);
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+      setPendingDefaultModel(null);
+      toast.success("Coding agent defaults saved");
+    },
+    onError: (error) => {
+      captureError(error, { feature: "personal-coding-agent-default-model-save" });
+      setPendingDefaultModel(null);
+      toast.error("Could not save coding agent defaults");
+    },
+  });
 
   // The selected provider's metadata drives whether the auth-type selector
   // is visible. For providers that don't ship a subscription OAuth flow
@@ -447,6 +475,34 @@ export default function AccountPage() {
           </CardHeader>
           <CardContent className="pb-6">
             <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="default-coding-agent-model">Default model</Label>
+                <Select
+                  value={effectiveDefaultModel || "__default__"}
+                  onValueChange={(value) => updateDefaultModelMutation.mutate(value === "__default__" ? "" : value)}
+                >
+                  <SelectTrigger
+                    id="default-coding-agent-model"
+                    aria-label="Default coding-agent model"
+                    className="w-full sm:w-[260px]"
+                  >
+                    <SelectValue placeholder="Default" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">Default</SelectItem>
+                    {AGENTS.map((agent) => (
+                      <SelectGroup key={agent.key}>
+                        <SelectLabel>{agent.label}</SelectLabel>
+                        {agent.models.map((model) => (
+                          <SelectItem key={model} value={model}>
+                            {model}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               {Object.entries(CODING_AGENT_REASONING_OPTIONS_BY_AGENT).map(([agentType, config]) => {
                 const defaultReasoning = effectiveReasoningDefaults[agentType as "codex" | "claude_code"] ?? "";
 

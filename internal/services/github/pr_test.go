@@ -66,7 +66,9 @@ var prTestPullRequestColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-	"health_version", "merged_at", "created_at", "updated_at",
+	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 }
 
 var prTestPreviewTargetColumns = []string{
@@ -111,6 +113,13 @@ func newPRTestRowWithTitle(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID
 		false,
 		nil,
 		int64(0),
+		models.PullRequestMergeWhenReadyStateOff,
+		(*uuid.UUID)(nil),
+		(*time.Time)(nil),
+		"",
+		(*int64)(nil),
+		"",
+		(*time.Time)(nil),
 		(*time.Time)(nil),
 		now,
 		now,
@@ -4499,9 +4508,10 @@ func TestDispatchPostPRSnapshotUpload_PromotesOnSuccess(t *testing.T) {
 	sessionID := uuid.New()
 	const newKey = "snapshots/org/session/post-pr.tar.zst"
 
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+			AddRow(int64(2), time.Now().UTC()))
 
 	store := &blockingSnapshotStore{
 		saveStarted: make(chan struct{}),
@@ -4616,7 +4626,7 @@ func TestDispatchPostPRSnapshotUpload_LogsPromoteFailure(t *testing.T) {
 	defer mock.Close()
 
 	// Promote returns an error from the DB; no follow-up Clear call.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
@@ -4930,9 +4940,10 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 	// PromotePendingSnapshot: the async write fired by the upload
 	// goroutine after Save() succeeds. SQL order is @id, @org_id,
 	// @expected_key, so the key guard is arg #2.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), wantPendingKey).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+			AddRow(int64(2), time.Now().UTC()))
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(

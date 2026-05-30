@@ -3,11 +3,12 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Pause, Loader2, Minus, Plus, Settings2 } from "lucide-react";
+import { ChevronDown, Play, Pause, Loader2, Minus, Plus, Settings2 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -115,9 +116,9 @@ function SettingsTab({
   const effectiveAgentType = model
     ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
     : automation.agent_type ?? defaultAgentType;
-  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi"].includes(effectiveAgentType);
   const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
-  let prePRReviewDescription = "Off for agents without native review support.";
+  let prePRReviewDescription = "Off for agents without review-loop support.";
   if (supportsNativeReviewLoop) {
     prePRReviewDescription = effectivePrePRReviewLoops === 0
       ? "Off"
@@ -193,7 +194,7 @@ function SettingsTab({
           repositoryId={automation.repository_id ?? undefined}
           branch={baseBranch?.trim() || automation.base_branch || undefined}
           agentType={effectiveAgentType}
-          rows={3}
+          rows={9}
           ariaInvalid={goalLength.isTooLong}
         />
         <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
@@ -256,7 +257,7 @@ function SettingsTab({
               </SelectContent>
             </Select>
           </div>
-          <div className="flex flex-wrap items-start gap-2 sm:items-center">
+          <div className="grid grid-cols-[auto_5rem_auto_5rem_minmax(0,12.5rem)] items-center gap-2">
             <span className="text-xs font-medium leading-none text-muted-foreground">At</span>
             <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
               <SelectTrigger className="h-9 w-20" aria-label="Run at hour">
@@ -287,95 +288,109 @@ function SettingsTab({
               value={timezone}
               onChange={setTimezone}
               detected={detectedTimezone}
-              className="w-full sm:w-auto"
+              className="w-[12.5rem] max-w-full"
             />
           </div>
         </div>
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="automation-model">Model</Label>
-        <AutomationModelSelect
-          id="automation-model"
-          ariaLabel="Model"
-          value={model}
-          onValueChange={setModel}
-        />
-      </div>
-      {showReasoningSelector ? (
-        <div className="space-y-1.5">
-          <Label htmlFor="automation-reasoning">Reasoning</Label>
-          <Select
-            value={reasoningEffort || "__default__"}
-            onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
-          >
-            <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
-              <SelectValue placeholder="Default reasoning" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__default__">Default reasoning</SelectItem>
-              {reasoningOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      ) : null}
-      <div className="space-y-1.5">
-        <Label>Base branch</Label>
-        <BranchPicker
-          repositoryId={automation.repository_id ?? ""}
-          value={baseBranch}
-          defaultBranch={automation.base_branch}
-          onValueChange={setBaseBranch}
-          label="Base branch"
-          buttonClassName="w-full justify-between"
-          contentClassName="w-[var(--radix-popover-trigger-width)]"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
-        <div className="flex items-center gap-2">
+      <Collapsible className="rounded-md border border-border">
+        <CollapsibleTrigger asChild>
           <Button
             type="button"
-            variant="outline"
-            size="icon"
-            aria-label="Decrease review passes"
-            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
-            disabled={!canManage || !supportsNativeReviewLoop}
+            variant="ghost"
+            className="group h-10 w-full justify-between rounded-md px-3 text-left"
           >
-            <Minus className="h-4 w-4" />
+            <span>Advanced settings</span>
+            <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
           </Button>
-          <Input
-            id="pre-pr-review-loops"
-            aria-label="Review passes"
-            type="number"
-            min={0}
-            max={5}
-            value={effectivePrePRReviewLoops}
-            onChange={(e) => {
-              const parsed = parseInt(e.target.value, 10);
-              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
-            }}
-            disabled={!canManage || !supportsNativeReviewLoop}
-            className="w-20 text-center"
-          />
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            aria-label="Increase review passes"
-            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
-            disabled={!canManage || !supportsNativeReviewLoop}
-          >
-            <Plus className="h-4 w-4" />
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {prePRReviewDescription}
-        </p>
-      </div>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="space-y-4 border-t border-border p-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="automation-model">Model</Label>
+            <AutomationModelSelect
+              id="automation-model"
+              ariaLabel="Model"
+              value={model}
+              onValueChange={setModel}
+            />
+          </div>
+          {showReasoningSelector ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="automation-reasoning">Reasoning</Label>
+              <Select
+                value={reasoningEffort || "__default__"}
+                onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+              >
+                <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
+                  <SelectValue placeholder="Default reasoning" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">Default reasoning</SelectItem>
+                  {reasoningOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+          <div className="space-y-1.5">
+            <Label>Base branch</Label>
+            <BranchPicker
+              repositoryId={automation.repository_id ?? ""}
+              value={baseBranch}
+              defaultBranch={automation.base_branch}
+              onValueChange={setBaseBranch}
+              label="Base branch"
+              buttonClassName="w-full justify-between"
+              contentClassName="w-[var(--radix-popover-trigger-width)]"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Decrease review passes"
+                onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+                disabled={!canManage || !supportsNativeReviewLoop}
+              >
+                <Minus className="h-4 w-4" />
+              </Button>
+              <Input
+                id="pre-pr-review-loops"
+                aria-label="Review passes"
+                type="number"
+                min={0}
+                max={5}
+                value={effectivePrePRReviewLoops}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+                }}
+                disabled={!canManage || !supportsNativeReviewLoop}
+                className="w-20 text-center"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label="Increase review passes"
+                onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+                disabled={!canManage || !supportsNativeReviewLoop}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {prePRReviewDescription}
+            </p>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
       {canManage && (
         <div className="flex items-center gap-3 pt-2">
           <Button

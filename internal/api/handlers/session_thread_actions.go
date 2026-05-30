@@ -46,7 +46,7 @@ func (h *SessionThreadHandler) CancelThread(w http.ResponseWriter, r *http.Reque
 
 // ListThreadFileEvents handles GET /sessions/{id}/thread-file-events — the
 // raw timeline of "tab T touched path P at turn N". The frontend rolls this
-// up into "Touched by tab" and "Overlap" filters in the Changes view.
+// up into overlap signals for the tab strip.
 //
 // Accepts an optional `?since=<RFC3339>` query parameter. The frontend
 // passes the most recent observed_at it has cached so polling on a long

@@ -683,8 +683,8 @@ describe("PreviewPanel component", () => {
       screen.getByText("Container crashed unexpectedly"),
     ).toBeInTheDocument();
 
-    // Retry Preview button
-    expect(screen.getByText("Retry Preview")).toBeInTheDocument();
+    // Retry preview button
+    expect(screen.getByText("Retry preview")).toBeInTheDocument();
   });
 
   it("lets users expand full startup logs for a failed preview", async () => {
@@ -718,11 +718,12 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Preview failed to start")).toBeInTheDocument();
     });
 
-    const diagnosticSurface = screen.getByRole("group", {
-      name: "Preview startup diagnostics",
-    });
+    const diagnosticSurface = screen.getByRole("alert");
     const startupLogRegion = screen.getByLabelText("Preview startup error logs");
     expect(diagnosticSurface).toContainElement(startupLogRegion);
+    expect(
+      screen.queryByRole("group", { name: "Preview startup diagnostics" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Startup summary")).toBeInTheDocument();
     expect(startupLogRegion).toHaveTextContent(summary);
     expect(startupLogRegion).toHaveClass("max-h-28");
@@ -1141,16 +1142,88 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Retry Preview" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Retry preview" })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Retry Preview" }));
+    await user.click(screen.getByRole("button", { name: "Retry preview" }));
 
     await waitFor(() => {
       expect(mockEnsure).toHaveBeenCalledWith("sess-1");
     });
     expect(mockStart).not.toHaveBeenCalled();
     expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("keeps Retry preview at full opacity while retrying", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "failed" }));
+    mockEnsure.mockReturnValue(new Promise(() => {}));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    const retryButton = await screen.findByRole("button", {
+      name: "Retry preview",
+    });
+    await user.click(retryButton);
+
+    expect(retryButton).toBeDisabled();
+    expect(retryButton).toHaveAttribute("data-loading", "true");
+    expect(retryButton).toHaveClass(
+      "disabled:data-[loading=true]:opacity-100",
+    );
+  });
+
+  it("shows Retry preview button for unhealthy preview", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "unhealthy" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+  });
+
+  it("ensures a preview when retrying after an unhealthy preview", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "unhealthy" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Retry preview" }));
+
+    await waitFor(() => {
+      expect(mockEnsure).toHaveBeenCalledWith("sess-1");
+    });
+    expect(mockStart).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not show refresh and retry actions together when stale preview metadata is unhealthy", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "unhealthy",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "out_of_date",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        preview_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        reason: "session_changed_after_preview_start",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Retry the preview to use the latest session changes."),
+    ).toBeInTheDocument();
   });
 
   /* ---------- Mutation error banner ---------- */
@@ -1452,13 +1525,66 @@ describe("PreviewPanel component", () => {
     expect(
       screen.getByText("Restart the preview to see the latest session changes."),
     ).toBeInTheDocument();
+    const freshnessCallout = screen.getByTestId("preview-freshness-callout");
+    const refreshButton = screen.getByRole("button", { name: "Refresh preview" });
+    expect(freshnessCallout).toContainElement(refreshButton);
     expect(screen.getByRole("link", { name: "Open Preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry preview" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Refresh preview" }));
+    await user.click(refreshButton);
 
     await waitFor(() => {
       expect(mockEnsure).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("does not show refresh and retry actions together when stale preview metadata is failed", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "failed",
+        error: "Container crashed",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "out_of_date",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        preview_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        reason: "session_changed_after_preview_start",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+    expect(screen.queryByText("New changes available")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("preview-freshness-callout")).not.toBeInTheDocument();
+  });
+
+  it("uses refresh instead of retry when an openable preview is stale", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "partially_ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "out_of_date",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        preview_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        reason: "session_changed_after_preview_start",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByRole("button", { name: "Refresh preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry preview" })).not.toBeInTheDocument();
   });
 
   it("shows unknown freshness as quiet metadata instead of a callout", async () => {
@@ -1530,7 +1656,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Try Again button in failed state ---------- */
 
-  it("calls ensure mutation when Retry Preview is clicked in failed state", async () => {
+  it("calls ensure mutation when Retry preview is clicked in failed state", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(
       makePreviewStatus({
@@ -1542,10 +1668,10 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Retry Preview")).toBeInTheDocument();
+      expect(screen.getByText("Retry preview")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Retry Preview"));
+    await user.click(screen.getByText("Retry preview"));
 
     await waitFor(() => {
       expect(mockEnsure).toHaveBeenCalledWith("sess-1");

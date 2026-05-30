@@ -231,7 +231,7 @@ func TestSessionStore_PublishCheckpoint(t *testing.T) {
 		name          string
 		lockToken     uuid.UUID
 		rowsAffected  int64
-		execErr       error
+		queryErr      error
 		expectOK      bool
 		expectErr     bool
 		queryPattern  string
@@ -258,7 +258,7 @@ func TestSessionStore_PublishCheckpoint(t *testing.T) {
 		},
 		{
 			name:         "wraps publish errors",
-			execErr:      errors.New("write failed"),
+			queryErr:     errors.New("write failed"),
 			expectErr:    true,
 			queryPattern: `checkpointed_at = @checkpointed_at`,
 		},
@@ -273,7 +273,7 @@ func TestSessionStore_PublishCheckpoint(t *testing.T) {
 			defer mock.Close()
 
 			store := NewSessionStore(mock)
-			expect := mock.ExpectExec(tt.queryPattern)
+			expect := mock.ExpectQuery(tt.queryPattern)
 			if tt.lockToken != uuid.Nil {
 				expect.WithArgs(
 					pgxmock.AnyArg(),
@@ -302,10 +302,13 @@ func TestSessionStore_PublishCheckpoint(t *testing.T) {
 					pgxmock.AnyArg(),
 				)
 			}
-			if tt.execErr != nil {
-				expect.WillReturnError(tt.execErr)
+			if tt.queryErr != nil {
+				expect.WillReturnError(tt.queryErr)
+			} else if tt.rowsAffected == 0 {
+				expect.WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}))
 			} else {
-				expect.WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+				expect.WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+					AddRow(int64(2), time.Now().UTC()))
 			}
 
 			ok, err := store.PublishCheckpoint(

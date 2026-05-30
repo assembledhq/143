@@ -112,11 +112,8 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.abort(ctx, reservation, "", "preview reservation no longer matches target")
 		return fmt.Errorf("reserved branch preview target mismatch")
 	}
-	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
-		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
-			return fmt.Errorf("reassign branch preview worker: %w", err)
-		}
-		reservation.WorkerNodeID = r.nodeID
+	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("reassign branch preview worker: %w", err)
 	}
 
 	target, err := r.previews.GetPreviewTarget(ctx, payload.OrgID, payload.PreviewTargetID)
@@ -283,11 +280,8 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 			return fmt.Errorf("reserved preview workspace revision mismatch")
 		}
 	}
-	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
-		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
-			return fmt.Errorf("reassign preview worker: %w", err)
-		}
-		reservation.WorkerNodeID = r.nodeID
+	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("reassign preview worker: %w", err)
 	}
 
 	session, err := r.sessions.GetByID(ctx, payload.OrgID, payload.SessionID)
@@ -305,6 +299,9 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		if errors.Is(acq.Err, ErrPreviewCapacity) {
 			r.registerCapacityDeadLetter(ctx, reservation)
 			return fmt.Errorf("%s: %w", acq.ErrCode, acq.Err)
+		}
+		if errors.Is(acq.Err, agent.ErrStaleSandboxIDCleared) {
+			return fmt.Errorf("%s: %w", acq.ErrCodeOr("STALE_SANDBOX_CLEARED"), acq.Err)
 		}
 		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
@@ -366,8 +363,23 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	return nil
 }
 
-func shouldReassignPreviewWorker(deadTargetNode, reservationWorkerNode, claimingWorkerNode string) bool {
-	return deadTargetNode != "" && claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
+func (r *StartRunner) reassignReservationWorkerIfNeeded(ctx context.Context, orgID, previewID uuid.UUID, reservation *models.PreviewInstance) error {
+	if reservation == nil || !shouldReassignPreviewWorker("", reservation.WorkerNodeID, r.nodeID) {
+		return nil
+	}
+	endpointURL := ""
+	if r.manager != nil {
+		endpointURL = r.manager.previewInternalBaseURL
+	}
+	if err := r.previews.ReassignPreviewWorker(ctx, orgID, previewID, r.nodeID, endpointURL); err != nil {
+		return err
+	}
+	reservation.WorkerNodeID = r.nodeID
+	return nil
+}
+
+func shouldReassignPreviewWorker(_ string, reservationWorkerNode, claimingWorkerNode string) bool {
+	return claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
 }
 
 func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
@@ -502,6 +514,11 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	case freshErr != nil:
 		r.logger.Warn().Err(freshErr).Str("session_id", session.ID.String()).Msg("preview hydrate: pre-hydrate peek failed; falling through to CAS race detection")
 	case winningID != "":
+		if cleared, clearErr := r.clearStalePreviewContainer(ctx, orgID, session, winningID, workDir); clearErr != nil {
+			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEAR_FAILED", Err: clearErr}
+		} else if cleared {
+			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEARED", Err: fmt.Errorf("%w", agent.ErrStaleSandboxIDCleared)}
+		}
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
 	}
 
@@ -540,6 +557,51 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
+}
+
+func (r *StartRunner) clearStalePreviewContainer(ctx context.Context, orgID uuid.UUID, session *models.Session, containerID, workDir string) (bool, error) {
+	if r == nil || r.sandboxProvider == nil || r.sessions == nil || session == nil || containerID == "" {
+		return false, nil
+	}
+	candidate := &agent.Sandbox{
+		ID:        containerID,
+		Provider:  "docker",
+		WorkDir:   workDir,
+		SessionID: session.ID.String(),
+		OrgID:     session.OrgID.String(),
+		Purpose:   "preview_hydrate",
+	}
+	alive, inspectErr := r.sandboxProvider.IsAlive(ctx, candidate)
+	if inspectErr != nil {
+		r.logger.Warn().Err(inspectErr).
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: stale container probe failed; leaving row for retry/reconciler")
+		return false, nil
+	}
+	if alive {
+		return false, nil
+	}
+	cleared, clearErr := r.sessions.ClearContainerID(ctx, orgID, session.ID, containerID)
+	if clearErr != nil {
+		r.logger.Warn().Err(clearErr).
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: failed to clear stale container_id")
+		return false, fmt.Errorf("clear stale container_id: %w", clearErr)
+	}
+	if !cleared {
+		r.logger.Info().
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: stale container clear lost CAS")
+		return false, nil
+	}
+	r.logger.Info().
+		Str("session_id", session.ID.String()).
+		Str("container_id", containerID).
+		Msg("preview hydrate: cleared stale container_id; retrying against clean row")
+	return true, nil
 }
 
 func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID, previewConfigName string) (*models.PreviewConfig, error) {

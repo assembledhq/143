@@ -42,6 +42,7 @@ import (
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/ownerloss"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -378,6 +379,7 @@ func main() {
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
+		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -398,10 +400,12 @@ func main() {
 		sessionLogStore := db.NewSessionLogStore(pool)
 		sessionStore.SetLogger(logger)
 		sessionLogStore.SetLogger(logger)
+		sessionThreadStore.SetLogger(logger)
 		jobStore.SetLogger(logger)
 		if sessionStreams != nil {
 			sessionStore.SetStreams(sessionStreams)
 			sessionLogStore.SetStreams(sessionStreams)
+			sessionThreadStore.SetStreams(sessionStreams)
 			sessionStreams.StartCleanup(ctx, sessionStore)
 		}
 		if jobNotifier != nil {
@@ -429,7 +433,9 @@ func main() {
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			HumanInputRequests:  sessionHumanInputStore,
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
+			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
@@ -446,7 +452,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, fileReader)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
@@ -574,6 +580,9 @@ func main() {
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
 		}
+		if cfg.NodeID != "" {
+			go worker.RunNodeDrainWatcher(ctx, db.NewNodeStore(pool), processWorkers, cfg.NodeID, logger, 5*time.Second)
+		}
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
@@ -589,6 +598,7 @@ func main() {
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 			agent.WithRuntimeJobTerminalizer(jobStore),
+			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -1008,12 +1018,14 @@ func configureSessionExecutorDispatch(
 				"/var/run/docker.sock:/var/run/docker.sock",
 				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 			},
-			GroupAdd: sessionExecutorGroupAddFromEnv(),
-			Env:      os.Environ(),
+			GroupAdd:    sessionExecutorGroupAddFromEnv(),
+			Env:         os.Environ(),
+			StopTimeout: cfg.SessionExecutorStopTimeout,
 		}),
-		NodeID:   cfg.NodeID,
-		Image:    cfg.SessionExecutorImage,
-		BuildSHA: version.BuildSHA,
+		NodeID:                cfg.NodeID,
+		Image:                 cfg.SessionExecutorImage,
+		BuildSHA:              version.BuildSHA,
+		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
 	}
 }
 
@@ -1063,6 +1075,7 @@ func buildServices(
 	orgSettingsCache *agent.OrgSettingsCache,
 	sandboxCapacity *agent.SandboxCapacityGate,
 	redisClient *cache.Client,
+	sessionStreams *cache.SessionStreams,
 	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -1173,6 +1186,13 @@ func buildServices(
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionThreadStore.SetLogger(logger)
+	if sessionStreams != nil {
+		sessionThreadStore.SetStreams(sessionStreams)
+	}
+	threadInboxStore := db.NewThreadInboxStore(pool)
+	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
+	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
@@ -1245,6 +1265,9 @@ func buildServices(
 		MentionIndexes:     mentionIndexCache,
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
+		ThreadRuntimes:     threadRuntimeStore,
+		ThreadInbox:        threadInboxStore,
+		SandboxHolders:     sessionSandboxHolderStore,
 		Cancels:            cancelRegistry,
 		ThreadCancels:      threadCancelRegistry,
 		OrgSettingsCache:   orgSettingsCache,
@@ -1316,6 +1339,15 @@ func buildServices(
 		jobStore,
 		logger,
 	)
+	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
+		sessionStore,
+		db.NewSessionExecutorStore(pool),
+		jobStore,
+		jobStore,
+		logger,
+	))
+	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
+	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	reviewLoopSvc := reviewloopservice.NewService(
 		reviewLoopStore,
 		reviewloopservice.RuntimeAdapter{

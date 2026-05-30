@@ -327,6 +327,36 @@ Primary action buttons (Save, Submit) must always be **right-aligned** using `ju
 </div>
 ```
 
+### Submit Buttons That Navigate
+
+When a submit/create mutation navigates to a different page on success, do **not** rely only on `mutation.isPending` for the button loading state. React Query clears `isPending` once the mutation settles, but `router.push()`/`router.replace()` can take another render before the current page unmounts. Keep a local navigation-pending flag so the button stays disabled and visibly loading until the user is off the screen.
+
+```tsx
+const [isNavigatingAfterSubmit, setIsNavigatingAfterSubmit] = useState(false);
+
+const mutation = useMutation({
+  mutationFn: submitForm,
+  onMutate: () => {
+    setIsNavigatingAfterSubmit(false);
+  },
+  onSuccess: (response) => {
+    setIsNavigatingAfterSubmit(true);
+    router.push(`/items/${response.data.id}`);
+  },
+  onError: () => {
+    setIsNavigatingAfterSubmit(false);
+  },
+});
+
+const isSubmitting = mutation.isPending || isNavigatingAfterSubmit;
+
+<Button onClick={() => mutation.mutate()} disabled={!canSubmit || isSubmitting}>
+  {isSubmitting ? "Creating..." : "Create item"}
+</Button>
+```
+
+If the successful action closes a dialog before navigation, the submit button is already off screen; this extra flag is most important for full-page forms and any still-visible CTA that initiates cross-page navigation.
+
 ## Modal & Dialog Patterns
 
 ### Modal Action Layout

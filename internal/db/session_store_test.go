@@ -29,7 +29,7 @@ var sessionTestColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -71,7 +71,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, 0, lastActivityAt, "none", nil, nil, nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at
+		nil, 0, lastActivityAt, "none", int64(0), nil, nil, nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at
 		nil,      // runtime_soft_deadline_at
 		nil,      // runtime_hard_deadline_at
 		nil,      // runtime_last_progress_at
@@ -666,9 +666,9 @@ func TestSessionStore_PromotePendingSnapshot(t *testing.T) {
 	// Promote must clear both pending_snapshot_key AND pending_snapshot_set_at
 	// in the same statement — otherwise the reaper would see a phantom
 	// timestamp on a row whose pending key has already been promoted.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), expected).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(4), time.Now()))
 
 	err = store.PromotePendingSnapshot(context.Background(), orgID, sessionID, expected)
 	require.NoError(t, err, "PromotePendingSnapshot should not error on a clean update")
@@ -687,9 +687,9 @@ func TestSessionStore_PublishCheckpoint_BumpsWorkspaceRevisionForSnapshot(t *tes
 	sessionID := uuid.New()
 	checkpointedAt := time.Now().UTC()
 
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = CASE[\\s\\S]*workspace_revision = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision[\\s\\S]*ELSE workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision_updated_at[\\s\\S]*ELSE @checkpointed_at").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = CASE[\\s\\S]*workspace_revision = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision[\\s\\S]*ELSE workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = CASE[\\s\\S]*@snapshot_key = '' THEN workspace_revision_updated_at[\\s\\S]*ELSE @checkpointed_at[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(3), checkpointedAt))
 
 	published, err := store.PublishCheckpoint(
 		context.Background(),
@@ -1166,12 +1166,38 @@ func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
 	store.SetLogger(zerolog.Nop())
 	store.SetStreams(nil)
 
-	mock.ExpectQuery(`UPDATE sessions SET status = @status, started_at = now\(\), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
+	mock.ExpectQuery(`UPDATE sessions SET status = @status, started_at = now\(\), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(context.DeadlineExceeded)
 
 	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusRunning)
 	require.Error(t, err, "UpdateStatus should surface query failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateStatusRunningClearsRuntimeControlFields(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	err = store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusRunning)
+
+	require.NoError(t, err, "UpdateStatus should transition the session to running")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1713,6 +1739,24 @@ func TestSessionStore_UpdateTurnComplete(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionStore_UpdateTurnCompleteAtomicallyAdvancesConcurrentTurns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec(`UPDATE sessions[\s\S]+current_turn = GREATEST\(current_turn \+ 1, @current_turn\)`).
+		WithArgs(anyDBArgs(13)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, &models.SessionResult{}, "agent-123", "snap-key")
+	require.NoError(t, err, "UpdateTurnComplete should atomically advance the shared session turn counter")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateTurnCompleteClearsStaleFailureDetails(t *testing.T) {
 	t.Parallel()
 
@@ -2056,12 +2100,14 @@ func TestSessionStore_ReleaseTurnHold(t *testing.T) {
 		name            string
 		containerID     string
 		previewHolds    bool
+		sandboxHolds    bool
 		wantDestroyNow  bool
 		wantContainerID string
 	}{
-		{"destroys when no preview hold", "container-1", false, true, "container-1"},
-		{"keeps alive when preview still holds", "container-1", true, false, "container-1"},
-		{"no-op when container was already empty", "", false, false, ""},
+		{"destroys when no holders remain", "container-1", false, false, true, "container-1"},
+		{"keeps alive when preview still holds", "container-1", true, false, false, "container-1"},
+		{"keeps alive when sandbox holder remains", "container-1", false, true, false, "container-1"},
+		{"no-op when container was already empty", "", false, false, false, ""},
 	}
 
 	for _, tt := range tests {
@@ -2076,8 +2122,8 @@ func TestSessionStore_ReleaseTurnHold(t *testing.T) {
 			mock.ExpectQuery(`WITH released AS \(\s*UPDATE sessions\s+SET turn_holding_container = FALSE`).
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(
-					pgxmock.NewRows([]string{"container_id", "preview_holds"}).
-						AddRow(tt.containerID, tt.previewHolds),
+					pgxmock.NewRows([]string{"container_id", "preview_holds", "sandbox_holds"}).
+						AddRow(tt.containerID, tt.previewHolds, tt.sandboxHolds),
 				)
 
 			destroyNow, cid, err := store.ReleaseTurnHold(context.Background(), uuid.New(), uuid.New())
@@ -2284,6 +2330,24 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, cleared)
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("checks active sandbox holders before clearing", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock")
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`NOT EXISTS \(\s*SELECT 1 FROM session_sandbox_holders h[\s\S]+h\.status IN \('active', 'draining'\)[\s\S]+h\.expires_at > now\(\)`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		cleared, err := store.FinalizeContainerDestroy(context.Background(), uuid.New(), uuid.New(), "c-1")
+		require.NoError(t, err, "FinalizeContainerDestroy should not fail when an active sandbox holder prevents cleanup")
+		require.False(t, cleared, "FinalizeContainerDestroy should leave the container alive when any active sandbox holder remains")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
 	t.Run("wraps db error", func(t *testing.T) {

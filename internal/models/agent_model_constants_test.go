@@ -26,7 +26,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
+		[]string{ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -82,7 +82,7 @@ func TestLLMModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, []string{
-		"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
+		"claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
 		"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
 		"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash",
 		"qwen3-235b-a22b", "qwen3-32b",
@@ -98,7 +98,7 @@ func TestLLMModelsByProvider(t *testing.T) {
 	require.Contains(t, byProvider, "openai")
 	require.Contains(t, byProvider, "gemini")
 	require.Contains(t, byProvider, "openrouter")
-	require.Equal(t, []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}, byProvider["anthropic"])
+	require.Equal(t, []string{"claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}, byProvider["anthropic"])
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}, byProvider["openai"])
 	require.Equal(t, []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"}, byProvider["gemini"])
 	require.Contains(t, byProvider["openrouter"], "gemini-3.1-pro", "openrouter should proxy the latest gemini models too")
@@ -211,13 +211,13 @@ func TestAgentTypeForModel(t *testing.T) {
 	}{
 		{"", ""},
 		{CodexModelGPT54, AgentTypeCodex},
-		{ClaudeCodeModelOpus47, AgentTypeClaudeCode},
+		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},
 		{GeminiCLIModelGemini25Pro, AgentTypeGeminiCLI},
 		{AmpModeSmart, AgentTypeAmp},
 		// Curated Pi entry contains "/" — must resolve to Pi via the curated
 		// lookup (not the slash heuristic) so we keep precedence stable if a
 		// non-Pi agent later registers a slash-shaped model.
-		{PiModelClaudeOpus47, AgentTypePi},
+		{PiModelClaudeOpus48, AgentTypePi},
 		// Slash heuristic only fires after every curated list misses.
 		{"moonshot/kimi-k2", AgentTypePi},
 		{"unknown-model", ""},
@@ -232,9 +232,9 @@ func TestValidatePMModel(t *testing.T) {
 
 	require.NoError(t, ValidatePMModel(""), "empty pm_model is allowed (caller falls back to default)")
 	require.NoError(t, ValidatePMModel(CodexModelGPT54))
-	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus47))
+	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus48))
 	require.NoError(t, ValidatePMModel(AmpModeSmart))
-	require.NoError(t, ValidatePMModel(PiModelClaudeOpus47))
+	require.NoError(t, ValidatePMModel(PiModelClaudeOpus48))
 	// Custom Pi provider/model — accepted with parity to ValidateModelForAgentType.
 	require.NoError(t, ValidatePMModel("moonshot/kimi-k2"))
 
@@ -289,7 +289,7 @@ func TestValidateSettingsModels(t *testing.T) {
 		{
 			name: "accepts pi model as pm model",
 			settings: OrgSettings{
-				PMModel: PiModelClaudeOpus47,
+				PMModel: PiModelClaudeOpus48,
 			},
 		},
 		{

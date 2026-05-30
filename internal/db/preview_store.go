@@ -62,11 +62,11 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
-	source_workspace_revision, source_workspace_revision_updated_at, preview_holding_container`
+	source_workspace_revision, source_workspace_revision_updated_at, unavailable_reason, preview_holding_container`
 
 const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, worker_node_id,
 	endpoint_url, preview_handle, primary_port, status, lease_expires_at,
-	last_heartbeat_at, drain_requested_at, stopped_at, error, created_at, updated_at`
+	last_heartbeat_at, drain_requested_at, stopped_at, error, unavailable_reason, created_at, updated_at`
 
 const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
 	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
@@ -829,6 +829,50 @@ func (s *PreviewStore) UpdatePreviewWorkerNodeID(ctx context.Context, orgID, id 
 	return nil
 }
 
+// ReassignPreviewWorker reassigns a starting preview reservation and its active
+// runtime routing row to the worker that actually claimed the start job.
+func (s *PreviewStore) ReassignPreviewWorker(ctx context.Context, orgID, id uuid.UUID, workerNodeID, endpointURL string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin preview worker reassignment: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txStore := s.WithTx(tx)
+	if err := txStore.UpdatePreviewWorkerNodeID(ctx, orgID, id, workerNodeID); err != nil {
+		return err
+	}
+	if endpointURL != "" {
+		if _, err := tx.Exec(ctx,
+			fmt.Sprintf(`UPDATE preview_runtimes
+			 SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), updated_at = now()
+			 WHERE preview_instance_id = @preview_id AND org_id = @org_id AND status IN %s`, activeRuntimeStatusFilter),
+			pgx.NamedArgs{"org_id": orgID, "preview_id": id},
+		); err != nil {
+			return fmt.Errorf("stop previous preview runtimes: %w", err)
+		}
+
+		var nextEpoch int
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(MAX(runtime_epoch), 0) + 1
+			 FROM preview_runtimes
+			 WHERE org_id = @org_id AND preview_instance_id = @preview_id`,
+			pgx.NamedArgs{"org_id": orgID, "preview_id": id},
+		).Scan(&nextEpoch); err != nil {
+			return fmt.Errorf("select next preview runtime epoch: %w", err)
+		}
+
+		runtime := newStartingPreviewRuntime(orgID, id, nextEpoch, workerNodeID, endpointURL)
+		if err := txStore.CreatePreviewRuntime(ctx, runtime); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit preview worker reassignment: %w", err)
+	}
+	return nil
+}
+
 // UpdatePreviewPhase records the current startup phase for status reloads and
 // support diagnostics. The update is scoped to active startup because terminal
 // status transitions own the final phase label.
@@ -891,7 +935,7 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	var query string
 	phase := previewPhaseForStatus(status)
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	} else {
 		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
@@ -950,7 +994,7 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -1594,11 +1638,22 @@ func (s *PreviewStore) HeartbeatPreviewRuntimesByWorker(ctx context.Context, wor
 // transitions their preview instances to unavailable.
 // lint:allow-no-orgid reason="cross-org worker shutdown/recovery marks runtimes owned by this node"
 func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorker(ctx context.Context, workerNodeID, reason string) (int64, error) {
+	return s.MarkActivePreviewRuntimesLostByWorkerWithReason(ctx, workerNodeID, reason, models.PreviewUnavailableReasonOwnerLost)
+}
+
+// MarkActivePreviewRuntimesLostByWorkerWithReason marks a worker's live
+// runtimes lost and persists a typed user/operator-facing unavailable reason.
+// lint:allow-no-orgid reason="cross-org worker shutdown/recovery marks runtimes owned by this node"
+func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx context.Context, workerNodeID, reason string, unavailableReason models.PreviewUnavailableReason) (int64, error) {
+	if err := unavailableReason.Validate(); err != nil {
+		return 0, err
+	}
 	tag, err := s.db.Exec(ctx,
 		fmt.Sprintf(`WITH lost AS (
 			UPDATE preview_runtimes
 			SET status = 'lost',
 				error = @reason,
+				unavailable_reason = @unavailable_reason,
 				stopped_at = COALESCE(stopped_at, now()),
 				updated_at = now()
 			WHERE worker_node_id = @worker AND status IN %s
@@ -1607,13 +1662,14 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorker(ctx context.Context
 		UPDATE preview_instances pi
 		SET status = 'unavailable',
 			error = @reason,
+			unavailable_reason = @unavailable_reason,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost
 		WHERE pi.id = lost.preview_instance_id
 		  AND pi.org_id = lost.org_id
 		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
-		pgx.NamedArgs{"worker": workerNodeID, "reason": reason},
+		pgx.NamedArgs{"worker": workerNodeID, "reason": reason, "unavailable_reason": unavailableReason},
 	)
 	if err != nil {
 		return 0, fmt.Errorf("mark active preview runtimes lost by worker: %w", err)
@@ -1630,6 +1686,7 @@ func (s *PreviewStore) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutof
 			UPDATE preview_runtimes
 			SET status = 'lost',
 				error = @reason,
+				unavailable_reason = 'lease_expired',
 				stopped_at = COALESCE(stopped_at, now()),
 				updated_at = now()
 			WHERE lease_expires_at < @cutoff AND status IN %s
@@ -1638,6 +1695,7 @@ func (s *PreviewStore) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutof
 		UPDATE preview_instances pi
 		SET status = 'unavailable',
 			error = @reason,
+			unavailable_reason = 'lease_expired',
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost
@@ -1738,6 +1796,14 @@ func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time
 			  AND s.org_id = preview_instances.org_id
 			  AND s.turn_holding_container = TRUE
 		)
+		AND NOT EXISTS (
+			SELECT 1 FROM session_sandbox_holders h
+			WHERE h.org_id = preview_instances.org_id
+			  AND h.session_id = preview_instances.session_id
+			  AND h.holder_kind = 'thread_runtime'
+			  AND h.status IN ('active', 'draining')
+			  AND h.expires_at > now()
+		)
 		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"idle_since": idleSince})
@@ -1766,6 +1832,14 @@ func (s *PreviewStore) ListIdlePreviewsForWorker(ctx context.Context, workerNode
 			WHERE s.id = preview_instances.session_id
 			  AND s.org_id = preview_instances.org_id
 			  AND s.turn_holding_container = TRUE
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM session_sandbox_holders h
+			WHERE h.org_id = preview_instances.org_id
+			  AND h.session_id = preview_instances.session_id
+			  AND h.holder_kind = 'thread_runtime'
+			  AND h.status IN ('active', 'draining')
+			  AND h.expires_at > now()
 		)
 		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
 

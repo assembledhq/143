@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -39,8 +41,17 @@ func (s *Service) CancelThread(ctx context.Context, orgID, sessionID, threadID u
 		return models.SessionThread{}, fmt.Errorf("mark cancel requested: %w", err)
 	}
 
+	cancelledLocally := false
 	if s.canceller != nil {
-		_ = s.canceller.CancelThread(threadID)
+		cancelledLocally = s.canceller.CancelThread(threadID)
+	}
+	if !cancelledLocally {
+		if err := s.enqueueCancelThread(ctx, orgID, sessionID, threadID); err != nil {
+			s.logger.Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Str("thread_id", threadID.String()).
+				Msg("failed to enqueue targeted thread cancel job")
+		}
 	}
 
 	// Re-fetch so callers see the cancel_requested_at timestamp.
@@ -52,9 +63,7 @@ func (s *Service) CancelThread(ctx context.Context, orgID, sessionID, threadID u
 }
 
 // ListFileEvents returns the raw file-event timeline for a session. Used by
-// the Changes view to power the "Touched by tab" / "Overlap" filters. We
-// expose the timeline (not a pre-rolled view) so the frontend can switch
-// between filter shapes without round-tripping for each.
+// the tab strip to detect overlapping file touches between active tabs.
 //
 // since, when non-nil, scopes the result to events observed at-or-after
 // that time. Frontend polling passes the most recent observed_at it has
@@ -69,6 +78,121 @@ func (s *Service) ListFileEvents(ctx context.Context, orgID, sessionID uuid.UUID
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
 	return s.fileEvents.ListBySession(ctx, orgID, sessionID, since)
+}
+
+const recoverableInboxEntryListLimit = 50
+
+func (s *Service) ListRecoverableInboxEntries(ctx context.Context, orgID, sessionID, threadID uuid.UUID) ([]models.ThreadInboxEntry, error) {
+	if s.inboxStore == nil {
+		return []models.ThreadInboxEntry{}, nil
+	}
+	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	if _, err := visibleThreadInSession(thread, sessionID); err != nil {
+		return nil, err
+	}
+	entries, err := s.inboxStore.ListRecoverableByThread(ctx, orgID, threadID, recoverableInboxEntryListLimit)
+	if err != nil {
+		return nil, fmt.Errorf("list recoverable inbox entries: %w", err)
+	}
+	if entries == nil {
+		entries = []models.ThreadInboxEntry{}
+	}
+	return entries, nil
+}
+
+func (s *Service) RetryInboxEntry(ctx context.Context, orgID, sessionID, threadID, entryID uuid.UUID, allowUnknownDelivery bool) (models.ThreadInboxEntry, error) {
+	if s.inboxStore == nil {
+		return models.ThreadInboxEntry{}, ErrThreadNotFound
+	}
+	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return models.ThreadInboxEntry{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	if _, err := visibleThreadInSession(thread, sessionID); err != nil {
+		return models.ThreadInboxEntry{}, err
+	}
+	entry, err := s.inboxStore.RetryRecoverable(ctx, orgID, threadID, entryID, allowUnknownDelivery)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.ThreadInboxEntry{}, ErrThreadNotFound
+		}
+		return models.ThreadInboxEntry{}, fmt.Errorf("retry recoverable inbox entry: %w", err)
+	}
+	var enqueueErr error
+	if s.runtimeOwnerStore != nil {
+		if _, activeErr := s.runtimeOwnerStore.GetActiveByThread(ctx, orgID, threadID); activeErr == nil {
+			enqueueErr = s.enqueueLiveThreadInboxDelivery(ctx, SendMessageInput{SessionID: sessionID, OrgID: orgID, ThreadID: threadID})
+		} else if errors.Is(activeErr, pgx.ErrNoRows) {
+			enqueueErr = s.enqueueThreadContinuation(ctx, orgID, sessionID, threadID)
+		} else if activeErr != nil {
+			enqueueErr = fmt.Errorf("get active runtime for replay: %w", activeErr)
+		}
+	} else {
+		enqueueErr = s.enqueueLiveThreadInboxDelivery(ctx, SendMessageInput{SessionID: sessionID, OrgID: orgID, ThreadID: threadID})
+	}
+	if enqueueErr != nil {
+		s.logger.Warn().Err(enqueueErr).
+			Str("session_id", sessionID.String()).
+			Str("thread_id", threadID.String()).
+			Str("inbox_entry_id", entryID.String()).
+			Msg("failed to enqueue live inbox delivery after inbox replay request")
+	}
+	return entry, nil
+}
+
+func (s *Service) enqueueCancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error {
+	if s.jobStore == nil {
+		return nil
+	}
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"thread_id":  threadID.String(),
+		"org_id":     orgID.String(),
+	}
+	dedupeKey := cancelThreadJobType + ":" + threadID.String()
+	var targetNodeID *string
+	if s.runtimeOwnerStore != nil {
+		runtime, err := s.runtimeOwnerStore.GetActiveByThread(ctx, orgID, threadID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("get active runtime for cancel: %w", err)
+			}
+		} else if runtime.OwnerNodeID != "" {
+			targetNodeID = &runtime.OwnerNodeID
+		}
+	}
+	_, err := s.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:        deliverThreadInboxQueue,
+		JobType:      cancelThreadJobType,
+		Payload:      payload,
+		Priority:     9,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: targetNodeID,
+	})
+	return err
+}
+
+func (s *Service) enqueueThreadContinuation(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error {
+	if s.jobStore == nil {
+		return nil
+	}
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"thread_id":  threadID.String(),
+		"org_id":     orgID.String(),
+	}
+	dedupeKey := db.ContinueSessionDedupeKey(threadID)
+	_, err := s.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:     "agent",
+		JobType:   "continue_session",
+		Payload:   payload,
+		Priority:  5,
+		DedupeKey: &dedupeKey,
+	})
+	return err
 }
 
 // ForkInput captures the parameters for forking a tab into its own session.

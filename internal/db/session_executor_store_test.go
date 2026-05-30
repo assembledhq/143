@@ -27,20 +27,22 @@ func TestSessionExecutorStore_CreateStarting(t *testing.T) {
 	jobID := uuid.New()
 	lockToken := uuid.New()
 	executorID := uuid.New()
+	deadline := time.Now().Add(90 * time.Minute).UTC()
 
 	mock.ExpectQuery("INSERT INTO session_executors").
-		WithArgs(orgID, sessionID, (*uuid.UUID)(nil), jobID, "run_agent", "worker-1", "worker-1", lockToken, "143:sha", "build-sha").
+		WithArgs(orgID, sessionID, (*uuid.UUID)(nil), jobID, "run_agent", "worker-1", "worker-1", lockToken, "143:sha", "build-sha", &deadline).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(executorID))
 
 	id, err := store.CreateStarting(context.Background(), orgID, models.CreateSessionExecutorParams{
-		SessionID:  sessionID,
-		JobID:      jobID,
-		JobType:    "run_agent",
-		HostNodeID: "worker-1",
-		OwnerID:    "worker-1",
-		LockToken:  lockToken,
-		Image:      "143:sha",
-		BuildSHA:   "build-sha",
+		SessionID:         sessionID,
+		JobID:             jobID,
+		JobType:           "run_agent",
+		HostNodeID:        "worker-1",
+		OwnerID:           "worker-1",
+		LockToken:         lockToken,
+		Image:             "143:sha",
+		BuildSHA:          "build-sha",
+		RuntimeDeadlineAt: &deadline,
 	})
 	require.NoError(t, err, "CreateStarting should insert an org-scoped executor row")
 	require.Equal(t, executorID, id, "CreateStarting should return the inserted executor id")
@@ -181,13 +183,14 @@ func TestSessionExecutorStore_HeartbeatWithLease(t *testing.T) {
 	executorID := uuid.New()
 	lockToken := uuid.New()
 
-	mock.ExpectExec("UPDATE session_executors").
+	mock.ExpectQuery("UPDATE session_executors[\\s\\S]+RETURNING drain_intent").
 		WithArgs(orgID, executorID, lockToken, int((2 * time.Minute).Seconds())).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"drain_intent"}).AddRow("none"))
 
-	ok, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
+	ok, intent, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
 	require.NoError(t, err, "HeartbeatWithLease should persist the executor heartbeat")
 	require.True(t, ok, "HeartbeatWithLease should report that the fenced update landed")
+	require.Equal(t, models.DrainIntentNone, intent, "HeartbeatWithLease should return the current executor drain intent")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -211,12 +214,13 @@ func TestSessionExecutorStore_GetByID(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "thread_id", "job_id", "job_type",
 			"host_node_id", "owner_id", "lock_token", "status", "image", "build_sha",
-			"heartbeat_at", "lease_expires_at", "started_at", "completed_at",
+			"heartbeat_at", "lease_expires_at", "runtime_deadline_at", "drain_intent",
+			"drain_requested_at", "drain_deadline_at", "started_at", "completed_at",
 			"exit_code", "last_error", "created_at", "updated_at",
 		}).AddRow(
 			executorID, orgID, sessionID, nil, jobID, "run_agent",
 			"worker-1", "worker-1", lockToken, string(models.SessionExecutorStatusStarting), "143:sha", "build-sha",
-			now, now.Add(time.Minute), now, nil, nil, nil, now, now,
+			now, now.Add(time.Minute), now.Add(90*time.Minute), "none", nil, nil, now, nil, nil, nil, now, now,
 		))
 
 	executor, err := store.GetByID(context.Background(), executorID)
@@ -302,6 +306,46 @@ func TestSessionExecutorStore_StateTransitionsWithLease(t *testing.T) {
 	}
 }
 
+func TestSessionExecutorStore_MarkDeployBudgetExpiredByNode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	now := time.Date(2026, 5, 28, 17, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec("UPDATE session_executors[\\s\\S]+drain_intent <> 'deploy_budget_expired'").
+		WithArgs(now, 45, "worker-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	updated, err := store.MarkDeployBudgetExpiredByNode(context.Background(), "worker-1", now, 45*time.Second)
+	require.NoError(t, err, "MarkDeployBudgetExpiredByNode should update over-budget active executors")
+	require.Equal(t, int64(2), updated, "MarkDeployBudgetExpiredByNode should return updated executor count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionExecutorStore_MarkDeployBudgetExpiredByNodeSkipsAlreadyMarkedExecutors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	now := time.Date(2026, 5, 28, 17, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec("UPDATE session_executors[\\s\\S]+drain_intent <> 'deploy_budget_expired'").
+		WithArgs(now, 45, "worker-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	updated, err := store.MarkDeployBudgetExpiredByNode(context.Background(), "worker-1", now, 45*time.Second)
+	require.NoError(t, err, "MarkDeployBudgetExpiredByNode should not error when every expired executor was already marked")
+	require.Equal(t, int64(0), updated, "MarkDeployBudgetExpiredByNode should return zero once budget expiry has already been recorded")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionExecutorStore_ReclaimLost(t *testing.T) {
 	t.Parallel()
 
@@ -319,6 +363,42 @@ func TestSessionExecutorStore_ReclaimLost(t *testing.T) {
 	require.NoError(t, err, "ReclaimLost should mark stale executors lost and requeue their jobs")
 	require.Equal(t, int64(2), reclaimed, "ReclaimLost should return the number of lost executors")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionExecutorStore_ReclaimLostForSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	staleBefore := time.Now().Add(-2 * time.Minute)
+	mock.ExpectQuery("WITH stale_active AS").
+		WithArgs(orgID, sessionID, staleBefore, 100).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+	reclaimed, err := store.ReclaimLostForSession(context.Background(), orgID, sessionID, staleBefore, 100)
+	require.NoError(t, err, "targeted ReclaimLost should mark stale executors lost and requeue their jobs")
+	require.Equal(t, int64(1), reclaimed, "targeted ReclaimLost should return the number of reclaimed rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionExecutorStore_ReclaimLostForSession_ScopesToSessionAndRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("session_executor_store.go")
+	require.NoError(t, err, "test should read session executor store source")
+
+	body := string(src)
+	require.Contains(t, body, "func (s *SessionExecutorStore) ReclaimLostForSession", "targeted executor recovery helper should exist")
+	require.Contains(t, body, "se.org_id = $1", "targeted executor recovery must filter by org id")
+	require.Contains(t, body, "se.session_id = $2", "targeted executor recovery must filter by session id")
+	require.Contains(t, body, "runtime_stop_reason = 'worker_recovery'", "targeted executor recovery must persist worker-recovery stop reason")
+	require.Contains(t, body, "recovery_state = 'queued'", "targeted executor recovery must queue session recovery")
+	require.Contains(t, body, "j.lease_expires_at < now()", "targeted executor recovery must only reclaim stale running leases")
 }
 
 func TestSessionExecutorStore_ReclaimLostClearsPreHandoffOrphans(t *testing.T) {
@@ -349,6 +429,19 @@ func TestSessionExecutorStore_ReclaimLostClearsTerminalJobOrphans(t *testing.T) 
 	body := string(src)
 	require.Contains(t, body, "j.lock_token IS NULL", "ReclaimLost should consider stale executors whose job lock was already cleared")
 	require.Contains(t, body, "stale.job_status IN ('succeeded', 'failed', 'cancelled', 'skipped', 'dead_letter')", "ReclaimLost should clear active executor rows for terminal jobs")
+}
+
+func TestSessionExecutorStore_ReclaimLostDefersWhileThreadRuntimeLeaseActive(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("session_executor_store.go")
+	require.NoError(t, err, "test should read session executor store source")
+
+	body := string(src)
+	require.Contains(t, body, "NOT EXISTS (\n\t\t\t\tSELECT 1\n\t\t\t\tFROM thread_runtimes tr", "ReclaimLost should consult active thread runtimes before requeueing a session job")
+	require.Contains(t, body, "tr.thread_id = se.thread_id", "ReclaimLost should gate recovery on the same thread runtime, not unrelated session work")
+	require.Contains(t, body, "tr.lease_expires_at > now()", "ReclaimLost should defer recovery while the thread runtime lease is still valid")
+	require.NotContains(t, body, "tr.lease_expires_at IS NULL OR tr.lease_expires_at > now()", "ReclaimLost should not treat NULL runtime leases as active because runtime reapers consider NULL leases expired")
 }
 
 func TestJobStore_GetRunningForSessionExecutor(t *testing.T) {

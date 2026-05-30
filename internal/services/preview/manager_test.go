@@ -156,7 +156,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -182,7 +182,7 @@ var sessionTestCols = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -208,8 +208,19 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", stringPtr("req-1"), "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil),
+		"",
 		false,
 	}
+}
+
+func setPreviewInstanceRowColumn(row []any, column string, value any) {
+	for i, name := range previewInstanceTestCols {
+		if name == column {
+			row[i] = value
+			return
+		}
+	}
+	panic(fmt.Sprintf("unknown preview instance test column %q", column))
 }
 
 func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash string, expiresAt time.Time, revokedAt *time.Time, now time.Time) []any {
@@ -239,6 +250,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		"current_turn":                   0,
 		"last_activity_at":               now,
 		"sandbox_state":                  "running",
+		"workspace_generation":           int64(0),
 		"runtime_last_progress_type":     "",
 		"runtime_last_progress_strength": "",
 		"runtime_extension_count":        0,
@@ -1483,6 +1495,52 @@ func TestRecyclePreview_SecretResolutionFailureMarksFailed(t *testing.T) {
 	require.Error(t, err, "RecyclePreview should fail when secret bundle resolution fails")
 	require.Contains(t, err.Error(), "preview secrets require a repository id", "RecyclePreview should return the secret resolution error")
 	require.NoError(t, mock.ExpectationsWereMet(), "secret resolution failure should mark the preview failed")
+}
+
+func TestRecyclePreview_StartFailureReleasesPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	containerID := "sandbox-recycle"
+
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-recycle","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"sandbox-recycle"}}`))
+	setPreviewInstanceRowColumn(row, "preview_holding_container", true)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(row...),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectQuery(`WITH released AS \(\s*UPDATE preview_instances\s+SET preview_holding_container = FALSE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, containerID, true),
+		)
+
+	mgr := newTestManager(mock, &mockProvider{startErr: errors.New("service exited before ready")})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "RecyclePreview should return the provider start failure")
+	require.Contains(t, err.Error(), "service exited before ready", "RecyclePreview should preserve the provider error")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed recycle should release the preview sandbox hold")
 }
 
 func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {

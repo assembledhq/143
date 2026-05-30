@@ -118,13 +118,13 @@ export default function NewAutomationPage() {
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
-  const supportsNativeReviewLoop = effectiveAgentType === "codex" || effectiveAgentType === "claude_code";
+  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi"].includes(effectiveAgentType);
   const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
   const prePRReviewDescription = supportsNativeReviewLoop
     ? effectivePrePRReviewLoops === 0
       ? "Off"
       : "Runs the coding agent's review/fix loop before opening a PR."
-    : "Off for agents without native review support.";
+    : "Off for agents without review-loop support.";
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
@@ -287,44 +287,6 @@ export default function NewAutomationPage() {
                   />
                 </div>
 
-                {!advancedOpen ? (
-                  <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
-                    <SelectTrigger className="h-9 w-full sm:w-[150px]" aria-label="Run as">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="org">Organization</SelectItem>
-                      <SelectItem value="personal">Personal</SelectItem>
-                    </SelectContent>
-                  </Select>
-                ) : null}
-
-                {!advancedOpen ? (
-                  <AutomationModelSelect
-                    ariaLabel="Model"
-                    value={model}
-                    onValueChange={setModel}
-                  />
-                ) : null}
-
-                {showReasoningSelector && !advancedOpen ? (
-                  <Select
-                    value={reasoningEffort || "__default__"}
-                    onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
-                  >
-                    <SelectTrigger className="h-9 w-full sm:w-[160px]" aria-label="Reasoning">
-                      <SelectValue placeholder="Default reasoning" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__default__">Default reasoning</SelectItem>
-                      {reasoningOptions.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : null}
               </>
             )}
             secondaryControls={(
@@ -344,7 +306,7 @@ export default function NewAutomationPage() {
                     <SheetHeader>
                       <SheetTitle>Advanced settings</SheetTitle>
                       <SheetDescription>
-                        Tune lower-frequency defaults for branch, scope, priority, review, and timezone.
+                        Tune lower-frequency defaults for identity, model, branch, scope, priority, and review.
                       </SheetDescription>
                     </SheetHeader>
                     <div className="mt-6 space-y-5">
@@ -370,6 +332,36 @@ export default function NewAutomationPage() {
                         </Select>
                       </div>
                       <div className="space-y-1.5">
+                        <Label htmlFor="advanced-model">Model</Label>
+                        <AutomationModelSelect
+                          id="advanced-model"
+                          ariaLabel="Model"
+                          value={model}
+                          onValueChange={setModel}
+                        />
+                      </div>
+                      {showReasoningSelector ? (
+                        <div className="space-y-1.5">
+                          <Label>Reasoning</Label>
+                          <Select
+                            value={reasoningEffort || "__default__"}
+                            onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+                          >
+                            <SelectTrigger aria-label="Reasoning">
+                              <SelectValue placeholder="Default reasoning" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__default__">Default reasoning</SelectItem>
+                              {reasoningOptions.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : null}
+                      <div className="space-y-1.5">
                         <Label>Base branch</Label>
                         <BranchPicker
                           repositoryId={repoId}
@@ -382,15 +374,6 @@ export default function NewAutomationPage() {
                           disabled={!repoId}
                           buttonClassName="w-full justify-between"
                           contentClassName="w-[var(--radix-popover-trigger-width)]"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="advanced-timezone">Timezone</Label>
-                        <TimezonePicker
-                          value={timezone}
-                          onChange={setTimezone}
-                          detected={detectedTimezone}
-                          className="w-full"
                         />
                       </div>
                       <div className="space-y-1.5">

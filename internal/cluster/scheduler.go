@@ -432,9 +432,9 @@ func (s *Scheduler) reapStrandedPendingSnapshots(ctx context.Context, now time.T
 }
 
 func (s *Scheduler) schedulePullRequestReconciliation(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
-	hourBucket := now.UTC().Format("2006010215")
+	tenMinuteBucket := now.UTC().Format("2006010215") + fmt.Sprintf("%d", now.UTC().Minute()/10)
 	for _, orgID := range orgIDs {
-		dedupeKey := fmt.Sprintf("reconcile_pull_request_state:%s:%s", orgID.String(), hourBucket)
+		dedupeKey := fmt.Sprintf("reconcile_pull_request_state:%s:%s", orgID.String(), tenMinuteBucket)
 		payload := map[string]any{
 			"org_id": orgID.String(),
 			"limit":  pullRequestReconcileBatch,

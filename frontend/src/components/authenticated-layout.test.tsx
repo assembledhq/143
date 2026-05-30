@@ -48,23 +48,17 @@ beforeEach(() => {
     logout: logoutMock,
   });
 
-  // The layout fetches proposal summary which isn't in the default handlers
-  server.use(
-    http.get("/api/v1/projects/proposals/summary", () => {
-      return HttpResponse.json({ data: { count: 0 } });
-    }),
-  );
 });
 
 describe("AuthenticatedLayout", () => {
-  it("shows projects in the primary navigation", () => {
+  it("hides projects from the primary navigation", () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
       </AuthenticatedLayout>
     );
 
-    expect(screen.getAllByRole("link", { name: "Projects" }).every((link) => link.getAttribute("href") === "/projects")).toBe(true);
+    expect(screen.queryByRole("link", { name: "Projects" })).not.toBeInTheDocument();
   });
 
   it("shows Autopilot in the primary navigation", () => {

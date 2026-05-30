@@ -17,6 +17,10 @@ import (
 // this to HTTP 409 so the UI can refresh its view of PR health.
 var ErrPullRequestNotMergeable = errors.New("pull request is not in a mergeable state")
 
+// ErrPullRequestHeadChanged is returned when an automated merge was scoped to
+// an earlier PR head SHA and the final pre-merge sync observes a different SHA.
+var ErrPullRequestHeadChanged = errors.New("pull request head changed")
+
 // ErrNoMergeMethodAllowed is returned when the repository has all merge
 // methods disabled — a misconfiguration the user must fix on GitHub.
 var ErrNoMergeMethodAllowed = errors.New("no merge method is allowed on this repository")
@@ -62,6 +66,10 @@ type gitHubMergeResponse struct {
 // Auth follows the same precedence as PR creation: user token when available
 // and accessible, app installation token otherwise.
 func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeResponse, error) {
+	return s.mergePullRequest(ctx, orgID, pullRequestID, userID, nil)
+}
+
+func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, expectedHeadSHA *string) (*models.PullRequestMergeResponse, error) {
 	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
 	if err != nil {
 		return nil, fmt.Errorf("load pull request: %w", err)
@@ -103,6 +111,9 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 			Str("repo", pr.GitHubRepo).
 			Msg("pull request health reports CanMerge=true but is missing head SHA; refusing to merge without race-protection guard")
 		return nil, fmt.Errorf("%w: pull request health is missing head SHA", ErrPullRequestNotMergeable)
+	}
+	if err := validateExpectedMergeHead(health.HeadSHA, expectedHeadSHA); err != nil {
+		return nil, err
 	}
 
 	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
@@ -202,6 +213,13 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		Message:     mergeResp.Message,
 		MergeMethod: method,
 	}, nil
+}
+
+func validateExpectedMergeHead(currentHeadSHA string, expectedHeadSHA *string) error {
+	if expectedHeadSHA == nil || *expectedHeadSHA == "" || currentHeadSHA == *expectedHeadSHA {
+		return nil
+	}
+	return fmt.Errorf("%w: expected %s, got %s", ErrPullRequestHeadChanged, *expectedHeadSHA, currentHeadSHA)
 }
 
 // selectMergeMethod picks a merge method honoring the repository's allow_*
