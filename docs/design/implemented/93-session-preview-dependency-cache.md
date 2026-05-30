@@ -1,6 +1,6 @@
 # Design: Session Preview Dependency Cache
 
-> **Status:** Not Started | **Last reviewed:** 2026-05-29
+> **Status:** Implemented | **Last reviewed:** 2026-05-30
 
 ## Summary
 
@@ -57,9 +57,9 @@ The new flow:
    - `preview.install.cache.enabled: false` disables restore and save.
 4. If caching is enabled:
    - Compute a dependency cache key from install config, declared lockfiles, sandbox runtime/image, and effective cache paths.
-   - Check the worker-local L1 cache by `cache_key`. If present, verify checksum and restore only the effective cache paths.
-   - On L1 miss, look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The L2 blob lives in shared object storage, so any worker can restore any other worker's saved blob.
-   - If L2 is found, stream the blob from object storage into the sandbox, verify checksum, populate worker-local L1 when configured, upsert the worker's L1 location hint, and restore only the effective cache paths.
+   - Look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The DB metadata is authoritative for effective paths and checksum.
+   - If metadata is found, check worker-local L1 by `cache_key` and use it when the checksum matches; otherwise stream the L2 blob from object storage into a bounded worker temp file.
+   - Verify checksum, populate worker-local L1 when configured, upsert the worker's L1 location hint, and restore only the effective cache paths.
    - If both L1 and L2 miss, continue to the normal install path.
 5. Run the existing `preview.install` flow:
    - Compute the existing install marker key.
@@ -337,7 +337,11 @@ type DependencyCache interface {
     // pass a mismatched path list. It removes those paths from the sandbox before
     // extracting so restore is idempotent.
     Restore(ctx context.Context, sb *agent.Sandbox, hit *DependencyCacheHit) error
-    Save(ctx context.Context, sb *agent.Sandbox, cacheKey string, paths []string, metadata DependencyCacheMetadata) error
+    Save(ctx context.Context, sb *agent.Sandbox, cacheKey string, paths []string, metadata DependencyCacheMetadata) (DependencyCacheSaveResult, error)
+}
+
+type DependencyCacheSaveResult struct {
+    SizeBytes int64
 }
 
 type DependencyCacheHit struct {
@@ -435,6 +439,7 @@ type StartPreviewOptions struct {
     OrgID        uuid.UUID
     RepositoryID uuid.UUID
     SessionID    uuid.UUID
+    ConfigDigest string
     ExtraEnv     map[string]string
 }
 
@@ -622,13 +627,17 @@ func (s *PreviewStore) DeleteDependencyCache(ctx context.Context, orgID, id uuid
 // ListDependencyCacheLRU returns the oldest entries for a repo beyond the retention limit,
 // used by the background eviction job to identify blobs to delete from object storage.
 func (s *PreviewStore) ListDependencyCacheLRU(ctx context.Context, orgID, repoID uuid.UUID, keepNewest int) ([]models.PreviewDependencyCache, error)
+func (s *PreviewStore) ListExpiredDependencyCaches(ctx context.Context, cutoff time.Time, limit int) ([]models.PreviewDependencyCache, error)
+func (s *PreviewStore) ListDependencyCachesOverLimit(ctx context.Context, keepNewestPerRepo, limit int) ([]models.PreviewDependencyCache, error)
 func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, location *models.PreviewDependencyCacheLocation) error
 func (s *PreviewStore) ListDependencyCacheWorkersByPlacement(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, limit int) ([]models.PreviewDependencyCacheLocation, error)
 func (s *PreviewStore) DeleteDependencyCacheLocation(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
+func (s *PreviewStore) DeleteExpiredDependencyCacheLocations(ctx context.Context, cutoff time.Time) (int64, error)
+func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context.Context, workerNodeID, cacheKey string) error
 func (s *PreviewStore) DeleteDependencyCacheLocationsForWorker(ctx context.Context, workerNodeID string) error
 ```
 
-`ListDependencyCacheLRU` is always org-scoped and does not require a lint exception. `DeleteDependencyCacheLocationsForWorker` is worker-scoped cleanup for node drain/local-cache wipe flows; if it cannot take `orgID`, add a narrow lint exception explaining that it does not expose tenant data and only deletes local-location hints.
+`ListDependencyCacheLRU` is always org-scoped and does not require a lint exception. Cross-org cleanup methods are limited to background cleanup or worker-local hint deletion, and carry narrow lint exceptions because they do not expose tenant data.
 
 ## Blob Storage
 
@@ -645,6 +654,12 @@ Add config:
 ```go
 PreviewDependencyCacheBucket string `env:"PREVIEW_DEPENDENCY_CACHE_BUCKET" envDefault:""`
 PreviewDependencyCachePrefix string `env:"PREVIEW_DEPENDENCY_CACHE_PREFIX" envDefault:"preview-dependency-cache"`
+PreviewDependencyCacheS3Region string `env:"PREVIEW_DEPENDENCY_CACHE_S3_REGION" envDefault:""`
+PreviewDependencyCacheS3Endpoint string `env:"PREVIEW_DEPENDENCY_CACHE_S3_ENDPOINT" envDefault:""`
+PreviewDependencyCacheS3UsePathStyle bool `env:"PREVIEW_DEPENDENCY_CACHE_S3_USE_PATH_STYLE" envDefault:"false"`
+PreviewDependencyCacheRetentionDays int `env:"PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS" envDefault:"30"`
+PreviewDependencyCacheCleanupInterval time.Duration `env:"PREVIEW_DEPENDENCY_CACHE_CLEANUP_INTERVAL" envDefault:"1h"`
+PreviewDependencyCacheKeepNewestPerRepo int `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO" envDefault:"50"`
 ```
 
 When `PREVIEW_DEPENDENCY_CACHE_BUCKET` is empty, dependency caching is disabled regardless of per-repo config. This is the safe default for environments that have not provisioned the bucket.
@@ -660,7 +675,7 @@ PreviewDependencyCacheLocalMaxBytes int64  `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_
 
 When `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR` is empty, every restore streams directly from object storage. The local cache is not required and should not be required in tests.
 
-When local L1 is configured, successful restores and saves should upsert `preview_dependency_cache_locations` with the worker's stable node ID. When local L1 eviction removes a blob, the worker should best-effort delete the matching location row. Stale location rows are acceptable because they only affect scheduling preference; the worker still verifies local file existence before restore and falls back to object storage.
+When local L1 is configured, successful restores and saves upsert `preview_dependency_cache_locations` with the worker's stable node ID. Local L1 eviction removes the oldest blobs when the worker-local byte budget is exceeded and best-effort deletes the matching location rows. Stale location rows are acceptable because they only affect scheduling preference; the worker still verifies local file existence before restore and falls back to object storage.
 
 ### Save
 
@@ -683,7 +698,7 @@ If no effective cache paths exist after install, skip save and log `dependency c
 Restore should:
 
 1. Look up the DB record for `(org_id, repo_id, cache_key)`.
-2. Stream the blob from object storage (checking the local L1 cache first if configured).
+2. Use the DB metadata as the source of truth for effective paths and checksum. If local L1 is configured and has the blob for this `cache_key`, stage that local blob first; otherwise stream the blob from object storage to a bounded worker temp file.
 3. Verify checksum against stored hash.
 4. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
 5. Extract the tarball into the repo root, validating that no entry escapes via absolute paths or `..` traversal.
@@ -695,7 +710,7 @@ Do not extract absolute paths or parent traversal entries. Validate tar entries 
 
 ### Eviction
 
-Object storage lifecycle rules (e.g. S3 Object Lifecycle Policies) should expire blobs after a configurable number of days (default: 30). A background DB cleanup job should periodically delete DB records whose `last_used_at` is older than the same retention window, and explicitly delete their corresponding objects if lifecycle rules are not configured. `ListDependencyCacheLRU` supports this job by returning the oldest entries per repo beyond a configured retention count.
+Object storage lifecycle rules (e.g. S3 Object Lifecycle Policies) should expire blobs after a configurable number of days (default: 30). A background DB cleanup job periodically deletes DB records whose `last_used_at` is older than the same retention window, explicitly deletes corresponding objects if lifecycle rules are not configured, enforces `PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO` with a cross-repo LRU scan, and deletes stale worker-local location hints older than the same retention window.
 
 ## Security and Secret Handling
 
@@ -812,7 +827,7 @@ Verification:
 5. Add tests for config validation and named-config merge behavior (omit / partial / full override).
 6. Add preview store methods for dependency cache lookup/upsert/touch/delete/LRU-list and local L1 location lookup/upsert/delete. Keep methods org-scoped except worker-node cleanup, which may need a narrow lint exception.
 7. Add store tests and satisfy tenancy lints.
-8. Add `DependencyCache` implementation backed by shared S3-compatible object storage. Restore checks optional worker-local L1 first, streams from S3 on L1 miss, derives effective paths from `DependencyCacheMetadata.EffectivePaths`, and upserts local L1 location rows after successful L1 population. Save uploads to S3, upserts the DB record, and registers local L1 location when configured. Implement background eviction via `ListDependencyCacheLRU`.
+8. Add `DependencyCache` implementation backed by shared S3-compatible object storage. Restore finds durable DB metadata first, then checks optional worker-local L1 before streaming from S3 to a bounded worker temp file on L1 miss, derives effective paths from `DependencyCacheMetadata.EffectivePaths`, and upserts local L1 location rows after successful L1 population. Save uploads to S3, writes checksum sidecars, upserts the DB record, and registers local L1 location when configured. Background cleanup deletes expired DB metadata, objects, and stale location hints; worker-local L1 eviction enforces the local byte budget.
 9. Add exact cache key computation using version string `preview-dependency-cache-v1`.
 10. Add placement key computation and scheduler tests.
 11. Update worker selection to prefer live session worker, matching local-cache holders, rendezvous candidates for placement key, least-loaded same-region fallback, then cross-region fallback.

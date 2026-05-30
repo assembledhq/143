@@ -74,6 +74,16 @@ var previewStartupCacheTestCols = []string{
 	"size_bytes", "worker_node_id", "last_used_at", "created_at",
 }
 
+var previewDependencyCacheTestCols = []string{
+	"id", "org_id", "repo_id", "cache_key", "placement_key",
+	"blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+}
+
+var previewDependencyCacheLocationTestCols = []string{
+	"id", "org_id", "repo_id", "cache_key", "placement_key",
+	"worker_node_id", "size_bytes", "last_used_at", "created_at",
+}
+
 var prPreviewStateTestCols = []string{
 	"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 	"last_preview_instance_id", "last_screenshot_blob_path", "last_visual_diff_blob_path",
@@ -2656,4 +2666,22 @@ func TestPreviewStore_UpdatePreviewReservationConfig_ExecError(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "update preview reservation config")
+}
+
+func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	cutoff := time.Now().UTC()
+	mock.ExpectExec("DELETE FROM preview_dependency_cache_locations").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 7))
+
+	deleted, err := NewPreviewStore(mock).DeleteExpiredDependencyCacheLocations(context.Background(), cutoff)
+	require.NoError(t, err, "DeleteExpiredDependencyCacheLocations should delete stale location hints")
+	require.Equal(t, int64(7), deleted, "DeleteExpiredDependencyCacheLocations should report deleted rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

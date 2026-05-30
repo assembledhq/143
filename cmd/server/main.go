@@ -256,7 +256,54 @@ func main() {
 				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
-			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			var dependencyCache preview.DependencyCache
+			if cfg.PreviewDependencyCacheEnabled && cfg.PreviewDependencyCacheBucket != "" {
+				dependencyS3Region := cfg.PreviewDependencyCacheS3Region
+				if dependencyS3Region == "" {
+					dependencyS3Region = cfg.SnapshotS3Region
+				}
+				dependencyS3Endpoint := cfg.PreviewDependencyCacheS3Endpoint
+				if dependencyS3Endpoint == "" {
+					dependencyS3Endpoint = cfg.SnapshotS3Endpoint
+				}
+				dependencyS3UsePathStyle := cfg.PreviewDependencyCacheS3UsePathStyle || cfg.SnapshotS3UsePathStyle
+				dependencyBlobStore, _, cacheStoreErr := storage.BuildSnapshotStore(ctx, storage.SnapshotStoreConfig{
+					S3Bucket:       cfg.PreviewDependencyCacheBucket,
+					S3Prefix:       cfg.PreviewDependencyCachePrefix,
+					S3Region:       dependencyS3Region,
+					S3Endpoint:     dependencyS3Endpoint,
+					S3UsePathStyle: dependencyS3UsePathStyle,
+				})
+				if cacheStoreErr != nil {
+					logger.Warn().Err(cacheStoreErr).Msg("failed to initialize preview dependency cache blob store — dependency caching disabled")
+				} else {
+					cache, cacheErr := preview.NewDependencyCache(preview.DependencyCacheConfig{
+						Store:         db.NewPreviewStore(pool),
+						Executor:      sandboxExec,
+						BlobStore:     dependencyBlobStore,
+						Logger:        logger,
+						WorkerNodeID:  cfg.NodeID,
+						Prefix:        cfg.PreviewDependencyCachePrefix,
+						LocalDir:      cfg.PreviewDependencyCacheLocalDir,
+						LocalMaxBytes: cfg.PreviewDependencyCacheLocalMaxBytes,
+					})
+					if cacheErr != nil {
+						logger.Warn().Err(cacheErr).Msg("failed to initialize preview dependency cache — dependency caching disabled")
+					} else {
+						dependencyCache = cache
+						cleaner := preview.NewDependencyCacheCleaner(preview.DependencyCacheCleanerConfig{
+							Store:             db.NewPreviewStore(pool),
+							BlobStore:         dependencyBlobStore,
+							Logger:            logger,
+							Retention:         time.Duration(cfg.PreviewDependencyCacheRetentionDays) * 24 * time.Hour,
+							Interval:          cfg.PreviewDependencyCacheCleanupInterval,
+							KeepNewestPerRepo: cfg.PreviewDependencyCacheKeepNewestPerRepo,
+						})
+						go cleaner.Run(ctx)
+					}
+				}
+			}
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger, previewproviders.WithDependencyCache(dependencyCache))
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
@@ -340,7 +387,7 @@ func main() {
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL)
+		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL, cfg.NodeRegion)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -574,6 +621,7 @@ func main() {
 			nodeManager,
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
+			cfg.NodeRegion,
 			previewRoutingReady.Load,
 			sandboxCapacity,
 		)
@@ -607,7 +655,10 @@ func main() {
 		if previewManager != nil {
 			previewStore := db.NewPreviewStore(pool)
 			nodeStore := db.NewNodeStore(pool)
-			selector := preview.NewWorkerSelector(nodeStore, previewStore)
+			selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+				PreferredRegion:      cfg.NodeRegion,
+			})
 			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
 			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
@@ -812,6 +863,7 @@ func startProcessWorkers(
 	nodeManager *cluster.NodeManager,
 	previewCapable bool,
 	previewInternalBaseURL string,
+	nodeRegion string,
 	previewRoutingReady func() bool,
 	sandboxCapacity *agent.SandboxCapacityGate,
 ) []*worker.Worker {
@@ -830,7 +882,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady, sandboxCapacity))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -854,9 +906,12 @@ func resolveWorkerMaxActiveSandboxes(workerProcessCount, configured int) int {
 // any provider installed later (e.g. by startProcessWorkers) must continue to
 // emit these fields or the next heartbeat will wipe preview_capable from the
 // node row and break preview routing.
-func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[string]any {
+func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeRegion string) map[string]any {
 	metadata := map[string]any{
 		"build_sha": version.BuildSHA,
+	}
+	if nodeRegion != "" {
+		metadata["region"] = nodeRegion
 	}
 	if previewCapable {
 		metadata["preview_capable"] = true
@@ -867,13 +922,13 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[s
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate) func() map[string]any {
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
 			advertisePreview = advertisePreview && previewRoutingReady()
 		}
-		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
+		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL, nodeRegion)
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
 		if sandboxCapacity != nil {

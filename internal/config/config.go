@@ -35,6 +35,7 @@ type Config struct {
 	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
 	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
 	NodeID             string   `env:"NODE_ID"`
+	NodeRegion         string   `env:"NODE_REGION"`
 	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
 	FrontendURL        string   `env:"FRONTEND_URL"`
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
@@ -247,12 +248,23 @@ type Config struct {
 	SessionFilesCacheMaxBytes int64 `env:"SESSION_FILES_CACHE_MAX_BYTES" envDefault:"5368709120"`
 
 	// Preview system
-	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
-	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
-	PreviewGatewayPort      int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
-	PreviewInternalBaseURL  string `env:"PREVIEW_INTERNAL_BASE_URL"`
-	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
-	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	ChromeWSURL                             string        `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
+	PreviewOriginTemplate                   string        `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
+	PreviewGatewayPort                      int           `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	PreviewInternalBaseURL                  string        `env:"PREVIEW_INTERNAL_BASE_URL"`
+	PreviewSnapshotCacheDir                 string        `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
+	PreviewHMRBlobDir                       string        `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	PreviewDependencyCacheEnabled           bool          `env:"PREVIEW_DEPENDENCY_CACHE_ENABLED" envDefault:"false"`
+	PreviewDependencyCacheBucket            string        `env:"PREVIEW_DEPENDENCY_CACHE_BUCKET"`
+	PreviewDependencyCachePrefix            string        `env:"PREVIEW_DEPENDENCY_CACHE_PREFIX" envDefault:"preview-dependency-cache"`
+	PreviewDependencyCacheS3Region          string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_REGION"`
+	PreviewDependencyCacheS3Endpoint        string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_ENDPOINT"`
+	PreviewDependencyCacheS3UsePathStyle    bool          `env:"PREVIEW_DEPENDENCY_CACHE_S3_USE_PATH_STYLE" envDefault:"false"`
+	PreviewDependencyCacheLocalDir          string        `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR"`
+	PreviewDependencyCacheLocalMaxBytes     int64         `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES" envDefault:"10737418240"`
+	PreviewDependencyCacheRetentionDays     int           `env:"PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS" envDefault:"30"`
+	PreviewDependencyCacheKeepNewestPerRepo int           `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO" envDefault:"50"`
+	PreviewDependencyCacheCleanupInterval   time.Duration `env:"PREVIEW_DEPENDENCY_CACHE_CLEANUP_INTERVAL" envDefault:"1h"`
 
 	// Concurrency caps for the preview subsystem. Each StartPreview checks
 	// these before hydrating a sandbox, so an overloaded worker returns a
@@ -556,8 +568,8 @@ func (c *Config) SentryEnvironmentOrDefault() string {
 // minimum strength requirements when running in production.
 func (c *Config) ValidateSecrets() error {
 	// Retention day validation applies in all environments.
-	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 {
-		return errors.New("DATA_RETENTION_*_DAYS values must not be negative")
+	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
+		return errors.New("DATA_RETENTION_*_DAYS, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")
 	}
 
 	if c.Env != "production" {

@@ -36,7 +36,7 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ StartPreviewOptions, _ ServiceObserver) (*PreviewHandle, error) {
 	m.startConfig = cfg
 	if m.startErr != nil {
 		return nil, m.startErr

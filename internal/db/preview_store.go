@@ -93,6 +93,12 @@ const previewAccessSessionColumns = `id, org_id, user_id, preview_instance_id,
 const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, blob_path,
 	size_bytes, worker_node_id, last_used_at, created_at`
 
+const previewDependencyCacheColumns = `id, org_id, repo_id, cache_key, placement_key,
+	blob_key, size_bytes, metadata, last_used_at, created_at`
+
+const previewDependencyCacheLocationColumns = `id, org_id, repo_id, cache_key, placement_key,
+	worker_node_id, size_bytes, last_used_at, created_at`
+
 const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id,
 	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
 	base_snapshot_key, status, created_at, updated_at`
@@ -2433,6 +2439,217 @@ func (s *PreviewStore) DeleteCache(ctx context.Context, orgID, id uuid.UUID) err
 	)
 	if err != nil {
 		return fmt.Errorf("delete cache: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) FindDependencyCache(ctx context.Context, orgID, repoID uuid.UUID, cacheKey string) (*models.PreviewDependencyCache, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache
+		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_key = @cache_key`, previewDependencyCacheColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "cache_key": cacheKey})
+	if err != nil {
+		return nil, fmt.Errorf("query dependency cache: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
+	if err != nil {
+		return nil, fmt.Errorf("get dependency cache: %w", err)
+	}
+	return &row, nil
+}
+
+func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.PreviewDependencyCache) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_dependency_cache (
+			org_id, repo_id, cache_key, placement_key, blob_key, size_bytes, metadata
+		) VALUES (
+			@org_id, @repo_id, @cache_key, @placement_key, @blob_key, @size_bytes, @metadata
+		)
+		ON CONFLICT (org_id, repo_id, cache_key)
+		DO UPDATE SET placement_key = EXCLUDED.placement_key,
+			blob_key = EXCLUDED.blob_key,
+			size_bytes = EXCLUDED.size_bytes,
+			metadata = EXCLUDED.metadata,
+			last_used_at = now()
+		RETURNING %s`, previewDependencyCacheColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":        entry.OrgID,
+		"repo_id":       entry.RepoID,
+		"cache_key":     entry.CacheKey,
+		"placement_key": entry.PlacementKey,
+		"blob_key":      entry.BlobKey,
+		"size_bytes":    entry.SizeBytes,
+		"metadata":      entry.Metadata,
+	})
+	if err != nil {
+		return fmt.Errorf("upsert dependency cache: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
+	if err != nil {
+		return fmt.Errorf("scan dependency cache: %w", err)
+	}
+	*entry = row
+	return nil
+}
+
+func (s *PreviewStore) TouchDependencyCache(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_dependency_cache SET last_used_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("touch dependency cache: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) DeleteDependencyCache(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("delete dependency cache: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) ListDependencyCacheLRU(ctx context.Context, orgID, repoID uuid.UUID, keepNewest, limit int) ([]models.PreviewDependencyCache, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache
+		WHERE org_id = @org_id AND repo_id = @repo_id
+		ORDER BY last_used_at DESC OFFSET @keep_newest LIMIT @limit`, previewDependencyCacheColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "keep_newest": keepNewest, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list dependency cache lru: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
+}
+
+// lint:allow-no-orgid reason="background dependency cache cleanup scans expired cache metadata across orgs"
+func (s *PreviewStore) ListExpiredDependencyCaches(ctx context.Context, cutoff time.Time, limit int) ([]models.PreviewDependencyCache, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache
+		WHERE last_used_at < @cutoff
+		ORDER BY last_used_at ASC LIMIT @limit`, previewDependencyCacheColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"cutoff": cutoff, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list expired dependency caches: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
+}
+
+// lint:allow-no-orgid reason="background dependency cache cleanup scans LRU metadata across orgs"
+func (s *PreviewStore) ListDependencyCachesOverLimit(ctx context.Context, keepNewestPerRepo, limit int) ([]models.PreviewDependencyCache, error) {
+	if keepNewestPerRepo < 0 {
+		keepNewestPerRepo = 0
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`SELECT %s FROM (
+			SELECT %s, row_number() OVER (
+				PARTITION BY org_id, repo_id ORDER BY last_used_at DESC
+			) AS dependency_cache_rank
+			FROM preview_dependency_cache
+		) ranked_dependency_cache
+		WHERE dependency_cache_rank > @keep_newest
+		ORDER BY last_used_at ASC LIMIT @limit`, previewDependencyCacheColumns, previewDependencyCacheColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"keep_newest": keepNewestPerRepo, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list dependency caches over limit: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
+}
+
+func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, location *models.PreviewDependencyCacheLocation) error {
+	query := fmt.Sprintf(`
+		INSERT INTO preview_dependency_cache_locations (
+			org_id, repo_id, cache_key, placement_key, worker_node_id, size_bytes
+		) VALUES (
+			@org_id, @repo_id, @cache_key, @placement_key, @worker_node_id, @size_bytes
+		)
+		ON CONFLICT (org_id, repo_id, cache_key, worker_node_id)
+		DO UPDATE SET placement_key = EXCLUDED.placement_key,
+			size_bytes = EXCLUDED.size_bytes,
+			last_used_at = now()
+		RETURNING %s`, previewDependencyCacheLocationColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":         location.OrgID,
+		"repo_id":        location.RepoID,
+		"cache_key":      location.CacheKey,
+		"placement_key":  location.PlacementKey,
+		"worker_node_id": location.WorkerNodeID,
+		"size_bytes":     location.SizeBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("upsert dependency cache location: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewDependencyCacheLocation])
+	if err != nil {
+		return fmt.Errorf("scan dependency cache location: %w", err)
+	}
+	*location = row
+	return nil
+}
+
+func (s *PreviewStore) ListDependencyCacheWorkersByPlacement(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, limit int) ([]models.PreviewDependencyCacheLocation, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache_locations
+		WHERE org_id = @org_id AND repo_id = @repo_id AND placement_key = @placement_key
+		ORDER BY last_used_at DESC LIMIT @limit`, previewDependencyCacheLocationColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "placement_key": placementKey, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list dependency cache workers by placement: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCacheLocation])
+}
+
+func (s *PreviewStore) DeleteDependencyCacheLocation(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache_locations WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("delete dependency cache location: %w", err)
+	}
+	return nil
+}
+
+// lint:allow-no-orgid reason="background dependency cache cleanup deletes stale ephemeral local cache hints across orgs"
+func (s *PreviewStore) DeleteExpiredDependencyCacheLocations(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache_locations WHERE last_used_at < @cutoff`,
+		pgx.NamedArgs{"cutoff": cutoff},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired dependency cache locations: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// lint:allow-no-orgid reason="worker cleanup deletes ephemeral local cache hints across orgs without exposing tenant data"
+func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context.Context, workerNodeID, cacheKey string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache_locations WHERE worker_node_id = @worker_node_id AND cache_key = @cache_key`,
+		pgx.NamedArgs{"worker_node_id": workerNodeID, "cache_key": cacheKey},
+	)
+	if err != nil {
+		return fmt.Errorf("delete dependency cache location by worker cache key: %w", err)
+	}
+	return nil
+}
+
+// lint:allow-no-orgid reason="worker cleanup deletes ephemeral local cache hints across orgs without exposing tenant data"
+func (s *PreviewStore) DeleteDependencyCacheLocationsForWorker(ctx context.Context, workerNodeID string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache_locations WHERE worker_node_id = @worker_node_id`,
+		pgx.NamedArgs{"worker_node_id": workerNodeID},
+	)
+	if err != nil {
+		return fmt.Errorf("delete dependency cache locations for worker: %w", err)
 	}
 	return nil
 }

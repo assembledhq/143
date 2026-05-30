@@ -143,6 +143,82 @@ Use `preview.install` when preview services need dependencies installed before t
 
 143 reruns the install when the config or declared lockfiles change, or when a declared verify path is missing.
 
+Dependency artifact caching is enabled by default for session previews when `preview.install.lockfiles` and effective cache paths exist. Effective paths are:
+
+```text
+clean_paths + cache.paths + inferred paths from known dependency files
+```
+
+| Dependency file | Inferred cache path |
+|---|---|
+| `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` | `node_modules` |
+| `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
+| `go.mod`, `go.sum` | `vendor` |
+
+Inference is relative to the lockfile directory: `package-lock.json` infers `node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`.
+
+For Python projects, no `cache` object is needed when a listed lockfile has a conventional local virtualenv:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["poetry", "install"],
+      "lockfiles": ["services/api/poetry.lock"],
+      "verify_paths": ["services/api/.venv"]
+    }
+  }
+}
+```
+
+For Go projects that use vendoring, `go.mod` infers `vendor`:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["go", "mod", "vendor"],
+      "lockfiles": ["go.mod", "go.sum"],
+      "verify_paths": ["vendor"]
+    }
+  }
+}
+```
+
+Add framework or package-manager caches with `cache.paths`:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules"],
+      "cache": { "paths": [".next/cache", ".turbo/cache"] }
+    }
+  }
+}
+```
+
+Opt out when dependency artifacts are not safe to reuse:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules"],
+      "cache": { "enabled": false }
+    }
+  }
+}
+```
+
+Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. `requirements.txt` can be unsafe if dependencies are not pinned; use a lockfile or opt out. Mutable image tags such as `latest` can also leave stale dependency artifacts, so prefer immutable digests or versioned tags.
+
+If dependencies look stale, change the lockfile so the cache key changes, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
+
 ## Add local infrastructure
 
 Prefer platform-managed infrastructure for preview-only databases and caches. The credentials are generated per preview, injected as environment variables, and destroyed with the preview.

@@ -363,12 +363,46 @@ type PreviewResourceList struct {
 // PreviewInstallConfig defines an optional platform-managed install phase that
 // runs before preview services start.
 type PreviewInstallConfig struct {
-	Command        []string `json:"command"`
-	Cwd            string   `json:"cwd,omitempty"`
-	Lockfiles      []string `json:"lockfiles,omitempty"`
-	CleanPaths     []string `json:"clean_paths,omitempty"`
-	VerifyPaths    []string `json:"verify_paths,omitempty"`
-	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	Command        []string                   `json:"command"`
+	Cwd            string                     `json:"cwd,omitempty"`
+	Lockfiles      []string                   `json:"lockfiles,omitempty"`
+	CleanPaths     []string                   `json:"clean_paths,omitempty"`
+	VerifyPaths    []string                   `json:"verify_paths,omitempty"`
+	TimeoutSeconds int                        `json:"timeout_seconds,omitempty"`
+	Cache          *PreviewInstallCacheConfig `json:"cache,omitempty"`
+}
+
+// PreviewInstallCacheConfig controls optional dependency artifact caching for
+// preview.install. Enabled is a pointer so named config merge/defaulting can
+// distinguish omitted from explicitly false.
+type PreviewInstallCacheConfig struct {
+	Enabled *bool    `json:"enabled,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+}
+
+type PreviewDependencyCache struct {
+	ID           uuid.UUID       `db:"id" json:"id"`
+	OrgID        uuid.UUID       `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID       `db:"repo_id" json:"repo_id"`
+	CacheKey     string          `db:"cache_key" json:"cache_key"`
+	PlacementKey string          `db:"placement_key" json:"placement_key"`
+	BlobKey      string          `db:"blob_key" json:"-"`
+	SizeBytes    int64           `db:"size_bytes" json:"size_bytes"`
+	Metadata     json.RawMessage `db:"metadata" json:"metadata"`
+	LastUsedAt   time.Time       `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time       `db:"created_at" json:"created_at"`
+}
+
+type PreviewDependencyCacheLocation struct {
+	ID           uuid.UUID `db:"id" json:"id"`
+	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID `db:"repo_id" json:"repo_id"`
+	CacheKey     string    `db:"cache_key" json:"cache_key"`
+	PlacementKey string    `db:"placement_key" json:"placement_key"`
+	WorkerNodeID string    `db:"worker_node_id" json:"worker_node_id"`
+	SizeBytes    int64     `db:"size_bytes" json:"size_bytes"`
+	LastUsedAt   time.Time `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 }
 
 // ServiceConfig defines a single service within a preview.

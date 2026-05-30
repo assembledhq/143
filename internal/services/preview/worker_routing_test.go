@@ -358,3 +358,239 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 }
+
+func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now().UTC()
+	metadata, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://worker.internal:8080",
+	})
+	require.NoError(t, err, "worker metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, "cache-key", "placement", "worker-1", int64(10), now, now).
+			AddRow(uuid.New(), orgID, repoID, "cache-key", "placement", "worker-2", int64(10), now, now))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, now, now).
+			AddRow("worker-2", "worker", "worker-2.internal", "active", metadata, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("worker-1", 2).
+			AddRow("worker-2", 0))
+
+	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 2)
+	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, "placement", true)
+	require.NoError(t, err, "cache placement worker lookup should not fail")
+	require.True(t, ok, "cache placement worker lookup should find a candidate")
+	require.Equal(t, "worker-2", worker.ID, "cache placement worker should skip full cache holders using one batched count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWorkerSelector_SelectLeastLoadedNodeInPreferredRegionIgnoresUnknownRegion(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	unknownMeta, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://unknown.internal:8080",
+	})
+	require.NoError(t, err, "unknown-region metadata should marshal")
+	westMeta, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://west.internal:8080",
+		Region:                 "us-west-2",
+	})
+	require.NoError(t, err, "west metadata should marshal")
+	eastMeta, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://east.internal:8080",
+		Region:                 "us-east-1",
+	})
+	require.NoError(t, err, "east metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("unknown-worker", "worker", "unknown.internal", "active", unknownMeta, now, now).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now).
+			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("east-worker", 0))
+
+	selector := NewWorkerSelectorWithOptions(db.NewNodeStore(mock), db.NewPreviewStore(mock), WorkerSelectorOptions{
+		MaxPreviewsPerWorker: 10,
+		PreferredRegion:      "us-east-1",
+	})
+	worker, err := selector.SelectLeastLoadedNodeInPreferredRegion(context.Background())
+	require.NoError(t, err, "preferred-region selection should find the explicitly matching worker")
+	require.Equal(t, "east-worker", worker.ID, "preferred-region selection should not treat workers with unknown regions as matching")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	eastMeta, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://east.internal:8080",
+		Region:                 "us-east-1",
+	})
+	require.NoError(t, err, "east metadata should marshal")
+	westMeta, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://west.internal:8080",
+		Region:                 "us-west-2",
+	})
+	require.NoError(t, err, "west metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, "cache-key", "placement", "west-worker", int64(10), now, now))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("east-worker", 3))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("east-worker", 3))
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, "cache-key", "placement", "west-worker", int64(10), now, now))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("west-worker", 0))
+
+	selector := NewWorkerSelectorWithOptions(db.NewNodeStore(mock), db.NewPreviewStore(mock), WorkerSelectorOptions{
+		MaxPreviewsPerWorker: 3,
+		PreferredRegion:      "us-east-1",
+	})
+	worker, err := selector.SelectStartNodeWithPlacement(context.Background(), orgID, &models.Session{ID: sessionID}, repoID, "placement")
+	require.NoError(t, err, "worker selection should fall back across regions when preferred region is full")
+	require.Equal(t, "west-worker", worker.ID, "cross-region fallback should pick a healthy worker only after preferred-region candidates are full")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestWorkerSelector_SelectStartNodeWithPlacement_NoPreferredRegionWorkers verifies that
+// when no workers exist in the preferred region at all, routing falls through to the
+// cross-region least-loaded fallback instead of returning ErrNoPreviewWorkers.
+func TestWorkerSelector_SelectStartNodeWithPlacement_NoPreferredRegionWorkers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	// Only a west worker exists; preferred region is east.
+	westMeta, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://west.internal:8080",
+		Region:                 "us-west-2",
+	})
+	require.NoError(t, err, "west metadata should marshal")
+
+	// 1. No active preview for the session.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+
+	// 2. selectCachePlacementWorker(preferredOnly=true): no location hints.
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}))
+
+	// 3. selectRendezvousWorker(preferredOnly=true): only west workers — no east workers eligible.
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+
+	// 4. SelectLeastLoadedNodeInPreferredRegion: no preferred-region workers.
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+
+	// 5. Cross-region: selectCachePlacementWorker(preferredOnly=false): no location hints.
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}))
+
+	// 6. Cross-region: selectRendezvousWorker(preferredOnly=false): west worker is eligible, at capacity=0.
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("west-worker", 0))
+
+	selector := NewWorkerSelectorWithOptions(db.NewNodeStore(mock), db.NewPreviewStore(mock), WorkerSelectorOptions{
+		MaxPreviewsPerWorker: 3,
+		PreferredRegion:      "us-east-1",
+	})
+	worker, err := selector.SelectStartNodeWithPlacement(context.Background(), orgID, &models.Session{ID: sessionID}, repoID, "placement")
+	require.NoError(t, err, "routing should fall through to cross-region when no preferred-region workers exist")
+	require.Equal(t, "west-worker", worker.ID, "should route to the only available worker in a different region")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
