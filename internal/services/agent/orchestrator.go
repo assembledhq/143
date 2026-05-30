@@ -2025,6 +2025,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	runtimeController.SetStopFallback(cancel)
 	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
 		return err
 	}
@@ -2932,6 +2933,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	runtimeCfg := o.resolveRuntimeConfig(ctx, session.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	runtimeController.SetStopFallback(cancel)
 	fallbackStatus := session.Status
 	if fallbackStatus == "" {
 		fallbackStatus = models.SessionStatusIdle
