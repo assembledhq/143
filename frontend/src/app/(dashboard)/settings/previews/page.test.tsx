@@ -429,6 +429,48 @@ describe("PreviewSettingsPage", () => {
     });
   }, 10000);
 
+  it("reveals existing secret file contents on explicit request", async () => {
+    const fileBundle = {
+      id: "bundle-file",
+      repository_id: "repo-1",
+      name: "file-bundle",
+      source_type: "managed",
+      exposure_policy: "preview_runtime",
+      outputs: [{ type: "file", path: "config.json", format: "json" }],
+      created_by_user_id: "user-1",
+      created_at: "2026-05-27T00:00:00Z",
+    };
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () =>
+        HttpResponse.json({ data: [fileBundle], meta: {} }),
+      ),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.post("*/api/v1/preview-secret-bundles/bundle-file/reveal", () =>
+        HttpResponse.json({
+          data: {
+            bundle: fileBundle,
+            source: { type: "managed", values: { SECRET_FILE_CONTENT: '{"token":"super-secret"}' } },
+            outputs: [{ type: "file", path: "config.json", format: "json", value: "secret:SECRET_FILE_CONTENT" }],
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
+
+    expect(screen.getByLabelText("Secret file contents")).toHaveValue("");
+
+    await userEvent.click(screen.getByRole("button", { name: "Reveal contents" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Secret file contents")).toHaveValue('{"token":"super-secret"}');
+    });
+  }, 10000);
+
   it("does not show a Test bundle action inside the edit dialog", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),

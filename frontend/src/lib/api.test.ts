@@ -1750,6 +1750,36 @@ describe('api client', () => {
       expect(result.data.bundle.name).toBe('staging');
     });
 
+    it('reveals preview secret bundle source by ID', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.post('/api/v1/preview-secret-bundles/:bundleId/reveal', ({ params }) => {
+          capturedUrl = `/api/v1/preview-secret-bundles/${params.bundleId as string}/reveal`;
+          return HttpResponse.json({
+            data: {
+              bundle: {
+                id: 'bundle-1',
+                repository_id: 'repo-1',
+                name: 'staging',
+                source_type: 'managed',
+                exposure_policy: 'preview_runtime',
+                outputs: [{ type: 'file', path: 'development.conf.json', format: 'json' }],
+                created_by_user_id: 'user-1',
+                created_at: '2026-01-01T00:00:00Z',
+              },
+              source: { type: 'managed', values: { SECRET_FILE_CONTENT: '{"token":"super-secret"}' } },
+              outputs: [{ type: 'file', path: 'development.conf.json', format: 'json', value: 'secret:SECRET_FILE_CONTENT' }],
+            },
+          });
+        }),
+      );
+
+      const result = await api.repositories.previewSecretBundles.reveal('bundle-1');
+
+      expect(capturedUrl).toBe('/api/v1/preview-secret-bundles/bundle-1/reveal');
+      expect(result.data.source.values.SECRET_FILE_CONTENT).toBe('{"token":"super-secret"}');
+    });
+
     it('patches a preview secret bundle by ID', async () => {
       let capturedBody: unknown;
       let capturedUrl: string | undefined;
