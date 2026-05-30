@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
@@ -64,6 +65,178 @@ func TestSessionHandlersRetryActiveThreadRuntimeConflict(t *testing.T) {
 	require.Contains(t, body, "errors.Is(err, agent.ErrThreadRuntimeAlreadyActive)", "session handlers should classify active thread runtime conflicts as retryable")
 	require.Contains(t, body, "thread runtime already active; retrying after lease recovery", "active-runtime retries should be logged distinctly from sandbox races")
 	require.Contains(t, body, "BypassMaxRetryDuration: true", "active-runtime retries should allow bounded lease recovery without consuming the normal retry window")
+}
+
+func TestSlackNotificationSubscriptionMatches(t *testing.T) {
+	t.Parallel()
+
+	automationID := uuid.New()
+	otherAutomationID := uuid.New()
+	tests := []struct {
+		name         string
+		raw          json.RawMessage
+		eventKind    string
+		automationID *uuid.UUID
+		expected     bool
+	}{
+		{
+			name:      "event list matches event",
+			raw:       json.RawMessage(`{"events":["session.completed"]}`),
+			eventKind: "session.completed",
+			expected:  true,
+		},
+		{
+			name:      "wildcard matches event",
+			raw:       json.RawMessage(`{"events":["*"]}`),
+			eventKind: "preview.ready",
+			expected:  true,
+		},
+		{
+			name:         "automation list matches automation event",
+			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, automationID)),
+			eventKind:    "automation.run.completed",
+			automationID: &automationID,
+			expected:     true,
+		},
+		{
+			name:         "automation list rejects different automation",
+			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, otherAutomationID)),
+			eventKind:    "automation.run.completed",
+			automationID: &automationID,
+			expected:     false,
+		},
+		{
+			name:      "empty settings do not subscribe",
+			raw:       json.RawMessage(`{}`),
+			eventKind: "session.failed",
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationSubscriptionMatches(tt.raw, tt.eventKind, tt.automationID)
+			require.Equal(t, tt.expected, got, "subscription matcher should return the expected decision")
+		})
+	}
+}
+
+func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
+	t.Parallel()
+
+	got := renderSlackPrompt(
+		"please inspect https://github.com/acme/repo/pull/42",
+		"https://slack.example/thread",
+		nil,
+		[]string{"https://sentry.io/issues/123", "src/app.ts"},
+		[]slackContextFile{{Name: "trace.log", Title: "Trace", Mimetype: "text/plain", Permalink: "https://slack.example/file"}},
+	)
+
+	require.Contains(t, got, "Detected references:", "prompt should include detected references")
+	require.Contains(t, got, "https://sentry.io/issues/123", "prompt should include external references")
+	require.Contains(t, got, "src/app.ts", "prompt should include file path references")
+	require.Contains(t, got, "Attached files:", "prompt should include attached file metadata")
+	require.Contains(t, got, "trace.log", "prompt should include Slack file names")
+}
+
+func TestSlackModalsUseInputLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		view ingestion.SlackHomeView
+	}{
+		{
+			name: "start session modal",
+			view: slackStartSessionModal(),
+		},
+		{
+			name: "configure channel modal",
+			view: slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}}),
+		},
+		{
+			name: "human input freeform modal",
+			view: slackHumanInputFreeformModal("{}"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NotEmpty(t, tt.view.Blocks, "modal should include input blocks")
+			for _, block := range tt.view.Blocks {
+				require.Equal(t, "input", block.Type, "test modal block should be an input block")
+				require.NotNil(t, block.Label, "Slack input blocks should serialize label")
+				require.Nil(t, block.Text, "Slack input blocks should not serialize unsupported text field")
+			}
+		})
+	}
+}
+
+func TestSlackThreadRoutingBySource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		source              string
+		messageTS           string
+		threadTS            string
+		expectedReplyThread string
+		expectedLinkThread  string
+		expectedPermalink   bool
+	}{
+		{
+			name:                "message event replies in source thread",
+			source:              "app_mention",
+			messageTS:           "1700000000.000100",
+			expectedReplyThread: "1700000000.000100",
+			expectedLinkThread:  "1700000000.000100",
+			expectedPermalink:   true,
+		},
+		{
+			name:                "threaded message event keeps explicit thread",
+			source:              "message.im",
+			messageTS:           "1700000000.000200",
+			threadTS:            "1700000000.000100",
+			expectedReplyThread: "1700000000.000100",
+			expectedLinkThread:  "1700000000.000100",
+			expectedPermalink:   true,
+		},
+		{
+			name:               "slash command posts unthreaded with synthetic link",
+			source:             "slash_command",
+			messageTS:          "slash-trigger-123",
+			expectedLinkThread: "slash:slash-trigger-123",
+		},
+		{
+			name:               "app home modal posts unthreaded with synthetic link",
+			source:             "app_home",
+			messageTS:          "V12345",
+			expectedLinkThread: "app_home:V12345",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := models.SlackStartSessionJobPayload{
+				Source:    tt.source,
+				MessageTS: tt.messageTS,
+				ThreadTS:  tt.threadTS,
+			}
+			replyThread := slackStartSessionReplyThreadTS(payload)
+			linkThread := slackStartSessionLinkThreadTS(payload, replyThread)
+
+			require.Equal(t, tt.expectedReplyThread, replyThread, "start handler should choose the expected Slack reply thread")
+			require.Equal(t, tt.expectedLinkThread, linkThread, "start handler should choose the expected persisted link thread")
+			require.Equal(t, tt.expectedReplyThread, slackReplyThreadTS(linkThread), "outbound replies should use only real Slack thread timestamps")
+			require.Equal(t, tt.expectedPermalink, slackSourceHasMessagePermalink(tt.source), "permalink resolution should only run for real Slack messages")
+		})
+	}
 }
 
 type workerLinearCredentialReader struct{}

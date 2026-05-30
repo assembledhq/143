@@ -414,9 +414,11 @@ func main() {
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
+			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
+			Memberships:         db.NewOrganizationMembershipStore(pool),
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
 			PriorityScores:      priorityScoreStore,
 			ComplexityEstimates: complexityEstimateStore,
@@ -440,6 +442,12 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+			SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -456,6 +464,7 @@ func main() {
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
+					services.PreviewController = previewManager
 					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
 						Manager:         previewManager,
 						Previews:        previewStore,
@@ -1387,6 +1396,10 @@ func buildServices(
 	if mErr != nil {
 		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
 	}
+	workerSlackbotMetrics, slackMetricsErr := metrics.NewSlackbotMetrics()
+	if slackMetricsErr != nil {
+		logger.Warn().Err(slackMetricsErr).Msg("failed to register slackbot metrics in worker; Slackbot emits will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
 		Logger:             logger,
@@ -1460,6 +1473,8 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		SlackbotMetrics: workerSlackbotMetrics,
+		FrontendURL:     cfg.FrontendURL,
 		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,

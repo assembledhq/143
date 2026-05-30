@@ -94,6 +94,7 @@ const (
 	SessionOriginProject      SessionOrigin = "project"
 	SessionOriginAutomation   SessionOrigin = "automation"
 	SessionOriginRevision     SessionOrigin = "revision"
+	SessionOriginSlack        SessionOrigin = "slack"
 )
 
 func (o SessionOrigin) Validate() error {
@@ -102,7 +103,8 @@ func (o SessionOrigin) Validate() error {
 		SessionOriginManual,
 		SessionOriginProject,
 		SessionOriginAutomation,
-		SessionOriginRevision:
+		SessionOriginRevision,
+		SessionOriginSlack:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionOrigin: %q", o)
