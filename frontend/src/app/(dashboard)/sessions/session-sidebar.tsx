@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
-import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
+import { Archive, ArchiveRestore, Loader2, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
@@ -94,12 +94,16 @@ function SessionSidebarOptionFrame({
 function SessionSidebarRowSurface({
   href,
   ariaCurrent,
+  ariaBusy,
   className,
+  onClick,
   children,
 }: {
   href?: string;
   ariaCurrent?: "page";
+  ariaBusy?: boolean;
   className?: string;
+  onClick?: MouseEventHandler<HTMLAnchorElement>;
   children: ReactNode;
 }) {
   const surfaceClassName = cn(sessionSidebarLinkSurfaceClass, className);
@@ -118,8 +122,10 @@ function SessionSidebarRowSurface({
     <Link
       href={href}
       aria-current={ariaCurrent}
+      aria-busy={ariaBusy || undefined}
       data-session-row-surface="true"
       className={surfaceClassName}
+      onClick={onClick}
     >
       {children}
     </Link>
@@ -266,6 +272,7 @@ export function SessionSidebar() {
   const listContainerRef = useRef<HTMLDivElement>(null);
   const optionRefs = useRef(new Map<string, HTMLDivElement>());
   const [activeSessionFocus, setActiveSessionFocus] = useState<{ id: string; pathname: string } | null>(null);
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const searchRef = useRef(search);
   const skipNextSearchParamWriteRef = useRef(false);
   // Debounce the search query so rapid typing doesn't fire a request per
@@ -437,7 +444,7 @@ export function SessionSidebar() {
   }, [firstPage, extraPages, search]);
 
   const isNewSession = pathname === "/sessions/new";
-  const activeSessionId = activeSessionFocus?.id ?? null;
+  const activeSessionId = pendingSessionId ?? activeSessionFocus?.id ?? null;
   const hasNavigatedFromNewSessionDraft = isNewSession && activeSessionFocus?.pathname === pathname;
 
   const currentActiveSessionId = useMemo(() => {
@@ -500,6 +507,22 @@ export function SessionSidebar() {
     listContainerRef.current?.focus({ preventScroll: true });
   }, []);
 
+  const markSessionOpening = useCallback((sessionId: string, sessionPathname: string) => {
+    setPendingSessionId(sessionId);
+    setActiveSessionFocus({ id: sessionId, pathname: sessionPathname });
+  }, []);
+
+  useEffect(() => {
+    if (!pendingSessionId) {
+      return;
+    }
+    if (selectedId === pendingSessionId) {
+      // The selected route segment is the completion signal for pending row navigation.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPendingSessionId(null);
+    }
+  }, [pendingSessionId, selectedId]);
+
   const setActiveByIndex = useCallback((index: number) => {
     if (displayedSessions.length === 0) return;
     const boundedIndex = Math.min(Math.max(index, 0), displayedSessions.length - 1);
@@ -532,8 +555,12 @@ export function SessionSidebar() {
 
   const openActiveSession = useCallback(() => {
     if (!activeSession) return;
-    router.push(`/sessions/${activeSession.id}${filterSuffix}`);
-  }, [activeSession, filterSuffix, router]);
+    const sessionHref = `/sessions/${activeSession.id}${filterSuffix}`;
+    if (selectedId !== activeSession.id) {
+      markSessionOpening(activeSession.id, sessionHref);
+    }
+    router.push(sessionHref);
+  }, [activeSession, filterSuffix, markSessionOpening, router, selectedId]);
 
   const toggleArchiveActiveSession = useCallback(() => {
     if (!activeSession) return;
@@ -782,6 +809,7 @@ export function SessionSidebar() {
 
         {displayedSessions.map((session) => {
           const isSelected = selectedId === session.id;
+          const isOpening = pendingSessionId === session.id && !isSelected;
           const cfg = statusConfig[session.status] || statusConfig.pending;
           const isWorkingSession = workingSet.has(session.status);
           const hasUnread = isUnread(session);
@@ -817,8 +845,8 @@ export function SessionSidebar() {
                   }
                 }}
                 className={cn(
-                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
-                  isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
+                  currentActiveSessionId === session.id && !isSelected && !isOpening && "border-border/70 bg-background/80 ring-1 ring-ring/20",
+                  (isSelected || isOpening) && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
                 )}
                 onClick={(event) => {
                   if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
@@ -830,8 +858,23 @@ export function SessionSidebar() {
                 <SessionSidebarRowSurface
                   href={sessionHref}
                   ariaCurrent={isSelected ? "page" : undefined}
+                  ariaBusy={isOpening}
+                  onClick={(event) => {
+                    if (
+                      event.defaultPrevented ||
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey ||
+                      event.button !== 0 ||
+                      isSelected
+                    ) {
+                      return;
+                    }
+                    markSessionOpening(session.id, sessionHref);
+                  }}
                   className={
-                    isSelected
+                    isSelected || isOpening
                       ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
                       : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
                   }
@@ -840,12 +883,14 @@ export function SessionSidebar() {
                     aria-hidden="true"
                     className={cn(
                       "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
-                      isSelected && "bg-primary/55",
+                      (isSelected || isOpening) && "bg-primary/55",
                     )}
                   />
                   <div className="flex items-start gap-2.5 min-w-0">
                     <div className="mt-1.5 shrink-0">
-                      {isWorkingSession ? (
+                      {isOpening ? (
+                        <Loader2 className="h-3 w-3 animate-spin text-primary" aria-hidden="true" />
+                      ) : isWorkingSession ? (
                         <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
                       ) : hasUnread ? (
                         <StatusDot color="bg-primary" />
@@ -858,7 +903,7 @@ export function SessionSidebar() {
                       <div className="flex items-start justify-between gap-2">
                         <p className={cn(
                           "text-xs font-medium truncate leading-snug",
-                          hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                          hasUnread || isWorkingSession || isOpening ? "text-foreground" : "text-muted-foreground"
                         )}>
                           {title}
                         </p>
@@ -870,8 +915,17 @@ export function SessionSidebar() {
                         >
                           <div className="flex min-w-max items-center gap-1.5 pr-1">
                             <span className="text-xs text-muted-foreground shrink-0">
-                              <span>{cfg.label}</span>
-                              {isWorkingSession && <AnimatedEllipsis />}
+                              {isOpening ? (
+                                <>
+                                  <span>Opening</span>
+                                  <AnimatedEllipsis />
+                                </>
+                              ) : (
+                                <>
+                                  <span>{cfg.label}</span>
+                                  {isWorkingSession && <AnimatedEllipsis />}
+                                </>
+                              )}
                             </span>
                             {session.pm_plan_id && !session.triggered_by_user_id && (
                               <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">

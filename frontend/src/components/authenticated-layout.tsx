@@ -336,7 +336,7 @@ function CompactSidebarRail({
         className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2"
         aria-label="Primary navigation"
       >
-        <div className="flex flex-col items-center gap-0.5">
+        <div data-testid="app-sidebar-rail-quick-actions" className="flex flex-col items-center gap-0.5">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -350,24 +350,6 @@ function CompactSidebarRail({
               </Button>
             </TooltipTrigger>
             <TooltipContent side="right" sideOffset={8}>Search</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Link
-                href="/settings"
-                aria-label="Settings"
-                aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-                className={cn(
-                  "flex h-7 w-10 items-center justify-center rounded-md transition-colors duration-150",
-                  pathname.startsWith("/settings")
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
-                )}
-              >
-                <Settings className="h-4 w-4" />
-              </Link>
-            </TooltipTrigger>
-            <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -412,6 +394,24 @@ function CompactSidebarRail({
               </Tooltip>
             );
           })}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                href="/settings"
+                aria-label="Settings"
+                aria-current={pathname.startsWith("/settings") ? "page" : undefined}
+                className={cn(
+                  "flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
+                  pathname.startsWith("/settings")
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Settings className="h-4 w-4" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
+          </Tooltip>
         </nav>
 
         <Popover>

@@ -106,7 +106,7 @@ describe("AuthenticatedLayout", () => {
     expect(compactRail).toHaveClass("w-14");
   });
 
-  it("keeps compact rail icons consistent between quick actions and nav", () => {
+  it("renders compact rail Settings inside primary nav with matching sizing", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -114,12 +114,12 @@ describe("AuthenticatedLayout", () => {
     );
 
     const compactRail = container.querySelector("[data-testid='app-sidebar-rail']");
-    const quickActions = compactRail?.querySelector("div");
+    expect(compactRail).not.toBeNull();
+
+    const quickActions = compactRail?.querySelector("[data-testid='app-sidebar-rail-quick-actions']");
     expect(quickActions).not.toBeNull();
-    const settingsQuickAction = within(quickActions as HTMLElement).getByRole("link", { name: "Settings" });
-    const settingsIcon = settingsQuickAction.querySelector("svg");
-    expect(settingsQuickAction).toHaveClass("h-7", "w-10");
-    expect(settingsIcon).toHaveClass("h-4", "w-4");
+    expect(within(quickActions as HTMLElement).queryByRole("link", { name: "Settings" })).toBeNull();
+    expect(within(quickActions as HTMLElement).getByRole("button", { name: "Search" })).toHaveClass("h-7", "w-10");
 
     const primaryNav = compactRail?.querySelector("nav");
     expect(primaryNav).not.toBeNull();
@@ -127,6 +127,11 @@ describe("AuthenticatedLayout", () => {
 
     const sessionsLink = within(primaryNav as HTMLElement).getByRole("link", { name: "Sessions" });
     expect(sessionsLink).toHaveClass("h-[30px]", "w-10");
+
+    const settingsNavLink = within(primaryNav as HTMLElement).getByRole("link", { name: "Settings" });
+    expect(settingsNavLink).toHaveClass("h-[30px]", "w-10");
+    expect(settingsNavLink).not.toHaveClass("h-10");
+    expect(settingsNavLink.querySelector("svg")).toHaveClass("h-4", "w-4");
   });
 
   it("keeps workspace and account actions reachable from the compact rail", async () => {
