@@ -33,6 +33,7 @@ type AuthHandler struct {
 	sessionStore    *db.AuthSessionStore
 	invitationStore *db.InvitationStore
 	memberships     *db.OrganizationMembershipStore
+	verifiedDomains domainAutoJoiner
 	userCredentials *db.UserCredentialStore
 	audit           *db.AuditEmitter
 	// gitHubAPIBaseURL / gitHubOAuthBaseURL are overridable so tests can
@@ -46,6 +47,10 @@ type AuthHandler struct {
 	// http.DefaultClient (production) or a locally-scoped client with a
 	// short timeout (the noreply-email probe).
 	httpClient *http.Client
+}
+
+func (h *AuthHandler) SetVerifiedDomainStore(store domainAutoJoiner) {
+	h.verifiedDomains = store
 }
 
 // SetGitHubURLsForTest overrides the GitHub API and OAuth base URLs and
@@ -681,6 +686,10 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Account linking: try Google ID → email → create new.
 	if existingUser, googleErr := h.userStore.GetByGoogleID(r.Context(), gUser.Sub); googleErr == nil {
+		if err := maybeAutoJoinVerifiedDomain(r.Context(), h.verifiedDomains, existingUser.ID, gUser.Email, gUser.EmailVerified); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "DOMAIN_AUTO_JOIN_FAILED", "failed to join verified domain organization", err)
+			return
+		}
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, gUser.Email, "", existingUser.ID)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
@@ -690,6 +699,10 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	if emailUser, emailErr := h.userStore.GetByEmail(r.Context(), gUser.Email); emailErr == nil {
 		if linkErr := h.userStore.LinkGoogleAccount(r.Context(), emailUser.ID, emailUser.OrgID, gUser.Sub, gUser.Picture); linkErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link Google account", linkErr)
+			return
+		}
+		if err := maybeAutoJoinVerifiedDomain(r.Context(), h.verifiedDomains, emailUser.ID, gUser.Email, gUser.EmailVerified); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "DOMAIN_AUTO_JOIN_FAILED", "failed to join verified domain organization", err)
 			return
 		}
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, gUser.Email, "", emailUser.ID)
@@ -736,6 +749,30 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Invalid invitation — fall through to default signup.
+	}
+
+	if gUser.EmailVerified && h.verifiedDomains != nil {
+		if domain, err := h.verifiedDomains.FindVerifiedAutoJoinByEmailDomain(r.Context(), gUser.Email); err == nil {
+			user := &models.User{
+				OrgID:     domain.OrgID,
+				Email:     gUser.Email,
+				Name:      name,
+				Role:      domain.AutoJoinRole,
+				GoogleID:  &gUser.Sub,
+				AvatarURL: &gUser.Picture,
+			}
+			sessionToken, createErr := h.createDomainJoinedGoogleUser(r.Context(), &domain, user)
+			if createErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create account", createErr)
+				return
+			}
+			h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
+			h.redirectWithSession(w, r, sessionToken)
+			return
+		} else if !db.IsNoVerifiedDomainMatch(err) {
+			writeError(w, r, http.StatusInternalServerError, "DOMAIN_AUTO_JOIN_FAILED", "failed to look up verified domain organization", err)
+			return
+		}
 	}
 
 	user := &models.User{
@@ -1186,10 +1223,11 @@ type googleTokenResponse struct {
 }
 
 type googleUser struct {
-	Sub     string `json:"sub"`
-	Email   string `json:"email"`
-	Name    string `json:"name"`
-	Picture string `json:"picture"`
+	Sub           string `json:"sub"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
 }
 
 func (h *AuthHandler) exchangeGoogleCode(code string) (*googleTokenResponse, error) {

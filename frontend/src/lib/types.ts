@@ -6,6 +6,22 @@ export interface Organization {
   updated_at: string;
 }
 
+export interface VerifiedDomain {
+  id: string;
+  org_id: string;
+  domain: string;
+  status: "pending" | "verified";
+  verification_token: string;
+  verified_at?: string;
+  auto_join_enabled: boolean;
+  auto_join_role: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  verification_host: string;
+  verification_record: string;
+}
+
 export interface MembershipSummary {
   org_id: string;
   org_name: string;

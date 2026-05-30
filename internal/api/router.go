@@ -92,6 +92,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewCommentStore := db.NewReviewCommentStore(pool)
 	memoryStore := db.NewMemoryStore(pool)
 	invitationStore := db.NewInvitationStore(pool)
+	verifiedDomainStore := db.NewVerifiedDomainStore(pool)
 	projectStore := db.NewProjectStore(pool)
 	projectTaskStore := db.NewProjectTaskStore(pool)
 	projectCycleStore := db.NewProjectCycleStore(pool)
@@ -222,6 +223,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithMembershipStore(membershipStore),
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
+	verifiedDomainHandler := handlers.NewVerifiedDomainHandler(verifiedDomainStore, nil)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -505,6 +507,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store into auth handler for token storage on login.
 	authHandler.SetUserCredentialStore(userCredentialStore)
+	authHandler.SetVerifiedDomainStore(verifiedDomainStore)
 
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
@@ -936,6 +939,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
+				r.Get("/api/v1/settings/domains", verifiedDomainHandler.List)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 				r.Get("/api/v1/pm/current", pmHandler.Current)
@@ -1176,6 +1180,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
 				r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
 				r.Patch("/api/v1/settings", settingsHandler.Update)
+				r.Post("/api/v1/settings/domains", verifiedDomainHandler.Create)
+				r.Post("/api/v1/settings/domains/{id}/verify", verifiedDomainHandler.Verify)
+				r.Delete("/api/v1/settings/domains/{id}", verifiedDomainHandler.Delete)
 				r.Post("/api/v1/memories", memoryHandler.Create)
 				r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
 				r.Put("/api/v1/memories/{id}", memoryHandler.UpdateRule)

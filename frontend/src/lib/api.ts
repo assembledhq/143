@@ -600,6 +600,14 @@ export const api = {
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
+    domains: {
+      list: () => get<import('./types').ListResponse<import('./types').VerifiedDomain>>('/api/v1/settings/domains'),
+      create: (body: { domain: string; auto_join_role?: string; auto_join_enabled?: boolean }) =>
+        post<import('./types').SingleResponse<import('./types').VerifiedDomain>>('/api/v1/settings/domains', body),
+      verify: (id: string) =>
+        post<import('./types').SingleResponse<import('./types').VerifiedDomain>>(`/api/v1/settings/domains/${id}/verify`),
+      delete: (id: string) => del(`/api/v1/settings/domains/${id}`),
+    },
   },
   credentials: {
     list: () => get<import('./types').ListResponse<import('./types').CredentialSummary>>('/api/v1/settings/credentials'),

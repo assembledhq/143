@@ -5,6 +5,10 @@ import SettingsPage from './page';
 const {
   settingsGetMock,
   settingsUpdateMock,
+  domainsListMock,
+  domainsCreateMock,
+  domainsVerifyMock,
+  domainsDeleteMock,
   auditLogsListMock,
   teamListMembersMock,
   useAuthMock,
@@ -27,6 +31,40 @@ const {
       updated_at: '2026-05-06T15:30:00Z',
     },
   }),
+  domainsListMock: vi.fn().mockResolvedValue({ data: [] }),
+  domainsCreateMock: vi.fn().mockResolvedValue({
+    data: {
+      id: 'domain-1',
+      org_id: 'org-1',
+      domain: 'example.com',
+      status: 'pending',
+      verification_token: 'token',
+      auto_join_enabled: true,
+      auto_join_role: 'member',
+      created_by: 'user-1',
+      created_at: '2026-05-01T12:00:00Z',
+      updated_at: '2026-05-01T12:00:00Z',
+      verification_host: '_143-domain-verification.example.com',
+      verification_record: '143-domain-verification=token',
+    },
+  }),
+  domainsVerifyMock: vi.fn().mockResolvedValue({
+    data: {
+      id: 'domain-1',
+      org_id: 'org-1',
+      domain: 'example.com',
+      status: 'verified',
+      verification_token: 'token',
+      auto_join_enabled: true,
+      auto_join_role: 'member',
+      created_by: 'user-1',
+      created_at: '2026-05-01T12:00:00Z',
+      updated_at: '2026-05-01T12:00:00Z',
+      verification_host: '_143-domain-verification.example.com',
+      verification_record: '143-domain-verification=token',
+    },
+  }),
+  domainsDeleteMock: vi.fn().mockResolvedValue(undefined),
   auditLogsListMock: vi.fn().mockResolvedValue({ data: [] }),
   teamListMembersMock: vi.fn().mockResolvedValue({ data: [] }),
   useAuthMock: vi.fn(() => ({
@@ -39,6 +77,12 @@ vi.mock('@/lib/api', () => ({
     settings: {
       get: settingsGetMock,
       update: settingsUpdateMock,
+      domains: {
+        list: domainsListMock,
+        create: domainsCreateMock,
+        verify: domainsVerifyMock,
+        delete: domainsDeleteMock,
+      },
     },
     auditLogs: {
       list: auditLogsListMock,
@@ -53,10 +97,23 @@ vi.mock('@/hooks/use-auth', () => ({
   useAuth: useAuthMock,
 }));
 
+vi.mock('@/lib/notify', () => ({
+  notify: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
 describe('SettingsPage', () => {
   beforeEach(() => {
     settingsGetMock.mockClear();
     settingsUpdateMock.mockClear();
+    domainsListMock.mockClear();
+    domainsCreateMock.mockClear();
+    domainsVerifyMock.mockClear();
+    domainsDeleteMock.mockClear();
+    domainsListMock.mockResolvedValue({ data: [] });
     useAuthMock.mockReset();
     useAuthMock.mockReturnValue({
       user: { role: 'admin' },
@@ -194,6 +251,49 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(screen.getByLabelText('Active previews per user')).toHaveValue(4);
+    });
+  });
+
+  it('lets admins create and verify a domain auto-join challenge', async () => {
+    domainsListMock.mockResolvedValue({
+      data: [
+        {
+          id: 'domain-1',
+          org_id: 'org-1',
+          domain: 'example.com',
+          status: 'pending',
+          verification_token: 'token',
+          auto_join_enabled: true,
+          auto_join_role: 'member',
+          created_by: 'user-1',
+          created_at: '2026-05-01T12:00:00Z',
+          updated_at: '2026-05-01T12:00:00Z',
+          verification_host: '_143-domain-verification.example.com',
+          verification_record: '143-domain-verification=token',
+        },
+      ],
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText('Domain access')).toBeInTheDocument();
+    expect(await screen.findByText('_143-domain-verification.example.com')).toBeInTheDocument();
+    expect(await screen.findByText('143-domain-verification=token')).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Domain'), 'newco.com');
+    await user.click(screen.getByRole('button', { name: /Add domain/i }));
+
+    await waitFor(() => {
+      expect(domainsCreateMock).toHaveBeenCalledWith({
+        domain: 'newco.com',
+        auto_join_role: 'member',
+      });
+    });
+
+    await user.click(screen.getByRole('button', { name: /Verify/i }));
+    await waitFor(() => {
+      expect(domainsVerifyMock).toHaveBeenCalledWith('domain-1');
     });
   });
 

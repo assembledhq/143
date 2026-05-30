@@ -1,8 +1,12 @@
 "use client";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { Check, Plus, Trash2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,7 +24,8 @@ import {
   coalesceSettingsPatch,
   type SettingsPatch,
 } from "@/lib/settings-autosave";
-import type { MembershipsResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import { notify as toast } from "@/lib/notify";
+import type { MembershipsResponse, Organization, OrgSettings, SingleResponse, VerifiedDomain } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
@@ -235,6 +240,134 @@ function PreviewCapacitySettings() {
   );
 }
 
+function DomainAccessSettings() {
+  const [domain, setDomain] = useState("");
+  const queryClient = useQueryClient();
+  const { data: domainsResponse, isLoading } = useQuery({
+    queryKey: queryKeys.settings.domains,
+    queryFn: () => api.settings.domains.list(),
+  });
+  const domains = domainsResponse?.data ?? [];
+
+  const invalidateDomains = () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.settings.domains });
+  };
+
+  const createMutation = useMutation({
+    mutationFn: () => api.settings.domains.create({ domain, auto_join_role: "member" }),
+    onSuccess: () => {
+      setDomain("");
+      invalidateDomains();
+      toast.success("Domain challenge created");
+    },
+    onError: () => toast.error("Couldn't add domain."),
+  });
+  const verifyMutation = useMutation({
+    mutationFn: (id: string) => api.settings.domains.verify(id),
+    onSuccess: () => {
+      invalidateDomains();
+      toast.success("Domain verified");
+    },
+    onError: () => toast.error("TXT record not found yet."),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.settings.domains.delete(id),
+    onSuccess: invalidateDomains,
+    onError: () => toast.error("Couldn't remove domain."),
+  });
+
+  const submitDomain = () => {
+    if (!domain.trim()) return;
+    createMutation.mutate();
+  };
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <h2 className="text-xs font-medium text-foreground">Domain access</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Verify a company email domain so Google users with matching verified emails join this organization automatically.
+        </p>
+      </div>
+      <Card>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="min-w-0 flex-1 space-y-2">
+              <Label htmlFor="verified-domain">Domain</Label>
+              <Input
+                id="verified-domain"
+                value={domain}
+                onChange={(event) => setDomain(event.target.value)}
+                placeholder="example.com"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") submitDomain();
+                }}
+              />
+            </div>
+            <Button
+              type="button"
+              onClick={submitDomain}
+              disabled={!domain.trim() || createMutation.isPending}
+            >
+              <Plus className="h-4 w-4" />
+              Add domain
+            </Button>
+          </div>
+
+          <div className="space-y-3">
+            {isLoading && <p className="text-xs text-muted-foreground">Loading domains...</p>}
+            {!isLoading && domains.length === 0 && (
+              <p className="text-xs text-muted-foreground">No verified domains yet.</p>
+            )}
+            {domains.map((item: VerifiedDomain) => (
+              <div key={item.id} className="rounded-md border border-border p-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-foreground">{item.domain}</span>
+                      <Badge variant={item.status === "verified" ? "default" : "secondary"}>
+                        {item.status}
+                      </Badge>
+                    </div>
+                    <div className="space-y-1 text-xs text-muted-foreground">
+                      <p>Host: <span className="font-mono text-foreground">{item.verification_host}</span></p>
+                      <p>TXT: <span className="break-all font-mono text-foreground">{item.verification_record}</span></p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    {item.status !== "verified" && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => verifyMutation.mutate(item.id)}
+                        disabled={verifyMutation.isPending}
+                      >
+                        <Check className="h-4 w-4" />
+                        Verify
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Remove ${item.domain}`}
+                      onClick={() => deleteMutation.mutate(item.id)}
+                      disabled={deleteMutation.isPending}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
@@ -280,6 +413,7 @@ export default function SettingsPage() {
           </Card>
         </section>
 
+        {user?.role === "admin" && <DomainAccessSettings />}
         {user?.role === "admin" && <PreviewCapacitySettings />}
         {user?.role === "admin" && <PRAuthorshipSettings />}
       </div>

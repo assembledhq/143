@@ -91,3 +91,45 @@ func (h *AuthHandler) createSignupOrg(
 	}
 	return sessionToken, nil
 }
+
+func (h *AuthHandler) createDomainJoinedGoogleUser(
+	ctx context.Context,
+	domain *models.VerifiedDomain,
+	user *models.User,
+) (string, error) {
+	if h.pool == nil {
+		return "", fmt.Errorf("auth handler pool is not configured")
+	}
+	if domain == nil {
+		return "", fmt.Errorf("verified domain is required")
+	}
+	if user == nil {
+		return "", fmt.Errorf("user is required")
+	}
+
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin domain signup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	user.OrgID = domain.OrgID
+	user.Role = domain.AutoJoinRole
+	if err := db.NewUserStore(tx).UpsertFromGoogle(ctx, user); err != nil {
+		return "", fmt.Errorf("create domain user: %w", err)
+	}
+	if _, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, domain.OrgID, domain.AutoJoinRole); err != nil {
+		return "", fmt.Errorf("grant domain membership: %w", err)
+	}
+	if err := db.NewUserStore(tx).UpdateLastOrgID(ctx, user.ID, &domain.OrgID); err != nil {
+		return "", fmt.Errorf("update domain last org: %w", err)
+	}
+	sessionToken, err := h.persistSessionTx(ctx, tx, user)
+	if err != nil {
+		return "", fmt.Errorf("create domain signup session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit domain signup transaction: %w", err)
+	}
+	return sessionToken, nil
+}

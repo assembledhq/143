@@ -46,6 +46,7 @@ export const queryKeys = {
   },
   settings: {
     all: ["settings"] as const,
+    domains: ["settings", "domains"] as const,
   },
   credentials: {
     all: ["credentials"] as const,
