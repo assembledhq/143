@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { parseAsString, useQueryState } from "nuqs";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowUpRight, CheckCircle2, Clock3, GitPullRequest, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
+import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { AutopilotConfigFooter } from "./autopilot-config-footer";
@@ -119,7 +119,6 @@ export function AutopilotPageContent() {
 
   const rows = queue?.data ?? [];
   const summary = queue?.meta.summary;
-  const topIssue = rows.find((row) => row.id === summary?.top_issue_id) ?? rows[0];
   const statusLine = buildStatusLine(viewModel.statusLine, summary);
 
   return (
@@ -136,7 +135,7 @@ export function AutopilotPageContent() {
           }
         />
 
-        <SummaryStrip topIssue={topIssue} summary={summary} />
+        <SummaryStrip summary={summary} />
 
         <QueueFilters
           source={source}
@@ -198,14 +197,8 @@ export function AutopilotPageContent() {
   );
 }
 
-function SummaryStrip({ topIssue, summary }: { topIssue?: AutopilotQueueRow; summary?: { autorunnable_count: number; needs_review_count: number; open_pr_count: number; active_run_count: number; ranked_issue_count: number } }) {
+function SummaryStrip({ summary }: { summary?: { autorunnable_count: number; needs_review_count: number; open_pr_count: number; active_run_count: number; ranked_issue_count: number } }) {
   const cards = [
-    {
-      label: "Top opportunity",
-      value: topIssue ? topIssue.title : "None",
-      detail: topIssue ? `${topIssue.low_hanging_fruit.label} fit · ${sourceDisplayText(topIssue)}` : "No ranked issues right now",
-      icon: CheckCircle2,
-    },
     {
       label: "Auto-runnable now",
       value: String(summary?.autorunnable_count ?? 0),
@@ -227,7 +220,7 @@ function SummaryStrip({ topIssue, summary }: { topIssue?: AutopilotQueueRow; sum
   ];
 
   return (
-    <div className="grid gap-3 md:grid-cols-4">
+    <div className="grid gap-3 md:grid-cols-3">
       {cards.map((card) => {
         const Icon = card.icon;
         return (
