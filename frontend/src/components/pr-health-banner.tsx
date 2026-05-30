@@ -237,7 +237,7 @@ export function PRHealthBanner({
                             <Button
                               size="icon"
                               variant="default"
-                              className="h-9 w-8 rounded-l-none"
+                              className="h-7 w-7 rounded-l-none"
                               disabled={mergeWhenReadyAction.disabled}
                               title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
                               aria-label="More merge actions"
@@ -249,7 +249,7 @@ export function PRHealthBanner({
                               )}
                             </Button>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent align="start">
+                          <DropdownMenuContent align="end">
                             <DropdownMenuItem
                               onClick={health.merge_when_ready.state === "queued" ? onCancelMergeWhenReady : onQueueMergeWhenReady}
                               disabled={mergeWhenReadyAction.disabled}
