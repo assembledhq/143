@@ -80,6 +80,28 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		}
 	}
 
+	if queryURL := os.Getenv("VICTORIALOGS_URL"); queryURL != "" {
+		provider := integration.NewVictoriaLogsProvider(integration.VictoriaLogsConfig{
+			QueryURL:          queryURL,
+			FieldNamesURL:     os.Getenv("VICTORIALOGS_FIELDS_URL"),
+			AuthToken:         os.Getenv("VICTORIALOGS_TOKEN"),
+			SharedOrgID:       os.Getenv("VICTORIALOGS_ORG_ID"),
+			MultiTenantShared: os.Getenv("VICTORIALOGS_SHARED") == "true",
+		})
+		reg.RegisterLogProvider(provider)
+		fmt.Fprintln(logger, "143-tools: registered victorialogs")
+	}
+
+	if token := os.Getenv("MEZMO_API_KEY"); token != "" {
+		provider := integration.NewMezmoProvider(integration.MezmoConfig{
+			APIKey:  token,
+			BaseURL: os.Getenv("MEZMO_BASE_URL"),
+			Dataset: os.Getenv("MEZMO_DATASET"),
+		})
+		reg.RegisterLogProvider(provider)
+		fmt.Fprintln(logger, "143-tools: registered mezmo")
+	}
+
 	owner := os.Getenv("GITHUB_REPO_OWNER")
 	repo := os.Getenv("GITHUB_REPO_NAME")
 	if owner != "" && repo != "" {
