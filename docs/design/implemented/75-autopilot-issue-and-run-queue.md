@@ -127,7 +127,7 @@ default.
 │ Status: Autopilot mode · analyzed 18m ago · 6 runs active           │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Summary strip:                                                       │
-│ [Top opportunity] [Auto-runnable now] [Needs review] [PRs open]     │
+│ [Auto-runnable now] [Needs review] [Connected work]                 │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Filters: Source | Status | Auto-run state | Repo | Owner | Search   │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -158,19 +158,18 @@ Examples:
 
 ### 2. Summary strip
 
-Use a compact row of 3-4 cards, not a hero.
+Use a compact row of aggregate cards, not a hero. Do not duplicate the top
+ranked issue here; the ranked issue table already carries the opportunity list.
 
 Recommended cards:
 
-- `Top opportunity` — the current highest-ranked issue, with cluster count if
-  related issues contributed to the ranking
 - `Auto-runnable now` — count of issues above the autorun threshold with no
   active run
 - `Needs review` — issues whose latest run is blocked on approval/guidance
-- `PRs open` — issues with a live PR from the latest linked session
+- `Connected work` — active runs plus live PRs from the latest linked sessions
 
-This preserves the "Autopilot has an opinion" feel without making the whole page
-read like a narrative briefing.
+This keeps the page's top summary operational while the ranked table remains the
+place to inspect specific opportunities.
 
 ### 3. Filters and controls
 
