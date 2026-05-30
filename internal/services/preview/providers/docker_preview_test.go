@@ -640,6 +640,8 @@ type recordingObserver struct {
 	outputCalls        []recordedOutput
 	cacheRestores      []recordedCacheEvent
 	cacheSaves         []recordedCacheEvent
+	phaseStarts        []string
+	phaseEnds          []string
 }
 
 type recordedReady struct {
@@ -681,6 +683,18 @@ func (r *recordingObserver) OnDependencyCacheSave(status string, cacheKey string
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cacheSaves = append(r.cacheSaves, recordedCacheEvent{status: status, cacheKey: cacheKey, sizeBytes: sizeBytes, err: err})
+}
+
+func (r *recordingObserver) OnPhaseStart(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.phaseStarts = append(r.phaseStarts, name)
+}
+
+func (r *recordingObserver) OnPhaseEnd(name string, _ error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.phaseEnds = append(r.phaseEnds, name)
 }
 
 func (r *recordingObserver) OnServiceOutput(name, line string) {
@@ -744,6 +758,11 @@ func (r *recordingObserver) dependencyCacheRestores() []recordedCacheEvent {
 	return append([]recordedCacheEvent(nil), r.cacheRestores...)
 }
 
+func (r *recordingObserver) phasesStarted() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.phaseStarts...)
+}
 
 type fakeDependencyCache struct {
 	mu         sync.Mutex
@@ -1781,6 +1800,44 @@ func TestStartPreview_NilObserver_DoesNotPanic(t *testing.T) {
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle))
+}
+
+func TestStartPreview_DoesNotReportInstallBuildPhaseWithoutInstall(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
+	obs := &recordingObserver{}
+
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}},
+		},
+	}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb"}, cfg, preview.StartPreviewOptions{}, obs)
+	require.NoError(t, err, "StartPreview should succeed without preview.install")
+	require.NotContains(t, obs.phasesStarted(), "install_build", "install_build phase should only cover preview.install work")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
 }
 
 func TestStartPreview_FailsWhenPrimaryPortNotExternallyReachable(t *testing.T) {

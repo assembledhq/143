@@ -3,7 +3,9 @@ package preview
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,6 +39,9 @@ func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd stri
 	switch {
 	case strings.HasPrefix(cmd, "test -e "):
 		return 0, nil
+	case strings.Contains(cmd, "tar czf -"):
+		_, err := stdout.Write(e.payload)
+		return 0, err
 	case strings.Contains(cmd, "tar czf "):
 		return 0, nil
 	case strings.HasPrefix(cmd, "cat "):
@@ -63,6 +68,11 @@ func (e *dependencyCacheExec) WriteFile(_ context.Context, _ *agent.Sandbox, pat
 	return nil
 }
 
+func (e *dependencyCacheExec) calls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.execCalls...)
+}
 
 type memorySnapshotStore struct {
 	mu    sync.Mutex
@@ -143,8 +153,14 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	})
 	require.NoError(t, err, "Save should upload dependency cache")
 	require.Equal(t, int64(len(payload)), result.SizeBytes, "Save should report compressed archive size")
-	require.Equal(t, payload, blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/"+cacheKey+".tar.gz"], "Save should upload archive bytes")
-	require.NotEmpty(t, bytes.TrimSpace(blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/"+cacheKey+".tar.gz.sha256"]), "Save should upload checksum sidecar")
+	sum := sha256.Sum256(payload)
+	expectedChecksum := fmt.Sprintf("%x", sum[:])
+	expectedBlobKey := "deps/" + orgID.String() + "/" + repoID.String() + "/" + cacheKey + "/" + expectedChecksum + ".tar.gz"
+	require.Equal(t, payload, blobStore.blobs[expectedBlobKey], "Save should upload archive bytes to a checksum-addressed object key")
+	require.NotEmpty(t, bytes.TrimSpace(blobStore.blobs[expectedBlobKey+".sha256"]), "Save should upload checksum sidecar next to the checksum-addressed blob")
+	require.Empty(t, blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/"+cacheKey+".tar.gz"], "Save should not overwrite a shared mutable blob key")
+	require.Contains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "tar czf -", "Save should stream tar output instead of creating a sandbox temp archive")
+	require.NotContains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "cat /tmp/preview-dependency-cache-", "Save should not read back a sandbox temp archive")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

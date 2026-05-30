@@ -234,17 +234,9 @@ func (c *SharedDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cac
 	for _, p := range existing {
 		args = append(args, dependencyCacheShellPathArg(p))
 	}
-	tmpPath := dependencyCacheTmpPath()
-	if exitCode, err := c.executor.Exec(ctx, sb, fmt.Sprintf("tar czf %s -C %s -- %s", shellQuote(tmpPath), shellQuote(sb.WorkDir), strings.Join(args, " ")), io.Discard, io.Discard); err != nil || exitCode != 0 {
-		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: archive exited %d: %w", exitCode, err)
-	}
-	defer func() {
-		if cleanupExit, cleanupErr := c.executor.Exec(context.WithoutCancel(ctx), sb, "rm -f "+shellQuote(tmpPath), io.Discard, io.Discard); cleanupErr != nil || cleanupExit != 0 {
-			c.logger.Warn().Err(cleanupErr).Int("exit_code", cleanupExit).Msg("failed to remove staged dependency cache blob after save")
-		}
-	}()
+	archiveCmd := fmt.Sprintf("cd %s && tar czf - -- %s", shellQuote(sb.WorkDir), strings.Join(args, " "))
 	var stderr bytes.Buffer
-	staged, err := c.stageSandboxBlob(ctx, sb, tmpPath, &stderr)
+	staged, err := c.stageSandboxArchive(ctx, sb, archiveCmd, &stderr)
 	if err != nil {
 		return DependencyCacheSaveResult{}, err
 	}
@@ -261,10 +253,10 @@ func (c *SharedDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cac
 	if err != nil {
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: marshal metadata: %w", err)
 	}
-	blobKey := c.blobKey(metadata.OrgID, metadata.RepoID, cacheKey)
-	// Concurrent saves for the same key are intentionally lock-free. The blob
-	// payload is content-addressed by the exact dependency key, so last writer
-	// wins is acceptable and the DB upsert records the checksum for that blob.
+	blobKey := c.blobKeyForChecksum(metadata.OrgID, metadata.RepoID, cacheKey, staged.checksum)
+	// Concurrent saves for the same key are intentionally lock-free. Blob
+	// objects are checksum-addressed so each DB upsert points at the exact
+	// payload whose checksum is recorded in metadata.
 	file, err := os.Open(staged.path) // #nosec G304 -- staged path was created by this process.
 	if err != nil {
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: open staged blob: %w", err)
@@ -373,7 +365,7 @@ func (c *SharedDependencyCache) stageLocalBlob(path string) (*dependencyCacheSta
 	}, nil
 }
 
-func (c *SharedDependencyCache) stageSandboxBlob(ctx context.Context, sb *agent.Sandbox, sandboxPath string, stderr io.Writer) (*dependencyCacheStagedBlob, error) {
+func (c *SharedDependencyCache) stageSandboxArchive(ctx context.Context, sb *agent.Sandbox, archiveCmd string, stderr io.Writer) (*dependencyCacheStagedBlob, error) {
 	dir, err := os.MkdirTemp("", "preview-dependency-cache-save-*")
 	if err != nil {
 		return nil, fmt.Errorf("dependency cache save: temp dir: %w", err)
@@ -387,15 +379,15 @@ func (c *SharedDependencyCache) stageSandboxBlob(ctx context.Context, sb *agent.
 	hasher := sha256.New()
 	counter := &cappedCountingWriter{limit: dependencyCacheMaxBlobBytes}
 	stream := io.MultiWriter(file, hasher, counter)
-	exitCode, execErr := c.executor.Exec(ctx, sb, "cat "+shellQuote(sandboxPath), stream, stderr)
+	exitCode, execErr := c.executor.Exec(ctx, sb, archiveCmd, stream, stderr)
 	closeErr := file.Close()
 	if execErr != nil {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: read archive exited %d: %w", exitCode, execErr)
+		return nil, fmt.Errorf("dependency cache save: archive stream exited %d: %w", exitCode, execErr)
 	}
 	if exitCode != 0 {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: read archive exited %d", exitCode)
+		return nil, fmt.Errorf("dependency cache save: archive stream exited %d", exitCode)
 	}
 	if closeErr != nil {
 		_ = os.RemoveAll(dir)
@@ -496,6 +488,13 @@ func (c *SharedDependencyCache) writeLocalBlobFromFile(ctx context.Context, hit 
 
 func (c *SharedDependencyCache) blobKey(orgID, repoID uuid.UUID, cacheKey string) string {
 	return fmt.Sprintf("%s/%s/%s/%s.tar.gz", c.prefix, orgID, repoID, cacheKey)
+}
+
+func (c *SharedDependencyCache) blobKeyForChecksum(orgID, repoID uuid.UUID, cacheKey, checksum string) string {
+	if checksum == "" {
+		return c.blobKey(orgID, repoID, cacheKey)
+	}
+	return fmt.Sprintf("%s/%s/%s/%s/%s.tar.gz", c.prefix, orgID, repoID, cacheKey, checksum)
 }
 
 func (c *SharedDependencyCache) localBlobPath(cacheKey string) string {

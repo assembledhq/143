@@ -249,9 +249,6 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	infraCreds := make(map[string]preview.InfraCredential)
 	var svcEnvs map[string]map[string]string
 	if err := func() (phaseErr error) {
-		notifyPhaseStart(observer, "install_build")
-		defer func() { notifyPhaseEnd(observer, "install_build", phaseErr) }()
-
 		// Phase 1: Provision infrastructure containers.
 		for name, infraCfg := range cfg.Infrastructure {
 			tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
@@ -1153,19 +1150,21 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	defer cancel()
 	installStarted := time.Now()
 	stderrSplitter := &previewLineSplitter{onLine: appendTail}
+	notifyPhaseStart(observer, "install_build")
 	exitCode, err := d.executor.ExecStream(installCtx, state.sandbox, cmd, appendTail, stderrSplitter)
 	stderrSplitter.flush()
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_build", time.Since(installStarted))
 	if err != nil || exitCode != 0 {
 		errMsg := formatPreviewInstallError(exitCode, err, timeout, installCtx.Err())
+		notifyPhaseEnd(observer, "install_build", fmt.Errorf("%s", errMsg))
 		notifyInstallFailed(observer, errMsg, outputTail)
 		return fmt.Errorf("%s", errMsg)
 	}
+	notifyPhaseEnd(observer, "install_build", nil)
 	d.logger.Info().Str("marker", markerPath).Msg("preview install completed")
 	d.saveDependencyCacheAsync(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer)
 	return nil
 }
-
 
 func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver) {
 	if d.dependencyCache == nil || cacheKey == "" || len(paths) == 0 {

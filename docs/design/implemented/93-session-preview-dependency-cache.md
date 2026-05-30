@@ -539,7 +539,7 @@ CREATE TABLE preview_dependency_cache (
     repo_id       uuid        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     cache_key     text        NOT NULL,
     placement_key text        NOT NULL DEFAULT '',
-    blob_key      text        NOT NULL DEFAULT '', -- object storage key, e.g. preview-dependency-cache/{org}/{repo}/{key}.tar.gz
+    blob_key      text        NOT NULL DEFAULT '', -- object storage key, e.g. preview-dependency-cache/{org}/{repo}/{key}/{checksum}.tar.gz
     size_bytes    bigint      NOT NULL DEFAULT 0,
     metadata      jsonb       NOT NULL DEFAULT '{}'::jsonb,
     last_used_at  timestamptz NOT NULL DEFAULT now(),
@@ -646,7 +646,7 @@ func (s *PreviewStore) DeleteDependencyCacheLocationsForWorker(ctx context.Conte
 Blobs are stored in a shared S3-compatible bucket. The object key encodes enough context for human inspection and future prefix-based access policies:
 
 ```text
-preview-dependency-cache/{org_id}/{repo_id}/{cache_key}.tar.gz
+preview-dependency-cache/{org_id}/{repo_id}/{cache_key}/{checksum_sha256}.tar.gz
 ```
 
 Add config:
@@ -679,17 +679,17 @@ When local L1 is configured, successful restores and saves upsert `preview_depen
 
 ### Save
 
-Save should archive only effective cache paths that exist:
+Save should archive only effective cache paths that exist. The archive is streamed out of the sandbox directly to a bounded worker temp file instead of first writing an unbounded sandbox temp archive:
 
 ```sh
-tar czf /tmp/preview-dependency-cache-<uuid>.tar.gz -C "$WORKDIR" -- <path1> <path2> ...
+cd "$WORKDIR" && tar czf - -- <path1> <path2> ...
 ```
 
 The implementation must avoid shell injection by validating paths and shell-escaping every argument.
 
-Upload the archive to the object storage key with a SHA-256 content hash stored as object metadata or as a companion `.sha256` object. After a successful upload, upsert the DB record.
+Upload the archive to a checksum-addressed object storage key with a SHA-256 content hash stored as object metadata or as a companion `.sha256` object. After a successful upload, upsert the DB record with that exact blob key.
 
-**Concurrent saves:** If multiple sessions for the same repo start simultaneously and all miss the cache, they may each upload a blob for the same cache key concurrently. S3 last-writer-wins semantics mean the stored blob is internally consistent. The `UpsertDependencyCache` DB call handles the record side. This is acceptable; add a comment in the save implementation so future maintainers do not add unnecessary locking.
+**Concurrent saves:** If multiple sessions for the same repo start simultaneously and all miss the cache, they may each upload a blob for the same cache key concurrently. Blob objects are checksum-addressed, so every DB upsert points at the exact object whose checksum is recorded in metadata. Last DB writer wins for discoverability, but it cannot pair one writer's checksum with another writer's object.
 
 If no effective cache paths exist after install, skip save and log `dependency cache save skipped: no effective paths exist`.
 
