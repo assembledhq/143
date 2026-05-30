@@ -307,6 +307,11 @@ describe("PreviewPanel component", () => {
 
   it("keeps preview container logs hidden during startup until requested", async () => {
     const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "starting" }, [
         {
@@ -365,6 +370,42 @@ describe("PreviewPanel component", () => {
     );
     expect(screen.getByRole("button", { name: "Hide preview logs" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1", { tail: true });
+
+    await user.click(screen.getByRole("button", { name: "Copy preview logs" }));
+
+    expect(writeText).toHaveBeenCalledWith(
+      "[server] running database migrations\n[server] listening on :8080",
+    );
+  });
+
+  it("does not copy preview log loading text before logs load", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({ status: "starting" }, [
+        {
+          id: "svc-1",
+          preview_instance_id: "prev-1",
+          service_name: "server",
+          role: "primary",
+          status: "starting",
+          command: ["go", "run", "."],
+          cwd: "",
+          port: 8080,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ]),
+    );
+    mockLogs.mockReturnValue(new Promise(() => {}));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await screen.findByText("Preparing preview");
+    await user.click(screen.getByRole("button", { name: "Show preview logs" }));
+
+    expect(screen.getByLabelText("Preview container logs")).toHaveTextContent(
+      "Loading preview logs...",
+    );
+    expect(screen.getByRole("button", { name: "Copy preview logs" })).toBeDisabled();
   });
 
   it("stacks startup phase tiles when the panel becomes narrow", async () => {
@@ -689,6 +730,11 @@ describe("PreviewPanel component", () => {
 
   it("lets users expand full startup logs for a failed preview", async () => {
     const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
     const summary =
       "preview service readiness probe failed: service \"server\" exited before becoming ready; last output: go: downloading google.golang.org/genproto/googleapis/rpc | [143-preview] running migrations... | Failed to create migrator…";
     const fullLog =
@@ -745,6 +791,31 @@ describe("PreviewPanel component", () => {
     expect(startupLogRegion).not.toHaveClass("overflow-hidden");
     expect(screen.getByRole("button", { name: "Show startup summary" })).toBeInTheDocument();
     expect(mockLogs).toHaveBeenCalledWith("sess-1");
+
+    await user.click(screen.getByRole("button", { name: "Copy error log" }));
+
+    expect(writeText).toHaveBeenCalledWith(fullLog);
+  });
+
+  it("does not copy startup error log loading text before logs load", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "failed",
+        error: "preview service readiness probe failed",
+      }),
+    );
+    mockLogs.mockReturnValue(new Promise(() => {}));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await screen.findByText("Preview failed to start");
+    await user.click(screen.getByRole("button", { name: "View full error log" }));
+
+    expect(screen.getByLabelText("Preview startup error logs")).toHaveTextContent(
+      "Loading error logs...",
+    );
+    expect(screen.getByRole("button", { name: "Copy error log" })).toBeDisabled();
   });
 
   it("does not show a standalone Failed badge when failure diagnostics are visible", async () => {
