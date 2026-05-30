@@ -323,6 +323,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
+		w.Register("merge_pull_request_when_ready", newMergePullRequestWhenReadyHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
 		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
 		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
@@ -441,6 +442,7 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
 	// snapshot uploads (spawned by CreatePR) have either promoted or
 	// cleared their pending_snapshot_key. Called by the server's graceful
@@ -604,6 +606,16 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
+			}
+			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview cleared stale sandbox container_id; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
 			return &FatalError{Err: err}
 		}
@@ -2183,6 +2195,31 @@ func newEnrichPullRequestHealthHandler(services *Services, logger zerolog.Logger
 			Int64("version", input.Version).
 			Msg("starting enrich_pull_request_health job")
 		return services.PR.EnrichPullRequestHealth(ctx, orgID, pullRequestID, input.Version)
+	}
+}
+
+func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID         string `json:"org_id"`
+			PullRequestID string `json:"pull_request_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal merge_pull_request_when_ready payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		pullRequestID, err := uuid.Parse(input.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("parse pull request ID: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Msg("starting merge_pull_request_when_ready job")
+		return services.PR.ProcessMergeWhenReady(ctx, orgID, pullRequestID)
 	}
 }
 

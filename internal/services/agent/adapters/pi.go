@@ -91,14 +91,14 @@ var piStreamingConfig = streamingAgentConfig{
 		return fmt.Sprintf(
 			"pi -p \"$(cat '%s')\" --mode json --api-key \"${PI_API_KEY}\" --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\"",
 			escapedPromptPath,
-			models.PiModelClaudeOpus47,
+			models.PiModelClaudeOpus48,
 		)
 	},
 	BuildResumeCmd: func(escapedPromptPath, escapedResumeSessionID string) string {
 		return fmt.Sprintf(
 			"pi -p \"$(cat '%s')\" --mode json --api-key \"${PI_API_KEY}\" --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\" --session '%s'",
 			escapedPromptPath,
-			models.PiModelClaudeOpus47,
+			models.PiModelClaudeOpus48,
 			escapedResumeSessionID,
 		)
 	},

@@ -36,7 +36,7 @@ import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import type { Session, SessionListItem, User } from "@/lib/types";
+import type { Session, SessionListItem, SessionStatus, User } from "@/lib/types";
 import {
   workingSet,
   filterToStatusParam as baseFilterToStatusParam,
@@ -47,7 +47,7 @@ import { getCountForTab, renderCount } from "@/lib/session-counts";
 // Status config
 // ---------------------------------------------------------------------------
 
-const statusConfig: Record<string, { dot: string; text: string; bg: string; label: string }> = {
+const statusConfig: Record<SessionStatus, { dot: string; text: string; bg: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
   running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
   idle: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Idle" },
@@ -75,9 +75,9 @@ function filterToStatusParam(filter: string | null): string | undefined {
 // Inline cell components
 // ---------------------------------------------------------------------------
 
-function SessionStatusDot({ status }: { status: string }) {
+function SessionStatusDot({ status }: { status: SessionStatus }) {
   const working = workingSet.has(status);
-  const cfg = statusConfig[status] || statusConfig.pending;
+  const cfg = statusConfig[status];
   if (working) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
@@ -109,7 +109,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       size: 140,
       cell: ({ row }) => {
         const status = row.original.status;
-        const cfg = statusConfig[status] || statusConfig.pending;
+        const cfg = statusConfig[status];
         const working = workingSet.has(status);
         return (
           <div className="flex items-center gap-2">

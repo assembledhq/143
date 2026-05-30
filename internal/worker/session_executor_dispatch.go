@@ -10,6 +10,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 type sessionExecutorDispatcher interface {
@@ -62,12 +63,13 @@ type sessionExecutorJobHandoffStore interface {
 }
 
 type DurableSessionExecutorDispatcher struct {
-	Executors sessionExecutorLifecycleStore
-	Jobs      sessionExecutorJobHandoffStore
-	Launcher  ExecutorLauncher
-	NodeID    string
-	Image     string
-	BuildSHA  string
+	Executors             sessionExecutorLifecycleStore
+	Jobs                  sessionExecutorJobHandoffStore
+	Launcher              ExecutorLauncher
+	NodeID                string
+	Image                 string
+	BuildSHA              string
+	ResolveRuntimeCeiling func(context.Context, uuid.UUID) time.Duration
 }
 
 func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (uuid.UUID, error) {
@@ -96,16 +98,23 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 		return uuid.Nil, err
 	}
 
+	var runtimeDeadlineAt *time.Time
+	if d.ResolveRuntimeCeiling != nil {
+		deadline := time.Now().UTC().Add(d.ResolveRuntimeCeiling(ctx, session.OrgID) + agent.HandlerCleanupBuffer)
+		runtimeDeadlineAt = &deadline
+	}
+
 	executorID, err := d.Executors.CreateStarting(ctx, session.OrgID, models.CreateSessionExecutorParams{
-		SessionID:  session.ID,
-		ThreadID:   threadID,
-		JobID:      jobID,
-		JobType:    jobType,
-		HostNodeID: d.NodeID,
-		OwnerID:    d.NodeID,
-		LockToken:  lockToken,
-		Image:      d.Image,
-		BuildSHA:   d.BuildSHA,
+		SessionID:         session.ID,
+		ThreadID:          threadID,
+		JobID:             jobID,
+		JobType:           jobType,
+		HostNodeID:        d.NodeID,
+		OwnerID:           d.NodeID,
+		LockToken:         lockToken,
+		Image:             d.Image,
+		BuildSHA:          d.BuildSHA,
+		RuntimeDeadlineAt: runtimeDeadlineAt,
 	})
 	if err != nil {
 		return uuid.Nil, err

@@ -24,6 +24,12 @@ type providerModel struct {
 var defaultChains = map[ModelName][]providerModel{
 	// Anthropic models — primary: Anthropic API, cross-provider fallback, then OpenRouter.
 	// Ordered most-capable → least-capable within the Claude 4 family.
+	"claude-opus-4-8": {
+		{ProviderName: "anthropic", ModelID: "claude-opus-4-8"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+		{ProviderName: "openrouter", ModelID: "anthropic/claude-opus-4-8"},
+	},
 	"claude-opus-4-7": {
 		{ProviderName: "anthropic", ModelID: "claude-opus-4-7"},
 		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
@@ -68,7 +74,7 @@ var defaultChains = map[ModelName][]providerModel{
 	// provider-specific API identifier (Gemini 3.x models ship as "-preview" strings).
 	"gemini-3.1-pro": {
 		{ProviderName: "gemini", ModelID: "gemini-3.1-pro-preview"},
-		{ProviderName: "anthropic", ModelID: "claude-opus-4-7"},
+		{ProviderName: "anthropic", ModelID: "claude-opus-4-8"},
 		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
 		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
 		{ProviderName: "openrouter", ModelID: "google/gemini-3.1-pro-preview"},

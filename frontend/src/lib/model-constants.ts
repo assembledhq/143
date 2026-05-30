@@ -1,3 +1,4 @@
+export const CLAUDE_CODE_MODEL_OPUS_48 = "claude-opus-4-8";
 export const CLAUDE_CODE_MODEL_OPUS_47 = "claude-opus-4-7";
 export const CLAUDE_CODE_MODEL_OPUS_46 = "claude-opus-4-6";
 export const CLAUDE_CODE_MODEL_SONNET_46 = "claude-sonnet-4-6";
@@ -5,6 +6,7 @@ export const CLAUDE_CODE_MODEL_SONNET_45 = "claude-sonnet-4-5";
 export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
+  CLAUDE_CODE_MODEL_OPUS_48,
   CLAUDE_CODE_MODEL_OPUS_47,
   CLAUDE_CODE_MODEL_OPUS_46,
   CLAUDE_CODE_MODEL_SONNET_46,
@@ -61,8 +63,9 @@ export const AVAILABLE_AMP_MODES = [
 ] as const;
 
 // Pi accepts provider/model patterns. Curated short list; PI_MODEL_CUSTOM
-// lets users opt into Pi's full multi-provider catalog. Opus 4.7 leads the
+// lets users opt into Pi's full multi-provider catalog. Opus 4.8 leads the
 // list as the current top model and matches the adapter's hardcoded fallback.
+export const PI_MODEL_CLAUDE_OPUS_48 = "anthropic/claude-opus-4-8";
 export const PI_MODEL_CLAUDE_OPUS_47 = "anthropic/claude-opus-4-7";
 export const PI_MODEL_CLAUDE_SONNET_46 = "anthropic/claude-sonnet-4-6";
 export const PI_MODEL_CLAUDE_HAIKU_45 = "anthropic/claude-haiku-4-5";
@@ -70,6 +73,7 @@ export const PI_MODEL_GPT_5_4 = "openai/gpt-5.4";
 export const PI_MODEL_GEMINI_2_5_PRO = "google/gemini-2.5-pro";
 
 export const AVAILABLE_PI_MODELS = [
+  PI_MODEL_CLAUDE_OPUS_48,
   PI_MODEL_CLAUDE_OPUS_47,
   PI_MODEL_CLAUDE_SONNET_46,
   PI_MODEL_CLAUDE_HAIKU_45,
@@ -88,12 +92,13 @@ export const DEFAULT_PM_MODEL = CODEX_MODEL_GPT_5_4;
 // from GET /api/v1/settings/llm-models (served by models.LLMModelsByProvider()
 // in internal/models/agent_model_constants.go). Keep both in sync.
 export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
-  anthropic: { label: "Anthropic", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
+  anthropic: { label: "Anthropic", models: ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
   openai: { label: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
   gemini: { label: "Gemini", models: ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
   openrouter: {
     label: "OpenRouter",
     models: [
+      "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-sonnet-4-6",
       "claude-haiku-4-5",

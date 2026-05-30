@@ -478,7 +478,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, &stale, int64(2), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, &stale, int64(2), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
@@ -562,14 +562,14 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Pending mergeability", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Pending mergeability", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -644,7 +644,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Pending mergeability", (*string)(nil), "open", "success", "app", "", &headSHA, &baseSHA, nil,
-			models.PullRequestMergeStateMergeabilityPending, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateMergeabilityPending, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -702,7 +702,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -812,7 +812,7 @@ func TestPRServiceSyncPullRequestStateSelfHealsMergedDrift(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -876,7 +876,7 @@ func TestPRServiceSyncPullRequestStateSelfHealsClosedWithoutMergeDrift(t *testin
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -948,7 +948,7 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateMergeRegression(t *testi
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Flaky PR", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateConflicted, true, 0, true, (*time.Time)(nil), int64(3), &now, now, now,
+			models.PullRequestMergeStateConflicted, true, 0, true, (*time.Time)(nil), int64(3), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), &now, now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -1006,7 +1006,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Pending mergeability", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -1128,7 +1128,7 @@ func TestPRServiceSyncPullRequestStateSkipsIndeterminateTestRegression(t *testin
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Tests rerun", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateClean, false, 2, true, (*time.Time)(nil), int64(4), &now, now, now,
+			models.PullRequestMergeStateClean, false, 2, true, (*time.Time)(nil), int64(4), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), &now, now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -1188,7 +1188,7 @@ func TestPRServiceEnrichPullRequestHealth(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 1, true, (*time.Time)(nil), int64(5), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 1, true, (*time.Time)(nil), int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -1260,7 +1260,7 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), (*time.Time)(nil), now, now,
+			models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1718,14 +1718,14 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-				models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-				models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
@@ -1790,7 +1790,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "open", "pending", "app", "", strPtr("head-inline"), nil, strPtr("base-inline"),
-				models.PullRequestMergeStateConflicted, true, 1, true, &now, int64(1), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateConflicted, true, 1, true, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1840,7 +1840,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "closed", "pending", "app", "", nil, nil, nil,
-				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1874,7 +1874,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1923,18 +1923,21 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 				prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
+				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 			))
 		mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
 			WillReturnError(errors.New("repo failed"))
+		mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*merge_when_ready_state = 'queued'[\\s\\S]*merge_when_ready_state = 'merging'").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "stale_before": pgxmock.AnyArg(), "limit": 10}).
+			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
 
 		err = service.ReconcilePullRequestState(context.Background(), orgID, 10)
 		require.NoError(t, err, "ReconcilePullRequestState should continue when individual PR syncs fail")
@@ -1990,7 +1993,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 						pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
 						"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-						models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), (*time.Time)(nil), now, now,
+						models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 					))
 				mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -2070,6 +2073,7 @@ var prHealthSessionThreadColumns = []string{
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
 var prHealthSessionColumns = []string{
@@ -2123,6 +2127,7 @@ func newPRHealthSessionThreadRow(threadID, sessionID, orgID uuid.UUID, now time.
 		nil, nil, nil, nil,
 		nil, nil, now,
 		nil, nil, float64(0), 0, nil,
+		"", nil, "", "", []byte(`[]`),
 	}
 }
 

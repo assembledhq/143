@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -41,7 +42,8 @@ const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_ov
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	result_summary, diff, failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
-	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
+	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
+	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
 
 // sessionThreadListColumns omits the raw diff while preserving a lightweight
 // truthy marker for UI affordances such as "Revert tab". Server-side actions
@@ -52,7 +54,8 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
 	failure_explanation, failure_category,
 	started_at, completed_at, created_at, archived_at,
-	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at`
+	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
+	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
 
 func qualifiedSessionThreadSelectColumns(alias string) string {
 	columns := strings.Split(sessionThreadSelectColumns, ",")
@@ -236,6 +239,54 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 		return fmt.Errorf("thread not found")
 	}
 	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+	return nil
+}
+
+func (s *SessionThreadStore) RecordRecoveryMetadata(ctx context.Context, orgID, threadID uuid.UUID, reason models.RuntimeStopReason, stopAfter time.Time, recoveryState, recoveryReason string) error {
+	if err := reason.Validate(); err != nil {
+		return err
+	}
+	if recoveryState == "" {
+		recoveryState = string(models.RecoveryStateQueued)
+	}
+	state := models.RecoveryState(recoveryState)
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	event := map[string]any{
+		"runtime_stop_reason": string(reason),
+		"recovery_state":      recoveryState,
+		"recovery_reason":     recoveryReason,
+		"recorded_at":         time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	rawEvent, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal thread recovery metadata event: %w", err)
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_threads
+		SET runtime_stop_reason = @runtime_stop_reason,
+			runtime_graceful_stop_at = @runtime_graceful_stop_at,
+			recovery_state = @recovery_state,
+			recovery_reason = @recovery_reason,
+			recovery_event_history = COALESCE(recovery_event_history, '[]'::jsonb) || jsonb_build_array(@event::jsonb),
+			last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND archived_at IS NULL`,
+		pgx.NamedArgs{
+			"id":                       threadID,
+			"org_id":                   orgID,
+			"runtime_stop_reason":      string(reason),
+			"runtime_graceful_stop_at": stopAfter,
+			"recovery_state":           recoveryState,
+			"recovery_reason":          recoveryReason,
+			"event":                    rawEvent,
+		})
+	if err != nil {
+		return fmt.Errorf("record thread recovery metadata: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("record thread recovery metadata: thread %s not found", threadID)
+	}
 	return nil
 }
 

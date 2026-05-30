@@ -131,13 +131,8 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
-import {
-  ThreadAttributionFilter,
-  useAttributionAllowedPaths,
-  type ThreadAttributionFilterValue,
-} from "./thread-attribution-filter";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -240,7 +235,9 @@ export function invalidateSessionHumanInputRequests(queryClient: QueryInvalidato
   queryClient.invalidateQueries({ queryKey: ["session", sessionId, "human-input-requests"] });
 }
 
-const statusConfig: Record<string, { color: string; label: string }> = {
+type DisplayStatusKey = SessionStatus | "pr_merged" | "pr_closed";
+
+const statusConfig: Record<DisplayStatusKey, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
   idle: { color: "bg-primary/10 text-primary", label: "Idle" },
@@ -255,7 +252,7 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
 };
 
-function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { color: string; label: string } {
+function getDisplayStatus(sessionStatus: SessionStatus, prStatus?: PullRequestStatus | null): { color: string; label: string } {
   if (sessionStatus === "pr_created") {
     if (prStatus === "merged") {
       return statusConfig.pr_merged;
@@ -265,6 +262,16 @@ function getDisplayStatus(sessionStatus: string, prStatus?: string | null): { co
     }
   }
   return statusConfig[sessionStatus] || statusConfig.pending;
+}
+
+function deriveEffectivePRStatus(prStatus?: PullRequestStatus | null, healthStatus?: PullRequestStatus | null): PullRequestStatus | undefined {
+  if (healthStatus === "merged" || prStatus === "merged") {
+    return "merged";
+  }
+  if (healthStatus === "closed" || prStatus === "closed") {
+    return "closed";
+  }
+  return prStatus ?? undefined;
 }
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
@@ -513,7 +520,7 @@ type PendingThreadPreview = Pick<
   "id" | "session_id" | "org_id" | "agent_type" | "label" | "status" | "current_turn" | "created_at" | "cost_cents" | "pending_message_count" | "cancel_requested_at" | "model_override" | "inbox_delivery"
 >;
 
-const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
 function mergePendingMessages(
   baseMessages: SessionMessage[],
@@ -574,7 +581,7 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
   );
 }
 
-function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: string | null }) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -600,6 +607,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
   const status = getDisplayStatus(session.status, prStatus);
   const isActive = !terminalSessionStatuses.has(session.status);
+  const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
 
   const triggeredByMember = session.triggered_by_user_id
@@ -624,6 +632,22 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
           </CardHeader>
           <CardContent>
             <MarkdownContent content={session.result_summary} className="text-xs" />
+          </CardContent>
+        </Card>
+      )}
+
+      {isDeployRecovery && (
+        <Card className="border-l-2 border-l-amber-500 bg-amber-50/30 dark:bg-amber-950/10">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs flex items-center gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+              Resumed after deploy
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-muted-foreground">
+              This turn was checkpointed because its old worker reached the deploy runtime ceiling, then requeued onto a replacement worker.
+            </p>
           </CardContent>
         </Card>
       )}
@@ -851,9 +875,6 @@ const ChangesTab = memo(function ChangesTab({
   onPassRangeChange,
   emptyStatusText,
   isMobile,
-  threads,
-  attributionFilter,
-  onAttributionFilterChange,
   diffLoadErrorText,
   diffTruncationText,
   onRetryDiffLoad,
@@ -869,9 +890,6 @@ const ChangesTab = memo(function ChangesTab({
   onPassRangeChange: (range: PassRange | null) => void;
   emptyStatusText: string;
   isMobile: boolean;
-  threads: SessionThread[];
-  attributionFilter: ThreadAttributionFilterValue;
-  onAttributionFilterChange: (next: ThreadAttributionFilterValue) => void;
   diffLoadErrorText?: string;
   diffTruncationText?: string;
   onRetryDiffLoad?: () => void;
@@ -896,20 +914,6 @@ const ChangesTab = memo(function ChangesTab({
             passes={passes}
             selectedRange={passRange}
             onRangeChange={onPassRangeChange}
-          />
-        </div>
-      )}
-
-      {/* Tab attribution filter — visible only when the session has more
-          than one tab. Lets the user scope the diff to one tab's outputs,
-          the overlap, or unattributed paths. */}
-      {threads.length > 1 && (
-        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
-          <span className="text-xs text-muted-foreground">Filter by tab:</span>
-          <ThreadAttributionFilter
-            threads={threads}
-            value={attributionFilter}
-            onChange={onAttributionFilterChange}
           />
         </div>
       )}
@@ -2922,7 +2926,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const canListTeamMembers = user?.role === "admin" || user?.role === "member";
   const canShipPR = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canManagePR = user?.role === "admin" || user?.role === "member";
-  const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+  const terminalStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
@@ -3074,6 +3078,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
+  const [pendingMergeWhenReady, setPendingMergeWhenReady] = useState(false);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
@@ -3545,11 +3550,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     staleTime: 30_000,
     refetchInterval: (query) => {
       const mergeState = query.state.data?.data?.merge_state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" ? 5_000 : false;
+      const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? 5_000 : false;
     },
   });
   const prHealth = prHealthData?.data;
-  const prStatus = prData?.data?.status;
+  const rawPRStatus = prData?.data?.status;
+  const prStatus = deriveEffectivePRStatus(rawPRStatus, prHealth?.status);
   const prNumber = prData?.data?.github_pr_number;
   const closedPRNumber = prNumber;
   const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
@@ -3733,6 +3740,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(message);
     },
   });
+  const mergeWhenReadyMutation = useMutation({
+    mutationFn: async (action: "queue" | "cancel") => {
+      if (!pullRequestId) {
+        throw new Error("Pull request not found");
+      }
+      return action === "queue"
+        ? api.pullRequests.queueMergeWhenReady(pullRequestId)
+        : api.pullRequests.cancelMergeWhenReady(pullRequestId);
+    },
+    onMutate: () => {
+      setRepairActionError(null);
+      setPendingMergeWhenReady(true);
+    },
+    onSuccess: (_response, action) => {
+      setPendingMergeWhenReady(false);
+      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      toast.success(action === "queue" ? "Merge when ready enabled" : "Merge when ready cancelled");
+    },
+    onError: (err) => {
+      setPendingMergeWhenReady(false);
+      const message = err instanceof ApiError ? err.message : "Failed to update merge when ready";
+      toast.error(message);
+    },
+  });
   useEffect(() => {
     // Pause the PR health SSE stream while the tab is hidden — same reasoning
     // as the session log stream above. The onerror branch already invalidates
@@ -3794,7 +3825,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
     };
   }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
-  const previousSessionStatusRef = useRef<string | undefined>(undefined);
+  const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
     if (!session?.id || !currentStatus) {
@@ -3825,7 +3856,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
-  const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
+  const isTerminalSession = session ? terminalSessionStatuses.has(session.status) : false;
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const canManageSession = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
   const canUseNativeReviewLoop = !!session && session.agent_type !== "pm_agent";
@@ -4652,10 +4683,9 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  // Session-wide file event timeline powers the tab-strip overlap badges and
-  // the Changes-view attribution filters. Polled at the same cadence as the
-  // session detail so a user-perceptible "tab touched a file" lands within
-  // one polling cycle.
+  // Session-wide file event timeline powers tab-strip overlap badges. Polled
+  // at the same cadence as the session detail so a user-perceptible "tab
+  // touched a file" lands within one polling cycle.
   //
   // Polling is incremental: the first request fetches the whole timeline,
   // subsequent requests pass `?since=<latest observed_at>` so a long session
@@ -4690,22 +4720,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => computeThreadOverlap(chromeThreads, accumulatedFileEvents),
     [chromeThreads, accumulatedFileEvents],
   );
-  const [attributionFilter, setAttributionFilter] = useState<ThreadAttributionFilterValue>({ kind: "all" });
-  const attributionAllowedPaths = useAttributionAllowedPaths(attributionFilter, accumulatedFileEvents);
-  const visibleDiffFiles = useMemo(
-    () =>
-      attributionAllowedPaths == null
-        ? diffFiles
-        : diffFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
-    [attributionAllowedPaths, diffFiles],
-  );
-  const visibleFilteredFiles = useMemo(
-    () =>
-      attributionAllowedPaths == null
-        ? filteredFiles
-        : filteredFiles.filter((f) => attributionAllowedPaths.has(f.newPath) || attributionAllowedPaths.has(f.oldPath)),
-    [attributionAllowedPaths, filteredFiles],
-  );
+  const visibleDiffFiles = diffFiles;
+  const visibleFilteredFiles = filteredFiles;
 
   useEffect(() => {
     if (visibleFilteredFiles.length === 0) {
@@ -5169,6 +5185,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     mergeMutation.mutate();
   }
 
+  function handleQueueMergeWhenReady() {
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "merge_pr" });
+      return;
+    }
+    mergeWhenReadyMutation.mutate("queue");
+  }
+
+  function handleCancelMergeWhenReady() {
+    mergeWhenReadyMutation.mutate("cancel");
+  }
+
   const prErrorNotice = prActionError ? {
     title: prErrorTitle(snapshotState, localPRActionError?.code),
     description: prActionError,
@@ -5273,17 +5301,16 @@ export function SessionDetailContent({ id }: { id: string }) {
                       variant="outline"
                       size="sm"
                       className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
                       onClick={() => createPRMutation.mutate(undefined)}
                     >
-                      {prActionSpinning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : prState === "failed" || localPRActionError ? (
+                      {!prActionSpinning && (prState === "failed" || localPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
                       ) : (
                         <GitPullRequest className="h-3 w-3" />
-                      )}
+                      ))}
                       {prActionLabel}
                     </Button>
                     <DropdownMenu>
@@ -5359,9 +5386,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               : "This session did not produce any file changes."
           }
           isMobile={isMobileReviewViewport}
-          threads={threads}
-          attributionFilter={attributionFilter}
-          onAttributionFilterChange={setAttributionFilter}
           diffLoadErrorText={diffLoadErrorText}
           diffTruncationText={diffTruncationText}
           onRetryDiffLoad={retryDiffLoad}
@@ -5416,9 +5440,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
+                mergeWhenReadyPending={pendingMergeWhenReady}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                onQueueMergeWhenReady={handleQueueMergeWhenReady}
+                onCancelMergeWhenReady={handleCancelMergeWhenReady}
                 onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,

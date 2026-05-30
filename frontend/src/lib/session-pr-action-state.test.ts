@@ -4,6 +4,7 @@ import type { PullRequestHealthResponse } from "./types";
 import {
   deriveCreatePRActionState,
   deriveMergeActionState,
+  deriveMergeWhenReadyActionState,
   derivePushChangesActionState,
 } from "./session-pr-action-state";
 
@@ -32,6 +33,7 @@ const baseHealth: PullRequestHealthResponse = {
   conflict_detail_available: false,
   failing_test_detail_available: false,
   active_repairs: [],
+  merge_when_ready: { state: "off" },
 };
 
 describe("session PR action state", () => {
@@ -134,6 +136,56 @@ describe("session PR action state", () => {
       expect(state.disabled, `${tt.name} should map Merge disabled state`).toBe(tt.disabled);
       expect(state.disabledReason, `${tt.name} should map Merge reason`).toBe(tt.reason);
       expect(state.label, `${tt.name} should map Merge label`).toBe(tt.label ?? "Merge");
+    }
+  });
+
+  it("maps merge-when-ready queueable and blocked states", () => {
+    const tests = [
+      {
+        name: "pending checks can queue",
+        health: { ...baseHealth, can_merge: false, checks: [{ name: "unit", category: "test" as const, status: "pending" as const }] },
+        visible: true,
+        disabled: false,
+        label: "Merge when ready",
+      },
+      {
+        name: "conflicts cannot queue",
+        health: { ...baseHealth, can_merge: false, has_conflicts: true },
+        visible: true,
+        disabled: true,
+        label: "Merge when ready",
+        reason: "Resolve conflicts before enabling merge when ready",
+      },
+      {
+        name: "failed checks cannot queue",
+        health: { ...baseHealth, can_merge: false, checks: [{ name: "unit", category: "test" as const, status: "failed" as const }] },
+        visible: true,
+        disabled: true,
+        label: "Merge when ready",
+        reason: "Fix failing checks before enabling merge when ready",
+      },
+      {
+        name: "queued can cancel",
+        health: { ...baseHealth, can_merge: false, merge_when_ready: { state: "queued" as const } },
+        visible: true,
+        disabled: false,
+        label: "Cancel merge when ready",
+      },
+      {
+        name: "cancelled can requeue",
+        health: { ...baseHealth, can_merge: false, merge_when_ready: { state: "cancelled" as const } },
+        visible: true,
+        disabled: false,
+        label: "Merge when ready",
+      },
+    ];
+
+    for (const tt of tests) {
+      const state = deriveMergeWhenReadyActionState({ health: tt.health, hasActiveRepair: false, pendingAction: null, pendingMergeWhenReady: false });
+      expect(state.visible, `${tt.name} should map visibility`).toBe(tt.visible);
+      expect(state.disabled, `${tt.name} should map disabled state`).toBe(tt.disabled);
+      expect(state.label, `${tt.name} should map label`).toBe(tt.label);
+      expect(state.disabledReason, `${tt.name} should map disabled reason`).toBe(tt.reason);
     }
   });
 });

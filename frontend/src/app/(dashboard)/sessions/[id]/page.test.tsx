@@ -3758,6 +3758,47 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
   });
 
+  it('uses merged health as terminal while the cached PR row still says open', async () => {
+    const prCreatedSession: Session = {
+      ...mockSessions[0],
+      status: 'pr_created',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: prCreatedSession,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPR,
+            status: 'open',
+            merged_at: null,
+          },
+        } satisfies SingleResponse<PullRequest>);
+      }),
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            status: 'merged',
+            can_merge: false,
+            summary: 'PR #42 was merged successfully.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findAllByText('PR merged')).toHaveLength(2);
+    expect(screen.getByText('PR #42 merged')).toBeInTheDocument();
+    expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
+    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+  });
+
   it('updates the header status when the PR stream reports a merge', async () => {
     const prCreatedSession: Session = {
       ...mockSessions[0],
@@ -4777,6 +4818,49 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(createPRCalled).toBe(true);
     });
+  });
+
+  it('keeps Create PR at full opacity while the request is queueing', async () => {
+    let releaseCreatePR: (() => void) | undefined;
+    const createPRResponse = new Promise<Response>((resolve) => {
+      releaseCreatePR = () => resolve(HttpResponse.json({ status: 'queued' }, { status: 202 }));
+    });
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', async () => {
+        return createPRResponse;
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const user = userEvent.setup();
+    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
+    await user.click(createPRButton);
+
+    const queueingButton = await screen.findByRole('button', { name: /Queueing PR/ });
+    expect(queueingButton).toBeDisabled();
+    expect(queueingButton).toHaveAttribute('data-loading', 'true');
+    expect(queueingButton).toHaveClass('disabled:data-[loading=true]:opacity-100');
+
+    releaseCreatePR?.();
   });
 
   it('does not queue duplicate create PR requests from the keyboard while one is pending', async () => {
@@ -7939,7 +8023,7 @@ describe('SessionDetailPage', () => {
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
-  it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
+  it('opens review from the Changes tab without a tab attribution filter', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
     const codexThread: SessionThread = {
       id: 'thread-codex',
@@ -8057,19 +8141,15 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: /^Changes/ }));
 
     const changesPanel = screen.getByRole('tabpanel', { name: /^Changes/ });
-    await user.click(within(changesPanel).getByRole('combobox'));
-    await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
+    expect(within(changesPanel).queryByRole('combobox')).not.toBeInTheDocument();
 
-    expect(screen.queryByRole('button', { name: 'Review 2 files' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review 3 files' })).not.toBeInTheDocument();
 
     await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
 
     expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
     expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();
-    expect(
-      screen.queryByText('frontend/src/components/automation-model-select.tsx')
-    ).not.toBeInTheDocument();
+    expect(screen.getByText('frontend/src/components/automation-model-select.tsx')).toBeInTheDocument();
   });
 
   it('shows model selector for agents with available models', async () => {

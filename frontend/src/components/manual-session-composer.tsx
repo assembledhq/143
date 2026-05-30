@@ -334,6 +334,7 @@ export function ManualSessionComposer({
   const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(initialRepoId ?? null);
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [isNavigatingAfterCreate, setIsNavigatingAfterCreate] = useState(false);
   const [caretPosition, setCaretPosition] = useState(0);
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
@@ -725,6 +726,7 @@ export function ManualSessionComposer({
       }),
     onMutate: () => {
       setCreationError(null);
+      setIsNavigatingAfterCreate(false);
       const rawTitle = message.trim().length > 0
         ? message.trim()
         : references.find((reference) => referenceCarriesLinearRef(reference))?.display ?? "";
@@ -743,6 +745,7 @@ export function ManualSessionComposer({
       // session once the refetch lands. See OptimisticSession.resolvedId.
       markOptimisticResolved(context.optimisticId, response.data.id);
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
+      setIsNavigatingAfterCreate(true);
       onCreated(response.data.id);
     },
     onError: (error, _variables, context) => {
@@ -753,9 +756,11 @@ export function ManualSessionComposer({
       setCreationError(
         error instanceof Error ? error.message : "Could not start session. Please try again.",
       );
+      setIsNavigatingAfterCreate(false);
       submittingRef.current = false;
     },
   });
+  const isCreatingSession = createManualSessionMutation.isPending || isNavigatingAfterCreate;
 
   function submitManualSession() {
     if (submittingRef.current) return;
@@ -1273,7 +1278,7 @@ export function ManualSessionComposer({
                 }}
                 placeholder={placeholder}
                 rows={1}
-                disabled={createManualSessionMutation.isPending}
+                disabled={isCreatingSession}
                 className={cn(
                   "min-h-[44px] resize-none border-none bg-transparent px-0 py-2 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed",
                   textareaClassName,
@@ -1432,11 +1437,11 @@ export function ManualSessionComposer({
                         type="button"
                         size="icon"
                         onClick={submitManualSession}
-                        disabled={!hasSubmittableInput || createManualSessionMutation.isPending}
+                        disabled={!hasSubmittableInput || isCreatingSession}
                         className="ml-auto h-8 w-8 rounded-full"
                         aria-label="Start session"
                       >
-                        {createManualSessionMutation.isPending ? (
+                        {isCreatingSession ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <ArrowUp className="h-4 w-4" />
@@ -1485,11 +1490,11 @@ export function ManualSessionComposer({
                       type="button"
                       size="icon"
                       onClick={submitManualSession}
-                      disabled={!hasSubmittableInput || createManualSessionMutation.isPending}
+                      disabled={!hasSubmittableInput || isCreatingSession}
                       className="ml-auto h-8 w-8 rounded-full"
                       aria-label="Start session"
                     >
-                      {createManualSessionMutation.isPending ? (
+                      {isCreatingSession ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
                         <ArrowUp className="h-4 w-4" />

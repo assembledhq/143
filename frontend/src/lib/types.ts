@@ -54,7 +54,7 @@ export interface ThreadMessageWindowMeta {
   has_older: boolean;
   latest_assistant_message_id?: number;
   live_edge_message_id?: number;
-  thread_status: string;
+  thread_status: ThreadStatus;
 }
 
 export interface ThreadMessageWindowResponse {
@@ -330,6 +330,10 @@ export type AutopilotRunState =
   | 'failed'
   | 'skipped';
 
+export type PullRequestStatus = 'open' | 'closed' | 'merged';
+export type PullRequestReviewStatus = 'pending' | 'approved' | 'changes_requested';
+export type PullRequestCIStatus = '' | 'success' | 'failure' | 'pending';
+
 export type AutopilotQueueAction =
   | 'start_run'
   | 'view_run'
@@ -368,7 +372,7 @@ export interface AutopilotQueueRow {
     id: string;
     number: number;
     url: string;
-    status: string;
+    status: PullRequestStatus;
     merged_at?: string;
   };
   available_action: AutopilotQueueAction;
@@ -400,7 +404,7 @@ export interface Session {
   origin?: string;
   interaction_mode?: string;
   agent_type: string;
-  status: string;
+  status: SessionStatus;
   autonomy_level: string;
   token_mode: string;
   complexity_tier?: number;
@@ -471,6 +475,8 @@ export interface Session {
   linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;
+  runtime_stop_reason?: string;
+  runtime_graceful_stop_at?: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
@@ -492,8 +498,8 @@ export interface RetrySessionRequest {
 }
 
 export interface PRSummary {
-  status: string;
-  ci_status: string;
+  status: PullRequestStatus;
+  ci_status: PullRequestCIStatus;
   number: number;
   url: string;
 }
@@ -842,10 +848,10 @@ export interface PullRequest {
   github_repo: string;
   title: string;
   body: string;
-  status: string;
+  status: PullRequestStatus;
   branch_name: string;
-  review_status: string | null;
-  ci_status: string;
+  review_status: PullRequestReviewStatus | null;
+  ci_status: PullRequestCIStatus;
   merged_at: string | null;
   closed_at: string | null;
   created_at: string;
@@ -864,8 +870,25 @@ export interface PullRequestCheckSummary {
 export interface PullRequestActiveRepair {
   action_type: "fix_tests" | "resolve_conflicts";
   session_id: string;
-  session_status: string;
+  session_status: SessionStatus;
   health_version: number;
+}
+
+export type PullRequestMergeWhenReadyState =
+  | "off"
+  | "queued"
+  | "merging"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface PullRequestMergeWhenReadyStatus {
+  state: PullRequestMergeWhenReadyState;
+  requested_by_user_id?: string;
+  requested_at?: string;
+  requested_head_sha?: string;
+  requested_health_version?: number;
+  last_error?: string;
 }
 
 export interface PullRequestHealthResponse {
@@ -873,7 +896,7 @@ export interface PullRequestHealthResponse {
   pull_request_number: number;
   repository: string;
   url: string;
-  status: string;
+  status: PullRequestStatus;
   head_sha: string;
   base_sha: string;
   health_version: number;
@@ -895,6 +918,7 @@ export interface PullRequestHealthResponse {
   conflict_detail_available: boolean;
   failing_test_detail_available: boolean;
   obsolete_active_repair_sessions?: boolean;
+  merge_when_ready: PullRequestMergeWhenReadyStatus;
 }
 
 export interface PullRequestRepairResponse {
@@ -1333,7 +1357,7 @@ export interface RepoSummary {
   repository_id: string;
   full_name: string;
   active_session_count: number;
-  latest_session_status: string | null;
+  latest_session_status: SessionStatus | null;
   active_project_count: number;
 }
 
@@ -1931,7 +1955,7 @@ export interface AutomationRunSession {
   // Mirrors models.SessionStatus values; the row UI keys off this
   // (notably "needs_human_guidance") to choose between failure and
   // attention treatments.
-  status: string;
+  status: SessionStatus;
   diff_stats?: { added: number; removed: number; files_changed?: number };
   failure_explanation?: string;
   failure_category?: string;

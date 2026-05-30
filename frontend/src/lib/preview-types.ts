@@ -119,6 +119,12 @@ export interface PreviewInstance {
   cpu_limit_millis: number;
   disk_limit_mb: number;
   error?: string;
+  unavailable_reason?:
+    | "owner_lost"
+    | "deploy_drain_timeout"
+    | "host_maintenance"
+    | "emergency_force"
+    | "lease_expired";
   created_at: string;
   updated_at: string;
   source_workspace_revision?: number;

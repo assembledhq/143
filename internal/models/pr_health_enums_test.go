@@ -95,6 +95,37 @@ func TestPullRequestHealthEnrichmentStatusValidate(t *testing.T) {
 	}
 }
 
+func TestPullRequestMergeWhenReadyStateValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		state     PullRequestMergeWhenReadyState
+		expectErr bool
+	}{
+		{name: "off", state: PullRequestMergeWhenReadyStateOff},
+		{name: "queued", state: PullRequestMergeWhenReadyStateQueued},
+		{name: "merging", state: PullRequestMergeWhenReadyStateMerging},
+		{name: "succeeded", state: PullRequestMergeWhenReadyStateSucceeded},
+		{name: "failed", state: PullRequestMergeWhenReadyStateFailed},
+		{name: "cancelled", state: PullRequestMergeWhenReadyStateCancelled},
+		{name: "invalid", state: PullRequestMergeWhenReadyState("oops"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.state.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported merge-when-ready states")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported merge-when-ready states")
+		})
+	}
+}
+
 func TestPullRequestCheckStatusValidate(t *testing.T) {
 	t.Parallel()
 
