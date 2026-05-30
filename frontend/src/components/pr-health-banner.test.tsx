@@ -191,6 +191,37 @@ describe("PRHealthBanner", () => {
     expect(onQueue).toHaveBeenCalledTimes(1);
   });
 
+  it("matches the Create PR split button sizing and menu alignment", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          checks: [{ name: "Unit tests", category: "test", status: "pending" }],
+          checks_confirmed: true,
+          can_merge: false,
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onQueueMergeWhenReady={vi.fn()}
+      />,
+    );
+
+    const moreActions = screen.getByRole("button", { name: "More merge actions" });
+    expect(moreActions).toHaveClass("h-7", "w-7", "rounded-l-none");
+    expect(moreActions).not.toHaveClass("h-9", "w-8");
+
+    await userEvent.setup().click(moreActions);
+    const menuItem = await screen.findByRole("menuitem", { name: "Merge when ready" });
+    expect(menuItem.closest("[data-slot='dropdown-menu-content']")).toHaveAttribute(
+      "data-align",
+      "end",
+    );
+  });
+
   it("shows queued auto-merge state and allows turning it off from the merge menu", async () => {
     const onCancel = vi.fn();
     renderWithProviders(
