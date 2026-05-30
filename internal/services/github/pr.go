@@ -3266,7 +3266,7 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 		if err := s.pullRequests.UpdateCIStatus(ctx, pr.OrgID, pr.ID, ciStatus); err != nil {
 			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to update CI status")
 		}
-		s.enqueuePullRequestStateSync(ctx, pr)
+		s.enqueuePullRequestStateSyncWithScope(ctx, pr, "check_suite_completed")
 	}
 
 	return nil
@@ -3298,7 +3298,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}
-		s.enqueuePullRequestStateSync(ctx, pr)
+		s.enqueuePullRequestStateSyncWithScope(ctx, pr, "check_run_completed")
 	}
 
 	return nil

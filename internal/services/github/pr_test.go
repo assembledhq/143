@@ -417,7 +417,7 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	require.NoError(t, err, "should create pgxmock pool")
 	defer mock.Close()
 
-	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, db.NewJobStore(mock), zerolog.Nop())
+	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, zerolog.Nop())
 	sessionMessages := db.NewSessionMessageStore(mock)
 	service.SetSessionMessageStore(sessionMessages)
 	require.Same(t, sessionMessages, service.sessionMessages, "SetSessionMessageStore should store the session message dependency")
@@ -427,22 +427,13 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	require.Same(t, streams, service.prHealthStreams, "SetPullRequestStreams should store the stream dependency")
 
 	repoName := "assembledhq/143"
+	prID := uuid.New()
+	orgID := uuid.New()
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
-			newPRTestRow(uuid.New(), nil, uuid.New(), repoName, time.Now(), nil)...,
+			newPRTestRow(prID, nil, orgID, repoName, time.Now(), nil)...,
 		))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     pgxmock.AnyArg(),
-			"queue":      "default",
-			"job_type":   "sync_pull_request_state",
-			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
-			"dedupe_key": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-
 	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
 		Action: "completed",
 		CheckRun: struct {

@@ -488,10 +488,12 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	now := time.Now()
 
 	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
 	prStore := db.NewPullRequestStore(prMock)
 
 	svc := &PRService{
 		pullRequests: prStore,
+		jobs:         db.NewJobStore(jobMock),
 		logger:       zerolog.Nop(),
 	}
 
@@ -507,6 +509,17 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "")
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	event := PullRequestEvent{
 		Action: "closed",
@@ -518,6 +531,7 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	err := svc.HandlePullRequestEvent(context.Background(), event)
 	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a closed-without-merge PR")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "closed pull request webhooks should enqueue a state sync with the generic dedupe key")
 }
 
 func TestHandlePullRequestEvent_ClosedWithoutMergeReturnsStatusUpdateError(t *testing.T) {
@@ -1615,6 +1629,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	t.Parallel()
 
 	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
 	prStore := db.NewPullRequestStore(prMock)
 
 	orgID := uuid.New()
@@ -1624,6 +1639,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 
 	svc := &PRService{
 		pullRequests: prStore,
+		jobs:         db.NewJobStore(jobMock),
 		logger:       zerolog.Nop(),
 	}
 
@@ -1639,7 +1655,17 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "check_suite_completed")
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	conclusion := "success"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
@@ -1651,6 +1677,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	err := svc.HandleCheckSuiteEvent(context.Background(), event)
 	require.NoError(t, err, "should process check suite event without error")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "check suite completion should enqueue a scoped health sync")
 }
 
 func TestHandleCheckSuiteEvent_Failure(t *testing.T) {
@@ -1681,7 +1708,6 @@ func TestHandleCheckSuiteEvent_Failure(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
 	conclusion := "failure"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
@@ -1705,7 +1731,6 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 
 	prMock := newMockPool(t)
 	jobMock := newMockPool(t)
-
 	svc := &PRService{
 		pullRequests: db.NewPullRequestStore(prMock),
 		jobs:         db.NewJobStore(jobMock),
@@ -1718,10 +1743,17 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
 		)
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "check_run_completed")
 	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-
 	event := CheckRunEvent{Action: "completed"}
 	event.Repository.FullName = "testorg/testrepo"
 	event.CheckRun.PullRequests = []struct {
@@ -1731,7 +1763,7 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 	err := svc.HandleCheckRunEvent(context.Background(), event)
 	require.NoError(t, err, "HandleCheckRunEvent should enqueue a health sync for completed check runs")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "check run completion should enqueue a scoped health sync")
 }
 
 func TestHandleCheckSuiteEvent_PRNotFound(t *testing.T) {
