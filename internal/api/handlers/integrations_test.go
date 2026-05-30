@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
@@ -84,6 +87,18 @@ func (f fakeIntegrationCredentialStore) Get(_ context.Context, _ uuid.UUID, prov
 
 func (f fakeIntegrationCredentialStore) Upsert(context.Context, uuid.UUID, models.ProviderConfig) error {
 	return nil
+}
+
+type fakeSlackUserInfoClient struct {
+	user ingestion.SlackUser
+	err  error
+}
+
+func (f fakeSlackUserInfoClient) FetchUserInfo(context.Context, string, string) (ingestion.SlackUser, error) {
+	if f.err != nil {
+		return ingestion.SlackUser{}, f.err
+	}
+	return f.user, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1302,6 +1317,105 @@ func TestIntegrationHandler_ConnectLinear_ReturnsExistingIntegration(t *testing.
 	require.Equal(t, integrationID, resp.Data.ID, "ConnectLinear should return the existing integration ID")
 	require.Equal(t, models.IntegrationProviderLinear, resp.Data.Provider, "ConnectLinear should return a linear integration")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_LinkSlackUserMeRejectsEmailMismatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {
+				OrgID:    orgID,
+				Provider: models.ProviderSlack,
+				Config:   models.SlackConfig{AccessToken: "xoxb-token", TeamID: "T123"},
+			},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackUserInfoClient(fakeSlackUserInfoClient{user: slackTestUser("U999", "other@example.com")}),
+	)
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+
+	body := strings.NewReader(`{"slack_user_id":"U999","slack_email":"other@example.com","slack_display_name":"Other"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/slack/user-links/me", body)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "user@example.com"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.LinkSlackUserMe(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "Slack self-link should reject Slack users whose email does not match the authenticated user")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack self-link should not upsert a mismatched Slack identity")
+}
+
+func TestIntegrationHandler_PatchSlackChannelSettingsRejectsForeignRepository(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	foreignRepoID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackChannelStore = db.NewSlackChannelSettingsStore(mock)
+	handler.repoStore = db.NewRepositoryStore(mock)
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+	mock.ExpectQuery(`FROM repositories\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}))
+
+	body := strings.NewReader(fmt.Sprintf(`{"default_repository_id":"%s"}`, foreignRepoID))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/integrations/slack/channels/C123", body)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("slack_channel_id", "C123")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.PatchSlackChannelSettings(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Slack channel settings should reject repository IDs outside the active org")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack channel settings should validate repository ownership before upsert")
+}
+
+func slackTestUser(id, email string) ingestion.SlackUser {
+	user := ingestion.SlackUser{ID: id}
+	user.Profile.Email = email
+	user.Profile.DisplayName = "Slack User"
+	return user
+}
+
+func expectSlackInstallationByOrg(mock pgxmock.PgxPoolIface, orgID, installationID, integrationID uuid.UUID) {
+	now := time.Now()
+	mock.ExpectQuery(`FROM slack_installations\s+WHERE org_id = @org_id AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", []string{"users:read.email"}, models.SlackInstallationStatusActive, nil, now,
+			nil, now, now,
+		))
 }
 
 func TestIntegrationHandler_ConnectLinear_ReactivatesErroredIntegration(t *testing.T) {
