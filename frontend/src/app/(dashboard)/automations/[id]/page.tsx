@@ -48,7 +48,7 @@ import {
 import { RunsTab } from "./runs-tab";
 import {
   browserTimezone,
-  formatRunAtWithTimezone,
+  formatAutomationSchedule,
   hourOptions,
   minuteOptions,
   splitRunAt,
@@ -533,10 +533,7 @@ export default function AutomationDetailPage() {
     );
   }
 
-  const scheduleTimezone = automation.timezone || "UTC";
-  const schedule = automation.schedule_type === "cron" && automation.cron_expression
-    ? `cron: ${automation.cron_expression} (${scheduleTimezone})`
-    : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}${automation.interval_run_at ? ` at ${formatRunAtWithTimezone(automation.interval_run_at, scheduleTimezone)}` : ""}`;
+  const schedule = formatAutomationSchedule(automation);
 
   const headerDescription = automation.enabled
     ? automation.next_run_at
