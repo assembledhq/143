@@ -109,6 +109,13 @@ describe("session PR action state", () => {
         reason: "Checks are still running.",
       },
       {
+        name: "auto-merge queued",
+        health: { ...baseHealth, can_merge: false, merge_when_ready: { state: "queued" as const } },
+        disabled: true,
+        reason: "Waiting for GitHub requirements.",
+        label: "Auto-merge on",
+      },
+      {
         name: "unconfirmed checks",
         health: { ...baseHealth, checks_confirmed: false, checks: [] },
         disabled: true,
@@ -169,7 +176,7 @@ describe("session PR action state", () => {
         health: { ...baseHealth, can_merge: false, merge_when_ready: { state: "queued" as const } },
         visible: true,
         disabled: false,
-        label: "Cancel merge when ready",
+        label: "Turn off auto-merge",
       },
       {
         name: "cancelled can requeue",

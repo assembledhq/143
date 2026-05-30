@@ -302,6 +302,16 @@ export function deriveMergeActionState({ health, hasActiveRepair, pendingAction 
     };
   }
 
+  if (health.merge_when_ready.state === "queued") {
+    return {
+      visible: true,
+      disabled: true,
+      disabledReason: "Waiting for GitHub requirements.",
+      label: "Auto-merge on",
+      spinning: false,
+    };
+  }
+
   if (health.has_conflicts || health.can_resolve_conflicts || health.merge_state === "conflicted") {
     return {
       visible: true,
@@ -372,7 +382,7 @@ export function deriveMergeWhenReadyActionState({ health, hasActiveRepair, pendi
 
   const current = health.merge_when_ready;
   if (current?.state === "queued") {
-    return { visible: true, disabled: false, label: "Cancel merge when ready", spinning: pendingMergeWhenReady };
+    return { visible: true, disabled: false, label: "Turn off auto-merge", spinning: pendingMergeWhenReady };
   }
   if (current?.state === "merging") {
     return { visible: true, disabled: true, disabledReason: "Merging this pull request", label: "Merging when ready…", spinning: true };
