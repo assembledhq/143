@@ -63,10 +63,14 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"GitHubStatusHandler.StartConnect":   "OAuth redirect only, no store calls",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.
-		"IntegrationHandler.StartLinearOAuth": "OAuth redirect only",
-		"IntegrationHandler.StartSentryOAuth": "OAuth redirect only",
-		"IntegrationHandler.StartGitHubOAuth": "OAuth redirect only",
-		"IntegrationHandler.StartSlackOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartLinearOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartSentryOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartGitHubOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartSlackOAuth":   "OAuth redirect only",
+		"IntegrationHandler.ReinstallSlackBot": "delegates to Slack OAuth redirect only",
+		"SlackbotHandler.Events":               "public Slack callback resolves org from verified Slack team/app installation",
+		"SlackbotHandler.Commands":             "public Slack callback resolves org from verified Slack team/app installation",
+		"SlackbotHandler.Interactions":         "public Slack callback resolves org from verified Slack team/app installation",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
 		"PMHandler.Bootstrap":                      "delegates to enqueueAndRespond which uses OrgIDFromContext",

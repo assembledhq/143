@@ -70,6 +70,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
+	slackInstallationStore := db.NewSlackInstallationStore(pool)
+	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
+	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
+	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
@@ -189,6 +193,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithIntegrationMembershipStore(membershipStore),
 		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
+		handlers.WithSlackInstallationStore(slackInstallationStore),
+		handlers.WithSlackUserLinkStore(slackUserLinkStore),
+		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
 	}
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
@@ -214,6 +221,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	integrationHandler.SetLinearJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
+	slackbotHandler := handlers.NewSlackbotHandler(
+		handlers.SlackbotHandlerConfig{
+			SigningSecret: cfg.SlackSigningSecret,
+			FrontendURL:   cfg.FrontendURL,
+		},
+		slackInstallationStore,
+		slackInboundEventStore,
+		jobStore,
+	)
+	slackbotHandler.SetLogger(logger)
+	if slackMetrics, err := metrics.NewSlackbotMetrics(); err == nil {
+		slackbotHandler.SetMetrics(slackMetrics)
+	} else {
+		logger.Warn().Err(err).Msg("failed to initialize Slackbot metrics")
+	}
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(
@@ -792,6 +814,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
 		})
 
+		// Slack callbacks are public from the session-cookie perspective and
+		// authenticate with Slack's request signature before any payload routing.
+		r.Post("/api/v1/webhooks/slack/events", slackbotHandler.Events)
+		r.Post("/api/v1/webhooks/slack/commands", slackbotHandler.Commands)
+		r.Post("/api/v1/webhooks/slack/interactions", slackbotHandler.Interactions)
+
 		// Protected routes (authenticated)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Auth(middleware.AuthStores{
@@ -1015,6 +1043,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 				r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
+				r.Post("/api/v1/integrations/slack/user-links/me", integrationHandler.LinkSlackUserMe)
+				r.Delete("/api/v1/integrations/slack/user-links/me", integrationHandler.UnlinkSlackUserMe)
 
 				// GitHub connection for user-authored PRs
 				r.Get("/api/v1/users/me/github/connect", githubStatusHandler.StartConnect)
@@ -1251,8 +1281,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
+				r.Get("/api/v1/integrations/slack/bot", integrationHandler.GetSlackBot)
+				r.Post("/api/v1/integrations/slack/bot/reinstall", integrationHandler.ReinstallSlackBot)
 				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+				r.Patch("/api/v1/integrations/slack/channels/{slack_channel_id}", integrationHandler.PatchSlackChannelSettings)
+				r.Get("/api/v1/integrations/slack/user-links", integrationHandler.ListSlackUserLinks)
 				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
 				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
 				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)

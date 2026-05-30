@@ -270,6 +270,8 @@ type SlackConfig struct {
 	AccessToken string   `json:"access_token"` // #nosec G117 -- JSON config field
 	TeamID      string   `json:"team_id"`
 	TeamName    string   `json:"team_name"`
+	BotUserID   string   `json:"bot_user_id,omitempty"`
+	BotID       string   `json:"bot_id,omitempty"`
 	Scope       string   `json:"scope"`
 	ChannelIDs  []string `json:"channel_ids"`
 }
