@@ -674,17 +674,24 @@ type PullRequest struct {
 	// into formatBranchName) change later. Nullable for PRs created before
 	// migration 107 added the column — the push code falls back to
 	// recomputing in that case.
-	HeadRef             *string               `db:"head_ref" json:"head_ref,omitempty"`
-	BaseSHA             *string               `db:"base_sha" json:"base_sha,omitempty"`
-	MergeState          PullRequestMergeState `db:"merge_state" json:"merge_state"`
-	HasConflicts        bool                  `db:"has_conflicts" json:"has_conflicts"`
-	FailingTestCount    int                   `db:"failing_test_count" json:"failing_test_count"`
-	NeedsAgentAction    bool                  `db:"needs_agent_action" json:"needs_agent_action"`
-	GitHubStateSyncedAt *time.Time            `db:"github_state_synced_at" json:"github_state_synced_at,omitempty"`
-	HealthVersion       int64                 `db:"health_version" json:"health_version"`
-	MergedAt            *time.Time            `db:"merged_at" json:"merged_at,omitempty"`
-	CreatedAt           time.Time             `db:"created_at" json:"created_at"`
-	UpdatedAt           time.Time             `db:"updated_at" json:"updated_at"`
+	HeadRef                     *string                        `db:"head_ref" json:"head_ref,omitempty"`
+	BaseSHA                     *string                        `db:"base_sha" json:"base_sha,omitempty"`
+	MergeState                  PullRequestMergeState          `db:"merge_state" json:"merge_state"`
+	HasConflicts                bool                           `db:"has_conflicts" json:"has_conflicts"`
+	FailingTestCount            int                            `db:"failing_test_count" json:"failing_test_count"`
+	NeedsAgentAction            bool                           `db:"needs_agent_action" json:"needs_agent_action"`
+	GitHubStateSyncedAt         *time.Time                     `db:"github_state_synced_at" json:"github_state_synced_at,omitempty"`
+	HealthVersion               int64                          `db:"health_version" json:"health_version"`
+	MergeWhenReadyState         PullRequestMergeWhenReadyState `db:"merge_when_ready_state" json:"merge_when_ready_state"`
+	MergeWhenReadyRequestedBy   *uuid.UUID                     `db:"merge_when_ready_requested_by" json:"merge_when_ready_requested_by,omitempty"`
+	MergeWhenReadyRequestedAt   *time.Time                     `db:"merge_when_ready_requested_at" json:"merge_when_ready_requested_at,omitempty"`
+	MergeWhenReadyHeadSHA       string                         `db:"merge_when_ready_head_sha" json:"merge_when_ready_head_sha,omitempty"`
+	MergeWhenReadyHealthVersion *int64                         `db:"merge_when_ready_health_version" json:"merge_when_ready_health_version,omitempty"`
+	MergeWhenReadyError         string                         `db:"merge_when_ready_error" json:"merge_when_ready_error,omitempty"`
+	MergeWhenReadyUpdatedAt     *time.Time                     `db:"merge_when_ready_updated_at" json:"merge_when_ready_updated_at,omitempty"`
+	MergedAt                    *time.Time                     `db:"merged_at" json:"merged_at,omitempty"`
+	CreatedAt                   time.Time                      `db:"created_at" json:"created_at"`
+	UpdatedAt                   time.Time                      `db:"updated_at" json:"updated_at"`
 }
 
 // PRSummary is a lightweight view of a PR for inclusion in session list responses.

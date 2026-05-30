@@ -3091,6 +3091,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
+  const [pendingMergeWhenReady, setPendingMergeWhenReady] = useState(false);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
@@ -3562,7 +3563,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     staleTime: 30_000,
     refetchInterval: (query) => {
       const mergeState = query.state.data?.data?.merge_state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" ? 5_000 : false;
+      const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? 5_000 : false;
     },
   });
   const prHealth = prHealthData?.data;
@@ -3747,6 +3749,30 @@ export function SessionDetailContent({ id }: { id: string }) {
       // the user reads the message the banner has already updated, so an
       // in-banner error would feel stale alongside the new state.
       const message = err instanceof ApiError ? err.message : "Failed to merge pull request";
+      toast.error(message);
+    },
+  });
+  const mergeWhenReadyMutation = useMutation({
+    mutationFn: async (action: "queue" | "cancel") => {
+      if (!pullRequestId) {
+        throw new Error("Pull request not found");
+      }
+      return action === "queue"
+        ? api.pullRequests.queueMergeWhenReady(pullRequestId)
+        : api.pullRequests.cancelMergeWhenReady(pullRequestId);
+    },
+    onMutate: () => {
+      setRepairActionError(null);
+      setPendingMergeWhenReady(true);
+    },
+    onSuccess: (_response, action) => {
+      setPendingMergeWhenReady(false);
+      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      toast.success(action === "queue" ? "Merge when ready enabled" : "Merge when ready cancelled");
+    },
+    onError: (err) => {
+      setPendingMergeWhenReady(false);
+      const message = err instanceof ApiError ? err.message : "Failed to update merge when ready";
       toast.error(message);
     },
   });
@@ -5186,6 +5212,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     mergeMutation.mutate();
   }
 
+  function handleQueueMergeWhenReady() {
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "merge_pr" });
+      return;
+    }
+    mergeWhenReadyMutation.mutate("queue");
+  }
+
+  function handleCancelMergeWhenReady() {
+    mergeWhenReadyMutation.mutate("cancel");
+  }
+
   const prErrorNotice = prActionError ? {
     title: prErrorTitle(snapshotState, localPRActionError?.code),
     description: prActionError,
@@ -5432,9 +5470,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
+                mergeWhenReadyPending={pendingMergeWhenReady}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
+                onQueueMergeWhenReady={handleQueueMergeWhenReady}
+                onCancelMergeWhenReady={handleCancelMergeWhenReady}
                 onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,

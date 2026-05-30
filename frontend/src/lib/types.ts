@@ -870,6 +870,23 @@ export interface PullRequestActiveRepair {
   health_version: number;
 }
 
+export type PullRequestMergeWhenReadyState =
+  | "off"
+  | "queued"
+  | "merging"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface PullRequestMergeWhenReadyStatus {
+  state: PullRequestMergeWhenReadyState;
+  requested_by_user_id?: string;
+  requested_at?: string;
+  requested_head_sha?: string;
+  requested_health_version?: number;
+  last_error?: string;
+}
+
 export interface PullRequestHealthResponse {
   pull_request_id: string;
   pull_request_number: number;
@@ -897,6 +914,7 @@ export interface PullRequestHealthResponse {
   conflict_detail_available: boolean;
   failing_test_detail_available: boolean;
   obsolete_active_repair_sessions?: boolean;
+  merge_when_ready: PullRequestMergeWhenReadyStatus;
 }
 
 export interface PullRequestRepairResponse {

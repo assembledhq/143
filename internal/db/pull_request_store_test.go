@@ -15,14 +15,18 @@ var prColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-	"health_version", "merged_at", "created_at", "updated_at",
+	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 }
 
 func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
 	return []any{
 		id, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 		"Fix bug", (*string)(nil), "open", "pending", "app", "", (*string)(nil), (*string)(nil), (*string)(nil),
-		models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+		models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0),
+		models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil),
+		(*time.Time)(nil), now, now,
 	}
 }
 

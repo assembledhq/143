@@ -32,6 +32,7 @@ const baseHealth: PullRequestHealthResponse = {
   failing_test_detail_available: false,
   obsolete_active_repair_sessions: false,
   active_repairs: [],
+  merge_when_ready: { state: "off" },
 };
 
 describe("PRHealthBanner", () => {
@@ -108,6 +109,7 @@ describe("PRHealthBanner", () => {
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
+        onQueueMergeWhenReady={vi.fn()}
         reviewAction={{
           disabled: false,
           spinning: false,
@@ -155,10 +157,61 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    const labels = screen.getAllByRole("button").map((button) => button.textContent);
+    const labels = screen.getAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((label) => label !== "");
     expect(labels).toEqual(
       ["Merge", "Resolve conflicts", "Review", "Push changes"],
     );
+  });
+
+  it("keeps merge disabled while allowing merge when ready from the dropdown", async () => {
+    const onQueue = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          checks: [{ name: "Unit tests", category: "test", status: "pending" }],
+          checks_confirmed: true,
+          can_merge: false,
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onQueueMergeWhenReady={onQueue}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    await userEvent.setup().click(screen.getByRole("button", { name: "More merge actions" }));
+    await userEvent.setup().click(await screen.findByRole("menuitem", { name: "Merge when ready" }));
+    expect(onQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows queued merge when ready state and allows cancelling", async () => {
+    const onCancel = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          merge_when_ready: { state: "queued", requested_head_sha: "head-sha" },
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onCancelMergeWhenReady={onCancel}
+      />,
+    );
+
+    expect(screen.getByText("Merge when ready is on. Waiting for checks to pass.")).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
   it("shows the disabled Review action reason in a hover tooltip", async () => {
