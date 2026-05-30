@@ -32,6 +32,7 @@ const health: PullRequestHealthResponse = {
   failing_test_detail_available: false,
   obsolete_active_repair_sessions: false,
   active_repairs: [],
+  merge_when_ready: { state: "off" },
 };
 
 describe("PRHealthBanner sync copy", () => {

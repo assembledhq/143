@@ -27,7 +27,9 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-		"health_version", "merged_at", "created_at", "updated_at",
+		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -41,7 +43,8 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil, nil,
-					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
 		)
 
 	pr, err := store.GetByRepoAndNumber(context.Background(), "org/repo", 42)
@@ -64,7 +67,9 @@ func TestPullRequestStore_GetByOrgRepoAndNumber(t *testing.T) {
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-		"health_version", "merged_at", "created_at", "updated_at",
+		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -78,7 +83,8 @@ func TestPullRequestStore_GetByOrgRepoAndNumber(t *testing.T) {
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil, nil,
-					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
 		)
 
 	pr, err := store.GetByOrgRepoAndNumber(context.Background(), orgID, "org/repo", 42)
@@ -122,7 +128,9 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-		"health_version", "merged_at", "created_at", "updated_at",
+		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 	}
 
 	orgID := uuid.New()
@@ -136,7 +144,8 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("body"), "open", "pending", "app", "success", nil, nil, nil,
-					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
 		)
 
 	result, err := store.BatchGetBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionID})
@@ -283,4 +292,123 @@ func TestPullRequestStore_UpdateHeadSHA_NoRowReturnsErrNoRows(t *testing.T) {
 	err = store.UpdateHeadSHA(context.Background(), orgID, prID, "abc123def456")
 	require.ErrorIs(t, err, pgx.ErrNoRows, "UpdateHeadSHA should report drift when no PR row matched")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStore_QueueMergeWhenReady_RequeuesCancelledState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+	orgID := uuid.New()
+	prID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	version := int64(12)
+
+	mock.ExpectQuery("UPDATE pull_requests[\\s\\S]*merge_when_ready_state = @state[\\s\\S]*merge_when_ready_error = ''[\\s\\S]*WHERE id = @id AND org_id = @org_id[\\s\\S]*RETURNING").
+		WithArgs(pgx.NamedArgs{
+			"id":             prID,
+			"org_id":         orgID,
+			"requested_by":   userID,
+			"head_sha":       "head-new",
+			"health_version": version,
+			"state":          models.PullRequestMergeWhenReadyStateQueued,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"merge_when_ready_state",
+			"merge_when_ready_requested_by",
+			"merge_when_ready_requested_at",
+			"merge_when_ready_head_sha",
+			"merge_when_ready_health_version",
+			"merge_when_ready_error",
+		}).AddRow(models.PullRequestMergeWhenReadyStateQueued, &userID, &now, "head-new", &version, ""))
+
+	status, err := store.QueueMergeWhenReady(context.Background(), orgID, prID, userID, "head-new", version)
+	require.NoError(t, err, "QueueMergeWhenReady should allow re-queueing after cancellation")
+	require.Equal(t, models.PullRequestMergeWhenReadyStateQueued, status.State, "QueueMergeWhenReady should return the queued state")
+	require.Equal(t, userID, *status.RequestedByUserID, "QueueMergeWhenReady should replace the requesting user")
+	require.Equal(t, "head-new", status.RequestedHeadSHA, "QueueMergeWhenReady should replace the requested head SHA")
+	require.Empty(t, status.LastError, "QueueMergeWhenReady should clear prior cancellation or failure errors")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStore_CancelMergeWhenReady(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+	orgID := uuid.New()
+	prID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	version := int64(12)
+
+	mock.ExpectQuery("UPDATE pull_requests[\\s\\S]*merge_when_ready_state = @state[\\s\\S]*WHERE id = @id AND org_id = @org_id[\\s\\S]*merge_when_ready_state IN \\('queued', 'failed', 'cancelled'\\)[\\s\\S]*RETURNING").
+		WithArgs(pgx.NamedArgs{
+			"id":     prID,
+			"org_id": orgID,
+			"state":  models.PullRequestMergeWhenReadyStateCancelled,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"merge_when_ready_state",
+			"merge_when_ready_requested_by",
+			"merge_when_ready_requested_at",
+			"merge_when_ready_head_sha",
+			"merge_when_ready_health_version",
+			"merge_when_ready_error",
+		}).AddRow(models.PullRequestMergeWhenReadyStateCancelled, &userID, &now, "head", &version, ""))
+
+	status, err := store.CancelMergeWhenReady(context.Background(), orgID, prID)
+	require.NoError(t, err, "CancelMergeWhenReady should mark queued intent cancelled")
+	require.Equal(t, models.PullRequestMergeWhenReadyStateCancelled, status.State, "CancelMergeWhenReady should return the cancelled state")
+	require.Equal(t, "head", status.RequestedHeadSHA, "CancelMergeWhenReady should preserve the cancelled request context")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStore_ClaimMergeWhenReadyForProcessing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		expected     bool
+	}{
+		{name: "claims queued intent", rowsAffected: 1, expected: true},
+		{name: "does not claim missing or fresh intent", rowsAffected: 0, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			store := NewPullRequestStore(mock)
+			orgID := uuid.New()
+			prID := uuid.New()
+			staleBefore := time.Now().Add(-15 * time.Minute).UTC()
+
+			mock.ExpectExec("UPDATE pull_requests[\\s\\S]*merge_when_ready_state = @state[\\s\\S]*merge_when_ready_state = 'queued'[\\s\\S]*merge_when_ready_state = 'merging'[\\s\\S]*merge_when_ready_updated_at < @stale_before").
+				WithArgs(pgx.NamedArgs{
+					"id":           prID,
+					"org_id":       orgID,
+					"state":        models.PullRequestMergeWhenReadyStateMerging,
+					"stale_before": staleBefore,
+				}).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			claimed, err := store.ClaimMergeWhenReadyForProcessing(context.Background(), orgID, prID, staleBefore)
+			require.NoError(t, err, "ClaimMergeWhenReadyForProcessing should not return database errors on successful exec")
+			require.Equal(t, tt.expected, claimed, "ClaimMergeWhenReadyForProcessing should report whether it claimed the intent")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }

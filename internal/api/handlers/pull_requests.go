@@ -23,6 +23,8 @@ type pullRequestHealthService interface {
 	GetPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID) (*models.PullRequestHealthResponse, error)
 	StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error)
 	MergePullRequest(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeResponse, error)
+	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
+	CancelMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 }
 
 type pullRequestMembershipStore interface {
@@ -256,6 +258,58 @@ func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestMergeResponse]{Data: *resp})
+}
+
+func (h *PullRequestHandler) QueueMergeWhenReady(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.mergeWhenReady(w, r, true)
+}
+
+func (h *PullRequestHandler) CancelMergeWhenReady(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.mergeWhenReady(w, r, false)
+}
+
+func (h *PullRequestHandler) mergeWhenReady(w http.ResponseWriter, r *http.Request, queue bool) {
+	if h.service == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "pull request merge when ready is not configured")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found in context")
+		return
+	}
+	pullRequestID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid pull request ID")
+		return
+	}
+
+	var resp *models.PullRequestMergeWhenReadyStatus
+	if queue {
+		resp, err = h.service.QueueMergeWhenReady(r.Context(), orgID, pullRequestID, user.ID)
+	} else {
+		resp, err = h.service.CancelMergeWhenReady(r.Context(), orgID, pullRequestID, user.ID)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, ghservice.ErrPullRequestMergeWhenReadyInProgress):
+			writeError(w, r, http.StatusConflict, "MERGE_WHEN_READY_IN_PROGRESS", "Merge when ready is already in progress", err)
+		case errors.Is(err, ghservice.ErrPullRequestMergeWhenReadyNotQueueable):
+			writeError(w, r, http.StatusConflict, "MERGE_WHEN_READY_NOT_QUEUEABLE", "Pull request cannot be queued for merge when ready", err)
+		case errors.Is(err, ghservice.ErrGitHubUserAuthRequired):
+			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account to merge this pull request as yourself", err)
+		case errors.Is(err, ghservice.ErrGitHubUserAuthRepoAccessDenied):
+			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REPO_ACCESS_DENIED", "your GitHub account cannot access this repository for merge", err)
+		default:
+			writeError(w, r, http.StatusInternalServerError, "MERGE_WHEN_READY_FAILED", "Failed to update merge when ready", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestMergeWhenReadyStatus]{Data: *resp})
 }
 
 // classifyGitHubMergeError maps an error returned from the GitHub merge call
