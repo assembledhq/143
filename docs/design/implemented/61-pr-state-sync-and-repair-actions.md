@@ -328,6 +328,8 @@ Instead, use a **per-PR singleflight sync queue**:
 
 This scales better under sustained webhook bursts and avoids arbitrary behavior around time windows.
 
+Current implementation note: ordinary PR lifecycle webhooks use the stable per-PR dedupe key `sync_pull_request_state:<pull_request_id>`. Completed `check_suite` and `check_run` webhooks use separate completion-scoped dedupe keys so a check-completion wake-up is not swallowed by a generic sync that was already pending or running before GitHub finished CI. This is a pragmatic approximation of the dirty-reschedule behavior above and keeps the post-completion sync low-latency without flooding the queue.
+
 ### Reconciliation path
 
 Event-driven sync is necessary for freshness, but it is not sufficient for correctness.
