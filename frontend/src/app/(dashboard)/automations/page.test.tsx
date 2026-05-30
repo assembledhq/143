@@ -73,7 +73,7 @@ describe("AutomationsPage", () => {
     expect(title).toHaveClass("break-words", "leading-5");
     expect(screen.getByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")).toHaveTextContent("🧪");
 
-    const schedule = screen.getByText(/every 2 weeks at/);
+    const schedule = screen.getByText(/Every 2 weeks at/);
     expect(schedule).toHaveClass("block", "break-words", "leading-5", "sm:max-w-[18rem]", "sm:text-right");
 
     const detailRow = screen.getByText(/Last run:/).parentElement;
