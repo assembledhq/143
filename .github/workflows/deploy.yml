@@ -128,11 +128,12 @@ jobs:
         # with content "ok" on success or "fail: ..." on failure. Poll each
         # worker host until we see one of those, or until the budget expires.
         #
-        # Budget breakdown (must stay ≥ in-process WORKER_DRAIN_TIMEOUT in
-        # internal/config/config.go, currently 45m):
-        #   45m drain + ~1m recreate + 2m healthcheck + polling overhead
-        # 4200s (70m) gives a comfortable margin. If you bump
-        # WORKER_DRAIN_TIMEOUT, bump this too.
+        # Routine blue/green deploys do not wait for old worker generations
+        # to finish draining; they start green, mark blue draining, then let
+        # host-side retire loops clean up old owners. This timeout only needs
+        # to cover green startup, DB heartbeat, preflight/mark-draining, and
+        # prune overhead. Poll workers in parallel so multiple hosts do not
+        # multiply CI runner time on a stuck rollout.
         #
         # Timeout vs host state: a verify timeout fails the workflow run,
         # but the detached host-side rollover keeps going and may still
@@ -141,8 +142,8 @@ jobs:
         # `make deploy-worker-status` before re-running.
         env:
           DEPLOY_SHA: ${{ github.sha }}
-          VERIFY_TIMEOUT_SECONDS: "4200"
-          POLL_INTERVAL_SECONDS: "15"
+          VERIFY_TIMEOUT_SECONDS: "360"
+          POLL_INTERVAL_SECONDS: "10"
         run: |
           set -euo pipefail
 
@@ -156,8 +157,9 @@ jobs:
           status_path="/var/log/143/deploy-worker-${short_sha}.status"
           ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ~/.ssh/deploy-key)
 
-          overall_rc=0
-          for host in $WORKERS; do
+          verify_worker() {
+            local host="$1"
+            local deadline outcome status
             echo "::group::verify worker $host"
             deadline=$(( $(date +%s) + VERIFY_TIMEOUT_SECONDS ))
             outcome=""
@@ -177,29 +179,45 @@ jobs:
                   echo "--- status file contents ---"
                   echo "$status"
                   outcome="fail"
-                  overall_rc=1
-                  break
+                  echo "::endgroup::"
+                  echo "worker $host: $outcome"
+                  return 1
                   ;;
                 "")
                   if [ "$(date +%s)" -ge "$deadline" ]; then
                     echo "✗ worker $host: rollover did not finish after ${VERIFY_TIMEOUT_SECONDS}s"
                     echo "  follow up with: make deploy-worker-status"
                     outcome="timeout"
-                    overall_rc=1
-                    break
+                    echo "::endgroup::"
+                    echo "worker $host: $outcome"
+                    return 1
                   fi
                   sleep "$POLL_INTERVAL_SECONDS"
                   ;;
                 *)
                   echo "⚠ worker $host: unexpected status: $status"
                   outcome="unknown"
-                  overall_rc=1
-                  break
+                  echo "::endgroup::"
+                  echo "worker $host: $outcome"
+                  return 1
                   ;;
               esac
             done
             echo "::endgroup::"
             echo "worker $host: $outcome"
+          }
+
+          pids=()
+          for host in $WORKERS; do
+            verify_worker "$host" &
+            pids+=("$!")
+          done
+
+          overall_rc=0
+          for pid in "${pids[@]}"; do
+            if ! wait "$pid"; then
+              overall_rc=1
+            fi
           done
 
           exit $overall_rc
