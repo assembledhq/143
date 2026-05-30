@@ -262,7 +262,7 @@ export const FileTree = memo(function FileTree({
 
   return (
     <div className="flex flex-col h-full">
-      <div className={cn("px-4 pb-3", variant === "sheet" && "pt-1")}>
+      <div className={cn("px-4 pb-3 pt-3", variant === "sheet" && "pt-1")}>
         <p className="text-xs font-medium text-muted-foreground/70 uppercase tracking-wider mb-2">
           {files.length} files changed
         </p>
