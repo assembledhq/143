@@ -465,6 +465,37 @@ func TestRuntimeController_RequestStopCancelsBeforePersistingStopMarker(t *testi
 	require.True(t, sessionStore.stopAfter[0].After(minStopAfter), "stop-after deadline should include graceful shutdown, checkpoint finalization, and watchdog slack")
 }
 
+func TestRuntimeController_RequestStopCancelsFallbackWhenRegistryHasNoEntry(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	sessionStore := &runtimeTestSessionStore{}
+	cancelCtx, cancel := context.WithCancelCause(context.Background())
+	controller := newRuntimeController(
+		runtimeConfig{
+			GracefulShutdownWindow:   time.Second,
+			CheckpointFinalizeWindow: time.Second,
+		},
+		sessionStore,
+		&runtimeTestJobStore{},
+		NewCancelRegistry(zerolog.Nop()),
+		zerolog.Nop(),
+		orgID,
+		sessionID,
+		0,
+		nil,
+		newRuntimeProgressTracker(time.Now()),
+	)
+	controller.SetStopFallback(cancel)
+
+	controller.RequestStop(StopReasonNoProgress)
+
+	require.ErrorIs(t, cancelCtx.Err(), context.Canceled, "RequestStop should cancel the fallback context when no registry entry exists")
+	require.ErrorIs(t, context.Cause(cancelCtx), context.Canceled, "fallback cancellation should use the runtime stop cause")
+	require.Equal(t, []models.RuntimeStopReason{models.RuntimeStopReasonNoProgress}, sessionStore.stopRequests, "RequestStop should still persist the stop reason")
+}
+
 func TestRuntimeController_RequestStopLogsActiveToolSummaries(t *testing.T) {
 	t.Parallel()
 
