@@ -84,6 +84,15 @@ vi.mock("@/components/autopilot-proposal-card", () => ({
 }));
 
 describe("AutopilotPageContent", () => {
+  it("shows aggregate summary cards without duplicating the top opportunity", async () => {
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByText("Auto-runnable now")).toBeInTheDocument();
+    expect(screen.getByText("Needs review")).toBeInTheDocument();
+    expect(screen.getByText("Connected work")).toBeInTheDocument();
+    expect(screen.queryByText("Top opportunity")).not.toBeInTheDocument();
+  });
+
   it("lets the queue table keep normal column widths on mobile", async () => {
     renderWithProviders(<AutopilotPageContent />);
 
