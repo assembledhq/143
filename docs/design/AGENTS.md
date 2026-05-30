@@ -30,6 +30,8 @@ Design docs that introduce or change backend behavior must include the concrete 
 
 For implemented schema, keep `implemented/01-database-schema.md` aligned with migrations. For broad backend API conventions, keep `implemented/02-api-server.md` aligned with the current route and response contracts.
 
+Only update `overall.md` when a design has actually been implemented, not while it is still in progress or in `future/`, and only for sufficiently large or important architecture/system-design changes.
+
 ### Rules
 
 - When you finish implementing a feature described by a design doc, update its status to `Implemented` and move the file into `implemented/`.
