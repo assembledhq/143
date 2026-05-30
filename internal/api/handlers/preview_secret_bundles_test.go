@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,19 +15,23 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
 type fakePreviewSecretBundleStore struct {
-	upsertInput  *db.UpsertPreviewSecretBundleInput
-	replaceID    uuid.UUID
-	replaceInput *db.UpsertPreviewSecretBundleInput
-	replaceErr   error
-	disabledName string
-	disabledUser uuid.UUID
-	row          models.PreviewSecretBundle
-	source       models.PreviewSecretBundleSource
-	outputs      []models.PreviewSecretBundleOutput
+	upsertInput    *db.UpsertPreviewSecretBundleInput
+	replaceID      uuid.UUID
+	replaceInput   *db.UpsertPreviewSecretBundleInput
+	replaceErr     error
+	disabledName   string
+	disabledUser   uuid.UUID
+	row            models.PreviewSecretBundle
+	getByIDErr     error
+	source         models.PreviewSecretBundleSource
+	decryptSrcErr  error
+	outputs        []models.PreviewSecretBundleOutput
+	decryptOutErr  error
 }
 
 func (s *fakePreviewSecretBundleStore) Upsert(_ context.Context, _ uuid.UUID, in db.UpsertPreviewSecretBundleInput) (*models.PreviewSecretBundle, error) {
@@ -48,6 +53,9 @@ func (s *fakePreviewSecretBundleStore) GetActive(_ context.Context, _ uuid.UUID,
 }
 
 func (s *fakePreviewSecretBundleStore) GetActiveByID(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*models.PreviewSecretBundle, error) {
+	if s.getByIDErr != nil {
+		return nil, s.getByIDErr
+	}
 	return &s.row, nil
 }
 
@@ -62,10 +70,16 @@ func (s *fakePreviewSecretBundleStore) Disable(_ context.Context, _ uuid.UUID, _
 }
 
 func (s *fakePreviewSecretBundleStore) DecryptSource(_ context.Context, _ uuid.UUID, _ models.PreviewSecretBundle) (models.PreviewSecretBundleSource, error) {
+	if s.decryptSrcErr != nil {
+		return models.PreviewSecretBundleSource{}, s.decryptSrcErr
+	}
 	return s.source, nil
 }
 
 func (s *fakePreviewSecretBundleStore) DecryptOutputs(_ context.Context, _ uuid.UUID, _ models.PreviewSecretBundle) ([]models.PreviewSecretBundleOutput, error) {
+	if s.decryptOutErr != nil {
+		return nil, s.decryptOutErr
+	}
 	return s.outputs, nil
 }
 
@@ -181,6 +195,118 @@ func TestPreviewSecretBundleHandler_TestDoesNotReturnPlaintext(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Test response should be valid JSON")
 	require.Equal(t, "ready", resp.Data.Status, "Test should report ready for valid managed bundle outputs")
 	require.Equal(t, "repo-dev", resp.Data.Bundle.Name, "Test should return non-secret bundle metadata")
+}
+
+func TestPreviewSecretBundleHandler_RevealReturnsPlaintextSource(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
+		},
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"SECRET_FILE_CONTENT": `{"token":"super-secret"}`}},
+		outputs: []models.PreviewSecretBundleOutput{{
+			Type:   "file",
+			Path:   "development.conf.json",
+			Format: "json",
+			Value:  "secret:SECRET_FILE_CONTENT",
+		}},
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/preview-secret-bundles/"+bundleID.String()+"/reveal", nil, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Reveal(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Reveal should return success for an existing bundle")
+	var resp models.SingleResponse[models.PreviewSecretBundleRevealResult]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Reveal response should be valid JSON")
+	require.Equal(t, store.source, resp.Data.Source, "Reveal should return the decrypted source values")
+	require.Equal(t, store.outputs, resp.Data.Outputs, "Reveal should return decrypted output references")
+	require.Equal(t, "repo-dev", resp.Data.Bundle.Name, "Reveal should include bundle metadata for context")
+}
+
+func TestPreviewSecretBundleHandler_RevealReturns404WhenBundleNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{getByIDErr: pgx.ErrNoRows}
+	handler := NewPreviewSecretBundleHandler(store)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/preview-secret-bundles/"+bundleID.String()+"/reveal", nil, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Reveal(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "Reveal should return 404 when bundle does not exist")
+	require.Contains(t, rr.Body.String(), "PREVIEW_SECRET_BUNDLE_NOT_FOUND")
+}
+
+func TestPreviewSecretBundleHandler_RevealReturns500WhenDecryptSourceFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID: bundleID, OrgID: orgID, RepositoryID: repoID, Name: "repo-dev",
+			SourceType: "managed", ExposurePolicy: "preview_runtime",
+			CreatedByUserID: userID, CreatedAt: time.Now(),
+		},
+		decryptSrcErr: fmt.Errorf("kms unavailable"),
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/preview-secret-bundles/"+bundleID.String()+"/reveal", nil, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Reveal(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "Reveal should return 500 when source decryption fails")
+	require.Contains(t, rr.Body.String(), "PREVIEW_SECRET_BUNDLE_SOURCE_FAILED")
+}
+
+func TestPreviewSecretBundleHandler_RevealReturns500WhenDecryptOutputsFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID: bundleID, OrgID: orgID, RepositoryID: repoID, Name: "repo-dev",
+			SourceType: "managed", ExposurePolicy: "preview_runtime",
+			CreatedByUserID: userID, CreatedAt: time.Now(),
+		},
+		source:        models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"SECRET_FILE_CONTENT": `{"token":"ok"}`}},
+		decryptOutErr: fmt.Errorf("kms unavailable"),
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/preview-secret-bundles/"+bundleID.String()+"/reveal", nil, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Reveal(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "Reveal should return 500 when output decryption fails")
+	require.Contains(t, rr.Body.String(), "PREVIEW_SECRET_BUNDLE_OUTPUTS_FAILED")
 }
 
 func TestPreviewSecretBundleHandler_UpsertRejectsInvalidJSONFileValue(t *testing.T) {

@@ -378,6 +378,51 @@ func (h *PreviewSecretBundleHandler) Test(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewSecretBundleTestResult]{Data: result})
 }
 
+func (h *PreviewSecretBundleHandler) Reveal(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	id, ok := parseUUIDParam(w, r, "id", "INVALID_PREVIEW_SECRET_BUNDLE_ID", "invalid preview secret bundle id")
+	if !ok {
+		return
+	}
+	row, err := h.store.GetActiveByID(r.Context(), orgID, id)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(w, r, http.StatusNotFound, "PREVIEW_SECRET_BUNDLE_NOT_FOUND", "preview secret bundle not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GET_PREVIEW_SECRET_BUNDLE_FAILED", "failed to get preview secret bundle", err)
+		return
+	}
+	source, err := h.store.DecryptSource(r.Context(), orgID, *row)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_SECRET_BUNDLE_SOURCE_FAILED", "failed to reveal preview secret bundle source", err)
+		return
+	}
+	outputs, err := h.store.DecryptOutputs(r.Context(), orgID, *row)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_SECRET_BUNDLE_OUTPUTS_FAILED", "failed to reveal preview secret bundle outputs", err)
+		return
+	}
+	summary := models.PreviewSecretBundleSummary{
+		ID:              row.ID,
+		RepositoryID:    row.RepositoryID,
+		Name:            row.Name,
+		SourceType:      row.SourceType,
+		ExposurePolicy:  row.ExposurePolicy,
+		Outputs:         summarizePreviewSecretOutputs(outputs),
+		CreatedByUserID: row.CreatedByUserID,
+		CreatedAt:       row.CreatedAt,
+	}
+	h.emitAudit(r, models.AuditActionPreviewSecretBundleRevealed, *row, summary)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewSecretBundleRevealResult]{
+		Data: models.PreviewSecretBundleRevealResult{
+			Bundle:  summary,
+			Source:  source,
+			Outputs: outputs,
+		},
+	})
+}
+
 func (h *PreviewSecretBundleHandler) summary(ctx context.Context, orgID uuid.UUID, row models.PreviewSecretBundle) (models.PreviewSecretBundleSummary, error) {
 	outputs, err := h.store.DecryptOutputs(ctx, orgID, row)
 	if err != nil {

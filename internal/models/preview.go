@@ -298,6 +298,12 @@ type PreviewSecretBundleTestResult struct {
 	Error  string                     `json:"error,omitempty"`
 }
 
+type PreviewSecretBundleRevealResult struct {
+	Bundle  PreviewSecretBundleSummary  `json:"bundle"`
+	Source  PreviewSecretBundleSource   `json:"source"`
+	Outputs []PreviewSecretBundleOutput `json:"outputs"`
+}
+
 type PreviewSecretOutputSummary struct {
 	Type   string   `json:"type"`
 	Env    []string `json:"env,omitempty"`

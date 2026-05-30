@@ -226,6 +226,8 @@ export const api = {
         patch<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/preview-secret-bundles/${bundleId}`, body),
       test: (bundleId: string) =>
         post<import('./types').SingleResponse<import('./types').PreviewSecretBundleTestResult>>(`/api/v1/preview-secret-bundles/${bundleId}/test`),
+      reveal: (bundleId: string) =>
+        post<import('./types').SingleResponse<import('./types').PreviewSecretBundleRevealResult>>(`/api/v1/preview-secret-bundles/${bundleId}/reveal`),
       delete: (id: string, name: string) =>
         del(`/api/v1/repositories/${id}/preview-secret-bundles/${encodeURIComponent(name)}`),
     },

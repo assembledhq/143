@@ -55,6 +55,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "issue.created is valid", value: AuditActionIssueCreated},
 		{name: "integration.connected is valid", value: AuditActionIntegrationConnected},
 		{name: "preview_secret_bundle.updated is valid", value: AuditActionPreviewSecretBundleUpdated},
+		{name: "preview_secret_bundle.revealed is valid", value: AuditActionPreviewSecretBundleRevealed},
 		{name: "preview_secret_bundle.resolved is valid", value: AuditActionPreviewSecretBundleResolved},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foo.bar", expectErr: true},
