@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
-import { Copy, HelpCircle, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
+import { Copy, Eye, HelpCircle, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
@@ -50,6 +50,7 @@ import { queryKeys } from "@/lib/query-keys";
 import type {
   ListResponse,
   PreviewAPIToken,
+  PreviewSecretBundleRevealResult,
   PreviewSecretBundleOutput,
   PreviewSecretBundlePatchRequest,
   PreviewSecretBundleSummary,
@@ -199,6 +200,29 @@ function PreviewSecretsSection() {
     },
   });
 
+  const revealTargetId = useRef<string | null>(null);
+  const revealMutation = useMutation({
+    mutationFn: (bundle: PreviewSecretBundleSummary) => {
+      revealTargetId.current = bundle.id;
+      return api.repositories.previewSecretBundles.reveal(bundle.id);
+    },
+    onSuccess: (response) => {
+      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== revealTargetId.current) return;
+      const content = getRevealedFileContent(response.data);
+      if (content === null) {
+        setFormError("Could not find stored file contents for this bundle.");
+        return;
+      }
+      setForm((current) => ({ ...current, fileContent: content }));
+      setFormError(null);
+      setJSONValidationError(null);
+    },
+    onError: (error) => {
+      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== revealTargetId.current) return;
+      setFormError(error instanceof ApiError ? error.message : "Secret file contents could not be revealed.");
+    },
+  });
+
   function openCreateDialog() {
     setDialogMode({ type: "create" });
     setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
@@ -228,6 +252,8 @@ function PreviewSecretsSection() {
     setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
     setFormError(null);
     setJSONValidationError(null);
+    revealTargetId.current = null;
+    revealMutation.reset();
   }
 
   useEffect(() => {
@@ -357,6 +383,12 @@ function PreviewSecretsSection() {
         onRowChange={updateRow}
         onRowAdd={addRow}
         onRowRemove={removeRow}
+        onReveal={() => {
+          if (dialogMode?.type === "edit") {
+            revealMutation.mutate(dialogMode.bundle);
+          }
+        }}
+        revealing={revealMutation.isPending}
         onSubmit={handleSave}
       />
 
@@ -511,6 +543,8 @@ function BundleDialog({
   onRowChange,
   onRowAdd,
   onRowRemove,
+  onReveal,
+  revealing,
   onSubmit,
 }: {
   mode: BundleDialogMode | null;
@@ -524,6 +558,8 @@ function BundleDialog({
   onRowChange: (index: number, patch: Partial<SecretValueRow>) => void;
   onRowAdd: () => void;
   onRowRemove: (index: number) => void;
+  onReveal: () => void;
+  revealing: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const isEdit = mode?.type === "edit";
@@ -614,7 +650,13 @@ function BundleDialog({
               />
             </TabsContent>
             <TabsContent value="file" className="space-y-4">
-              <SecretFileFields form={form} onFormChange={onFormChange} />
+              <SecretFileFields
+                form={form}
+                canReveal={isEdit && editHasFileOutputs}
+                revealing={revealing}
+                onReveal={onReveal}
+                onFormChange={onFormChange}
+              />
             </TabsContent>
           </Tabs>
 
@@ -637,9 +679,15 @@ function BundleDialog({
 
 function SecretFileFields({
   form,
+  canReveal,
+  revealing,
+  onReveal,
   onFormChange,
 }: {
   form: BundleFormState;
+  canReveal: boolean;
+  revealing: boolean;
+  onReveal: () => void;
   onFormChange: (form: BundleFormState) => void;
 }) {
   return (
@@ -675,7 +723,15 @@ function SecretFileFields({
         </div>
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="secret-file-content">Secret file contents</Label>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <Label htmlFor="secret-file-content">Secret file contents</Label>
+          {canReveal ? (
+            <Button type="button" variant="outline" size="sm" onClick={onReveal} disabled={revealing}>
+              <Eye className="h-4 w-4" />
+              {revealing ? "Revealing..." : "Reveal contents"}
+            </Button>
+          ) : null}
+        </div>
         <Textarea
           id="secret-file-content"
           value={form.fileContent}
@@ -1144,6 +1200,14 @@ function fileOutputsFromBundle(bundle: PreviewSecretBundleSummary): PreviewSecre
       path: output.path,
       format: output.format as PreviewSecretBundleOutput["format"],
     }));
+}
+
+function getRevealedFileContent(reveal: PreviewSecretBundleRevealResult): string | null {
+  const fileOutputs = reveal.outputs.filter((output) => output.type === "file" && output.value?.startsWith("secret:"));
+  if (fileOutputs.length !== 1) return null;
+  const sourceKey = fileOutputs[0].value!.slice("secret:".length);
+  if (!sourceKey) return null;
+  return reveal.source.values[sourceKey] ?? null;
 }
 
 function formatOutputSummary(output: PreviewSecretBundleSummary["outputs"][number]): string[] {

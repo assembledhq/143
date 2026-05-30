@@ -174,7 +174,7 @@ Fields:
    - `Save`
    - `Cancel`
 
-For edit flows, do not fetch or show plaintext secret values again. File-bundle edits can preserve the existing encrypted file by leaving the contents field blank; the frontend sends a metadata-only PATCH with outputs but no `source`, and the backend merges the existing decrypted source before saving the next active version. Pasting new file contents replaces the stored encrypted value. Environment-variable edits still require re-entering changed values until the UI has per-value preservation controls.
+For edit flows, do not fetch or show plaintext secret values automatically. File-bundle edits can preserve the existing encrypted file by leaving the contents field blank; the frontend sends a metadata-only PATCH with outputs but no `source`, and the backend merges the existing decrypted source before saving the next active version. Pasting new file contents replaces the stored encrypted value. Admins can explicitly reveal file contents with an action in the edit dialog; that path uses an admin-only endpoint, returns plaintext only for the requested bundle, and emits an audit event without copying secret values into audit details. Environment-variable edits still require re-entering changed values until the UI has per-value preservation controls.
 
 ### Secret File Validation
 
