@@ -15,7 +15,42 @@ const mockDeviceAuth = {
   expires_in: 600,
 };
 
+function setMobileMatch(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 639px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 describe("CodexDeviceCodeModal", () => {
+  it("uses the shared mobile sheet layout", async () => {
+    setMobileMatch(true);
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "pending" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    const dialog = await screen.findByRole("dialog", { name: "Connect your ChatGPT account" });
+    expect(dialog).toHaveAttribute("data-slot", "sheet-content");
+    expect(dialog).toHaveClass("max-h-[100svh]", "overflow-hidden");
+  });
+
   it("shows initiating state then device code on success", async () => {
     server.use(
       http.post(INITIATE_URL, () => {
