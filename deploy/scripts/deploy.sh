@@ -93,6 +93,19 @@ run_worker_host_reconcile() {
     "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
 }
 
+remote_shell_quote() {
+  local value="$1"
+  printf "'"
+  printf '%s' "$value" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+remote_env_assignment() {
+  local key="$1" value="$2"
+  printf '%s=' "$key"
+  remote_shell_quote "$value"
+}
+
 # --- Refresh secrets from .env.production.enc ---
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -465,21 +478,24 @@ else
 fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-  "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
-  "WORKER_DEPLOY_DETACH=${WORKER_DEPLOY_DETACH:-}" \
-  "WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS=${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}" \
-  "WORKER_BLUE_GREEN_PORT_START=${WORKER_BLUE_GREEN_PORT_START:-}" \
-  "WORKER_BLUE_GREEN_PORT_END=${WORKER_BLUE_GREEN_PORT_END:-}" \
-  "WORKER_BASE_NODE_ID=${WORKER_BASE_NODE_ID:-}" \
-  "WORKER_DRAIN_TIMEOUT=${WORKER_DRAIN_TIMEOUT:-}" \
-  "DEPLOY_MODE=${DEPLOY_MODE:-routine}" \
-  "DEPLOY_REQUESTED_BY=${DEPLOY_REQUESTED_BY:-deploy-script}" \
-  "DEPLOY_REASON=${DEPLOY_REASON:-routine worker rollout}" \
-  "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
-  "SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}" \
-  "DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}" \
-  "DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}" \
-  "DEPLOY_DOCKER_VOLUME_PRUNE=${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" \
+  "$(remote_env_assignment COMPOSE_FILE "$COMPOSE_FILE")" \
+  "$(remote_env_assignment HEALTH_SERVICE "$HEALTH_SERVICE")" \
+  "$(remote_env_assignment ROLE "$ROLE")" \
+  "$(remote_env_assignment IMAGE_TAG "$TAG")" \
+  "$(remote_env_assignment WORKER_DEPLOY_DETACH "${WORKER_DEPLOY_DETACH:-}")" \
+  "$(remote_env_assignment WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS "${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_START "${WORKER_BLUE_GREEN_PORT_START:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_END "${WORKER_BLUE_GREEN_PORT_END:-}")" \
+  "$(remote_env_assignment WORKER_BASE_NODE_ID "${WORKER_BASE_NODE_ID:-}")" \
+  "$(remote_env_assignment WORKER_DRAIN_TIMEOUT "${WORKER_DRAIN_TIMEOUT:-}")" \
+  "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+  "$(remote_env_assignment DEPLOY_REQUESTED_BY "${DEPLOY_REQUESTED_BY:-deploy-script}")" \
+  "$(remote_env_assignment DEPLOY_REASON "${DEPLOY_REASON:-routine worker rollout}")" \
+  "$(remote_env_assignment FORCE_DEPLOY_WITH_ACTIVE_SESSIONS "${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}")" \
+  "$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")" \
+  "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
+  "$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")" \
+  "$(remote_env_assignment DEPLOY_DOCKER_VOLUME_PRUNE "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}")" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
