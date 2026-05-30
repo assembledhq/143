@@ -57,13 +57,15 @@ The new flow:
    - `preview.install.cache.enabled: false` disables restore and save.
 4. If caching is enabled:
    - Compute a dependency cache key from install config, declared lockfiles, sandbox runtime/image, and effective cache paths.
-   - Look up a blob in shared object storage by `(org_id, repo_id, cache_key)`. Any worker can serve any other worker's saved blob.
-   - If found, stream the blob from object storage into the sandbox and restore only the effective cache paths.
+   - Check the worker-local L1 cache by `cache_key`. If present, verify checksum and restore only the effective cache paths.
+   - On L1 miss, look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The L2 blob lives in shared object storage, so any worker can restore any other worker's saved blob.
+   - If L2 is found, stream the blob from object storage into the sandbox, verify checksum, populate worker-local L1 when configured, upsert the worker's L1 location hint, and restore only the effective cache paths.
+   - If both L1 and L2 miss, continue to the normal install path.
 5. Run the existing `preview.install` flow:
    - Compute the existing install marker key.
    - If the marker and `verify_paths` are present, skip install.
    - Otherwise clean `clean_paths`, run `command`, then write the marker.
-6. If install succeeds and caching is enabled, save the effective cache paths into shared object storage and optionally the worker-local L1 cache.
+6. If install succeeds and caching is enabled, archive the effective cache paths once, write the archive to worker-local L1 when configured, upload it to shared L2 object storage, upsert the durable L2 metadata row, and upsert the worker's L1 location hint.
 7. Start preview services and readiness as today.
 
 This means cache restore is an accelerator, not the source of truth. The hydrated session snapshot remains authoritative for source files.
@@ -479,7 +481,51 @@ The manager observer should persist concise preview logs for restore/save failur
 
 ## Database Schema
 
-Add a new org-scoped table. Do not reuse `preview_startup_cache`; that table represents full-workspace snapshots and has different safety semantics.
+Add new org-scoped tables. Do not reuse `preview_startup_cache`; that table represents full-workspace snapshots and has different safety semantics.
+
+### Metadata Store Choice: Postgres vs Redis
+
+There are two different metadata categories:
+
+- Durable L2 blob index: "Does an object-storage blob exist for this exact `(org_id, repo_id, cache_key)`, and what metadata/checksum/effective paths belong to it?"
+- Ephemeral L1 location hints: "Which workers recently had a local disk copy for this `(org_id, repo_id, placement_key)`?"
+
+Recommendation: keep both in Postgres for the first implementation, with object storage as the source of blob bytes. Revisit Redis only if scheduler lookup/write volume becomes a measured bottleneck.
+
+Postgres advantages:
+
+- It is already the system-of-record database and fits the existing store/test/tenancy patterns.
+- Durable L2 metadata should survive Redis eviction, deploys, and cache-node restarts; losing it would make existing S3 blobs undiscoverable until rebuilt.
+- Org scoping, auditability, migrations, and cleanup jobs are straightforward.
+- LRU and retention queries are simple SQL and can be kept consistent with S3 lifecycle cleanup.
+- It avoids adding Redis as another required dependency for preview caching.
+
+Postgres downsides:
+
+- `last_used_at` touches and L1 location upserts add write traffic.
+- Scheduler lookups add a DB read on preview start.
+- Location rows are ephemeral, so storing them durably is more persistence than they strictly need.
+
+Mitigations:
+
+- Throttle `last_used_at` updates so a cache hit only touches the row if the existing timestamp is older than a small interval, e.g. 5-15 minutes.
+- Bound scheduler location lookups with a small `LIMIT`, short timeout, and fallback to rendezvous hashing.
+- Treat stale location rows as harmless hints and clean them with a periodic TTL job.
+
+Redis advantages:
+
+- Fast TTL-native storage is a natural fit for L1 location hints.
+- It can absorb high-frequency worker heartbeat/location writes without increasing Postgres write load.
+- Key expiry automatically handles dead workers and local disk eviction if workers refresh locations periodically.
+
+Redis downsides:
+
+- It is not a good source of truth for L2 metadata unless Redis persistence/backup is made operationally critical.
+- Eviction or restart would make S3 blobs undiscoverable if durable metadata lived only in Redis.
+- Multi-dimensional lookups such as `(org_id, repo_id, placement_key)` plus LRU/retention cleanup require custom key/index maintenance.
+- It adds another production dependency and another failure mode to preview startup.
+
+If Redis is introduced later, use it as an optional accelerator for `preview_dependency_cache_locations` only: workers write L1 location hints to Redis with TTL, the scheduler reads Redis first, and Postgres remains the durable L2 blob index. Do not move `preview_dependency_cache` to Redis unless the product is comfortable treating all dependency-cache metadata as disposable and letting S3 lifecycle cleanup orphaned blobs.
 
 ```sql
 CREATE TABLE preview_dependency_cache (
