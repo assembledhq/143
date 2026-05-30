@@ -74,15 +74,6 @@ var previewStartupCacheTestCols = []string{
 	"size_bytes", "worker_node_id", "last_used_at", "created_at",
 }
 
-var previewDependencyCacheTestCols = []string{
-	"id", "org_id", "repo_id", "cache_key", "placement_key",
-	"blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
-}
-
-var previewDependencyCacheLocationTestCols = []string{
-	"id", "org_id", "repo_id", "cache_key", "placement_key",
-	"worker_node_id", "size_bytes", "last_used_at", "created_at",
-}
 
 var prPreviewStateTestCols = []string{
 	"id", "org_id", "repo_id", "pr_number", "github_comment_id",

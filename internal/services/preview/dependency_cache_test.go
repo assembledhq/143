@@ -63,11 +63,6 @@ func (e *dependencyCacheExec) WriteFile(_ context.Context, _ *agent.Sandbox, pat
 	return nil
 }
 
-func (e *dependencyCacheExec) calls() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return append([]string(nil), e.execCalls...)
-}
 
 type memorySnapshotStore struct {
 	mu    sync.Mutex

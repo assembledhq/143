@@ -744,11 +744,6 @@ func (r *recordingObserver) dependencyCacheRestores() []recordedCacheEvent {
 	return append([]recordedCacheEvent(nil), r.cacheRestores...)
 }
 
-func (r *recordingObserver) dependencyCacheSaves() []recordedCacheEvent {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]recordedCacheEvent(nil), r.cacheSaves...)
-}
 
 type fakeDependencyCache struct {
 	mu         sync.Mutex

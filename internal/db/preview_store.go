@@ -2527,6 +2527,7 @@ func (s *PreviewStore) ListDependencyCacheLRU(ctx context.Context, orgID, repoID
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
 }
 
+// ListExpiredDependencyCaches returns dependency cache entries whose last_used_at is before cutoff.
 // lint:allow-no-orgid reason="background dependency cache cleanup scans expired cache metadata across orgs"
 func (s *PreviewStore) ListExpiredDependencyCaches(ctx context.Context, cutoff time.Time, limit int) ([]models.PreviewDependencyCache, error) {
 	if limit <= 0 {
@@ -2542,6 +2543,7 @@ func (s *PreviewStore) ListExpiredDependencyCaches(ctx context.Context, cutoff t
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCache])
 }
 
+// ListDependencyCachesOverLimit returns dependency cache entries ranked beyond keepNewestPerRepo within each repo.
 // lint:allow-no-orgid reason="background dependency cache cleanup scans LRU metadata across orgs"
 func (s *PreviewStore) ListDependencyCachesOverLimit(ctx context.Context, keepNewestPerRepo, limit int) ([]models.PreviewDependencyCache, error) {
 	if keepNewestPerRepo < 0 {
@@ -2618,6 +2620,7 @@ func (s *PreviewStore) DeleteDependencyCacheLocation(ctx context.Context, orgID 
 	return nil
 }
 
+// DeleteExpiredDependencyCacheLocations removes local cache location hints whose last_used_at is before cutoff.
 // lint:allow-no-orgid reason="background dependency cache cleanup deletes stale ephemeral local cache hints across orgs"
 func (s *PreviewStore) DeleteExpiredDependencyCacheLocations(ctx context.Context, cutoff time.Time) (int64, error) {
 	tag, err := s.db.Exec(ctx,
@@ -2630,6 +2633,7 @@ func (s *PreviewStore) DeleteExpiredDependencyCacheLocations(ctx context.Context
 	return tag.RowsAffected(), nil
 }
 
+// DeleteDependencyCacheLocationByWorkerCacheKey removes a single local cache location hint for the given worker and cache key.
 // lint:allow-no-orgid reason="worker cleanup deletes ephemeral local cache hints across orgs without exposing tenant data"
 func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context.Context, workerNodeID, cacheKey string) error {
 	_, err := s.db.Exec(ctx,
@@ -2642,6 +2646,7 @@ func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context
 	return nil
 }
 
+// DeleteDependencyCacheLocationsForWorker removes all local cache location hints for the given worker node.
 // lint:allow-no-orgid reason="worker cleanup deletes ephemeral local cache hints across orgs without exposing tenant data"
 func (s *PreviewStore) DeleteDependencyCacheLocationsForWorker(ctx context.Context, workerNodeID string) error {
 	_, err := s.db.Exec(ctx,
