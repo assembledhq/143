@@ -128,6 +128,15 @@ describe("FileTree", () => {
     expect(screen.getByText("3 files changed")).toBeInTheDocument();
   });
 
+  it("adds top spacing above the changed-files summary in the sidebar", () => {
+    render(
+      <FileTree files={files} activeFileIndex={0} onFileSelect={vi.fn()} />
+    );
+
+    const summary = screen.getByText("3 files changed");
+    expect(summary.parentElement).toHaveClass("pt-3");
+  });
+
   it("calls onFileSelect when a file is clicked", async () => {
     const onFileSelect = vi.fn();
     const user = userEvent.setup();
