@@ -25,6 +25,8 @@ import {
   X,
   ChevronDown,
   MoreHorizontal,
+  Copy,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -95,6 +97,7 @@ const STARTUP_PHASE_RAIL_STACK_WIDTH = 300;
 const STARTUP_PHASE_RAIL_COMPACT_WIDTH = 420;
 
 type StartupPhaseRailLayout = "default" | "compact" | "stacked";
+type CopiedLogTarget = "preview" | "error";
 
 function getStartupPhaseRailLayout(
   width: number,
@@ -428,10 +431,35 @@ export function PreviewPanel({
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
   const [showPreviewRuntimeLogs, setShowPreviewRuntimeLogs] = useState(false);
+  const [copiedLogTarget, setCopiedLogTarget] =
+    useState<CopiedLogTarget | null>(null);
   const [startupPhaseRailLayout, setStartupPhaseRailLayout] =
     useState<StartupPhaseRailLayout>("default");
   const startupErrorLogsId = useId();
   const previewRuntimeLogsId = useId();
+
+  useEffect(() => {
+    if (!copiedLogTarget) return;
+    const timer = window.setTimeout(() => setCopiedLogTarget(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copiedLogTarget]);
+
+  const copyLogs = useCallback(
+    (target: CopiedLogTarget, logs: string) => {
+      if (!navigator.clipboard) {
+        console.error("Clipboard API is unavailable.");
+        return;
+      }
+
+      void navigator.clipboard
+        .writeText(logs)
+        .then(() => setCopiedLogTarget(target))
+        .catch((err: unknown) => {
+          console.error("Failed to copy preview logs.", err);
+        });
+    },
+    [],
+  );
 
   // Poll preview status every 3s when active
   const {
@@ -545,6 +573,14 @@ export function PreviewPanel({
     previewLogsQuery.isError,
     previewLogsQuery.isLoading,
   ]);
+  const canCopyPreviewRuntimeLogs =
+    !previewLogsQuery.isLoading &&
+    !previewLogsQuery.isError &&
+    visiblePreviewRuntimeLogs !== "No preview logs have been captured yet.";
+  const canCopyStartupErrorLogs =
+    !previewLogsQuery.isLoading &&
+    !previewLogsQuery.isError &&
+    startupErrorLogs.trim().length > 0;
 
   // Ensure preview
   const startMutation = useMutation({
@@ -1154,6 +1190,24 @@ export function PreviewPanel({
                   )}
                 />
               </Button>
+              {showPreviewRuntimeLogs && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  aria-label="Copy preview logs"
+                  title="Copy preview logs"
+                  disabled={!canCopyPreviewRuntimeLogs}
+                  onClick={() => copyLogs("preview", visiblePreviewRuntimeLogs)}
+                >
+                  {copiedLogTarget === "preview" ? (
+                    <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                  ) : (
+                    <Copy className="size-3.5" aria-hidden="true" />
+                  )}
+                </Button>
+              )}
             </div>
             {showPreviewRuntimeLogs && (
               <pre
@@ -1223,14 +1277,36 @@ export function PreviewPanel({
 
             {visibleStartupErrorLogs && (
               <div className="border-t border-destructive/10 pt-3">
-                <div className="mb-1.5 flex min-w-0 items-center gap-2">
-                  <span
-                    className="size-1.5 shrink-0 rounded-full bg-destructive"
-                    aria-hidden="true"
-                  />
-                  <div className="truncate text-xs font-medium text-foreground">
-                    {showFullStartupLogs ? "Full error log" : "Startup summary"}
+                <div className="mb-1.5 flex min-w-0 items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-destructive"
+                      aria-hidden="true"
+                    />
+                    <div className="truncate text-xs font-medium text-foreground">
+                      {showFullStartupLogs
+                        ? "Full error log"
+                        : "Startup summary"}
+                    </div>
                   </div>
+                  {showFullStartupLogs && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                      aria-label="Copy error log"
+                      title="Copy error log"
+                      disabled={!canCopyStartupErrorLogs}
+                      onClick={() => copyLogs("error", visibleStartupErrorLogs)}
+                    >
+                      {copiedLogTarget === "error" ? (
+                        <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                      ) : (
+                        <Copy className="size-3.5" aria-hidden="true" />
+                      )}
+                    </Button>
+                  )}
                 </div>
                 <pre
                   id={startupErrorLogsId}
