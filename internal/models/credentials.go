@@ -40,6 +40,8 @@ const (
 	ProviderSlack                 ProviderName = "slack"
 	ProviderNotion                ProviderName = "notion"
 	ProviderCircleCI              ProviderName = "circleci"
+	ProviderVictoriaLogs          ProviderName = "victorialogs"
+	ProviderMezmo                 ProviderName = "mezmo"
 )
 
 // AllProviders is the canonical list of credential providers.
@@ -49,7 +51,7 @@ var AllProviders = []ProviderName{
 	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
-	ProviderCircleCI,
+	ProviderCircleCI, ProviderVictoriaLogs, ProviderMezmo,
 }
 
 // LLMProviders is the subset of providers that serve LLM completions.

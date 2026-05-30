@@ -1,6 +1,6 @@
 # Design: Agent Log Provider Tools
 
-> **Status:** Not Started | **Last reviewed:** 2026-05-28
+> **Status:** Implemented | **Last reviewed:** 2026-05-30
 
 ## Summary
 

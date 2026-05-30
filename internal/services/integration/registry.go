@@ -3,6 +3,8 @@ package integration
 import (
 	"fmt"
 	"sync"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // Registry holds all configured integration providers, organized by category.
@@ -24,6 +26,7 @@ type Registry struct {
 	prCreators        map[string]PullRequestCreator
 	projectProposers  map[string]ProjectProposer
 	ciTestInsights    map[string]CITestInsights
+	logProviders      map[string]LogProvider
 }
 
 // NewRegistry creates an empty integration registry.
@@ -38,6 +41,7 @@ func NewRegistry() *Registry {
 		prCreators:        make(map[string]PullRequestCreator),
 		projectProposers:  make(map[string]ProjectProposer),
 		ciTestInsights:    make(map[string]CITestInsights),
+		logProviders:      make(map[string]LogProvider),
 	}
 }
 
@@ -280,6 +284,13 @@ func (r *Registry) RegisterCITestInsights(provider CITestInsights) {
 	r.ciTestInsights[provider.Name()] = provider
 }
 
+// RegisterLogProvider adds a read-only log provider (e.g. VictoriaLogs, Mezmo).
+func (r *Registry) RegisterLogProvider(provider LogProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logProviders[string(provider.Name())] = provider
+}
+
 // CITestInsightsProviders returns all registered CI test insights providers.
 func (r *Registry) CITestInsightsProviders() []CITestInsights {
 	r.mu.RLock()
@@ -302,6 +313,29 @@ func (r *Registry) CITestInsightsProvider(name string) (CITestInsights, error) {
 	return p, nil
 }
 
+// LogProviders returns all registered log providers.
+func (r *Registry) LogProviders() []LogProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]LogProvider, 0, len(r.logProviders))
+	for _, p := range r.logProviders {
+		result = append(result, p)
+	}
+	return result
+}
+
+// LogProvider returns a specific log provider by provider name.
+func (r *Registry) LogProvider(name models.ProviderName) (LogProvider, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	key := string(name)
+	p, ok := r.logProviders[key]
+	if !ok {
+		return nil, fmt.Errorf("log provider %q not registered", key)
+	}
+	return p, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -314,7 +348,8 @@ func (r *Registry) HasAny() bool {
 		len(r.issueCreators) > 0 ||
 		len(r.prCreators) > 0 ||
 		len(r.projectProposers) > 0 ||
-		len(r.ciTestInsights) > 0
+		len(r.ciTestInsights) > 0 ||
+		len(r.logProviders) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -348,6 +383,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.ciTestInsights {
 		m["ci_test_insights"] = append(m["ci_test_insights"], name)
+	}
+	for name := range r.logProviders {
+		m["log_providers"] = append(m["log_providers"], name)
 	}
 	return m
 }
