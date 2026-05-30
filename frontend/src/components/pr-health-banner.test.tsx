@@ -191,7 +191,7 @@ describe("PRHealthBanner", () => {
     expect(onQueue).toHaveBeenCalledTimes(1);
   });
 
-  it("shows queued merge when ready state and allows cancelling", async () => {
+  it("shows queued auto-merge state and allows turning it off from the merge menu", async () => {
     const onCancel = vi.fn();
     renderWithProviders(
       <PRHealthBanner
@@ -209,8 +209,11 @@ describe("PRHealthBanner", () => {
       />,
     );
 
-    expect(screen.getByText("Merge when ready is on. Waiting for checks to pass.")).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Auto-merge on" })).toBeDisabled();
+    expect(screen.getByText("Waiting for GitHub requirements.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "More merge actions" }));
+    await userEvent.setup().click(await screen.findByRole("menuitem", { name: "Turn off auto-merge" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 

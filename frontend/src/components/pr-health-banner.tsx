@@ -356,14 +356,9 @@ export function PRHealthBanner({
                   </p>
                 )}
                 {health.merge_when_ready.state === "queued" && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                    <span>Merge when ready is on. Waiting for checks to pass.</span>
-                    {onCancelMergeWhenReady && (
-                      <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={onCancelMergeWhenReady} disabled={mergeWhenReadyPending}>
-                        Cancel
-                      </Button>
-                    )}
-                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Waiting for GitHub requirements.
+                  </p>
                 )}
                 {health.merge_when_ready.state === "failed" && health.merge_when_ready.last_error && (
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
