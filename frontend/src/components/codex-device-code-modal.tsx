@@ -4,6 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
+import {
+  ResponsiveModal,
+  ResponsiveModalBody,
+  ResponsiveModalDescription,
+  ResponsiveModalFooter,
+  ResponsiveModalHeader,
+  ResponsiveModalTitle,
+} from "@/components/ui/responsive-modal";
 import { Check, Copy } from "lucide-react";
 import type { CodexDeviceAuth } from "@/lib/types";
 
@@ -107,9 +115,20 @@ export function CodexDeviceCodeModal({
   const seconds = timeLeft % 60;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg border bg-background p-6 shadow-lg">
-        <h3 className="text-lg font-medium">Connect your ChatGPT account</h3>
+    <ResponsiveModal
+      open
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+      desktopClassName="sm:max-w-md"
+    >
+      <ResponsiveModalHeader>
+        <ResponsiveModalTitle>Connect your ChatGPT account</ResponsiveModalTitle>
+        <ResponsiveModalDescription>
+          Open the verification link, enter the device code, and keep this window open while authentication completes.
+        </ResponsiveModalDescription>
+      </ResponsiveModalHeader>
+      <ResponsiveModalBody>
         {status === "initiating" && <p className="mt-4 text-sm text-muted-foreground">Starting authentication...</p>}
         {status === "pending" && deviceAuth && (
           <div className="mt-4 space-y-4">
@@ -131,7 +150,7 @@ export function CodexDeviceCodeModal({
                       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
                       copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
                     }).catch(() => {
-                      // Clipboard write failed — don't show "Copied"
+                      console.error("Failed to copy Codex device code");
                     });
                   }}
                 >
@@ -164,13 +183,13 @@ export function CodexDeviceCodeModal({
             <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
-        <div className="mt-6 flex items-center justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={onClose}>{status === "completed" ? "Done" : "Cancel"}</Button>
-          {(status === "error" || status === "expired") && (
-            <Button size="sm" onClick={startAuth}>Try again</Button>
-          )}
-        </div>
-      </div>
-    </div>
+      </ResponsiveModalBody>
+      <ResponsiveModalFooter>
+        <Button variant="outline" size="sm" onClick={onClose}>{status === "completed" ? "Done" : "Cancel"}</Button>
+        {(status === "error" || status === "expired") && (
+          <Button size="sm" onClick={startAuth}>Try again</Button>
+        )}
+      </ResponsiveModalFooter>
+    </ResponsiveModal>
   );
 }
