@@ -63,6 +63,12 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 	b.WriteString(fmt.Sprintf("- Output is JSON. Pipe through `jq` for filtering: `%s`\n", exampleJQTip(tools)))
 	b.WriteString("- Combine tools: find an error, then look up related tasks.\n")
 	b.WriteString("- Use `--limit` to control result size and keep output manageable.\n")
+	for _, tool := range tools {
+		if strings.HasPrefix(tool.Name, "log_") {
+			b.WriteString("- Log queries require a time bound: always provide `--since` or `--start_time`/`--end_time`.\n")
+			break
+		}
+	}
 
 	return b.String()
 }

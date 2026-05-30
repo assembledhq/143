@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -54,11 +56,24 @@ func taskManagerUnauthorizedDetail(providerName string, err error) string {
 // dispatches tool calls to the appropriate integration method.
 type ToolRegistry struct {
 	integrations *integration.Registry
+	cursorSigner *integration.LogCursorSigner
 }
 
 // NewToolRegistry creates a ToolRegistry backed by the given integration registry.
+// It initializes a log cursor signer using LOG_CURSOR_SIGNING_KEY if set, or a
+// random ephemeral key otherwise (cursors won't survive restarts without the env var).
 func NewToolRegistry(reg *integration.Registry) *ToolRegistry {
-	return &ToolRegistry{integrations: reg}
+	key := []byte(os.Getenv("LOG_CURSOR_SIGNING_KEY"))
+	if len(key) == 0 {
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			panic(fmt.Sprintf("failed to generate log cursor signing key: %s", err))
+		}
+	}
+	return &ToolRegistry{
+		integrations: reg,
+		cursorSigner: integration.NewLogCursorSigner(key),
+	}
 }
 
 // ListTools returns all available MCP tools based on which integrations are
@@ -274,6 +289,10 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
+		tools = append(tools, logToolDefinitions(logProviders)...)
+	}
+
 	for _, pp := range tr.integrations.ProjectProposers() {
 		prefix := pp.Name()
 		tools = append(tools,
@@ -381,6 +400,11 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("pull request creator not registered")
 		}
 		return tr.callPullRequestCreator(ctx, creators[0], "create_pr", args)
+	}
+
+	switch name {
+	case "log_query", "log_context", "log_fields", "log_stats":
+		return tr.callLogTool(ctx, name, args)
 	}
 
 	// Try each integration category. The tool name is prefixed with the

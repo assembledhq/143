@@ -6,18 +6,21 @@ import "fmt"
 type IntegrationProvider string
 
 const (
-	IntegrationProviderGitHub   IntegrationProvider = "github"
-	IntegrationProviderSentry   IntegrationProvider = "sentry"
-	IntegrationProviderLinear   IntegrationProvider = "linear"
-	IntegrationProviderSlack    IntegrationProvider = "slack"
-	IntegrationProviderNotion   IntegrationProvider = "notion"
-	IntegrationProviderCircleCI IntegrationProvider = "circleci"
+	IntegrationProviderGitHub       IntegrationProvider = "github"
+	IntegrationProviderSentry       IntegrationProvider = "sentry"
+	IntegrationProviderLinear       IntegrationProvider = "linear"
+	IntegrationProviderSlack        IntegrationProvider = "slack"
+	IntegrationProviderNotion       IntegrationProvider = "notion"
+	IntegrationProviderCircleCI     IntegrationProvider = "circleci"
+	IntegrationProviderVictoriaLogs IntegrationProvider = "victorialogs"
+	IntegrationProviderMezmo        IntegrationProvider = "mezmo"
 )
 
 func (p IntegrationProvider) Validate() error {
 	switch p {
 	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear,
-		IntegrationProviderSlack, IntegrationProviderNotion, IntegrationProviderCircleCI:
+		IntegrationProviderSlack, IntegrationProviderNotion, IntegrationProviderCircleCI,
+		IntegrationProviderVictoriaLogs, IntegrationProviderMezmo:
 		return nil
 	default:
 		return fmt.Errorf("invalid IntegrationProvider: %q", p)

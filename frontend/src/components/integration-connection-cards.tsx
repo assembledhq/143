@@ -182,6 +182,8 @@ const DISCONNECT_DESCRIPTIONS: Record<IntegrationKey, string> = {
   slack: "This will disconnect Slack from your organization. Channel monitoring will stop.",
   notion: "This will disconnect Notion from your organization. Product docs will no longer sync.",
   circleci: "This will disconnect CircleCI from your organization. Flaky-test data will no longer be available to agents.",
+  victorialogs: "This will disconnect VictoriaLogs from your organization. Production log queries will no longer be available to agents.",
+  mezmo: "This will disconnect Mezmo from your organization. Production log queries will no longer be available to agents.",
 };
 
 function IntegrationAction({
