@@ -46,9 +46,11 @@ func (r *lockedRecorder) BodyString() string {
 }
 
 type stubPullRequestHealthService struct {
-	getHealthFunc func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error)
-	repairFunc    func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error)
-	mergeFunc     func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error)
+	getHealthFunc            func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error)
+	repairFunc               func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error)
+	mergeFunc                func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error)
+	queueMergeWhenReadyFunc  func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
+	cancelMergeWhenReadyFunc func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 }
 
 type stubPullRequestMembershipStore struct {
@@ -68,6 +70,20 @@ func (s *stubPullRequestHealthService) MergePullRequest(ctx context.Context, org
 		return nil, errors.New("merge not stubbed")
 	}
 	return s.mergeFunc(ctx, orgID, pullRequestID, userID)
+}
+
+func (s *stubPullRequestHealthService) QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+	if s.queueMergeWhenReadyFunc == nil {
+		return nil, errors.New("queue merge when ready not stubbed")
+	}
+	return s.queueMergeWhenReadyFunc(ctx, orgID, pullRequestID, userID)
+}
+
+func (s *stubPullRequestHealthService) CancelMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+	if s.cancelMergeWhenReadyFunc == nil {
+		return nil, errors.New("cancel merge when ready not stubbed")
+	}
+	return s.cancelMergeWhenReadyFunc(ctx, orgID, pullRequestID, userID)
 }
 
 func (s *stubPullRequestMembershipStore) Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
@@ -592,8 +608,107 @@ func TestPullRequestHandler_Merge(t *testing.T) {
 	})
 }
 
+func TestPullRequestHandler_MergeWhenReady(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	prID := uuid.New()
+	now := time.Now().UTC()
+	healthVersion := int64(7)
+
+	t.Run("queues merge when ready", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			queueMergeWhenReadyFunc: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				require.Equal(t, orgID, gotOrgID, "QueueMergeWhenReady should pass the active org ID")
+				require.Equal(t, prID, gotPRID, "QueueMergeWhenReady should pass the parsed pull request ID")
+				require.Equal(t, userID, gotUserID, "QueueMergeWhenReady should pass the current user ID")
+				return &models.PullRequestMergeWhenReadyStatus{
+					State:                  models.PullRequestMergeWhenReadyStateQueued,
+					RequestedByUserID:      &userID,
+					RequestedAt:            &now,
+					RequestedHeadSHA:       "head",
+					RequestedHealthVersion: &healthVersion,
+				}, nil
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeWhenReadyRequest(http.MethodPost, prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.QueueMergeWhenReady(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "QueueMergeWhenReady should return 200 on success")
+		var resp models.SingleResponse[models.PullRequestMergeWhenReadyStatus]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "QueueMergeWhenReady should return valid JSON")
+		require.Equal(t, models.PullRequestMergeWhenReadyStateQueued, resp.Data.State, "QueueMergeWhenReady should serialize the queued state")
+		require.Equal(t, "head", resp.Data.RequestedHeadSHA, "QueueMergeWhenReady should serialize the requested head")
+	})
+
+	t.Run("cancels merge when ready", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			cancelMergeWhenReadyFunc: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				require.Equal(t, orgID, gotOrgID, "CancelMergeWhenReady should pass the active org ID")
+				require.Equal(t, prID, gotPRID, "CancelMergeWhenReady should pass the parsed pull request ID")
+				require.Equal(t, userID, gotUserID, "CancelMergeWhenReady should pass the current user ID")
+				return &models.PullRequestMergeWhenReadyStatus{
+					State:                  models.PullRequestMergeWhenReadyStateCancelled,
+					RequestedByUserID:      &userID,
+					RequestedAt:            &now,
+					RequestedHeadSHA:       "head",
+					RequestedHealthVersion: &healthVersion,
+				}, nil
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeWhenReadyRequest(http.MethodDelete, prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.CancelMergeWhenReady(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "CancelMergeWhenReady should return 200 on success")
+		var resp models.SingleResponse[models.PullRequestMergeWhenReadyStatus]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "CancelMergeWhenReady should return valid JSON")
+		require.Equal(t, models.PullRequestMergeWhenReadyStateCancelled, resp.Data.State, "CancelMergeWhenReady should serialize the cancelled state")
+	})
+
+	t.Run("requeue after cancellation is delegated to service", func(t *testing.T) {
+		t.Parallel()
+
+		called := false
+		svc := &stubPullRequestHealthService{
+			queueMergeWhenReadyFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				called = true
+				return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeWhenReadyRequest(http.MethodPost, prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.QueueMergeWhenReady(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "QueueMergeWhenReady should allow service-level re-queueing after cancellation")
+		require.True(t, called, "QueueMergeWhenReady should call the queue service even if prior state was cancelled")
+	})
+}
+
 func mergeRequest(pathID string, user *models.User, orgID uuid.UUID) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/pull-requests/"+pathID+"/merge", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	if user != nil {
+		req = req.WithContext(middleware.WithUser(req.Context(), user))
+	}
+	req = req.WithContext(withURLParam(req.Context(), "id", pathID))
+	return req
+}
+
+func mergeWhenReadyRequest(method, pathID string, user *models.User, orgID uuid.UUID) *http.Request {
+	req := httptest.NewRequest(method, "/api/v1/pull-requests/"+pathID+"/merge-when-ready", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	if user != nil {
 		req = req.WithContext(middleware.WithUser(req.Context(), user))

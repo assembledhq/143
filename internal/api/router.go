@@ -1114,6 +1114,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
 				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
 				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
+				r.Post("/api/v1/pull-requests/{id}/merge-when-ready", pullRequestHandler.QueueMergeWhenReady)
+				r.Delete("/api/v1/pull-requests/{id}/merge-when-ready", pullRequestHandler.CancelMergeWhenReady)
 
 				// Automations (write)
 				r.Post("/api/v1/automations", automationHandler.Create)

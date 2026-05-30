@@ -263,6 +263,10 @@ export type MergeActionInput = {
   pendingAction: "fix_tests" | "resolve_conflicts" | "merge" | null;
 };
 
+export type MergeWhenReadyActionInput = MergeActionInput & {
+  pendingMergeWhenReady: boolean;
+};
+
 export function deriveMergeActionState({ health, hasActiveRepair, pendingAction }: MergeActionInput): LabeledLifecycleActionState {
   if (health.status !== "open") {
     return { visible: false, disabled: false, label: "Merge", spinning: false };
@@ -359,4 +363,42 @@ export function deriveMergeActionState({ health, hasActiveRepair, pendingAction 
   }
 
   return { visible: true, disabled: false, label: "Merge", spinning: false };
+}
+
+export function deriveMergeWhenReadyActionState({ health, hasActiveRepair, pendingAction, pendingMergeWhenReady }: MergeWhenReadyActionInput): LabeledLifecycleActionState {
+  if (health.status !== "open") {
+    return { visible: false, disabled: false, label: "Merge when ready", spinning: false };
+  }
+
+  const current = health.merge_when_ready;
+  if (current?.state === "queued") {
+    return { visible: true, disabled: false, label: "Cancel merge when ready", spinning: pendingMergeWhenReady };
+  }
+  if (current?.state === "merging") {
+    return { visible: true, disabled: true, disabledReason: "Merging this pull request", label: "Merging when ready…", spinning: true };
+  }
+
+  const label = current?.state === "failed" ? "Retry merge when ready" : "Merge when ready";
+  if (pendingMergeWhenReady) {
+    return { visible: true, disabled: true, disabledReason: "Updating merge when ready", label, spinning: true };
+  }
+  if (pendingAction !== null) {
+    return { visible: true, disabled: true, disabledReason: "Wait for the current PR action to finish", label, spinning: false };
+  }
+  if (hasActiveRepair) {
+    return { visible: true, disabled: true, disabledReason: "Wait for the active repair session to finish before enabling merge when ready", label, spinning: false };
+  }
+  if (health.has_conflicts || health.can_resolve_conflicts || health.merge_state === "conflicted") {
+    return { visible: true, disabled: true, disabledReason: "Resolve conflicts before enabling merge when ready", label, spinning: false };
+  }
+  if (health.failing_test_count > 0 || health.can_fix_tests || (health.checks ?? []).some((check) => check.status === "failed")) {
+    return { visible: true, disabled: true, disabledReason: "Fix failing checks before enabling merge when ready", label, spinning: false };
+  }
+  if (!health.head_sha) {
+    return { visible: true, disabled: true, disabledReason: "Waiting for GitHub to report the pull request head", label, spinning: false };
+  }
+  if (health.can_merge) {
+    return { visible: false, disabled: false, label, spinning: false };
+  }
+  return { visible: true, disabled: false, label, spinning: false };
 }

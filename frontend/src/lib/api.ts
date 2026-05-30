@@ -235,6 +235,8 @@ export const api = {
     fixTests: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`),
     resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
+    queueMergeWhenReady: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
+    cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
   },
   previews: {
     list: (params?: { repository_id?: string; branch?: string; status?: string }) => {

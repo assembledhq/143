@@ -122,6 +122,7 @@ export const mockPRHealth: PullRequestHealthResponse = {
   enrichment_ready: true,
   conflict_detail_available: true,
   failing_test_detail_available: false,
+  merge_when_ready: { state: 'off' },
 };
 
 export const mockProjectDetail: ProjectDetail = {
@@ -438,6 +439,18 @@ export const handlers = [
         repair_action_type: 'resolve_conflicts',
       },
     } satisfies SingleResponse<PullRequestRepairResponse>);
+  }),
+
+  http.post('/api/v1/pull-requests/:id/merge-when-ready', () => {
+    return HttpResponse.json({
+      data: { state: 'queued', requested_head_sha: 'head-sha', requested_health_version: 1 },
+    } satisfies SingleResponse<import('@/lib/types').PullRequestMergeWhenReadyStatus>);
+  }),
+
+  http.delete('/api/v1/pull-requests/:id/merge-when-ready', () => {
+    return HttpResponse.json({
+      data: { state: 'cancelled', requested_head_sha: 'head-sha', requested_health_version: 1 },
+    } satisfies SingleResponse<import('@/lib/types').PullRequestMergeWhenReadyStatus>);
   }),
 
   http.get('/api/v1/sessions/:id/messages', () => {

@@ -26,6 +26,7 @@ const (
 	prHealthSyncJobType      = "sync_pull_request_state"
 	prHealthReconcileJobType = "reconcile_pull_request_state"
 	prHealthEnrichJobType    = "enrich_pull_request_health"
+	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
 )
 
 var (
@@ -139,6 +140,14 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 		NeedsAgentAction:    pr.NeedsAgentAction,
 		GitHubStateSyncedAt: pr.GitHubStateSyncedAt,
 		HealthVersion:       pr.HealthVersion,
+		MergeWhenReady: models.PullRequestMergeWhenReadyStatus{
+			State:                  pr.MergeWhenReadyState,
+			RequestedByUserID:      pr.MergeWhenReadyRequestedBy,
+			RequestedAt:            pr.MergeWhenReadyRequestedAt,
+			RequestedHeadSHA:       pr.MergeWhenReadyHeadSHA,
+			RequestedHealthVersion: pr.MergeWhenReadyHealthVersion,
+			LastError:              pr.MergeWhenReadyError,
+		},
 	}
 	derivePullRequestRepairActions(resp)
 	if pr.HeadSHA != nil {
@@ -391,6 +400,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 
 	s.publishPullRequestUpdated(ctx, pr, current)
+	s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	if mergeStateIndeterminate {
 		return ErrPullRequestMergeabilityPending
 	}
@@ -410,6 +420,13 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 			}
 			s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to reconcile pull request health")
 		}
+	}
+	queued, err := s.pullRequests.ListMergeWhenReadyForProcessing(ctx, orgID, time.Now().Add(-mergeWhenReadyMergingStaleAfter), limit)
+	if err != nil {
+		return err
+	}
+	for _, pr := range queued {
+		s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	}
 	return nil
 }
@@ -944,6 +961,24 @@ func (s *PRService) enqueuePullRequestHealthEnrichment(ctx context.Context, pr m
 	if err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health enrichment")
 	}
+}
+
+func (s *PRService) enqueueMergeWhenReadyProcessing(ctx context.Context, pr models.PullRequest) {
+	if s.jobs == nil || !isMergeWhenReadyProcessable(pr, time.Now()) {
+		return
+	}
+	dedupeKey := fmt.Sprintf("%s:%s", prMergeWhenReadyJobType, pr.ID.String())
+	_, err := s.jobs.Enqueue(ctx, pr.OrgID, prHealthSyncQueue, prMergeWhenReadyJobType, map[string]string{
+		"org_id":          pr.OrgID.String(),
+		"pull_request_id": pr.ID.String(),
+	}, 7, &dedupeKey)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue merge-when-ready processing")
+	}
+}
+
+func isMergeWhenReadyProcessable(pr models.PullRequest, now time.Time) bool {
+	return pr.MergeWhenReadyState == models.PullRequestMergeWhenReadyStateQueued || isStaleMergeWhenReadyMerging(pr, now)
 }
 
 func (s *PRService) publishPullRequestUpdated(ctx context.Context, pr models.PullRequest, current models.PullRequestHealthCurrent) {
