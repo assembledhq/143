@@ -2017,6 +2017,7 @@ type stubPRService struct {
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
+	processMergeWhenReadyFn   func(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -2057,6 +2058,13 @@ func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uui
 func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {
 	if s.enrichPullRequestHealthFn != nil {
 		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
+	}
+	return nil
+}
+
+func (s *stubPRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	if s.processMergeWhenReadyFn != nil {
+		return s.processMergeWhenReadyFn(ctx, orgID, pullRequestID)
 	}
 	return nil
 }
@@ -2490,6 +2498,21 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			},
 			expectErr: "parse pull request ID",
 		},
+		{
+			name:    "merge when ready passes parsed ids",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newMergePullRequestWhenReadyHandler(services, logger)
+			},
+		},
+		{
+			name:    "merge when ready rejects invalid payload",
+			payload: json.RawMessage(`oops`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newMergePullRequestWhenReadyHandler(services, logger)
+			},
+			expectErr: "unmarshal merge_pull_request_when_ready payload",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2519,6 +2542,12 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.version = gotVersion
 						return nil
 					},
+					processMergeWhenReadyFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) error {
+						called.mergeWhenReadyCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						return nil
+					},
 				},
 			}
 
@@ -2544,6 +2573,10 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 				require.Equal(t, orgID, called.orgID, "enrich handler should parse and pass the org ID")
 				require.Equal(t, prID, called.prID, "enrich handler should parse and pass the pull request ID")
 				require.Equal(t, int64(9), called.version, "enrich handler should parse and pass the version")
+			case "merge when ready passes parsed ids":
+				require.Equal(t, 1, called.mergeWhenReadyCalls, "merge-when-ready handler should invoke the PR service once")
+				require.Equal(t, orgID, called.orgID, "merge-when-ready handler should parse and pass the org ID")
+				require.Equal(t, prID, called.prID, "merge-when-ready handler should parse and pass the pull request ID")
 			}
 		})
 	}
@@ -2573,13 +2606,14 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 }
 
 type prHandlerCalls struct {
-	syncCalls      int
-	reconcileCalls int
-	enrichCalls    int
-	orgID          uuid.UUID
-	prID           uuid.UUID
-	limit          int
-	version        int64
+	syncCalls           int
+	reconcileCalls      int
+	enrichCalls         int
+	mergeWhenReadyCalls int
+	orgID               uuid.UUID
+	prID                uuid.UUID
+	limit               int
+	version             int64
 }
 
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {

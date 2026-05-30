@@ -98,6 +98,31 @@ func (s PullRequestHealthEnrichmentStatus) Validate() error {
 	}
 }
 
+type PullRequestMergeWhenReadyState string
+
+const (
+	PullRequestMergeWhenReadyStateOff       PullRequestMergeWhenReadyState = "off"
+	PullRequestMergeWhenReadyStateQueued    PullRequestMergeWhenReadyState = "queued"
+	PullRequestMergeWhenReadyStateMerging   PullRequestMergeWhenReadyState = "merging"
+	PullRequestMergeWhenReadyStateSucceeded PullRequestMergeWhenReadyState = "succeeded"
+	PullRequestMergeWhenReadyStateFailed    PullRequestMergeWhenReadyState = "failed"
+	PullRequestMergeWhenReadyStateCancelled PullRequestMergeWhenReadyState = "cancelled"
+)
+
+func (s PullRequestMergeWhenReadyState) Validate() error {
+	switch s {
+	case PullRequestMergeWhenReadyStateOff,
+		PullRequestMergeWhenReadyStateQueued,
+		PullRequestMergeWhenReadyStateMerging,
+		PullRequestMergeWhenReadyStateSucceeded,
+		PullRequestMergeWhenReadyStateFailed,
+		PullRequestMergeWhenReadyStateCancelled:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestMergeWhenReadyState: %q", s)
+	}
+}
+
 type PullRequestRepairActionType string
 
 const (
@@ -189,6 +214,16 @@ type PullRequestHealthResponse struct {
 	ConflictDetailAvailable      bool                              `json:"conflict_detail_available"`
 	FailingTestDetailAvailable   bool                              `json:"failing_test_detail_available"`
 	ObsoleteActiveRepairSessions bool                              `json:"obsolete_active_repair_sessions,omitempty"`
+	MergeWhenReady               PullRequestMergeWhenReadyStatus   `json:"merge_when_ready"`
+}
+
+type PullRequestMergeWhenReadyStatus struct {
+	State                  PullRequestMergeWhenReadyState `json:"state"`
+	RequestedByUserID      *uuid.UUID                     `json:"requested_by_user_id,omitempty"`
+	RequestedAt            *time.Time                     `json:"requested_at,omitempty"`
+	RequestedHeadSHA       string                         `json:"requested_head_sha,omitempty"`
+	RequestedHealthVersion *int64                         `json:"requested_health_version,omitempty"`
+	LastError              string                         `json:"last_error,omitempty"`
 }
 
 type PullRequestActiveRepair struct {
