@@ -146,6 +146,12 @@ export interface PreviewSecretBundleTestResult {
   error?: string;
 }
 
+export interface PreviewSecretBundleRevealResult {
+  bundle: PreviewSecretBundleSummary;
+  source: PreviewSecretBundleSource;
+  outputs: PreviewSecretBundleOutput[];
+}
+
 export interface BranchPreviewCreateRequest {
   repository_id: string;
   branch: string;

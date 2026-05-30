@@ -1172,6 +1172,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/preview-secret-bundles/{id}", previewSecretBundleHandler.Patch)
 				r.Delete("/api/v1/preview-secret-bundles/{id}", previewSecretBundleHandler.DeleteByID)
 				r.Post("/api/v1/preview-secret-bundles/{id}/test", previewSecretBundleHandler.Test)
+				r.Post("/api/v1/preview-secret-bundles/{id}/reveal", previewSecretBundleHandler.Reveal)
 				r.Get("/api/v1/pm/context/pending", pmHandler.ListPendingRefreshes)
 				r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
 				r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
