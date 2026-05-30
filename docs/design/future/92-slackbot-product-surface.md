@@ -295,56 +295,457 @@ Authorization checks:
 
 The Slack install is org-scoped. A Slack workspace may map to one active 143 organization by default. Multi-org Slack workspaces require an explicit org selector in App Home or channel settings before actions can run.
 
-## Backend Shape
+## Engineering Implementation
 
-New request endpoints:
+The Slackbot implementation should be built as a first-class integration surface, not as special cases inside session handlers. Slack inbound handlers should authenticate Slack, normalize the request into org-scoped events, and enqueue jobs. Session creation, preview control, human-input responses, and notifications should continue through the same service/job paths used by the web app.
 
-- `POST /api/v1/webhooks/slack/events`
-- `POST /api/v1/webhooks/slack/commands`
-- `POST /api/v1/webhooks/slack/interactions`
+### Slack App Configuration
 
-All Slack inbound endpoints must:
+Use one Slack App with bot user enabled.
 
-- Verify Slack request signatures.
-- Bound request bodies.
-- Deduplicate by Slack event/request IDs where available.
-- Ack quickly.
-- Enqueue durable jobs for LLM classification, session creation, preview actions, or notification updates.
-- Ignore bot/self messages.
+Request URLs:
 
-New jobs:
+- Events API: `POST /api/v1/webhooks/slack/events`
+- Slash commands: `POST /api/v1/webhooks/slack/commands`
+- Interactivity and modals: `POST /api/v1/webhooks/slack/interactions`
+- OAuth callback: existing `/api/v1/integrations/slack/callback`, upgraded to bot install semantics.
 
-- `slack_handle_mention`
-- `slack_handle_interaction`
-- `slack_send_notification`
-- `slack_sync_app_home`
+Event subscriptions:
+
+- `url_verification`: required by Slack during Events API setup.
+- `app_mention`: starts or continues Slack-thread sessions from channel mentions.
+- `message.im`: starts or continues sessions from bot DMs.
+- `app_home_opened`: renders or refreshes App Home.
+- `app_uninstalled` / `app_uninstalled_team`: marks installation disconnected.
+- `app_rate_limited`: logs Slack event delivery pressure.
+- `member_joined_channel`: optional, useful for detecting when the bot was invited and posting channel setup.
+
+Do not subscribe to generic `message.channels` or `message.groups` for passive channel listening in v1. Mention-only channel behavior comes from `app_mention`.
+
+Bot scopes:
+
+- `app_mentions:read`: receive direct mentions of the app.
+- `im:history`: receive DMs sent to the bot.
+- `chat:write`: post, update, and delete bot messages.
+- `commands`: slash commands, if `/143` is supported.
+- `users:read`: read basic Slack user profile data.
+- `users:read.email`: best-effort Slack-to-143 user mapping by email.
+- `channels:read`: resolve public channel metadata.
+- `groups:read`: resolve private channel metadata where the app is present.
+- `channels:history`: fetch public-channel thread context when the app is in the channel.
+- `groups:history`: fetch private-channel thread context when the app is in the channel.
+- `im:read`: resolve DM channel metadata.
+- `im:write`: open DMs for notifications and human-input requests.
+- `files:read`: optional, for reading files attached to messages used as session context.
+- `links:read` / `links:write`: optional later phase for 143 URL unfurls.
+
+`chat:write.public` should not be required for v1 because the bot should only post in DMs or channels where it is installed/invited. Add it only if the product intentionally supports posting to public channels the app has not joined.
+
+Web API methods used:
+
+- `oauth.v2.access`: exchange OAuth code for bot token and install metadata.
+- `auth.test`: validate bot token and discover bot identity.
+- `chat.postMessage`: post ack, progress, final result, and notifications.
+- `chat.update`: update the initial status/progress message.
+- `chat.delete`: optional cleanup of obsolete progress messages.
+- `chat.postEphemeral`: show private account-link or permission prompts.
+- `conversations.replies`: fetch thread context for mentioned threads.
+- `conversations.info`: resolve channel names and privacy.
+- `conversations.open`: open DM channels for notifications.
+- `views.publish`: render App Home.
+- `views.open` / `views.update`: modals for missing repository/preview context.
+- `users.info` / `users.lookupByEmail`: map Slack users to 143 users.
+- `files.info`: optional attachment metadata lookup.
+- `chat.unfurl`: optional later phase for 143 URL unfurls.
+
+Slack docs references: `app_mention` requires `app_mentions:read`, DMs use `message.im` with `im:history`, `chat:write` allows posting/updating messages, `commands` enables slash commands, and `users:read.email` is required for user email access. See Slack docs for [`app_mention`](https://docs.slack.dev/reference/events/app_mention/), [`message.im`](https://docs.slack.dev/reference/events/message.im), [`chat:write`](https://docs.slack.dev/reference/scopes/chat.write), [`commands`](https://docs.slack.dev/reference/scopes/commands), [`users:read.email`](https://docs.slack.dev/reference/scopes/users.read.email), and [Events API](https://docs.slack.dev/apis/events-api/).
+
+### Public Webhook APIs
+
+These endpoints are unauthenticated from the 143 session-cookie perspective. They must authenticate Slack using the Slack signing secret.
+
+#### `POST /api/v1/webhooks/slack/events`
+
+Accepts Slack Events API envelopes.
+
+Behavior:
+
+1. Read body with a 1MB limit.
+2. Verify `X-Slack-Signature` and `X-Slack-Request-Timestamp`; reject stale timestamps.
+3. Handle `url_verification` inline by returning the `challenge`.
+4. Resolve installation by `team_id` / `enterprise_id` / `api_app_id`.
+5. Deduplicate by Slack `event_id`.
+6. Ignore bot/self messages.
+7. Persist inbound event metadata.
+8. Enqueue the appropriate job.
+9. Return 200 quickly.
+
+Job routing:
+
+- `app_mention` -> `slack_start_or_continue_session`
+- `message.im` -> `slack_start_or_continue_session`
+- `app_home_opened` -> `slack_sync_app_home`
+- `app_uninstalled*` -> `slack_mark_installation_inactive`
+- `app_rate_limited` -> log/metric only
+
+#### `POST /api/v1/webhooks/slack/commands`
+
+Accepts slash command payloads such as `/143`.
+
+Behavior:
+
+1. Verify Slack signature.
+2. Resolve installation and user.
+3. Deduplicate by a hash of team/channel/user/command/trigger timestamp where Slack does not provide a durable event ID.
+4. Ack with a lightweight ephemeral or in-channel response.
+5. Enqueue `slack_start_or_continue_session` or open a modal when required context is missing.
+
+#### `POST /api/v1/webhooks/slack/interactions`
+
+Accepts button, select, modal, and App Home interaction payloads.
+
+Behavior:
+
+1. Verify Slack signature.
+2. Decode the `payload` form field.
+3. Resolve installation and user.
+4. Deduplicate by action payload ID / view ID / message timestamp tuple.
+5. Route by `callback_id` / `action_id`.
+6. Ack quickly.
+7. Enqueue mutating work.
+
+Representative action IDs:
+
+- `slack_select_repository`
+- `slack_open_session`
+- `slack_create_preview`
+- `slack_refresh_preview`
+- `slack_extend_preview`
+- `slack_answer_human_input`
+- `slack_link_account`
+
+### Authenticated Product APIs
+
+Admin/settings APIs should stay under normal app auth and RBAC.
+
+- `GET /api/v1/integrations/slack/bot`: install metadata, scopes, bot user, health.
+- `POST /api/v1/integrations/slack/bot/reinstall`: start upgraded OAuth flow.
+- `GET /api/v1/integrations/slack/channels`: Slack channels visible to bot, with connected settings.
+- `PATCH /api/v1/integrations/slack/channels/{slack_channel_id}`: set default repository, allowed actions, notification subscriptions.
+- `GET /api/v1/integrations/slack/user-links`: list Slack user mappings.
+- `POST /api/v1/integrations/slack/user-links/me`: link current 143 user to Slack user.
+- `DELETE /api/v1/integrations/slack/user-links/me`: unlink current user.
+
+### Data Model
+
+All new tables are org-scoped. Secrets stay in encrypted credential storage, not in integration config or these tables.
+
+#### `slack_installations`
+
+One active install per `(org_id, team_id, api_app_id)`.
+
+```sql
+CREATE TABLE slack_installations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    integration_id uuid NOT NULL REFERENCES integrations(id),
+    team_id text NOT NULL,
+    team_name text NOT NULL DEFAULT '',
+    enterprise_id text,
+    api_app_id text NOT NULL DEFAULT '',
+    bot_user_id text NOT NULL DEFAULT '',
+    bot_id text NOT NULL DEFAULT '',
+    scope text[] NOT NULL DEFAULT '{}',
+    status text NOT NULL DEFAULT 'active',
+    installed_by_user_id uuid REFERENCES users(id),
+    installed_at timestamptz NOT NULL DEFAULT now(),
+    last_event_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (org_id, team_id, api_app_id)
+);
+```
+
+Encrypted Slack credential config should include:
+
+```json
+{
+  "access_token": "xoxb-...",
+  "team_id": "T...",
+  "team_name": "Engineering",
+  "bot_user_id": "U...",
+  "bot_id": "B...",
+  "scope": "app_mentions:read,chat:write,..."
+}
+```
+
+The Slack signing secret is app-level. SaaS can keep it in env/config. Self-hosted deployments can configure it through existing protected credential/env paths. Do not expose it in integration API responses.
+
+#### `slack_user_links`
+
+Best-effort identity mapping. User ID is nullable to support observed Slack users before they link.
+
+```sql
+CREATE TABLE slack_user_links (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    slack_installation_id uuid NOT NULL REFERENCES slack_installations(id),
+    user_id uuid REFERENCES users(id),
+    slack_team_id text NOT NULL,
+    slack_user_id text NOT NULL,
+    slack_email text,
+    slack_display_name text NOT NULL DEFAULT '',
+    source text NOT NULL DEFAULT 'observed',
+    linked_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (org_id, slack_team_id, slack_user_id),
+    UNIQUE (org_id, user_id, slack_team_id)
+);
+```
+
+`source` values: `observed`, `email_match`, `self_linked`, `admin_linked`.
+
+#### `slack_channel_settings`
+
+Channel defaults and allowed Slack-started capabilities.
+
+```sql
+CREATE TABLE slack_channel_settings (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    slack_installation_id uuid NOT NULL REFERENCES slack_installations(id),
+    slack_team_id text NOT NULL,
+    slack_channel_id text NOT NULL,
+    slack_channel_name text NOT NULL DEFAULT '',
+    channel_type text NOT NULL DEFAULT 'channel',
+    default_repository_id uuid REFERENCES repositories(id),
+    default_branch text,
+    response_visibility text NOT NULL DEFAULT 'thread',
+    allowed_actions text[] NOT NULL DEFAULT '{session,preview}',
+    notification_subscriptions jsonb NOT NULL DEFAULT '{}'::jsonb,
+    active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (org_id, slack_team_id, slack_channel_id)
+);
+```
+
+`allowed_actions` examples: `session`, `preview`, `pr_request`, `human_input`.
+
+#### `slack_session_links`
+
+Connects Slack threads/DMs to canonical 143 sessions.
+
+```sql
+CREATE TABLE slack_session_links (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    session_id uuid NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    slack_installation_id uuid NOT NULL REFERENCES slack_installations(id),
+    slack_team_id text NOT NULL,
+    slack_channel_id text NOT NULL,
+    slack_thread_ts text NOT NULL,
+    slack_root_ts text NOT NULL DEFAULT '',
+    slack_message_permalink text NOT NULL DEFAULT '',
+    slack_user_id text NOT NULL DEFAULT '',
+    mapped_user_id uuid REFERENCES users(id),
+    team_session boolean NOT NULL DEFAULT false,
+    latest_status_message_ts text,
+    final_message_ts text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (org_id, slack_team_id, slack_channel_id, slack_thread_ts)
+);
+```
+
+When another `@143` mention lands in the same Slack thread, reuse the existing session when it is resumable; otherwise create a new session and link it to the same Slack thread with a new thread-message pointer.
+
+#### `slack_inbound_events`
+
+Deduplication, audit, and retry visibility for Slack callbacks.
+
+```sql
+CREATE TABLE slack_inbound_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    slack_installation_id uuid NOT NULL REFERENCES slack_installations(id),
+    slack_event_id text,
+    slack_team_id text NOT NULL,
+    event_type text NOT NULL,
+    channel_id text,
+    user_id text,
+    event_ts text,
+    payload jsonb NOT NULL,
+    status text NOT NULL DEFAULT 'received',
+    job_id uuid,
+    error text,
+    received_at timestamptz NOT NULL DEFAULT now(),
+    processed_at timestamptz,
+    UNIQUE (org_id, slack_event_id)
+);
+```
+
+For command/interaction payloads without Slack `event_id`, compute a deterministic idempotency key and store it in `slack_event_id`.
+
+#### `slack_outbound_messages`
+
+Tracks posted/updated Slack messages so jobs can update progress and final output idempotently.
+
+```sql
+CREATE TABLE slack_outbound_messages (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    slack_session_link_id uuid REFERENCES slack_session_links(id) ON DELETE CASCADE,
+    notification_id uuid,
+    slack_team_id text NOT NULL,
+    slack_channel_id text NOT NULL,
+    slack_message_ts text NOT NULL,
+    message_kind text NOT NULL,
+    status text NOT NULL DEFAULT 'posted',
+    last_payload_hash text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (org_id, slack_team_id, slack_channel_id, slack_message_ts)
+);
+```
+
+`message_kind` examples: `ack`, `progress`, `final`, `notification`, `human_input`.
+
+### Job Payloads
+
+#### `slack_start_or_continue_session`
+
+```json
+{
+  "org_id": "uuid",
+  "slack_inbound_event_id": "uuid",
+  "slack_installation_id": "uuid",
+  "team_id": "T123",
+  "channel_id": "C123",
+  "thread_ts": "1710000000.000000",
+  "message_ts": "1710000001.000000",
+  "slack_user_id": "U123",
+  "text": "<@U143> fix this",
+  "permalink": "https://...",
+  "source": "app_mention"
+}
+```
+
+Handler responsibilities:
+
+1. Load channel settings and user mapping.
+2. Fetch thread context with `conversations.replies` when useful and permitted.
+3. Resolve repository/preview/session references.
+4. Create or resume a 143 session.
+5. Persist `slack_session_links`.
+6. Post/update the Slack ack message with the session URL.
+7. Enqueue normal `run_agent` / `continue_session` work.
+
+#### `slack_post_run_update`
+
+```json
+{
+  "org_id": "uuid",
+  "session_id": "uuid",
+  "slack_session_link_id": "uuid",
+  "update_kind": "tool_started",
+  "title": "Running tests",
+  "summary": "npm test",
+  "terminal": false
+}
+```
+
+This job is fed by session/runtime events. It should debounce noisy updates and render only meaningful progress to Slack.
+
+#### `slack_post_final_response`
+
+```json
+{
+  "org_id": "uuid",
+  "session_id": "uuid",
+  "slack_session_link_id": "uuid",
+  "final_message_id": "uuid"
+}
+```
+
+Handler responsibilities:
+
+1. Load the final assistant/session message.
+2. Render that final response directly with Slack formatting.
+3. Append session/preview/PR links.
+4. Update the ack/progress message to terminal state.
+5. Post or update the final Slack message idempotently.
+
+#### `slack_handle_interaction`
+
+Routes button/select/modal actions to existing services:
+
+- Repository selection -> update `slack_channel_settings` or `slack_session_links` context and continue session.
+- Human-input answer -> existing human-input answer API/service.
+- Preview actions -> durable preview control plane.
+- Open session -> link button only, no mutation.
+
+#### `slack_sync_app_home`
+
+Builds the user's App Home view from:
+
+- linked user identity,
+- pending human-input requests,
+- Slack-started active sessions,
+- active previews,
+- recent automation runs,
+- account-link/install health.
+
+### Session Integration Points
+
+Slack-started sessions should use the same session creation service as `/sessions/new`, with a `source = slack` or equivalent provenance field. If the current session model cannot represent team sessions without a user, add explicit nullable attribution fields instead of faking a user:
+
+- `created_by_user_id` nullable for team sessions, or a separate `session_attribution` row.
+- `source = slack`.
+- `source_metadata` containing Slack team/channel/thread IDs, sanitized and non-secret.
+
+Thread context should enter the session as structured attachments/references:
+
+- Slack permalink.
+- Root message text.
+- Selected replies.
+- File metadata/URLs when allowed.
+- Detected references.
+
+Do not paste unbounded Slack history into prompts. Bound by message count, size, and recency, and preserve the full permalink for human inspection.
+
+### Progress Rendering
+
+Session/runtime events should be normalized before reaching Slack:
+
+- `session.created` -> ack with session URL.
+- `context.resolved` -> repository/branch status.
+- `tool.started` -> short "Calling tool" or "Running command" update.
+- `tool.completed` -> only render if long-running or user-relevant.
+- `preview.started` / `preview.ready` / `preview.failed` -> preview status.
+- `human_input.requested` -> Slack action block.
+- `session.completed` -> final agent response.
+- `session.failed` -> concise failure message plus session URL.
+
+Slack progress updates should be debounced, for example at most once every 5-10 seconds per Slack thread unless the event requires user input or reaches a terminal state.
+
+### Security and Reliability
+
+- Verify Slack signatures for every inbound endpoint before parsing payload semantics.
+- Reject request timestamps outside a narrow replay window.
+- Return 200 quickly for Slack callbacks; all slow work happens in jobs.
+- Deduplicate events and interactions before enqueueing jobs.
+- Never store Slack bot tokens, signing secrets, response URLs, or trigger IDs in plaintext tables.
+- Do not log raw Slack payloads at info level; scrub tokens, response URLs, and private message text.
+- Ignore messages from the Slackbot itself and other bot messages unless explicitly allowed.
+- Apply org/channel allowed actions before starting previews or PR-related actions for team sessions.
+- For mapped users, enforce normal 143 RBAC.
+- For unmapped users, create team sessions only within channel defaults.
+- Keep Slack output bounded. Long final responses should be truncated with a link to 143.
+- Add metrics for inbound events, dedupe hits, session starts, Slack API failures, rate limits, and message update latency.
 
 The existing Slack polling/summarization worker can remain separate. Its purpose is context ingestion, not interactive bot handling.
-
-## Data Model
-
-Likely additions:
-
-- `slack_installations`: org/team/app install metadata, bot user ID, scopes, status.
-- `slack_user_links`: org ID, 143 user ID, Slack team ID, Slack user ID, source, timestamps.
-- `slack_channel_settings`: org ID, team ID, channel ID, defaults, allowed actions, notification subscriptions.
-- `slack_interaction_events`: dedupe/audit table for inbound event IDs and action payloads.
-- `notification_deliveries`: if not already implemented by the notification system, delivery status keyed by notification/channel/provider target.
-
-Credentials remain in encrypted credential storage. Integration config may expose safe metadata, but never bot tokens or signing secrets.
-
-## Slack App Capabilities
-
-Required capabilities depend on phase, but the full app likely needs:
-
-- Bot token with message posting.
-- Events API subscriptions for app mentions, DMs, and app/channel lifecycle events.
-- Slash commands.
-- Interactivity for buttons, select menus, and modals.
-- App Home.
-- Link unfurls for 143 URLs as a later enhancement.
-
-The initial channel behavior should subscribe only to explicit mentions and DMs. Do not subscribe to or process ordinary channel messages for passive response decisions.
 
 ## Rollout
 
@@ -365,7 +766,7 @@ The initial channel behavior should subscribe only to explicit mentions and DMs.
 
 - Persist Slack thread references on sessions.
 - Post milestone updates back to the originating thread.
-- Improve final Slack summaries for questions, investigations, fixes, and preview requests.
+- Improve final Slack response rendering for questions, investigations, fixes, and preview requests.
 - Add modals/select menus only for missing required context.
 
 ### Phase 4 - Human Input Requests
