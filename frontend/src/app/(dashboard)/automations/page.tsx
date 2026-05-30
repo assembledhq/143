@@ -7,7 +7,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/utils";
 import type { Automation } from "@/lib/types";
-import { formatRunAtWithTimezone } from "./schedule-time";
+import { formatAutomationSchedule } from "./schedule-time";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -18,20 +18,6 @@ import {
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { useAuth } from "@/hooks/use-auth";
-
-function formatSchedule(a: Automation): string {
-  const tz = a.timezone || "UTC";
-  if (a.schedule_type === "cron" && a.cron_expression) {
-    return `cron: ${a.cron_expression} (${tz})`;
-  }
-  const val = a.interval_value ?? 1;
-  const unit = a.interval_unit ?? "days";
-  const intervalText = `every ${val} ${val === 1 ? unit.replace(/s$/, "") : unit}`;
-  if (!a.interval_run_at) {
-    return intervalText;
-  }
-  return `${intervalText} at ${formatRunAtWithTimezone(a.interval_run_at, tz)}`;
-}
 
 function AutomationCard({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const queryClient = useQueryClient();
@@ -89,7 +75,7 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
                   {automation.name}
                 </h3>
                 <span className="block break-words text-xs leading-5 text-muted-foreground sm:max-w-[18rem] sm:text-right">
-                  {formatSchedule(automation)}
+                  {formatAutomationSchedule(automation)}
                 </span>
               </div>
               <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:gap-x-3 sm:gap-y-1">

@@ -1,3 +1,5 @@
+import type { Automation } from "@/lib/types";
+
 // Shared schedule-time helpers for the automation new/edit pages. The backend
 // stores interval_run_at as a "HH:MM" string aligned to 5 minutes (see
 // migration 88 chk_automations_interval_run_at_format). Keeping the option
@@ -66,4 +68,41 @@ export function formatRunAtWithTimezone(runAt: string, timezone: string): string
     parseInt(minute, 10),
   ).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   return `${formatted} (${timezone})`;
+}
+
+type AutomationScheduleFields = Pick<
+  Automation,
+  | "schedule_type"
+  | "interval_value"
+  | "interval_unit"
+  | "interval_run_at"
+  | "cron_expression"
+  | "timezone"
+>;
+
+function intervalLabel(value: number, unit: NonNullable<Automation["interval_unit"]>): string {
+  if (unit === "hours" && value === 24) return "Daily";
+  if (unit === "days" && value === 1) return "Daily";
+  if (value === 1) return `Every ${unit.replace(/s$/, "")}`;
+  return `Every ${value} ${unit}`;
+}
+
+function shouldShowRunAt(value: number, unit: NonNullable<Automation["interval_unit"]>): boolean {
+  return unit !== "hours" || value >= 24;
+}
+
+export function formatAutomationSchedule(schedule: AutomationScheduleFields): string {
+  const timezone = schedule.timezone || "UTC";
+  if (schedule.schedule_type === "cron" && schedule.cron_expression) {
+    return `cron: ${schedule.cron_expression} (${timezone})`;
+  }
+
+  const value = schedule.interval_value ?? 1;
+  const unit = schedule.interval_unit ?? "days";
+  const label = intervalLabel(value, unit);
+  if (!schedule.interval_run_at || !shouldShowRunAt(value, unit)) {
+    return label;
+  }
+
+  return `${label} at ${formatRunAtWithTimezone(schedule.interval_run_at, timezone)}`;
 }
