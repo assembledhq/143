@@ -651,18 +651,18 @@ export default function AutomationDetailPage() {
         </Sheet>
         <PageHeader
           title={
-            <span className="inline-flex min-w-0 items-center gap-3">
+            <span className="inline-flex min-w-0 items-center gap-2">
               {canManage ? (
                 <AutomationEmojiPicker
                   value={automation.icon_value || "⚙️"}
                   onChange={(iconValue) => iconMutation.mutate(iconValue)}
-                  trigger="icon"
+                  trigger="inline"
                   triggerLabel="Change automation emoji"
                   disabled={iconMutation.isPending}
                 />
               ) : (
                 <span
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+                  className="shrink-0 align-baseline text-[0.95em] leading-none"
                   aria-label={`Automation icon for ${automation.name}`}
                 >
                   {automation.icon_value || "⚙️"}
