@@ -20,6 +20,8 @@ func TestIntegrationProviderValidate(t *testing.T) {
 		{name: "valid slack", value: IntegrationProviderSlack},
 		{name: "valid notion", value: IntegrationProviderNotion},
 		{name: "valid circleci", value: IntegrationProviderCircleCI},
+		{name: "valid victorialogs", value: IntegrationProviderVictoriaLogs},
+		{name: "valid mezmo", value: IntegrationProviderMezmo},
 		{name: "invalid empty", value: IntegrationProvider(""), wantErr: true},
 		{name: "invalid unknown", value: IntegrationProvider("jira"), wantErr: true},
 	}

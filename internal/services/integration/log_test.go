@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +146,38 @@ func TestLogCursorSigner(t *testing.T) {
 	require.ErrorIs(t, err, ErrLogCursorInvalid, "Verify should reject cursors with mismatched constraints")
 }
 
+func TestLogCursorSignerDecode(t *testing.T) {
+	t.Parallel()
+
+	signer := NewLogCursorSigner([]byte("test-secret"))
+	constraints := LogCursorConstraints{
+		Provider:       models.ProviderVictoriaLogs,
+		Query:          "service:api",
+		StartTime:      time.Date(2026, 5, 28, 10, 0, 0, 0, time.UTC),
+		EndTime:        time.Date(2026, 5, 28, 11, 0, 0, 0, time.UTC),
+		Direction:      LogDirectionDesc,
+		ExpiresAt:      time.Now().Add(time.Hour).UTC(),
+		ProviderCursor: "2026-05-28T10:45:00Z",
+	}
+
+	cursor, err := signer.Sign(constraints)
+	require.NoError(t, err)
+
+	got, err := signer.Decode(cursor)
+	require.NoError(t, err, "Decode should accept a valid cursor")
+	require.Equal(t, constraints.Provider, got.Provider, "Decode should return correct provider")
+	require.Equal(t, constraints.Query, got.Query, "Decode should return correct query")
+	require.Equal(t, constraints.ProviderCursor, got.ProviderCursor, "Decode should return the provider cursor")
+
+	// Decode should not enforce constraint matching (different query is fine).
+	_, err = signer.Decode(cursor)
+	require.NoError(t, err, "Decode should succeed regardless of current request parameters")
+
+	// Tampered cursor should be rejected.
+	_, err = signer.Decode(cursor + "x")
+	require.ErrorIs(t, err, ErrLogCursorInvalid, "Decode should reject tampered cursors")
+}
+
 func TestRedactLogPayload(t *testing.T) {
 	t.Parallel()
 
@@ -167,6 +202,28 @@ func TestRedactLogPayload(t *testing.T) {
 	item := items[0].(map[string]any)
 	require.Equal(t, "[REDACTED]", item["session_token"], "RedactLogPayload should redact sensitive fields inside arrays")
 	require.Equal(t, float64(2), item["count"], "RedactLogPayload should preserve safe fields inside arrays")
+}
+
+func TestNormalizeLogRecordsCapsRawPayloadFields(t *testing.T) {
+	t.Parallel()
+
+	includeRaw := true
+	result := normalizeLogRecords(models.ProviderVictoriaLogs, []map[string]any{
+		{
+			"timestamp": "2026-05-28T12:00:00Z",
+			"message":   "hello",
+			"details":   strings.Repeat("x", logEntryFieldLimit+100),
+			"nested": map[string]any{
+				"safe": strings.Repeat("y", logEntryFieldLimit+100),
+			},
+		},
+	}, nil, &includeRaw)
+
+	require.Len(t, result, 1, "normalizeLogRecords should return one entry")
+	require.Len(t, result[0].Raw["details"], logEntryFieldLimit, "raw top-level string fields should be capped")
+	nested, ok := result[0].Raw["nested"].(map[string]any)
+	require.True(t, ok, "raw nested objects should remain structured")
+	require.Len(t, nested["safe"], logEntryFieldLimit, "raw nested string fields should be capped")
 }
 
 func TestIsSensitiveLogField(t *testing.T) {
@@ -300,11 +357,11 @@ func TestVictoriaLogsContextFindsTargetWhenResultsExceedContextWindow(t *testing
 	before := 2
 	after := 2
 	result, err := provider.GetLogContext(context.Background(), LogContextRequest{
-		Anchor:    LogAnchor{Timestamp: &targetTime},
-		Query:     &query,
-		Since:     durationPtr(time.Hour),
-		Before:    &before,
-		After:     &after,
+		Anchor: LogAnchor{Timestamp: &targetTime},
+		Query:  &query,
+		Since:  durationPtr(time.Hour),
+		Before: &before,
+		After:  &after,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result.Target, "target should be found even when it is the newest entry in the result set")
@@ -367,6 +424,136 @@ func TestVictoriaLogsStatsTruncatesAndSetsFlag(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.Truncated, "Truncated should be set when series exceed limit")
 	require.Len(t, result.Series, 2, "series should be capped at limit")
+}
+
+func TestVictoriaLogsStatsIncludesIntervalBucket(t *testing.T) {
+	t.Parallel()
+
+	var capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr, "test server should read request body")
+		params, parseErr := url.ParseQuery(string(body))
+		require.NoError(t, parseErr, "test server should parse form body")
+		capturedQuery = params.Get("query")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"_time":"2026-05-28T12:00:00Z","service":"api","count":2}` + "\n"))
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:   server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	interval := 5 * time.Minute
+	_, err := provider.QueryLogStats(context.Background(), LogStatsRequest{
+		Query:    "*",
+		Since:    durationPtr(time.Hour),
+		GroupBy:  []string{"service"},
+		Interval: &interval,
+	})
+	require.NoError(t, err, "QueryLogStats should accept an interval")
+	require.Contains(t, capturedQuery, "stats by (_time:5m, service) count()", "stats query should bucket by the requested interval")
+}
+
+func TestVictoriaLogsMultiTenantScopesQuery(t *testing.T) {
+	t.Parallel()
+
+	var capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		params, _ := url.ParseQuery(string(body))
+		capturedQuery = params.Get("query")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:          server.URL,
+		HTTPClient:        server.Client(),
+		SharedOrgID:       "org-abc",
+		MultiTenantShared: true,
+	})
+
+	_, err := provider.QueryLogs(context.Background(), LogQueryRequest{
+		Query: "service:api",
+		Since: durationPtr(time.Hour),
+	})
+	require.NoError(t, err)
+	require.Contains(t, capturedQuery, `org_id="org-abc"`, "multi-tenant query should include org_id filter")
+	require.Contains(t, capturedQuery, "service:api", "multi-tenant query should preserve the original query")
+}
+
+func TestMezmoProviderNormalizesLogEntries(t *testing.T) {
+	t.Parallel()
+
+	// Mezmo returns results under a "lines" key.
+	mezmoBody, _ := json.Marshal(map[string]any{
+		"lines": []map[string]any{
+			{
+				"timestamp": "2026-05-28T12:00:00Z",
+				"level":     "error",
+				"message":   "connection refused",
+				"service":   "api",
+			},
+		},
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(mezmoBody)
+	}))
+	defer server.Close()
+
+	provider := NewMezmoProvider(MezmoConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	result, err := provider.QueryLogs(context.Background(), LogQueryRequest{
+		Query: "level:error",
+		Since: durationPtr(time.Hour),
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Entries, 1, "should return one normalized entry")
+	require.Equal(t, "connection refused", result.Entries[0].Message)
+	require.Equal(t, "error", result.Entries[0].Level)
+	require.Equal(t, "api", result.Entries[0].Service)
+	require.Equal(t, models.ProviderMezmo, result.Entries[0].Provider)
+}
+
+func TestVictoriaLogsListFieldsNative(t *testing.T) {
+	t.Parallel()
+
+	fieldNamesBody := []byte(`{"field_name":"level"}
+{"field_name":"service"}
+{"field_name":"trace_id"}
+`)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write(fieldNamesBody)
+	}))
+	defer server.Close()
+
+	provider := NewVictoriaLogsProvider(VictoriaLogsConfig{
+		QueryURL:      server.URL,
+		FieldNamesURL: server.URL,
+		HTTPClient:    server.Client(),
+	})
+
+	result, err := provider.ListLogFields(context.Background(), LogFieldsRequest{
+		Since: durationPtr(time.Hour),
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Fields, 3, "should return all field names from native endpoint")
+	names := make([]string, len(result.Fields))
+	for i, f := range result.Fields {
+		names[i] = f.Name
+	}
+	require.ElementsMatch(t, []string{"level", "service", "trace_id"}, names)
 }
 
 func stringPtr(v string) *string                 { return &v }

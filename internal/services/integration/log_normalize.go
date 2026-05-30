@@ -38,7 +38,7 @@ func normalizeLogRecords(provider models.ProviderName, records []map[string]any,
 			Fields:    filteredLogFields(redacted, fieldSet),
 		}
 		if includeRaw != nil && *includeRaw {
-			entry.Raw = redacted
+			entry.Raw = truncateRawLogPayload(redacted)
 		}
 		entries = append(entries, entry)
 	}
@@ -81,6 +81,35 @@ func truncateLogFieldValue(value any) any {
 			return v
 		}
 		return truncateString(string(data), logEntryFieldLimit)
+	default:
+		return value
+	}
+}
+
+func truncateRawLogPayload(record map[string]any) map[string]any {
+	out := make(map[string]any, len(record))
+	for key, value := range record {
+		out[key] = truncateRawLogValue(value)
+	}
+	return out
+}
+
+func truncateRawLogValue(value any) any {
+	switch v := value.(type) {
+	case string:
+		return truncateString(v, logEntryFieldLimit)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			out[key] = truncateRawLogValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = truncateRawLogValue(child)
+		}
+		return out
 	default:
 		return value
 	}

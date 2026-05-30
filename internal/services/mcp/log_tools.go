@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,8 +81,9 @@ func logToolDefinitions(providers []integration.LogProvider) []Tool {
 					"since":      props["since"],
 					"start_time": props["start_time"],
 					"end_time":   props["end_time"],
-					"group_by": {Type: "array", Description: "Field names to group by", Items: &SchemaProperty{Type: "string"}},
-					"limit":    {Type: "number", Description: "Max grouped rows", Default: 100},
+					"group_by":   {Type: "array", Description: "Field names to group by", Items: &SchemaProperty{Type: "string"}},
+					"interval":   {Type: "string", Description: "Optional time bucket interval, such as 5m or 1h"},
+					"limit":      {Type: "number", Description: "Max grouped rows", Default: 100},
 				},
 				Required: []string{"query"},
 			},
@@ -100,6 +102,13 @@ func anyLogProviderSupportsStats(providers []integration.LogProvider) bool {
 	return false
 }
 
+const (
+	logQueryResponseCap   = 200 * 1024 // 200 KB
+	logContextResponseCap = 400 * 1024 // 400 KB
+	logFieldsResponseCap  = 50 * 1024  // 50 KB
+	logStatsResponseCap   = 100 * 1024 // 100 KB
+)
+
 func (tr *ToolRegistry) callLogTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
 	provider, err := tr.resolveLogProvider(args)
 	if err != nil {
@@ -112,10 +121,58 @@ func (tr *ToolRegistry) callLogTool(ctx context.Context, name string, args json.
 		if err != nil {
 			return ErrorResult(err.Error())
 		}
+		// Decode cursor and inject original time bounds for pagination continuation.
+		if req.Cursor != nil && tr.cursorSigner != nil {
+			constraints, cerr := tr.cursorSigner.Decode(*req.Cursor)
+			if cerr != nil {
+				return ErrorResult(integration.ErrLogCursorInvalid.Error())
+			}
+			if !logCursorMatchesRequest(constraints, req, provider.Name()) {
+				return ErrorResult(integration.ErrLogCursorInvalid.Error())
+			}
+			providerTS, perr := time.Parse(time.RFC3339Nano, constraints.ProviderCursor)
+			if perr != nil {
+				return ErrorResult(integration.ErrLogCursorInvalid.Error())
+			}
+			// Shift the time window past the last returned entry.
+			dir := constraints.Direction
+			start := constraints.StartTime
+			end := constraints.EndTime
+			if dir == integration.LogDirectionDesc {
+				end = providerTS.Add(-time.Nanosecond)
+			} else {
+				start = providerTS.Add(time.Nanosecond)
+			}
+			req.StartTime = &start
+			req.EndTime = &end
+			req.Since = nil
+		}
 		result, err := provider.QueryLogs(ctx, req)
 		if err != nil {
 			return logToolError("log_query", provider.Name(), err)
 		}
+		// Sign a next-page cursor when the result is truncated.
+		if result.Truncated && tr.cursorSigner != nil && len(result.Entries) > 0 {
+			last := result.Entries[len(result.Entries)-1]
+			dir := integration.LogDirectionDesc
+			if req.Direction != nil {
+				dir = *req.Direction
+			}
+			nc := integration.LogCursorConstraints{
+				Provider:       provider.Name(),
+				Query:          req.Query,
+				StartTime:      result.StartTime,
+				EndTime:        result.EndTime,
+				Direction:      dir,
+				Fields:         req.Fields,
+				ExpiresAt:      time.Now().Add(24 * time.Hour),
+				ProviderCursor: last.Timestamp.UTC().Format(time.RFC3339Nano),
+			}
+			if cursor, serr := tr.cursorSigner.Sign(nc); serr == nil {
+				result.NextCursor = cursor
+			}
+		}
+		capLogQueryResult(result, logQueryResponseCap)
 		return jsonResult(result)
 	case "log_context":
 		req, err := parseLogContextRequest(args)
@@ -125,6 +182,43 @@ func (tr *ToolRegistry) callLogTool(ctx context.Context, name string, args json.
 		result, err := provider.GetLogContext(ctx, req)
 		if err != nil {
 			return logToolError("log_context", provider.Name(), err)
+		}
+		beforeTrimmed, afterTrimmed := capLogContextResult(result, logContextResponseCap)
+		// Sign prev/next cursors so the agent can fetch the trimmed context window.
+		if tr.cursorSigner != nil && req.Query != nil {
+			if start, end, nerr := integration.NormalizeLogTimeBounds(req.Since, req.StartTime, req.EndTime, integration.LogMaxLookback, time.Now()); nerr == nil {
+				if beforeTrimmed && len(result.Before) > 0 {
+					nc := integration.LogCursorConstraints{
+						Provider:       provider.Name(),
+						Query:          *req.Query,
+						StartTime:      start,
+						EndTime:        end,
+						Direction:      integration.LogDirectionDesc,
+						Fields:         req.Fields,
+						ExpiresAt:      time.Now().Add(24 * time.Hour),
+						ProviderCursor: result.Before[0].Timestamp.UTC().Format(time.RFC3339Nano),
+					}
+					if cursor, serr := tr.cursorSigner.Sign(nc); serr == nil {
+						result.PrevCursor = cursor
+					}
+				}
+				if afterTrimmed && len(result.After) > 0 {
+					last := result.After[len(result.After)-1]
+					nc := integration.LogCursorConstraints{
+						Provider:       provider.Name(),
+						Query:          *req.Query,
+						StartTime:      start,
+						EndTime:        end,
+						Direction:      integration.LogDirectionAsc,
+						Fields:         req.Fields,
+						ExpiresAt:      time.Now().Add(24 * time.Hour),
+						ProviderCursor: last.Timestamp.UTC().Format(time.RFC3339Nano),
+					}
+					if cursor, serr := tr.cursorSigner.Sign(nc); serr == nil {
+						result.NextCursor = cursor
+					}
+				}
+			}
 		}
 		return jsonResult(result)
 	case "log_fields":
@@ -136,6 +230,7 @@ func (tr *ToolRegistry) callLogTool(ctx context.Context, name string, args json.
 		if err != nil {
 			return logToolError("log_fields", provider.Name(), err)
 		}
+		capLogFieldsResult(result, logFieldsResponseCap)
 		return jsonResult(result)
 	case "log_stats":
 		req, err := parseLogStatsRequest(args)
@@ -146,9 +241,90 @@ func (tr *ToolRegistry) callLogTool(ctx context.Context, name string, args json.
 		if err != nil {
 			return logToolError("log_stats", provider.Name(), err)
 		}
+		capLogStatsResult(result, logStatsResponseCap)
 		return jsonResult(result)
 	default:
 		return ErrorResult(fmt.Sprintf("unknown log tool: %s", name))
+	}
+}
+
+// logCursorMatchesRequest returns true when the cursor's constraints are
+// consistent with the current request — same provider, query, direction, and
+// field list. Time bounds are intentionally excluded because they are replaced
+// by the cursor's stored bounds on continuation.
+func logCursorMatchesRequest(c integration.LogCursorConstraints, req integration.LogQueryRequest, provider models.ProviderName) bool {
+	if c.Provider != provider || c.Query != req.Query {
+		return false
+	}
+	dir := integration.LogDirectionDesc
+	if req.Direction != nil {
+		dir = *req.Direction
+	}
+	if c.Direction != dir {
+		return false
+	}
+	got := append([]string(nil), c.Fields...)
+	want := append([]string(nil), req.Fields...)
+	slices.Sort(got)
+	slices.Sort(want)
+	return slices.Equal(got, want)
+}
+
+func capLogQueryResult(r *integration.LogQueryResult, maxBytes int) {
+	for len(r.Entries) > 1 {
+		data, _ := json.Marshal(r)
+		if len(data) <= maxBytes {
+			return
+		}
+		r.Entries = r.Entries[:len(r.Entries)-1]
+		r.Truncated = true
+	}
+}
+
+// capLogContextResult trims the outermost before/after entries alternately
+// until the marshalled result fits within maxBytes. It returns whether Before
+// or After entries were trimmed so the caller can sign continuation cursors.
+func capLogContextResult(r *integration.LogContextResult, maxBytes int) (beforeTrimmed, afterTrimmed bool) {
+	for {
+		data, _ := json.Marshal(r)
+		if len(data) <= maxBytes {
+			return
+		}
+		trimmed := false
+		if len(r.After) > 0 {
+			r.After = r.After[:len(r.After)-1]
+			afterTrimmed = true
+			trimmed = true
+		}
+		if len(r.Before) > 0 {
+			r.Before = r.Before[1:]
+			beforeTrimmed = true
+			trimmed = true
+		}
+		if !trimmed {
+			return
+		}
+	}
+}
+
+func capLogFieldsResult(r *integration.LogFieldsResult, maxBytes int) {
+	for len(r.Fields) > 1 {
+		data, _ := json.Marshal(r)
+		if len(data) <= maxBytes {
+			return
+		}
+		r.Fields = r.Fields[:len(r.Fields)-1]
+	}
+}
+
+func capLogStatsResult(r *integration.LogStatsResult, maxBytes int) {
+	for len(r.Series) > 1 {
+		data, _ := json.Marshal(r)
+		if len(data) <= maxBytes {
+			return
+		}
+		r.Series = r.Series[:len(r.Series)-1]
+		r.Truncated = true
 	}
 }
 
@@ -285,12 +461,24 @@ func parseLogStatsRequest(args json.RawMessage) (integration.LogStatsRequest, er
 	if err != nil {
 		return integration.LogStatsRequest{}, err
 	}
+	var interval *time.Duration
+	if p.Interval != "" {
+		parsed, err := parseLogDuration(p.Interval)
+		if err != nil {
+			return integration.LogStatsRequest{}, err
+		}
+		if parsed <= 0 || parsed > integration.LogMaxLookback {
+			return integration.LogStatsRequest{}, fmt.Errorf("interval must be >0 and <= %s", integration.LogMaxLookback)
+		}
+		interval = &parsed
+	}
 	return integration.LogStatsRequest{
 		Query:     p.Query,
 		Since:     since,
 		StartTime: start,
 		EndTime:   end,
 		GroupBy:   p.GroupBy,
+		Interval:  interval,
 		Limit:     limit,
 	}, nil
 }
@@ -418,5 +606,6 @@ type logStatsParams struct {
 	StartTime string   `json:"start_time"`
 	EndTime   string   `json:"end_time"`
 	GroupBy   []string `json:"group_by"`
+	Interval  string   `json:"interval"`
 	Limit     int      `json:"limit"`
 }

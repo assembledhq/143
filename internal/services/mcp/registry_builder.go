@@ -83,6 +83,7 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 	if queryURL := os.Getenv("VICTORIALOGS_URL"); queryURL != "" {
 		provider := integration.NewVictoriaLogsProvider(integration.VictoriaLogsConfig{
 			QueryURL:          queryURL,
+			FieldNamesURL:     os.Getenv("VICTORIALOGS_FIELDS_URL"),
 			AuthToken:         os.Getenv("VICTORIALOGS_TOKEN"),
 			SharedOrgID:       os.Getenv("VICTORIALOGS_ORG_ID"),
 			MultiTenantShared: os.Getenv("VICTORIALOGS_SHARED") == "true",

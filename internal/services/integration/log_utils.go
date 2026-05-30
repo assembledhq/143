@@ -200,6 +200,38 @@ func (s *LogCursorSigner) Verify(cursor string, expected LogCursorConstraints) (
 	return got, nil
 }
 
+// Decode validates the HMAC and expiry of cursor and returns its constraints
+// without enforcing constraint matching. Use this to extract the original query
+// parameters for cursor-based pagination continuation.
+func (s *LogCursorSigner) Decode(cursor string) (LogCursorConstraints, error) {
+	if len(s.secret) == 0 {
+		return LogCursorConstraints{}, errors.New("log cursor signer secret is required")
+	}
+	payloadB64, sigB64, ok := strings.Cut(cursor, ".")
+	if !ok {
+		return LogCursorConstraints{}, ErrLogCursorInvalid
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		return LogCursorConstraints{}, ErrLogCursorInvalid
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil {
+		return LogCursorConstraints{}, ErrLogCursorInvalid
+	}
+	if !hmac.Equal(sig, s.sign(payload)) {
+		return LogCursorConstraints{}, ErrLogCursorInvalid
+	}
+	var got LogCursorConstraints
+	if err := json.Unmarshal(payload, &got); err != nil {
+		return LogCursorConstraints{}, ErrLogCursorInvalid
+	}
+	if !got.ExpiresAt.IsZero() && s.now().After(got.ExpiresAt) {
+		return LogCursorConstraints{}, ErrLogCursorInvalid
+	}
+	return got, nil
+}
+
 func (s *LogCursorSigner) sign(payload []byte) []byte {
 	mac := hmac.New(sha256.New, s.secret)
 	_, _ = mac.Write(payload)

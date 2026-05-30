@@ -20,6 +20,7 @@ const logProviderHTTPBodyLimit = 2 << 20
 
 type VictoriaLogsConfig struct {
 	QueryURL          string
+	FieldNamesURL     string // Optional: VictoriaLogs /select/logsql/field_names endpoint for native field discovery.
 	AuthToken         string
 	SharedOrgID       string
 	HTTPClient        *http.Client
@@ -107,6 +108,9 @@ func (p *VictoriaLogsProvider) GetLogContext(ctx context.Context, req LogContext
 }
 
 func (p *VictoriaLogsProvider) ListLogFields(ctx context.Context, req LogFieldsRequest) (*LogFieldsResult, error) {
+	if p.cfg.FieldNamesURL != "" {
+		return p.listLogFieldsNative(ctx, req)
+	}
 	limit := intValue(req.Limit, 100)
 	query := "*"
 	if req.Query != nil && strings.TrimSpace(*req.Query) != "" {
@@ -120,17 +124,93 @@ func (p *VictoriaLogsProvider) ListLogFields(ctx context.Context, req LogFieldsR
 	return &LogFieldsResult{Provider: p.Name(), Fields: collectLogFields(result.Entries, limit)}, nil
 }
 
+func (p *VictoriaLogsProvider) listLogFieldsNative(ctx context.Context, req LogFieldsRequest) (*LogFieldsResult, error) {
+	start, end, err := NormalizeLogTimeBounds(req.Since, nil, nil, LogMaxLookback, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	query := p.scopedQuery("*")
+	if req.Query != nil && strings.TrimSpace(*req.Query) != "" {
+		query = p.scopedQuery(*req.Query)
+	}
+	values := url.Values{}
+	values.Set("query", query)
+	values.Set("start", start.Format(time.RFC3339Nano))
+	values.Set("end", end.Format(time.RFC3339Nano))
+	if req.Limit != nil && *req.Limit > 0 {
+		values.Set("limit", strconv.Itoa(*req.Limit))
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.FieldNamesURL, strings.NewReader(values.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if p.cfg.AuthToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.cfg.AuthToken)
+	}
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, ErrLogProviderUnauthorized
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, ErrLogRateLimited
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, logProviderHTTPBodyLimit))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("log provider returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	fields, err := parseVictoriaLogsFieldNames(body)
+	if err != nil {
+		return nil, err
+	}
+	return &LogFieldsResult{Provider: p.Name(), Fields: fields}, nil
+}
+
+func parseVictoriaLogsFieldNames(body []byte) ([]LogField, error) {
+	var fields []LogField
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 4096), logProviderHTTPBodyLimit)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record struct {
+			FieldName string `json:"field_name"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return nil, fmt.Errorf("unexpected field_names response: %w", err)
+		}
+		if record.FieldName != "" {
+			fields = append(fields, LogField{Name: record.FieldName})
+		}
+	}
+	return fields, scanner.Err()
+}
+
 func (p *VictoriaLogsProvider) QueryLogStats(ctx context.Context, req LogStatsRequest) (*LogStatsResult, error) {
 	start, end, err := NormalizeLogTimeBounds(req.Since, req.StartTime, req.EndTime, LogMaxLookback, time.Now())
 	if err != nil {
 		return nil, err
 	}
 	query := p.scopedQuery(req.Query)
-	if len(req.GroupBy) > 0 {
+	groupBy := make([]string, 0, len(req.GroupBy)+1)
+	if req.Interval != nil {
+		groupBy = append(groupBy, "_time:"+formatLogStatsInterval(*req.Interval))
+	}
+	groupBy = append(groupBy, req.GroupBy...)
+	if len(groupBy) > 0 {
 		if err := validateLogGroupByFields(req.GroupBy); err != nil {
 			return nil, err
 		}
-		query += " | stats by (" + strings.Join(req.GroupBy, ", ") + ") count()"
+		query += " | stats by (" + strings.Join(groupBy, ", ") + ") count()"
 	} else {
 		query += " | stats count()"
 	}
@@ -171,6 +251,21 @@ func validateLogGroupByFields(fields []string) error {
 		}
 	}
 	return nil
+}
+
+func formatLogStatsInterval(interval time.Duration) string {
+	switch {
+	case interval%(24*time.Hour) == 0:
+		return fmt.Sprintf("%dd", int(interval/(24*time.Hour)))
+	case interval%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(interval/time.Hour))
+	case interval%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(interval/time.Minute))
+	case interval%time.Second == 0:
+		return fmt.Sprintf("%ds", int(interval/time.Second))
+	default:
+		return interval.String()
+	}
 }
 
 func (p *VictoriaLogsProvider) scopedQuery(query string) string {
@@ -327,6 +422,7 @@ func parseLogHTTPRecords(body []byte) ([]map[string]any, error) {
 		Data    []map[string]any `json:"data"`
 		Entries []map[string]any `json:"entries"`
 		Logs    []map[string]any `json:"logs"`
+		Lines   []map[string]any `json:"lines"`
 	}
 	if json.Unmarshal(body, &envelope) == nil {
 		switch {
@@ -336,6 +432,8 @@ func parseLogHTTPRecords(body []byte) ([]map[string]any, error) {
 			return envelope.Entries, nil
 		case envelope.Logs != nil:
 			return envelope.Logs, nil
+		case envelope.Lines != nil:
+			return envelope.Lines, nil
 		}
 		var records []map[string]any
 		if json.Unmarshal(body, &records) == nil {
