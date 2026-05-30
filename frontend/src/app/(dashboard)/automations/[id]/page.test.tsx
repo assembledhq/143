@@ -116,7 +116,10 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Change automation emoji" })).toHaveTextContent("🧪");
+    const headerEmoji = screen.getByRole("button", { name: "Change automation emoji" });
+    expect(headerEmoji).toHaveTextContent("🧪");
+    expect(headerEmoji).toHaveClass("h-auto", "p-0", "align-baseline");
+    expect(headerEmoji).not.toHaveClass("size-9");
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Edit" }));
 
