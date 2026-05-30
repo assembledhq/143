@@ -364,6 +364,54 @@ describe('SessionSidebar', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
+  it('shows a pending opening state immediately when a session row is clicked', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Slow session' }),
+      makeSession({ id: 's2', result_summary: 'Other session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Slow session')).closest('a');
+    expect(link).not.toBeNull();
+
+    await userEvent.click(link!);
+
+    expect(link).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByText('Opening')).toBeInTheDocument();
+    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveClass(
+      'border-primary/20',
+      'bg-background',
+      'shadow-sm',
+    );
+    expect(screen.getByText('Other session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('keeps the target row pending when switching from one selected session to another', async () => {
+    mockSelectedSegment = 's1';
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Current session' }),
+      makeSession({ id: 's2', result_summary: 'Next session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const nextLink = (await screen.findByText('Next session')).closest('a');
+    expect(nextLink).not.toBeNull();
+
+    await userEvent.click(nextLink!);
+
+    expect(nextLink).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Current session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveClass(
+      'border-primary/20',
+      'bg-background',
+      'shadow-sm',
+    );
+  });
+
   it('uses the same row padding frame for the new-session draft and normal sessions', async () => {
     mockPathname = '/sessions/new';
     serveSessions([
