@@ -214,10 +214,13 @@ func (h *PreviewSecretBundleHandler) Patch(w http.ResponseWriter, r *http.Reques
 		name = *body.Name
 	}
 	if body.Source != nil {
-		source = *body.Source
+		source = mergePreviewSecretBundleSource(source, *body.Source)
 	}
 	if body.Outputs != nil {
 		outputs = *body.Outputs
+	}
+	if body.Source != nil || body.Outputs != nil {
+		source = prunePreviewSecretBundleSource(source, outputs)
 	}
 	exposurePolicy := existing.ExposurePolicy
 	if body.ExposurePolicy != nil {
@@ -489,6 +492,7 @@ func validatePreviewSecretBundleRequest(body previewSecretBundleUpsertRequest) [
 	if body.ExposurePolicy != "" && body.ExposurePolicy != "preview_runtime" {
 		errs = append(errs, `exposure_policy must be "preview_runtime"`)
 	}
+	fileOutputCount := 0
 	for i, output := range body.Outputs {
 		switch output.Type {
 		case "env":
@@ -496,6 +500,10 @@ func validatePreviewSecretBundleRequest(body previewSecretBundleUpsertRequest) [
 				errs = append(errs, "outputs["+strconv.Itoa(i)+"].values is required for env outputs")
 			}
 		case "file":
+			fileOutputCount++
+			if fileOutputCount > 1 {
+				errs = append(errs, "only one file output is supported")
+			}
 			if output.Path == "" {
 				errs = append(errs, "outputs["+strconv.Itoa(i)+"].path is required for file outputs")
 			}
@@ -517,6 +525,75 @@ func validatePreviewSecretBundleRequest(body previewSecretBundleUpsertRequest) [
 		}
 	}
 	return errs
+}
+
+func mergePreviewSecretBundleSource(existing, incoming models.PreviewSecretBundleSource) models.PreviewSecretBundleSource {
+	merged := models.PreviewSecretBundleSource{
+		Type:   incoming.Type,
+		Values: make(map[string]string, len(existing.Values)+len(incoming.Values)),
+	}
+	for key, value := range existing.Values {
+		merged.Values[key] = value
+	}
+	for key, value := range incoming.Values {
+		merged.Values[key] = value
+	}
+	return merged
+}
+
+func prunePreviewSecretBundleSource(source models.PreviewSecretBundleSource, outputs []models.PreviewSecretBundleOutput) models.PreviewSecretBundleSource {
+	refs := previewSecretBundleSourceRefs(outputs)
+	if len(refs) == 0 {
+		source.Values = nil
+		return source
+	}
+	pruned := make(map[string]string, len(refs))
+	for key := range refs {
+		if value, ok := source.Values[key]; ok {
+			pruned[key] = value
+		}
+	}
+	source.Values = pruned
+	return source
+}
+
+func previewSecretBundleSourceRefs(outputs []models.PreviewSecretBundleOutput) map[string]struct{} {
+	refs := make(map[string]struct{})
+	for _, output := range outputs {
+		collectPreviewSecretExpressionRef(output.Value, refs)
+		for _, expr := range output.Values {
+			collectPreviewSecretExpressionRef(expr, refs)
+		}
+		if len(output.Content) > 0 {
+			var content any
+			if err := json.Unmarshal(output.Content, &content); err == nil {
+				collectPreviewSecretContentRefs(content, refs)
+			}
+		}
+	}
+	return refs
+}
+
+func collectPreviewSecretContentRefs(value any, refs map[string]struct{}) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, child := range typed {
+			collectPreviewSecretContentRefs(child, refs)
+		}
+	case []any:
+		for _, child := range typed {
+			collectPreviewSecretContentRefs(child, refs)
+		}
+	case string:
+		collectPreviewSecretExpressionRef(typed, refs)
+	}
+}
+
+func collectPreviewSecretExpressionRef(expr string, refs map[string]struct{}) {
+	key, ok := strings.CutPrefix(expr, "secret:")
+	if ok && key != "" {
+		refs[key] = struct{}{}
+	}
 }
 
 func isSafePreviewSecretFilePath(raw string) bool {

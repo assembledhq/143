@@ -143,7 +143,7 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
 
-    expect(screen.getByRole("tablist", { name: "Delivery method" })).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Bundle output editor" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Environment variables" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "Secret file" })).toHaveAttribute("aria-selected", "false");
     expect(screen.getByText("Stored secrets")).toBeInTheDocument();
@@ -200,6 +200,65 @@ describe("PreviewSettingsPage", () => {
     });
   }, 10000);
 
+  it("saves multiple environment variables and one secret file in the same bundle", async () => {
+    let savedBody: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.post("*/api/v1/repositories/repo-1/preview-secret-bundles", async ({ request }) => {
+        savedBody = await request.json();
+        return HttpResponse.json({ data: bundle("bundle-2", "repo-1", "mixed") });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
+    await userEvent.type(screen.getByLabelText("Bundle name"), "mixed");
+    await userEvent.type(screen.getByLabelText("Secret name"), "DATABASE_URL");
+    await userEvent.type(screen.getByLabelText("Secret value"), "postgres://dev");
+    await userEvent.click(screen.getByRole("button", { name: "Add value" }));
+    await userEvent.type(screen.getByLabelText("Secret name 2"), "GOOGLE_DRIVE_REFRESH_TOKEN");
+    await userEvent.type(screen.getByLabelText("Secret value 2"), "refresh-token");
+    await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
+    await userEvent.type(screen.getByLabelText("Secret file path"), "development.conf.json");
+    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
+    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"api":"secret"}' } });
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(savedBody).toEqual({
+        name: "mixed",
+        source: {
+          type: "managed",
+          values: {
+            DATABASE_URL: "postgres://dev",
+            GOOGLE_DRIVE_REFRESH_TOKEN: "refresh-token",
+            SECRET_FILE_CONTENT: '{"api":"secret"}',
+          },
+        },
+        outputs: [
+          {
+            type: "env",
+            values: {
+              DATABASE_URL: "secret:DATABASE_URL",
+              GOOGLE_DRIVE_REFRESH_TOKEN: "secret:GOOGLE_DRIVE_REFRESH_TOKEN",
+            },
+          },
+          {
+            type: "file",
+            path: "development.conf.json",
+            format: "json",
+            value: "secret:SECRET_FILE_CONTENT",
+          },
+        ],
+        exposure_policy: "preview_runtime",
+      });
+    });
+  }, 10000);
+
   it("uses the shared tooltip for disabled Save guidance", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -238,10 +297,10 @@ describe("PreviewSettingsPage", () => {
     expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
 
     await userEvent.hover(screen.getByText("Save").closest("span")!);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add at least one secret name and value");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add at least one environment variable or secret file");
   });
 
-  it("warns when editing a legacy bundle that has both env and file outputs", async () => {
+  it("allows editing a bundle that has both env and file outputs", async () => {
     const dualBundle = {
       id: "bundle-dual",
       repository_id: "repo-1",
@@ -268,10 +327,11 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit dual-delivery/i }))[0]);
 
-    expect(screen.getByText(/uses both env vars and a secret file/i)).toBeInTheDocument();
+    expect(screen.getByText(/Add one or more environment variables and optionally one generated file/i)).toBeInTheDocument();
+    expect(screen.queryByText(/the other will be removed on save/i)).not.toBeInTheDocument();
   });
 
-  it("hides the re-enter file hint when switching to env delivery mode on a file bundle", async () => {
+  it("keeps the file-preservation hint available when editing a file bundle", async () => {
     const fileBundle = {
       id: "bundle-file",
       repository_id: "repo-1",
@@ -299,7 +359,7 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "Environment variables" }));
 
-    expect(screen.queryByText(/leave the file contents blank/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/leave the file contents blank/i)).toBeInTheDocument();
   });
 
   it("rejects invalid JSON in secret file contents when format is JSON", async () => {
