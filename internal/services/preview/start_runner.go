@@ -27,6 +27,8 @@ import (
 
 const previewNoConfigMessage = "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run."
 
+var ErrSandboxBusy = errors.New("session sandbox is busy")
+
 // StartRunner completes durable preview startup jobs after the API has
 // reserved the preview row and enqueued start_preview.
 type StartRunner struct {
@@ -303,6 +305,14 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		if errors.Is(acq.Err, agent.ErrStaleSandboxIDCleared) {
 			return fmt.Errorf("%s: %w", acq.ErrCodeOr("STALE_SANDBOX_CLEARED"), acq.Err)
 		}
+		if errors.Is(acq.Err, agent.ErrSandboxOnDifferentNode) {
+			r.registerSandboxBusyDeadLetter(ctx, reservation)
+			return fmt.Errorf("%s: %w", acq.ErrCodeOr("SANDBOX_WRONG_NODE"), acq.Err)
+		}
+		if acq.ErrCode == "SANDBOX_BUSY" {
+			r.registerSandboxBusyDeadLetter(ctx, reservation)
+			return fmt.Errorf("%s: %w: %v", acq.ErrCode, ErrSandboxBusy, acq.Err)
+		}
 		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
@@ -397,6 +407,21 @@ func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservatio
 	})
 }
 
+func (r *StartRunner) registerSandboxBusyDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
+	if r == nil || r.manager == nil || reservation == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if deadLetterErr != nil {
+			r.logger.Warn().Err(deadLetterErr).
+				Str("preview_id", reservation.ID.String()).
+				Str("session_id", reservation.SessionID.String()).
+				Msg("preview start dead-lettered after sandbox-busy retries")
+		}
+		r.manager.AbortReservation(hookCtx, reservation, "", "Preview could not start because the session sandbox stayed busy. Try again after the current agent turn finishes.")
+	})
+}
+
 func (r *StartRunner) abort(ctx context.Context, reservation *models.PreviewInstance, hydratedID, reason string) {
 	if r.manager == nil || reservation == nil {
 		return
@@ -472,6 +497,9 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	workDir := r.resolveSandboxWorkDir(ctx, session)
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
+		if ownerCheck := r.checkLiveContainerWorker(session.WorkerNodeID); ownerCheck.Err != nil {
+			return ownerCheck
+		}
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
@@ -509,11 +537,14 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	sandboxCfg.Purpose = "preview_hydrate"
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
-	winningID, freshErr := r.sessions.PeekContainerID(ctx, orgID, session.ID)
+	winningID, winningWorkerID, freshErr := r.sessions.PeekContainerOwnership(ctx, orgID, session.ID)
 	switch {
 	case freshErr != nil:
 		r.logger.Warn().Err(freshErr).Str("session_id", session.ID.String()).Msg("preview hydrate: pre-hydrate peek failed; falling through to CAS race detection")
 	case winningID != "":
+		if ownerCheck := r.checkLiveContainerWorker(&winningWorkerID); ownerCheck.Err != nil {
+			return ownerCheck
+		}
 		if cleared, clearErr := r.clearStalePreviewContainer(ctx, orgID, session, winningID, workDir); clearErr != nil {
 			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEAR_FAILED", Err: clearErr}
 		} else if cleared {
@@ -557,6 +588,29 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
+}
+
+func (r *StartRunner) checkLiveContainerWorker(workerNodeID *string) acquireSandboxResult {
+	if r == nil || r.nodeID == "" {
+		return acquireSandboxResult{}
+	}
+	owner := ""
+	if workerNodeID != nil {
+		owner = strings.TrimSpace(*workerNodeID)
+	}
+	if owner == "" {
+		return acquireSandboxResult{
+			ErrCode: "SANDBOX_BUSY",
+			Err:     fmt.Errorf("%w: session sandbox worker ownership is not recorded yet", ErrSandboxBusy),
+		}
+	}
+	if owner != r.nodeID {
+		return acquireSandboxResult{
+			ErrCode: "SANDBOX_WRONG_NODE",
+			Err:     fmt.Errorf("%w: session sandbox belongs to worker %s", agent.ErrSandboxOnDifferentNode, owner),
+		}
+	}
+	return acquireSandboxResult{}
 }
 
 func (r *StartRunner) clearStalePreviewContainer(ctx context.Context, orgID uuid.UUID, session *models.Session, containerID, workDir string) (bool, error) {
