@@ -667,7 +667,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		recycleWorker = nil
 	}
 
-	workerSelector := preview.NewWorkerSelector(nodeStore, previewStore)
+	workerSelector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+		MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+		PreferredRegion:      cfg.NodeRegion,
+	})
 	workerClient := preview.NewWorkerPreviewClient(cfg.SessionSecret)
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).

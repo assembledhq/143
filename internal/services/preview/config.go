@@ -335,7 +335,92 @@ func selectNamedPreviewSection(previewData []byte, name string) ([]byte, bool, e
 	if !ok {
 		return nil, false, fmt.Errorf("preview config %q not found; available configs: %s", selectedName, strings.Join(names, ", "))
 	}
-	return selected, true, nil
+	merged, err := mergeNamedPreviewSection(previewData, selected)
+	if err != nil {
+		return nil, false, err
+	}
+	return merged, true, nil
+}
+
+func mergeNamedPreviewSection(baseData, selectedData []byte) ([]byte, error) {
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(baseData, &base); err != nil {
+		return nil, fmt.Errorf("parse base preview config: %w", err)
+	}
+	delete(base, "default")
+	delete(base, "configs")
+	var selected map[string]json.RawMessage
+	if err := json.Unmarshal(selectedData, &selected); err != nil {
+		return nil, fmt.Errorf("parse named preview config: %w", err)
+	}
+	for key, value := range selected {
+		if key == "install" {
+			mergedInstall, err := mergeInstallSection(base[key], value)
+			if err != nil {
+				return nil, err
+			}
+			base[key] = mergedInstall
+			continue
+		}
+		base[key] = value
+	}
+	out, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged preview config: %w", err)
+	}
+	return out, nil
+}
+
+func mergeInstallSection(baseData, selectedData json.RawMessage) (json.RawMessage, error) {
+	if len(baseData) == 0 || string(baseData) == "null" {
+		return selectedData, nil
+	}
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(baseData, &base); err != nil {
+		return nil, fmt.Errorf("parse base preview.install: %w", err)
+	}
+	var selected map[string]json.RawMessage
+	if err := json.Unmarshal(selectedData, &selected); err != nil {
+		return nil, fmt.Errorf("parse named preview.install: %w", err)
+	}
+	for key, value := range selected {
+		if key == "cache" {
+			mergedCache, err := mergeObjectSection(base[key], value, "preview.install.cache")
+			if err != nil {
+				return nil, err
+			}
+			base[key] = mergedCache
+			continue
+		}
+		base[key] = value
+	}
+	out, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged preview.install: %w", err)
+	}
+	return out, nil
+}
+
+func mergeObjectSection(baseData, selectedData json.RawMessage, field string) (json.RawMessage, error) {
+	if len(baseData) == 0 || string(baseData) == "null" {
+		return selectedData, nil
+	}
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(baseData, &base); err != nil {
+		return nil, fmt.Errorf("parse base %s: %w", field, err)
+	}
+	var selected map[string]json.RawMessage
+	if err := json.Unmarshal(selectedData, &selected); err != nil {
+		return nil, fmt.Errorf("parse named %s: %w", field, err)
+	}
+	for key, value := range selected {
+		base[key] = value
+	}
+	out, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged %s: %w", field, err)
+	}
+	return out, nil
 }
 
 func sortedPreviewConfigNames(configs map[string]json.RawMessage) []string {
@@ -607,6 +692,21 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 			errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, path))
 		}
 	}
+	if install.Cache != nil {
+		if len(install.Cache.Paths) > 0 && len(install.Lockfiles) == 0 {
+			errs = append(errs, "preview.install.cache.paths requires preview.install.lockfiles")
+		}
+		for i, path := range install.Cache.Paths {
+			field := fmt.Sprintf("preview.install.cache.paths[%d]", i)
+			errs = append(errs, validatePreviewDependencyCachePath(field, path, false)...)
+		}
+	}
+	if paths, enabled := ResolvePreviewInstallCachePaths(install); enabled {
+		for i, path := range paths {
+			field := fmt.Sprintf("preview.install effective cache path[%d]", i)
+			errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
+		}
+	}
 	for i, path := range install.VerifyPaths {
 		field := fmt.Sprintf("preview.install.verify_paths[%d]", i)
 		if strings.TrimSpace(path) == "" {
@@ -621,6 +721,35 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 	return errs
 }
 
+func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []string {
+	var errs []string
+	if strings.TrimSpace(raw) == "" {
+		return []string{field + " is required"}
+	}
+	errs = append(errs, validatePathInsideRepo(field, raw)...)
+	clean := filepath.Clean(raw)
+	if clean == "." {
+		errs = append(errs, fmt.Sprintf("%s: path %q is too broad to cache", field, raw))
+	}
+	parts := strings.Split(clean, string(filepath.Separator))
+	for _, part := range parts {
+		if part == ".git" {
+			errs = append(errs, fmt.Sprintf("%s: path %q must not target .git", field, raw))
+			break
+		}
+	}
+	if clean == ".143/cache/preview-install" || strings.HasPrefix(clean, ".143/cache/preview-install/") {
+		errs = append(errs, fmt.Sprintf("%s: path %q must not target preview install markers", field, raw))
+	}
+	if !validPreviewInstallCleanPath.MatchString(raw) {
+		errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, raw))
+	}
+	if !allowGlob && strings.Contains(raw, "*") {
+		errs = append(errs, fmt.Sprintf("%s: path %q glob paths are not allowed", field, raw))
+	}
+	return errs
+}
+
 func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
 	if install == nil {
 		return
@@ -628,6 +757,78 @@ func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
 	if install.TimeoutSeconds == 0 {
 		install.TimeoutSeconds = DefaultInstallTimeoutSeconds
 	}
+}
+
+// ResolvePreviewInstallCachePaths returns the effective dependency-cache paths
+// and whether dependency caching is enabled for this install config. Caching is
+// default-on only when lockfiles and at least one effective path exist.
+func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]string, bool) {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return nil, false
+	}
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(raw string) {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+		if clean == "" || clean == "." {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	for _, path := range install.CleanPaths {
+		add(path)
+	}
+	if install.Cache != nil {
+		for _, path := range install.Cache.Paths {
+			add(path)
+		}
+	}
+	for _, lockfile := range install.Lockfiles {
+		if inferred, ok := inferPreviewDependencyCachePath(lockfile); ok {
+			add(inferred)
+		}
+	}
+	sort.Strings(paths)
+	return paths, len(paths) > 0
+}
+
+func inferPreviewDependencyCachePath(lockfile string) (string, bool) {
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(lockfile)))
+	if clean == "" || clean == "." {
+		return "", false
+	}
+	dir := pathDir(clean)
+	base := filepath.Base(clean)
+	var cacheDir string
+	switch base {
+	case "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb":
+		cacheDir = "node_modules"
+	case "poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock", "requirements.txt", "requirements-dev.txt":
+		cacheDir = ".venv"
+	case "go.mod", "go.sum":
+		cacheDir = "vendor"
+	default:
+		return "", false
+	}
+	if dir == "." || dir == "" {
+		return cacheDir, true
+	}
+	return dir + "/" + cacheDir, true
+}
+
+func pathDir(clean string) string {
+	idx := strings.LastIndex(clean, "/")
+	if idx < 0 {
+		return "."
+	}
+	return clean[:idx]
 }
 
 func validatePreviewResources(resources models.PreviewResourceRequirements) []string {
@@ -839,6 +1040,11 @@ func cloneInstallConfig(install *models.PreviewInstallConfig) *models.PreviewIns
 	cloned.Lockfiles = append([]string(nil), install.Lockfiles...)
 	cloned.CleanPaths = append([]string(nil), install.CleanPaths...)
 	cloned.VerifyPaths = append([]string(nil), install.VerifyPaths...)
+	if install.Cache != nil {
+		cache := *install.Cache
+		cache.Paths = append([]string(nil), install.Cache.Paths...)
+		cloned.Cache = &cache
+	}
 	return &cloned
 }
 

@@ -65,7 +65,19 @@ Use `preview.default` to auto-select one config. If there are multiple configs a
 <ConfigField name="preview.install.lockfiles" type="string[]" description="Repo-relative files included in the install cache key." />
 <ConfigField name="preview.install.clean_paths" type="string[]" description="Repo-relative paths or simple globs removed before reinstalling. 143 deletes only declared paths." />
 <ConfigField name="preview.install.verify_paths" type="string[]" description="Repo-relative paths that must exist before a cached install can be reused." />
+<ConfigField name="preview.install.cache.enabled" type="boolean" defaultValue="true" description="Set false to opt out of dependency artifact caching." />
+<ConfigField name="preview.install.cache.paths" type="string[]" description="Additive repo-relative dependency/build cache paths. Effective paths are clean_paths + cache.paths + inferred paths." />
 <ConfigField name="preview.install.timeout_seconds" type="integer" defaultValue="420" description="Maximum install duration. Max 1800." />
+
+Inferred dependency cache paths:
+
+| Dependency file | Inferred cache path |
+|---|---|
+| `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` | `node_modules` |
+| `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
+| `go.mod`, `go.sum` | `vendor` |
+
+Inference is relative to the dependency file directory. For example, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. For stale dependencies, change lockfiles, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
 
 ## Service fields
 
