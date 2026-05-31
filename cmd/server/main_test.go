@@ -170,6 +170,46 @@ func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
 	}
 }
 
+func TestPreviewDependencyCacheEnabledWithConfiguredBucket(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{
+			name: "bucket enables cache by default",
+			cfg: config.Config{
+				PreviewDependencyCacheBucket: "preview-dependency-cache",
+			},
+			want: true,
+		},
+		{
+			name: "empty bucket keeps cache disabled",
+			cfg:  config.Config{},
+			want: false,
+		},
+		{
+			name: "blank bucket keeps cache disabled",
+			cfg: config.Config{
+				PreviewDependencyCacheBucket: "   ",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := previewDependencyCacheEnabled(tt.cfg)
+
+			require.Equal(t, tt.want, got, "dependency cache should be enabled exactly when an L2 bucket is configured")
+		})
+	}
+}
+
 func TestValidateSessionExecutorStartupConfig(t *testing.T) {
 	t.Parallel()
 
