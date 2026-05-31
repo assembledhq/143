@@ -442,6 +442,7 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+			Previews:            previewStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),

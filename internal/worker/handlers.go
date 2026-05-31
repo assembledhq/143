@@ -35,6 +35,7 @@ import (
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
+	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/assembledhq/143/internal/version"
 )
 
@@ -421,6 +422,7 @@ type Stores struct {
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
+	Previews            *db.PreviewStore
 	SlackInstallations  *db.SlackInstallationStore
 	SlackUserLinks      *db.SlackUserLinkStore
 	SlackChannels       *db.SlackChannelSettingsStore
@@ -1442,40 +1444,46 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			if getErr != nil {
 				return fmt.Errorf("get linked slack session: %w", getErr)
 			}
-			msg := &models.SessionMessage{
-				SessionID:  session.ID,
-				OrgID:      orgID,
-				ThreadID:   session.PrimaryThreadID,
-				UserID:     mappedUserID,
-				TurnNumber: session.CurrentTurn,
-				Role:       models.MessageRoleUser,
-				Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+			if slackShouldContinueLinkedSession(session.Status) {
+				msg := &models.SessionMessage{
+					SessionID:  session.ID,
+					OrgID:      orgID,
+					ThreadID:   session.PrimaryThreadID,
+					UserID:     mappedUserID,
+					TurnNumber: session.CurrentTurn,
+					Role:       models.MessageRoleUser,
+					Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+				}
+				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
+					return fmt.Errorf("create slack follow-up message: %w", err)
+				}
+				scopeID := session.ID
+				if session.PrimaryThreadID != nil {
+					scopeID = *session.PrimaryThreadID
+				}
+				dedupeKey := db.ContinueSessionDedupeKey(scopeID)
+				continuePayload := map[string]string{
+					"org_id":     orgID.String(),
+					"session_id": session.ID.String(),
+				}
+				if session.PrimaryThreadID != nil {
+					continuePayload["thread_id"] = session.PrimaryThreadID.String()
+				}
+				if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", continuePayload, 5, &dedupeKey); err != nil {
+					return fmt.Errorf("enqueue slack session continuation: %w", err)
+				}
+				ackText := slackSessionAckText(services, session.ID, "Continuing")
+				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, payload.ChannelID, threadTS, ackText); err != nil {
+					logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
+				} else {
+					recordSlackOutbound(ctx, stores, services, logger, existingLink, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
+				}
+				return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 			}
-			if err := stores.SessionMessages.Create(ctx, msg); err != nil {
-				return fmt.Errorf("create slack follow-up message: %w", err)
-			}
-			scopeID := session.ID
-			if session.PrimaryThreadID != nil {
-				scopeID = *session.PrimaryThreadID
-			}
-			dedupeKey := db.ContinueSessionDedupeKey(scopeID)
-			continuePayload := map[string]string{
-				"org_id":     orgID.String(),
-				"session_id": session.ID.String(),
-			}
-			if session.PrimaryThreadID != nil {
-				continuePayload["thread_id"] = session.PrimaryThreadID.String()
-			}
-			if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", continuePayload, 5, &dedupeKey); err != nil {
-				return fmt.Errorf("enqueue slack session continuation: %w", err)
-			}
-			ackText := slackSessionAckText(services, session.ID, "Continuing")
-			if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, payload.ChannelID, threadTS, ackText); err != nil {
-				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
-			} else {
-				recordSlackOutbound(ctx, stores, services, logger, existingLink, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
-			}
-			return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
+			logger.Info().
+				Str("session_id", session.ID.String()).
+				Str("status", string(session.Status)).
+				Msg("linked Slack session is not resumable; starting a new session for thread")
 		}
 		if linkErr != nil && !errors.Is(linkErr, pgx.ErrNoRows) {
 			return fmt.Errorf("get slack session link: %w", linkErr)
@@ -1627,6 +1635,10 @@ func slackStartSessionLinkThreadTS(payload models.SlackStartSessionJobPayload, r
 	default:
 		return payload.MessageTS
 	}
+}
+
+func slackShouldContinueLinkedSession(status models.SessionStatus) bool {
+	return status.CanAddThread()
 }
 
 func slackSourceHasMessagePermalink(source string) bool {
@@ -2183,7 +2195,11 @@ func renderSlackNotification(services *Services, input models.SlackSendNotificat
 		})
 	}
 	if input.PreviewID != "" {
-		value, _ := json.Marshal(map[string]string{"org_id": input.OrgID, "preview_id": input.PreviewID})
+		valueFields := map[string]string{"org_id": input.OrgID, "preview_id": input.PreviewID}
+		if input.SessionID != "" {
+			valueFields["session_id"] = input.SessionID
+		}
+		value, _ := json.Marshal(valueFields)
 		elements = append(elements, map[string]any{
 			"type":      "button",
 			"action_id": "slack_open_preview",
@@ -3105,48 +3121,43 @@ func handleSlackPreviewAction(ctx context.Context, stores *Stores, services *Ser
 }
 
 func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID uuid.UUID) error {
-	if input.UserID == "" {
-		return fmt.Errorf("slack preview action requires a Slack user")
+	if stores == nil {
+		return fmt.Errorf("slack preview action dependencies are not configured")
 	}
-	if stores != nil && stores.SlackChannels != nil && input.ChannelID != "" {
-		settings, err := stores.SlackChannels.GetByChannel(ctx, orgID, input.TeamID, input.ChannelID)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("load slack channel settings for preview action: %w", err)
-		}
-		if err == nil && !stringSliceContains(settings.AllowedActions, "preview") {
-			return fmt.Errorf("slack preview action is not allowed in this channel")
-		}
+	var value struct {
+		SessionID string `json:"session_id"`
 	}
-	if stores != nil && stores.SlackUserLinks != nil {
-		link, err := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID)
+	if input.Value != "" {
+		_ = json.Unmarshal([]byte(input.Value), &value)
+	}
+	isOriginatingTeamSession := false
+	if value.SessionID != "" && stores.SlackSessionLinks != nil {
+		sessionID, err := uuid.Parse(value.SessionID)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			return fmt.Errorf("resolve slack user for preview action: %w", err)
+			return fmt.Errorf("parse slack preview action session_id: %w", err)
 		}
-		if link.UserID == nil {
-			return nil
-		}
-		if stores.Memberships != nil {
-			membership, err := stores.Memberships.Get(ctx, *link.UserID, orgID)
-			if err != nil {
-				return fmt.Errorf("load linked user membership for preview action: %w", err)
-			}
-			if membership.Role == models.RoleViewer {
-				return fmt.Errorf("slack preview action requires a non-viewer 143 role")
-			}
-		} else if stores.Users != nil {
-			user, err := stores.Users.GetByID(ctx, orgID, *link.UserID)
-			if err != nil {
-				return fmt.Errorf("load linked user for preview action: %w", err)
-			}
-			if user.Role == models.RoleViewer {
-				return fmt.Errorf("slack preview action requires a non-viewer 143 role")
-			}
+		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load slack session link for preview action: %w", err)
+		} else if err == nil {
+			isOriginatingTeamSession = link.TeamSession &&
+				link.SlackTeamID == input.TeamID &&
+				link.SlackChannelID == input.ChannelID
 		}
 	}
-	return nil
+	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
+	_, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
+		OrgID:                    orgID,
+		TeamID:                   input.TeamID,
+		ChannelID:                input.ChannelID,
+		SlackUserID:              input.UserID,
+		Capability:               slackbotsvc.CapabilityPreview,
+		AllowedRoles:             []models.Role{models.RoleAdmin, models.RoleMember, models.RoleBuilder},
+		RequireMapped:            !isOriginatingTeamSession,
+		AllowUnmappedTeamSession: true,
+		IsOriginatingTeamSession: isOriginatingTeamSession,
+	})
+	return err
 }
 
 func stringSliceContains(values []string, target string) bool {

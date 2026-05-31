@@ -1941,6 +1941,92 @@ func (h *IntegrationHandler) ListSlackUserLinks(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, models.ListResponse[models.SlackUserLink]{Data: links, Meta: models.PaginationMeta{}})
 }
 
+func (h *IntegrationHandler) UpsertSlackUserLinkAdmin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	if h.memberships == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "MEMBERSHIP_STORE_NOT_CONFIGURED", "membership validation is not configured")
+		return
+	}
+	var body struct {
+		UserID           uuid.UUID `json:"user_id"`
+		SlackUserID      string    `json:"slack_user_id"`
+		SlackEmail       string    `json:"slack_email"`
+		SlackDisplayName string    `json:"slack_display_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	body.SlackUserID = strings.TrimSpace(body.SlackUserID)
+	body.SlackEmail = strings.TrimSpace(body.SlackEmail)
+	body.SlackDisplayName = strings.TrimSpace(body.SlackDisplayName)
+	if body.UserID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_USER_ID", "user_id is required")
+		return
+	}
+	if body.SlackUserID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_SLACK_USER_ID", "slack_user_id is required")
+		return
+	}
+	if _, err := h.memberships.Get(r.Context(), body.UserID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusBadRequest, "USER_NOT_IN_ORG", "user_id must belong to the current org")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "MEMBERSHIP_LOOKUP_FAILED", "failed to validate user membership", err)
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	var emailPtr *string
+	if body.SlackEmail != "" {
+		emailPtr = &body.SlackEmail
+	}
+	link := &models.SlackUserLink{
+		OrgID:               orgID,
+		SlackInstallationID: installation.ID,
+		UserID:              &body.UserID,
+		SlackTeamID:         installation.TeamID,
+		SlackUserID:         body.SlackUserID,
+		SlackEmail:          emailPtr,
+		SlackDisplayName:    body.SlackDisplayName,
+	}
+	if err := h.slackUserLinkStore.UpsertAdminLink(r.Context(), link); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to upsert slack user link", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
+}
+
+func (h *IntegrationHandler) DeleteSlackUserLinkAdmin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	linkID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LINK_ID", "id must be a valid UUID")
+		return
+	}
+	if err := h.slackUserLinkStore.DeleteByID(r.Context(), orgID, linkID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SLACK_USER_LINK_NOT_FOUND", "slack user link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_DELETE_FAILED", "failed to delete slack user link", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *IntegrationHandler) LinkSlackUserMe(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())

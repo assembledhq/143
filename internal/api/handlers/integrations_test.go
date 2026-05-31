@@ -1359,6 +1359,120 @@ func TestIntegrationHandler_LinkSlackUserMeRejectsEmailMismatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "Slack self-link should not upsert a mismatched Slack identity")
 }
 
+func TestIntegrationHandler_UpsertSlackUserLinkAdmin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	email := "eng@example.com"
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithIntegrationMembershipStore(fakeGitHubMembershipStore{membership: models.OrganizationMembership{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   models.RoleMember,
+		}}),
+	)
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+	mock.ExpectQuery(`ON CONFLICT \(org_id, slack_team_id, slack_user_id\)`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "user_id", "slack_team_id", "slack_user_id",
+			"slack_email", "slack_display_name", "source", "linked_at", "created_at", "updated_at",
+		}).AddRow(
+			linkID, orgID, installationID, &userID, "T123", "U123", &email, "Eng User",
+			models.SlackUserLinkSourceAdminLinked, &now, now, now,
+		))
+
+	body := strings.NewReader(fmt.Sprintf(`{"user_id":%q,"slack_user_id":"U123","slack_email":"eng@example.com","slack_display_name":"Eng User"}`, userID.String()))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/slack/user-links", body)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.UpsertSlackUserLinkAdmin(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "admin Slack user-link upsert should return OK")
+	var resp models.SingleResponse[models.SlackUserLink]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Slack user-link response should be valid JSON")
+	require.Equal(t, models.SlackUserLinkSourceAdminLinked, resp.Data.Source, "admin upsert should mark the link as admin linked")
+	require.Equal(t, &userID, resp.Data.UserID, "admin upsert should link the requested user")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link upsert should satisfy database expectations")
+}
+
+func TestIntegrationHandler_DeleteSlackUserLinkAdmin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+
+	mock.ExpectExec(`DELETE FROM slack_user_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/slack/user-links/"+linkID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", linkID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.DeleteSlackUserLinkAdmin(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "admin Slack user-link delete should return OK")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link delete should satisfy database expectations")
+}
+
+func TestIntegrationHandler_DeleteSlackUserLinkAdmin_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+
+	mock.ExpectExec(`DELETE FROM slack_user_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/slack/user-links/"+linkID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", linkID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.DeleteSlackUserLinkAdmin(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "admin Slack user-link delete should return 404 for non-existent link")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link delete not-found should satisfy database expectations")
+}
+
 func TestIntegrationHandler_PatchSlackChannelSettingsRejectsForeignRepository(t *testing.T) {
 	t.Parallel()
 
