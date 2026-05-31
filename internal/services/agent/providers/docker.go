@@ -1026,9 +1026,18 @@ func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path s
 
 // WriteFile writes data to a file inside the sandbox.
 func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, filePath string, data []byte) error {
+	return d.WriteFileFromReader(ctx, sb, filePath, bytes.NewReader(data), int64(len(data)))
+}
+
+// WriteFileFromReader writes a file into the sandbox without requiring callers
+// to materialize the entire payload as a byte slice.
+func (d *DockerProvider) WriteFileFromReader(ctx context.Context, sb *agent.Sandbox, filePath string, reader io.Reader, sizeBytes int64) error {
 	cleanPath := filepath.ToSlash(filepath.Clean(filePath))
 	if cleanPath == "." {
 		return fmt.Errorf("write file %s: invalid path", filePath)
+	}
+	if sizeBytes < 0 {
+		return fmt.Errorf("write file %s: invalid size", filePath)
 	}
 	relPath := strings.TrimPrefix(cleanPath, "/")
 	if relPath == "" {
@@ -1040,21 +1049,6 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, fileP
 		}
 	}
 	extractDir, archiveName := writeFileTarTarget(sb, cleanPath, relPath)
-
-	var archive bytes.Buffer
-	tw := tar.NewWriter(&archive)
-	if err := writeTarDirs(tw, path.Dir(archiveName)); err != nil {
-		return fmt.Errorf("write file %s: build tar dirs: %w", filePath, err)
-	}
-	if err := tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: int64(len(data))}); err != nil {
-		return fmt.Errorf("write file %s: build tar header: %w", filePath, err)
-	}
-	if _, err := tw.Write(data); err != nil {
-		return fmt.Errorf("write file %s: build tar body: %w", filePath, err)
-	}
-	if err := tw.Close(); err != nil {
-		return fmt.Errorf("write file %s: close tar: %w", filePath, err)
-	}
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"tar", "xf", "-", "-C", extractDir},
@@ -1071,8 +1065,36 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, fileP
 		return fmt.Errorf("write file %s: attach: %w", filePath, err)
 	}
 	defer attachResp.Close()
-	if _, err := io.Copy(attachResp.Conn, &archive); err != nil {
+
+	pr, pw := io.Pipe()
+	writeErrCh := make(chan error, 1)
+	go func() {
+		tw := tar.NewWriter(pw)
+		var err error
+		if err = writeTarDirs(tw, path.Dir(archiveName)); err == nil {
+			err = tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: sizeBytes})
+		}
+		if err == nil {
+			_, err = io.Copy(tw, reader)
+		}
+		if closeErr := tw.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			writeErrCh <- err
+			return
+		}
+		writeErrCh <- pw.Close()
+	}()
+	if _, err := io.Copy(attachResp.Conn, pr); err != nil {
+		// Close the read end so the writer goroutine unblocks and exits.
+		_ = pr.CloseWithError(err)
+		<-writeErrCh // wait for goroutine to finish before returning
 		return fmt.Errorf("write file %s: stream tar: %w", filePath, err)
+	}
+	if err := <-writeErrCh; err != nil {
+		return fmt.Errorf("write file %s: build tar stream: %w", filePath, err)
 	}
 	_ = attachResp.CloseWrite()
 	stderrBuf := newCappedBuffer(tarStderrCap)

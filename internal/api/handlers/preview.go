@@ -11,6 +11,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -702,7 +703,9 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	//      create a new container and restore the snapshot.
 	//   3. SnapshotExpired / SnapshotUnavailable — neither a container nor a
 	//      usable snapshot exists.
+	hydrateStarted := time.Now()
 	acq := h.acquireSandbox(ctx, orgID, &session, input.Config)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, orgID.String(), "hydrate", time.Since(hydrateStarted))
 	if acq.Err != nil {
 		h.logger.Warn().Err(acq.Err).
 			Str("session_id", sessionID.String()).
@@ -741,12 +744,14 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	}
 
 	if body.Config == nil {
+		configStarted := time.Now()
 		// Auto-detect: read preview config from the session's workspace.
 		// We deliberately do NOT fall back to a generic "npm start on :3000"
 		// default — for any repo without that file, that fallback exits within
 		// seconds and the user waits ~90s for the readiness probe to give up.
 		// Returning a clear PREVIEW_NO_CONFIG error is strictly more useful.
 		cfg, err := h.readWorkspacePreviewConfig(ctx, sb, sessionID)
+		metrics.RecordSessionPreviewPhaseDuration(ctx, orgID.String(), "config", time.Since(configStarted))
 		if err != nil {
 			if errors.Is(err, preview.ErrInvalidConfig) {
 				msg := preview.InvalidConfigMessage(err)
@@ -803,7 +808,36 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 	if err != nil {
 		return nil, 0, newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
 	}
-	worker, err := h.workerSelector.SelectStartNode(ctx, orgID, &session)
+	repoID := uuid.Nil
+	if session.RepositoryID != nil {
+		repoID = *session.RepositoryID
+	}
+	placementKey := ""
+	if repoID != uuid.Nil {
+		if body.Config != nil {
+			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled {
+				configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
+				if digestErr != nil {
+					h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
+				}
+				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
+				if placementErr != nil {
+					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
+				} else {
+					placementKey = computedPlacementKey
+				}
+			}
+		}
+		if placementKey == "" {
+			computedPlacementKey, placementErr := preview.ComputePreviewDependencyCacheRepoPlacementKey(orgID, repoID)
+			if placementErr != nil {
+				h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
+			} else {
+				placementKey = computedPlacementKey
+			}
+		}
+	}
+	worker, err := h.workerSelector.SelectStartNodeWithPlacement(ctx, orgID, &session, repoID, placementKey)
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):

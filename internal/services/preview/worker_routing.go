@@ -2,15 +2,20 @@ package preview
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -22,9 +27,14 @@ var (
 	ErrLegacySessionWorkerOwnership = errors.New("live session is missing worker ownership metadata")
 )
 
+// rendezvousTopN is the number of top-scored rendezvous candidates to check
+// for capacity before falling through to the least-loaded fallback.
+const rendezvousTopN = 6
+
 // WorkerNodeMetadata is the routable subset of nodes.metadata used by preview.
 type WorkerNodeMetadata struct {
 	BuildSHA               string `json:"build_sha,omitempty"`
+	Region                 string `json:"region,omitempty"`
 	PreviewCapable         bool   `json:"preview_capable,omitempty"`
 	PreviewInternalBaseURL string `json:"preview_internal_base_url,omitempty"`
 }
@@ -34,17 +44,42 @@ type WorkerNode struct {
 	ID      string
 	Mode    string
 	BaseURL string
+	Region  string
 }
 
 // WorkerSelector resolves preview-owning workers and selects workers for cold starts.
 type WorkerSelector struct {
-	nodes    *db.NodeStore
-	previews *db.PreviewStore
+	nodes                *db.NodeStore
+	previews             *db.PreviewStore
+	maxPreviewsPerWorker int
+	preferredRegion      string
+}
+
+type WorkerSelectorOptions struct {
+	MaxPreviewsPerWorker int
+	PreferredRegion      string
 }
 
 // NewWorkerSelector creates a new worker selector.
 func NewWorkerSelector(nodes *db.NodeStore, previews *db.PreviewStore) *WorkerSelector {
-	return &WorkerSelector{nodes: nodes, previews: previews}
+	return NewWorkerSelectorWithMaxPerWorker(nodes, previews, DefaultMaxPreviewsPerWorker)
+}
+
+func NewWorkerSelectorWithMaxPerWorker(nodes *db.NodeStore, previews *db.PreviewStore, maxPreviewsPerWorker int) *WorkerSelector {
+	return NewWorkerSelectorWithOptions(nodes, previews, WorkerSelectorOptions{MaxPreviewsPerWorker: maxPreviewsPerWorker})
+}
+
+func NewWorkerSelectorWithOptions(nodes *db.NodeStore, previews *db.PreviewStore, opts WorkerSelectorOptions) *WorkerSelector {
+	maxPreviewsPerWorker := opts.MaxPreviewsPerWorker
+	if maxPreviewsPerWorker <= 0 {
+		maxPreviewsPerWorker = DefaultMaxPreviewsPerWorker
+	}
+	return &WorkerSelector{
+		nodes:                nodes,
+		previews:             previews,
+		maxPreviewsPerWorker: maxPreviewsPerWorker,
+		preferredRegion:      strings.TrimSpace(opts.PreferredRegion),
+	}
 }
 
 func parseWorkerNode(node models.Node) (WorkerNode, error) {
@@ -65,6 +100,7 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 		ID:      node.ID,
 		Mode:    string(node.Mode),
 		BaseURL: baseURL,
+		Region:  strings.TrimSpace(metadata.Region),
 	}, nil
 }
 
@@ -83,6 +119,7 @@ func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
 		ID:      node.ID,
 		Mode:    string(node.Mode),
 		BaseURL: baseURL,
+		Region:  strings.TrimSpace(metadata.Region),
 	}, nil
 }
 
@@ -106,12 +143,17 @@ func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (Worker
 
 // SelectStartNode picks the worker that should handle Start Preview for the session.
 func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, session *models.Session) (WorkerNode, error) {
+	return s.SelectStartNodeWithPlacement(ctx, orgID, session, uuid.Nil, "")
+}
+
+func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placementKey string) (WorkerNode, error) {
 	if session == nil {
 		return WorkerNode{}, fmt.Errorf("session is required")
 	}
 
 	instance, err := s.previews.GetActivePreviewForSession(ctx, orgID, session.ID)
 	if err == nil && instance != nil {
+		metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "live_session")
 		return s.ResolveNode(ctx, instance.WorkerNodeID)
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -123,10 +165,50 @@ func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, s
 		if session.WorkerNodeID == nil || *session.WorkerNodeID == "" {
 			return WorkerNode{}, ErrLegacySessionWorkerOwnership
 		}
+		metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "live_session")
 		return s.ResolveNode(ctx, *session.WorkerNodeID)
 	}
 
-	return s.SelectLeastLoadedNode(ctx)
+	if repoID != uuid.Nil && strings.TrimSpace(placementKey) != "" {
+		worker, ok, lookupErr := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, true)
+		if lookupErr == nil && ok {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "local_cache_holder")
+			return worker, nil
+		} else if lookupErr != nil {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
+		}
+		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, true); err != nil && !errors.Is(err, ErrNoPreviewWorkers) {
+			return WorkerNode{}, err
+		} else if ok {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "rendezvous")
+			return worker, nil
+		}
+	}
+
+	worker, err := s.SelectLeastLoadedNodeInPreferredRegion(ctx)
+	if err == nil {
+		metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "least_loaded")
+		return worker, nil
+	}
+	if !errors.Is(err, ErrNoPreviewWorkers) || s.preferredRegion == "" {
+		return WorkerNode{}, err
+	}
+	if repoID != uuid.Nil && strings.TrimSpace(placementKey) != "" {
+		if worker, ok, err := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, false); err != nil {
+			return WorkerNode{}, err
+		} else if ok {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
+			return worker, nil
+		}
+		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, false); err != nil {
+			return WorkerNode{}, err
+		} else if ok {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
+			return worker, nil
+		}
+	}
+	metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
+	return s.SelectLeastLoadedNodeExcept(ctx, nil)
 }
 
 // SelectLeastLoadedNode picks the preview-capable active worker with the fewest active previews.
@@ -134,9 +216,17 @@ func (s *WorkerSelector) SelectLeastLoadedNode(ctx context.Context) (WorkerNode,
 	return s.SelectLeastLoadedNodeExcept(ctx, nil)
 }
 
+func (s *WorkerSelector) SelectLeastLoadedNodeInPreferredRegion(ctx context.Context) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, nil, true)
+}
+
 // SelectLeastLoadedNodeExcept picks the least-loaded preview-capable active
 // worker while skipping any excluded worker IDs.
 func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, excluded map[string]struct{}) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, excluded, false)
+}
+
+func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, preferredOnly bool) (WorkerNode, error) {
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {
 		return WorkerNode{}, err
@@ -153,6 +243,9 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, exclud
 			continue
 		}
 		if worker.Mode != "worker" && worker.Mode != "all" {
+			continue
+		}
+		if preferredOnly && !s.inPreferredRegion(worker) {
 			continue
 		}
 		eligible = append(eligible, worker)
@@ -174,12 +267,132 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, exclud
 	// Second pass: pick the least-loaded worker (ties broken by lexicographic ID).
 	best := WorkerNode{}
 	bestCount := 0
+	found := false
 	for i, worker := range eligible {
 		count := counts[worker.ID]
-		if i == 0 || count < bestCount || (count == bestCount && worker.ID < best.ID) {
+		if count >= s.maxPreviewsPerWorker {
+			continue
+		}
+		if !found || i == 0 || count < bestCount || (count == bestCount && worker.ID < best.ID) {
 			best = worker
 			bestCount = count
+			found = true
 		}
 	}
+	if !found {
+		return WorkerNode{}, ErrNoPreviewWorkers
+	}
 	return best, nil
+}
+
+func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, preferredOnly bool) (WorkerNode, bool, error) {
+	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	locations, err := s.previews.ListDependencyCacheWorkersByPlacement(lookupCtx, orgID, repoID, placementKey, 64)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	if len(locations) == 0 {
+		return WorkerNode{}, false, nil
+	}
+	nodes, err := s.nodes.ListActive(ctx)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	routable := make(map[string]WorkerNode, len(nodes))
+	for _, node := range nodes {
+		worker, err := parseWorkerNode(node)
+		if err != nil || (worker.Mode != "worker" && worker.Mode != "all") {
+			continue
+		}
+		if preferredOnly && !s.inPreferredRegion(worker) {
+			continue
+		}
+		routable[worker.ID] = worker
+	}
+	ids := make([]string, 0, len(locations))
+	seen := make(map[string]struct{}, len(locations))
+	for _, location := range locations {
+		if _, ok := routable[location.WorkerNodeID]; !ok {
+			continue
+		}
+		if _, ok := seen[location.WorkerNodeID]; ok {
+			continue
+		}
+		seen[location.WorkerNodeID] = struct{}{}
+		ids = append(ids, location.WorkerNodeID)
+	}
+	if len(ids) == 0 {
+		return WorkerNode{}, false, nil
+	}
+	counts, err := s.previews.CountActivePreviewsByWorkers(ctx, ids)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	for _, location := range locations {
+		worker, ok := routable[location.WorkerNodeID]
+		if !ok {
+			continue
+		}
+		if counts[worker.ID] < s.maxPreviewsPerWorker {
+			return worker, true, nil
+		}
+	}
+	return WorkerNode{}, false, nil
+}
+
+func (s *WorkerSelector) selectRendezvousWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, topN int, preferredOnly bool) (WorkerNode, bool, error) {
+	nodes, err := s.nodes.ListActive(ctx)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	var eligible []WorkerNode
+	for _, node := range nodes {
+		worker, err := parseWorkerNode(node)
+		if err != nil || (worker.Mode != "worker" && worker.Mode != "all") {
+			continue
+		}
+		if preferredOnly && !s.inPreferredRegion(worker) {
+			continue
+		}
+		eligible = append(eligible, worker)
+	}
+	if len(eligible) == 0 {
+		return WorkerNode{}, false, ErrNoPreviewWorkers
+	}
+	sort.Slice(eligible, func(i, j int) bool {
+		left := rendezvousScore(orgID, repoID, placementKey, eligible[i].ID)
+		right := rendezvousScore(orgID, repoID, placementKey, eligible[j].ID)
+		if left == right {
+			return eligible[i].ID < eligible[j].ID
+		}
+		return left > right
+	})
+	if topN <= 0 || topN > len(eligible) {
+		topN = len(eligible)
+	}
+	candidates := eligible[:topN]
+	ids := make([]string, len(candidates))
+	for i, worker := range candidates {
+		ids[i] = worker.ID
+	}
+	counts, err := s.previews.CountActivePreviewsByWorkers(ctx, ids)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	for _, worker := range candidates {
+		if counts[worker.ID] < s.maxPreviewsPerWorker {
+			return worker, true, nil
+		}
+	}
+	return WorkerNode{}, false, nil
+}
+
+func (s *WorkerSelector) inPreferredRegion(worker WorkerNode) bool {
+	return s.preferredRegion == "" || worker.Region == s.preferredRegion
+}
+
+func rendezvousScore(orgID, repoID uuid.UUID, placementKey, workerID string) uint64 {
+	sum := sha256.Sum256([]byte(orgID.String() + "\x00" + repoID.String() + "\x00" + placementKey + "\x00" + workerID))
+	return binary.BigEndian.Uint64(sum[:8])
 }
