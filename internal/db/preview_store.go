@@ -1669,6 +1669,7 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 		SET status = 'unavailable',
 			error = @reason,
 			unavailable_reason = @unavailable_reason,
+			preview_holding_container = FALSE,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost
@@ -1702,6 +1703,7 @@ func (s *PreviewStore) MarkExpiredPreviewRuntimesLost(ctx context.Context, cutof
 		SET status = 'unavailable',
 			error = @reason,
 			unavailable_reason = 'lease_expired',
+			preview_holding_container = FALSE,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost

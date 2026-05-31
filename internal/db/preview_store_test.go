@@ -2278,7 +2278,7 @@ func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerMarksPreviewUnavailab
 
 	store := NewPreviewStore(mock)
 
-	mock.ExpectExec("WITH lost AS").
+	mock.ExpectExec("WITH lost AS[\\s\\S]+UPDATE preview_instances[\\s\\S]+preview_holding_container = FALSE").
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
@@ -2304,6 +2304,25 @@ func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerRecordsUnavailableRea
 	updated, err := store.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), "worker-1", "drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout)
 	require.NoError(t, err, "MarkActivePreviewRuntimesLostByWorkerWithReason should persist a deploy-specific reason")
 	require.Equal(t, int64(1), updated, "MarkActivePreviewRuntimesLostByWorkerWithReason should report updated previews")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkExpiredPreviewRuntimesLostClearsPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+UPDATE preview_instances[\\s\\S]+preview_holding_container = FALSE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	updated, err := store.MarkExpiredPreviewRuntimesLost(context.Background(), time.Now(), "preview runtime lease expired")
+	require.NoError(t, err, "MarkExpiredPreviewRuntimesLost should mark expired runtimes lost")
+	require.Equal(t, int64(1), updated, "MarkExpiredPreviewRuntimesLost should report updated previews")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
