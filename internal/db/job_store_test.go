@@ -804,6 +804,17 @@ func TestJobStore_ReclaimLostRunningJobs_IncludesLegacyNullLeaseRows(t *testing.
 	require.NotContains(t, sql, "j.lease_expires_at IS NULL AND j.locked_at < $1", "legacy null-lease recovery must not reclaim active live-node jobs using the node heartbeat cutoff")
 }
 
+func TestJobStore_ReclaimLostRunningJobs_RecoveryMetadataSessionJobsOnly(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id, j.job_type", "global recovery should keep job type available when applying session recovery metadata")
+	require.Contains(t, sql, "AND uj.job_type IN ('run_agent', 'continue_session')", "global recovery should only mark sessions recovering for agent runtime jobs")
+}
+
 func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {
 	t.Parallel()
 
