@@ -258,7 +258,7 @@ function PreviewSecretsSection() {
 
   useEffect(() => {
     const timeoutID = window.setTimeout(() => {
-      if (!dialogMode || form.deliveryMode !== "file" || form.fileFormat !== "json" || !form.fileContent) {
+      if (!dialogMode || form.fileFormat !== "json" || !form.fileContent) {
         setJSONValidationError(null);
         return;
       }
@@ -271,7 +271,7 @@ function PreviewSecretsSection() {
     }, JSON_FILE_VALIDATION_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timeoutID);
-  }, [dialogMode, form.deliveryMode, form.fileContent, form.fileFormat]);
+  }, [dialogMode, form.fileContent, form.fileFormat]);
 
   function updateRow(index: number, patch: Partial<SecretValueRow>) {
     setForm((current) => ({
@@ -565,23 +565,25 @@ function BundleDialog({
   const isEdit = mode?.type === "edit";
   const editBundle = mode?.type === "edit" ? mode.bundle : null;
   const editHasFileOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "file") : false;
-  const editHasEnvOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "env") : false;
-  const editHasBothOutputs = editHasFileOutputs && editHasEnvOutputs;
-  const hasFilledValue = form.rows.some((row) => row.key.trim() && row.value);
-  const canPreserveFileContent = isEdit && editHasFileOutputs && form.deliveryMode === "file" && !form.fileContent;
+  const existingEnvNames = new Set(editBundle ? envNamesFromBundle(editBundle) : []);
+  const hasEnvOutput = form.rows.some((row) => {
+    const key = row.key.trim();
+    return key && (Boolean(row.value) || (isEdit && existingEnvNames.has(key)));
+  });
+  const wantsFileOutput = Boolean(form.filePath.trim()) || Boolean(form.fileContent);
+  const canPreserveFileContent = isEdit && editHasFileOutputs && Boolean(form.filePath.trim()) && !form.fileContent;
   const hasFileOutput = Boolean(form.filePath.trim()) && (Boolean(form.fileContent) || canPreserveFileContent);
   const canSave = Boolean(form.repositoryId)
     && Boolean(form.name.trim())
-    && (form.deliveryMode === "env" ? hasFilledValue : hasFileOutput);
-  const saveTooltip = form.deliveryMode === "file" && !form.filePath.trim()
+    && (hasEnvOutput || hasFileOutput)
+    && (!wantsFileOutput || hasFileOutput);
+  const saveTooltip = form.fileContent && !form.filePath.trim()
     ? "Add the secret file path before saving"
-    : form.deliveryMode === "file" && !form.fileContent && !canPreserveFileContent
+    : form.filePath.trim() && !form.fileContent && !canPreserveFileContent
       ? "Paste the secret file contents before saving"
-      : form.deliveryMode === "env" && isEdit && !hasFilledValue
-        ? "Re-enter at least one secret value to save changes"
-        : form.deliveryMode === "env" && !hasFilledValue
-          ? "Add at least one secret name and value"
-          : undefined;
+      : !hasEnvOutput && !hasFileOutput
+        ? "Add at least one environment variable or secret file"
+        : undefined;
 
   return (
     <Dialog open={Boolean(mode)} onOpenChange={onOpenChange}>
@@ -589,12 +591,10 @@ function BundleDialog({
         <DialogHeader>
           <DialogTitle>{isEdit ? "Edit bundle" : "New bundle"}</DialogTitle>
           <DialogDescription>
-            Secret values are not shown again after creation.
-            {editHasBothOutputs
-              ? " This bundle uses both env vars and a secret file. Choose which delivery method to keep — the other will be removed on save."
-              : editHasFileOutputs && form.deliveryMode === "file"
-                ? " Leave the file contents blank to keep the encrypted file already stored, or paste new contents to replace it."
-                : null}
+            Secret values are not shown again after creation. Add one or more environment variables and optionally one generated file.
+            {editHasFileOutputs
+              ? " Leave the file contents blank to keep the encrypted file already stored, or paste new contents to replace it."
+              : null}
           </DialogDescription>
         </DialogHeader>
         <form className="space-y-5" onSubmit={onSubmit}>
@@ -636,14 +636,14 @@ function BundleDialog({
             value={form.deliveryMode}
             onValueChange={(value) => onFormChange({ ...form, deliveryMode: value as BundleDeliveryMode })}
           >
-            <TabsList aria-label="Delivery method" className="w-full sm:w-fit">
+            <TabsList aria-label="Bundle output editor" className="w-full sm:w-fit">
               <TabsTrigger value="env">Environment variables</TabsTrigger>
               <TabsTrigger value="file">Secret file</TabsTrigger>
             </TabsList>
             <TabsContent value="env" className="space-y-4">
               <StoredSecretsFields
                 rows={form.rows}
-                description="Each secret name becomes an environment variable in the preview runtime."
+                description="Each secret name becomes an environment variable in the preview runtime. Existing values can stay blank unless you want to replace them."
                 onRowChange={onRowChange}
                 onRowAdd={onRowAdd}
                 onRowRemove={onRowRemove}
@@ -1123,66 +1123,70 @@ function buildBundleRequest(
     return new Error("Bundle name is required.");
   }
 
-  const values: Record<string, string> = {};
-  let outputs: PreviewSecretBundleOutput[] = [];
-  if (form.deliveryMode === "file") {
-    const path = form.filePath.trim();
-    if (!path) {
+  const sourceValues: Record<string, string> = {};
+  const outputs: PreviewSecretBundleOutput[] = [];
+  const existingEnvNames = new Set(mode.type === "edit" ? envNamesFromBundle(mode.bundle) : []);
+  const envValues: Record<string, string> = {};
+
+  for (const row of form.rows) {
+    const key = row.key.trim();
+    if (!key && !row.value) continue;
+    if (!key || (!row.value && (mode.type === "create" || !existingEnvNames.has(key)))) {
+      return new Error("Each new secret value needs both a key and a value.");
+    }
+    envValues[key] = `secret:${key}`;
+    if (row.value) {
+      sourceValues[key] = row.value;
+    }
+  }
+  if (Object.keys(envValues).length > 0) {
+    outputs.push({ type: "env" as const, values: envValues });
+  }
+
+  const filePath = form.filePath.trim();
+  const wantsFileOutput = Boolean(filePath) || Boolean(form.fileContent);
+  if (wantsFileOutput) {
+    if (!filePath) {
       return new Error("Secret file path is required.");
     }
     const fileOutput: PreviewSecretBundleOutput = {
       type: "file",
-      path,
+      path: filePath,
       format: form.fileFormat,
       value: `secret:${SECRET_FILE_KEY}`,
     };
-    if (!form.fileContent) {
-      if (mode.type === "edit") {
-        return {
-          name,
-          outputs: [fileOutput],
-          exposure_policy: "preview_runtime",
-        };
-      }
+    const canPreserveFileContent = mode.type === "edit"
+      && fileOutputsFromBundle(mode.bundle).length > 0
+      && !form.fileContent;
+    if (!form.fileContent && !canPreserveFileContent) {
       return new Error("Secret file contents are required.");
     }
-    if (form.fileFormat === "json") {
-      try {
-        JSON.parse(form.fileContent);
-      } catch {
-        return new Error(SECRET_FILE_JSON_ERROR);
+    if (form.fileContent) {
+      if (form.fileFormat === "json") {
+        try {
+          JSON.parse(form.fileContent);
+        } catch {
+          return new Error(SECRET_FILE_JSON_ERROR);
+        }
       }
+      sourceValues[SECRET_FILE_KEY] = form.fileContent;
     }
-    values[SECRET_FILE_KEY] = form.fileContent;
-    outputs = [fileOutput];
-  } else {
-    for (const row of form.rows) {
-      const key = row.key.trim();
-      if (!key && !row.value) continue;
-      if (!key || !row.value) {
-        return new Error("Each secret value needs both a key and a value.");
-      }
-      values[key] = row.value;
-    }
-    if (Object.keys(values).length === 0) {
-      return new Error("At least one secret value is required.");
-    }
-    const envValues = form.rows.reduce<Record<string, string>>((acc, row) => {
-      const key = row.key.trim();
-      if (key && row.value) {
-        acc[key] = `secret:${key}`;
-      }
-      return acc;
-    }, {});
-    outputs = Object.keys(envValues).length > 0 ? [{ type: "env" as const, values: envValues }] : [];
+    outputs.push(fileOutput);
   }
 
-  return {
+  if (outputs.length === 0) {
+    return new Error("At least one environment variable or secret file is required.");
+  }
+
+  const body: PreviewSecretBundlePatchRequest | PreviewSecretBundleUpsertRequest = {
     name,
-    source: { type: "managed", values },
     outputs,
     exposure_policy: "preview_runtime",
   };
+  if (Object.keys(sourceValues).length > 0 || mode.type === "create") {
+    body.source = { type: "managed", values: sourceValues };
+  }
+  return body;
 }
 
 function envNamesFromBundle(bundle: PreviewSecretBundleSummary): string[] {

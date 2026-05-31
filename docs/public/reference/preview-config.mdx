@@ -120,9 +120,9 @@ New preview configs should prefer `preview.secrets`. The legacy `preview.credent
 <ConfigField name="preview.secrets.bundle" type="string" required description="Name of the admin-managed preview secret bundle." />
 <ConfigField name="preview.secrets.services" type="string[]" required description="Service names that receive env outputs from the bundle. File outputs are workspace-wide and must list every preview service." />
 <ConfigField name="preview.secrets.env" type="string[]" description="Non-secret hint listing required env var names." />
-<ConfigField name="preview.secrets.files" type="string[]" description="Non-secret hint listing generated secret file paths, such as `development.conf.json`." />
+<ConfigField name="preview.secrets.files" type="string[]" description="Non-secret hint listing the generated secret file path, such as `development.conf.json`. V1 admin bundles support one file output." />
 
-`preview.secrets` may be a single object or an array of objects. The repo config never contains secret values. It only declares the bundle name, service scope, and expected output names.
+`preview.secrets` may be a single object or an array of objects. The repo config never contains secret values. It only declares the bundle name, service scope, and expected output names. A bundle may deliver multiple environment variables and one generated file.
 
 Admin-managed bundle outputs support:
 
