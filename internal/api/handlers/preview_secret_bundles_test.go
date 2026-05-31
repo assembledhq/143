@@ -20,18 +20,18 @@ import (
 )
 
 type fakePreviewSecretBundleStore struct {
-	upsertInput    *db.UpsertPreviewSecretBundleInput
-	replaceID      uuid.UUID
-	replaceInput   *db.UpsertPreviewSecretBundleInput
-	replaceErr     error
-	disabledName   string
-	disabledUser   uuid.UUID
-	row            models.PreviewSecretBundle
-	getByIDErr     error
-	source         models.PreviewSecretBundleSource
-	decryptSrcErr  error
-	outputs        []models.PreviewSecretBundleOutput
-	decryptOutErr  error
+	upsertInput   *db.UpsertPreviewSecretBundleInput
+	replaceID     uuid.UUID
+	replaceInput  *db.UpsertPreviewSecretBundleInput
+	replaceErr    error
+	disabledName  string
+	disabledUser  uuid.UUID
+	row           models.PreviewSecretBundle
+	getByIDErr    error
+	source        models.PreviewSecretBundleSource
+	decryptSrcErr error
+	outputs       []models.PreviewSecretBundleOutput
+	decryptOutErr error
 }
 
 func (s *fakePreviewSecretBundleStore) Upsert(_ context.Context, _ uuid.UUID, in db.UpsertPreviewSecretBundleInput) (*models.PreviewSecretBundle, error) {
@@ -122,6 +122,109 @@ func TestPreviewSecretBundleHandler_PatchByIDMergesExistingBundle(t *testing.T) 
 	require.Equal(t, "repo-renamed", store.replaceInput.Name, "Patch should apply the requested rename")
 	require.Equal(t, store.source, store.replaceInput.Source, "Patch should preserve source when omitted")
 	require.Equal(t, store.outputs, store.replaceInput.Outputs, "Patch should preserve outputs when omitted")
+}
+
+func TestPreviewSecretBundleHandler_PatchByIDMergesManagedSourceValues(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
+		},
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{
+			"DATABASE_URL":        "postgres://old",
+			"SECRET_FILE_CONTENT": `{"token":"old"}`,
+		}},
+		outputs: []models.PreviewSecretBundleOutput{
+			{Type: "env", Values: map[string]string{"DATABASE_URL": "secret:DATABASE_URL"}},
+			{Type: "file", Path: "development.conf.json", Format: "json", Value: "secret:SECRET_FILE_CONTENT"},
+		},
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{
+		"source": {"type": "managed", "values": {"GOOGLE_DRIVE_REFRESH_TOKEN": "refresh-token"}},
+		"outputs": [
+			{"type": "env", "values": {
+				"DATABASE_URL": "secret:DATABASE_URL",
+				"GOOGLE_DRIVE_REFRESH_TOKEN": "secret:GOOGLE_DRIVE_REFRESH_TOKEN"
+			}},
+			{"type": "file", "path": "development.conf.json", "format": "json", "value": "secret:SECRET_FILE_CONTENT"}
+		]
+	}`)
+	req := previewSecretBundleRequest(http.MethodPatch, "/api/v1/preview-secret-bundles/"+bundleID.String(), body, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Patch(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Patch should return success when adding an env var to a bundle with a preserved file")
+	require.NotNil(t, store.replaceInput, "Patch should pass a replacement input")
+	require.Equal(t, map[string]string{
+		"DATABASE_URL":               "postgres://old",
+		"GOOGLE_DRIVE_REFRESH_TOKEN": "refresh-token",
+		"SECRET_FILE_CONTENT":        `{"token":"old"}`,
+	}, store.replaceInput.Source.Values, "Patch should merge new managed values with existing encrypted source values")
+}
+
+func TestPreviewSecretBundleHandler_PatchByIDPrunesRemovedManagedSourceValues(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	bundleID := uuid.New()
+	store := &fakePreviewSecretBundleStore{
+		row: models.PreviewSecretBundle{
+			ID:              bundleID,
+			OrgID:           orgID,
+			RepositoryID:    repoID,
+			Name:            "repo-dev",
+			SourceType:      "managed",
+			ExposurePolicy:  "preview_runtime",
+			CreatedByUserID: userID,
+			CreatedAt:       time.Now(),
+		},
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{
+			"DATABASE_URL":               "postgres://old",
+			"GOOGLE_DRIVE_REFRESH_TOKEN": "refresh-token",
+			"SECRET_FILE_CONTENT":        `{"token":"old"}`,
+		}},
+		outputs: []models.PreviewSecretBundleOutput{
+			{Type: "env", Values: map[string]string{
+				"DATABASE_URL":               "secret:DATABASE_URL",
+				"GOOGLE_DRIVE_REFRESH_TOKEN": "secret:GOOGLE_DRIVE_REFRESH_TOKEN",
+			}},
+			{Type: "file", Path: "development.conf.json", Format: "json", Value: "secret:SECRET_FILE_CONTENT"},
+		},
+	}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{
+		"outputs": [
+			{"type": "env", "values": {"DATABASE_URL": "secret:DATABASE_URL"}}
+		]
+	}`)
+	req := previewSecretBundleRequest(http.MethodPatch, "/api/v1/preview-secret-bundles/"+bundleID.String(), body, orgID, userID)
+	addURLParam(req, "id", bundleID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Patch(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Patch should return success when removing env and file outputs")
+	require.NotNil(t, store.replaceInput, "Patch should pass a replacement input")
+	require.Equal(t, map[string]string{
+		"DATABASE_URL": "postgres://old",
+	}, store.replaceInput.Source.Values, "Patch should remove managed values no longer referenced by active outputs")
 }
 
 func TestPreviewSecretBundleHandler_PatchByIDReturnsConflictForNameCollision(t *testing.T) {
@@ -335,6 +438,46 @@ func TestPreviewSecretBundleHandler_UpsertRejectsInvalidJSONFileValue(t *testing
 
 	require.Equal(t, http.StatusBadRequest, rr.Code, "Upsert should reject invalid JSON file secret values before saving")
 	require.Nil(t, store.upsertInput, "Upsert should not save invalid preview secret bundle output configuration")
+}
+
+func TestPreviewSecretBundleHandler_UpsertRejectsMultipleFileOutputs(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	store := &fakePreviewSecretBundleStore{}
+	handler := NewPreviewSecretBundleHandler(store)
+	body := bytes.NewBufferString(`{
+		"name": "repo-dev",
+		"source": {"type": "managed", "values": {
+			"development_conf_json": "{\"token\":\"ok\"}",
+			"service_account_json": "{\"client_email\":\"dev@example.com\"}"
+		}},
+		"outputs": [
+			{
+				"type": "file",
+				"path": "development.conf.json",
+				"format": "json",
+				"value": "secret:development_conf_json"
+			},
+			{
+				"type": "file",
+				"path": "service-account.json",
+				"format": "json",
+				"value": "secret:service_account_json"
+			}
+		]
+	}`)
+	req := previewSecretBundleRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/preview-secret-bundles", body, orgID, userID)
+	addURLParam(req, "id", repoID.String())
+	rr := httptest.NewRecorder()
+
+	handler.Upsert(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Upsert should reject more than one file output per bundle")
+	require.Contains(t, rr.Body.String(), "INVALID_PREVIEW_SECRET_BUNDLE", "response should identify the invalid bundle request")
+	require.Nil(t, store.upsertInput, "Upsert should not save bundle output configuration with multiple files")
 }
 
 func TestPreviewSecretBundleHandler_DeletePassesUserForInactiveSuccessor(t *testing.T) {
