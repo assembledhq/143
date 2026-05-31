@@ -486,6 +486,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS "${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_START "${WORKER_BLUE_GREEN_PORT_START:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_END "${WORKER_BLUE_GREEN_PORT_END:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS "${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS "${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_BASE_NODE_ID "${WORKER_BASE_NODE_ID:-}")" \
   "$(remote_env_assignment WORKER_DRAIN_TIMEOUT "${WORKER_DRAIN_TIMEOUT:-}")" \
   "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
@@ -1053,22 +1055,45 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   worker_host_capacity_preflight() {
     local min_mem="${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}"
     local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}"
+    local attempts="${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-3}"
+    local retry_delay="${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-2}"
     local free_mem idle_cpu idle1 total1 idle2 total2 delta
+    local attempt
 
-    free_mem="$(awk '/MemAvailable:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 0)"
-    read -r idle1 total1 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
-    sleep 1
-    read -r idle2 total2 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
-    idle1="${idle1:-0}"
-    total1="${total1:-0}"
-    idle2="${idle2:-0}"
-    total2="${total2:-0}"
-    delta=$((total2 - total1))
-    if [ "$delta" -le 0 ]; then
-      idle_cpu=0
-    else
-      idle_cpu=$((((idle2 - idle1) * 1000) / delta))
+    if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [ "$attempts" -lt 1 ]; then
+      attempts=1
     fi
+    if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
+      retry_delay=2
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+      free_mem="$(awk '/MemAvailable:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 0)"
+      read -r idle1 total1 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+      sleep 1
+      read -r idle2 total2 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+      idle1="${idle1:-0}"
+      total1="${total1:-0}"
+      idle2="${idle2:-0}"
+      total2="${total2:-0}"
+      delta=$((total2 - total1))
+      if [ "$delta" -le 0 ]; then
+        idle_cpu=0
+      else
+        idle_cpu=$((((idle2 - idle1) * 1000) / delta))
+      fi
+
+      if [ "$free_mem" -ge "$min_mem" ] && [ "$idle_cpu" -ge "$min_cpu" ]; then
+        WORKER_BLUE_GREEN_FREE_MEMORY_MB="$free_mem"
+        WORKER_BLUE_GREEN_IDLE_CPU_MILLIS="$idle_cpu"
+        return 0
+      fi
+
+      if [ "$attempt" -lt "$attempts" ]; then
+        echo "Worker capacity preflight attempt ${attempt}/${attempts} below threshold: free=${free_mem}MB min=${min_mem}MB idle=${idle_cpu}m min=${min_cpu}m; retrying..." >&2
+        sleep "$retry_delay"
+      fi
+    done
 
     if [ "$free_mem" -lt "$min_mem" ]; then
       echo "ERROR: insufficient free memory for worker blue/green overlap: free=${free_mem}MB min=${min_mem}MB" >&2
@@ -1078,8 +1103,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       echo "ERROR: insufficient idle CPU for worker blue/green overlap: idle=${idle_cpu}m min=${min_cpu}m" >&2
       return 1
     fi
-    WORKER_BLUE_GREEN_FREE_MEMORY_MB="$free_mem"
-    WORKER_BLUE_GREEN_IDLE_CPU_MILLIS="$idle_cpu"
   }
 
   worker_support_service_fingerprint() {
@@ -1629,6 +1652,8 @@ DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
 WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS='${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}'
 WORKER_BLUE_GREEN_PORT_START='${WORKER_BLUE_GREEN_PORT_START:-}'
 WORKER_BLUE_GREEN_PORT_END='${WORKER_BLUE_GREEN_PORT_END:-}'
+WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS='${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}'
+WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS='${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}'
 WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
 WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
 
@@ -1663,7 +1688,7 @@ EOS
       # </dev/null + redirect: nothing tied back to the SSH stdio so SSH can
       #   close cleanly.
       setsid bash -c "
-        flock -x /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
+        flock -xo /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
         rm -f '$rollover_script'
       " </dev/null >/dev/null 2>&1 &
       disown

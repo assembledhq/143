@@ -337,6 +337,7 @@ func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testi
 	require.Contains(t, deploy, "worker_host_capacity_preflight", "worker deploy should run a local CPU/memory capacity preflight before starting green")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB", "worker deploy should let operators set the minimum free memory needed for temporary worker overlap")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS", "worker deploy should let operators set the minimum idle CPU budget needed for temporary worker overlap")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS", "worker deploy should retry transient capacity preflight failures before failing a routine rollout")
 	require.Contains(t, deploy, "worker_support_service_fingerprint", "worker deploy should fingerprint support-service config inputs during preflight")
 	require.Contains(t, deploy, "--support-services-fingerprint", "worker deploy preflight should pass support-service fingerprints into worker-deployctl")
 	require.Contains(t, deploy, "--expected-schema-version", "worker deploy preflight should pass the expected migration/schema version into worker-deployctl")
@@ -873,6 +874,7 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.NotContains(t, deployText, "run_worker_deployctl_in_container", "detached worker rollovers should not embed worker-container-bound deploy control helpers")
 	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
+	require.Contains(t, deployText, `flock -xo /tmp/143-deploy-worker.lock`, "detached worker rollovers should not let background drain watchers inherit the deploy lock")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
