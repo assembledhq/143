@@ -205,9 +205,9 @@ func TestStartRunnerAcquireSandbox_ClearsStaleContainerIDBeforeHydrateRetry(t *t
 		SnapshotKey:  &snapshotKey,
 	}
 
-	mock.ExpectQuery(`SELECT COALESCE\(container_id, ''\)\s+FROM sessions`).
+	mock.ExpectQuery(`SELECT COALESCE\(container_id, ''\), COALESCE\(worker_node_id, ''\)\s+FROM sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow(staleContainerID))
+		WillReturnRows(pgxmock.NewRows([]string{"container_id", "worker_node_id"}).AddRow(staleContainerID, ""))
 	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+turn_holding_container = FALSE`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -219,6 +219,62 @@ func TestStartRunnerAcquireSandbox_ClearsStaleContainerIDBeforeHydrateRetry(t *t
 	require.Nil(t, result.Sandbox, "stale cleanup should not hydrate in the same attempt")
 	require.Equal(t, []string{staleContainerID, staleContainerID}, provider.probedIDs, "runner should probe the recorded container before clearing it")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartRunnerAcquireSandbox_DoesNotProbeContainerOwnedByDifferentWorker(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "container-on-other-worker"
+	workerNodeID := "worker-a"
+	provider := &acquireSandboxProvider{aliveByID: map[string]bool{containerID: false}}
+	runner := &StartRunner{
+		sandboxProvider: provider,
+		nodeID:          "worker-b",
+		logger:          zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		WorkerNodeID: &workerNodeID,
+		SandboxState: models.SandboxStateRunning,
+	}
+
+	result := runner.acquireSandbox(context.Background(), orgID, session, nil)
+
+	require.ErrorIs(t, result.Err, agent.ErrSandboxOnDifferentNode, "live containers owned by another worker should be retried on that worker")
+	require.Equal(t, "SANDBOX_WRONG_NODE", result.ErrCode, "wrong-node live containers should use a stable preview error code")
+	require.Empty(t, provider.probedIDs, "runner must not probe a container on the local Docker daemon when another worker owns it")
+	require.Nil(t, result.Sandbox, "wrong-node acquisition should not return a sandbox")
+}
+
+func TestStartRunnerAcquireSandbox_WaitsForWorkerOwnershipBeforeProbe(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "container-with-pending-owner"
+	provider := &acquireSandboxProvider{aliveByID: map[string]bool{containerID: false}}
+	runner := &StartRunner{
+		sandboxProvider: provider,
+		nodeID:          "worker-b",
+		logger:          zerolog.Nop(),
+	}
+	session := &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		SandboxState: models.SandboxStateRunning,
+	}
+
+	result := runner.acquireSandbox(context.Background(), orgID, session, nil)
+
+	require.ErrorIs(t, result.Err, ErrSandboxBusy, "live containers without worker ownership should be retried until ownership is visible")
+	require.Equal(t, "SANDBOX_BUSY", result.ErrCode, "pending worker ownership should keep the sandbox-busy retry contract")
+	require.Empty(t, provider.probedIDs, "runner must not probe a live container before worker ownership is known")
+	require.Nil(t, result.Sandbox, "pending worker ownership should not return a sandbox")
 }
 
 type acquireSandboxSnapshotStore struct{}
