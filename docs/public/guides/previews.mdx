@@ -292,7 +292,7 @@ For new configs, reference a named secret bundle. The repo declares only the bun
 }
 ```
 
-An org admin creates the `repo-dev` bundle outside the repo. The bundle can deliver env vars and generated files. For example, a file output can render a whole JSON document from one managed secret value:
+An org admin creates the `repo-dev` bundle outside the repo. The bundle can deliver multiple env vars and one generated file. For example, a file output can render a whole JSON document from one managed secret value:
 
 ```json
 {
@@ -328,7 +328,7 @@ The older `preview.credentials` shape is still accepted for an env-var-only mana
 
 In both models, the config only references admin-managed values by name and allowlists which outputs may be injected. Secret values are not committed to git.
 
-Scope env secrets to the smallest service list with `services` or legacy `inject_into`. A frontend service usually should not receive server-only secrets because public frontend frameworks can expose environment variables in browser bundles. File outputs are workspace-wide, so a bundle that generates files must list every preview service.
+Scope env secrets to the smallest service list with `services` or legacy `inject_into`. A frontend service usually should not receive server-only secrets because public frontend frameworks can expose environment variables in browser bundles. The file output is workspace-wide, so a bundle that generates a file must list every preview service.
 
 <Callout type="warning" title="Connected previews">
 Any preview with `preview.secrets`, `preview.credentials.mode` other than `none`, or `preview.network.destinations` is treated as connected. Connected previews pin launch behavior to the base branch so a session diff cannot change commands, ports, env handling, secret bundle names, or generated secret file paths while secrets are in scope.
