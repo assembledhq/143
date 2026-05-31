@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -63,6 +64,10 @@ const (
 	httpDrainPropagationDelay = 7 * time.Second
 	httpShutdownTimeout       = 100 * time.Second
 )
+
+func previewDependencyCacheEnabled(cfg config.Config) bool {
+	return strings.TrimSpace(cfg.PreviewDependencyCacheBucket) != ""
+}
 
 func main() {
 	if isSessionExecutorInvocation(os.Args) {
@@ -257,7 +262,7 @@ func main() {
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
 			var dependencyCache preview.DependencyCache
-			if cfg.PreviewDependencyCacheEnabled && cfg.PreviewDependencyCacheBucket != "" {
+			if previewDependencyCacheEnabled(*cfg) {
 				dependencyS3Region := cfg.PreviewDependencyCacheS3Region
 				if dependencyS3Region == "" {
 					dependencyS3Region = cfg.SnapshotS3Region

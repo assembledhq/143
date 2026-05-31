@@ -663,6 +663,7 @@ PreviewDependencyCacheKeepNewestPerRepo int `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_
 ```
 
 When `PREVIEW_DEPENDENCY_CACHE_BUCKET` is empty, dependency caching is disabled regardless of per-repo config. This is the safe default for environments that have not provisioned the bucket.
+When `PREVIEW_DEPENDENCY_CACHE_BUCKET` is set, dependency caching is enabled by default; the former `PREVIEW_DEPENDENCY_CACHE_ENABLED` flag is obsolete and should not be required for new deployments.
 
 ### Worker-local download cache (optional L1)
 
@@ -745,18 +746,10 @@ Preview logs:
 
 1. Ship schema and store methods.
 2. Ship config parser/model support while cache implementation is disabled; configs with `cache.enabled` and `cache.paths` should start validating successfully.
-3. Ship dependency cache service and public Fumadocs behind an env flag:
-
-   ```go
-   PREVIEW_DEPENDENCY_CACHE_ENABLED=false
-   ```
-
-   Docs must land in the same PR as the service implementation (not after), so that when the feature is enabled users have documentation. The env flag keeps the feature hidden from users until step 5.
-
+3. Ship dependency cache service and public Fumadocs with bucket-presence enablement: environments that set `PREVIEW_DEPENDENCY_CACHE_BUCKET` get dependency caching automatically, while environments without a bucket remain disabled.
 4. Enable in development and one internal repo. Verify metrics, logs, S3 uploads, and eviction job behavior.
-5. Enable by default (`PREVIEW_DEPENDENCY_CACHE_ENABLED=true`) once metrics show no correctness regressions and cache disk eviction behaves correctly.
 
-Repo config can opt out per preview config even when the feature flag defaults on. Repos with `preview.install.lockfiles` and either `clean_paths`, `cache.paths`, or inferred JavaScript/Python/Go paths get caching by default.
+Repo config can opt out per preview config. Repos with `preview.install.lockfiles` and either `clean_paths`, `cache.paths`, or inferred JavaScript/Python/Go paths get caching by default whenever the deployment has an L2 cache bucket configured.
 
 ## Testing Plan
 
@@ -834,12 +827,12 @@ Verification:
 12. Add cache metrics using `org_id` dimension only (not `repo_id`); align result labels with observer statuses and add scheduler-decision metrics.
 13. Change `PreviewCapableProvider.StartPreview` to accept `StartPreviewOptions`; update all provider implementations and tests.
 14. Thread org/repo/session metadata through `Manager.LaunchPreview` into provider options.
-15. Wire dependency cache into worker/server startup config with `PREVIEW_DEPENDENCY_CACHE_ENABLED` flag defaulting to `false`, `PREVIEW_DEPENDENCY_CACHE_BUCKET` defaulting to empty (disabled), and optional `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR`/`PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES` for the worker-local L1 cache.
+15. Wire dependency cache into worker/server startup config with `PREVIEW_DEPENDENCY_CACHE_BUCKET` defaulting to empty (disabled) and optional `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR`/`PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES` for the worker-local L1 cache. When the bucket is present, the cache starts automatically.
 16. Integrate restore/save around `runPreviewInstall`; add a comment documenting the restore-then-clean trade-off for marker-absent cold starts.
 17. Extend observer/logging for cache events; implement clarified status semantics (no `hit` terminal status; `restored` and `save_failed`/`saved`/`skipped` only).
 18. Add provider tests for cache hit/miss/failure/concurrent-save paths.
-19. Update public Fumadocs and internal preview docs alongside the service implementation (same PR, gated by env flag): include the inferred dependency-file table, `requirements.txt` unpinned-deps warning, mutable image tag warning, additive `cache.paths` example, and opt-out example.
-20. Add rollout env flag.
+19. Update public Fumadocs and internal preview docs alongside the service implementation: include the inferred dependency-file table, `requirements.txt` unpinned-deps warning, mutable image tag warning, additive `cache.paths` example, and opt-out example.
+20. Make bucket presence the rollout gate.
 21. Run full Go verification and tenancy lint.
 
 ## Open Questions

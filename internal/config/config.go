@@ -255,7 +255,6 @@ type Config struct {
 	PreviewInternalBaseURL                  string        `env:"PREVIEW_INTERNAL_BASE_URL"`
 	PreviewSnapshotCacheDir                 string        `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
 	PreviewHMRBlobDir                       string        `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
-	PreviewDependencyCacheEnabled           bool          `env:"PREVIEW_DEPENDENCY_CACHE_ENABLED" envDefault:"false"`
 	PreviewDependencyCacheBucket            string        `env:"PREVIEW_DEPENDENCY_CACHE_BUCKET"`
 	PreviewDependencyCachePrefix            string        `env:"PREVIEW_DEPENDENCY_CACHE_PREFIX" envDefault:"preview-dependency-cache"`
 	PreviewDependencyCacheS3Region          string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_REGION"`
