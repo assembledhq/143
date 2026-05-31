@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
+import { act } from "@testing-library/react";
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import PreviewSettingsPage from "./page";
@@ -177,11 +178,9 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "file-only");
+    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "file-only" } });
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret file path"), "development.conf.json");
-    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
-    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "development.conf.json" } });
     fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"token":"super-secret"}' } });
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
@@ -192,7 +191,7 @@ describe("PreviewSettingsPage", () => {
         outputs: [{
           type: "file",
           path: "development.conf.json",
-          format: "json",
+          format: "raw",
           value: "secret:SECRET_FILE_CONTENT",
         }],
         exposure_policy: "preview_runtime",
@@ -215,16 +214,14 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "mixed");
-    await userEvent.type(screen.getByLabelText("Secret name"), "DATABASE_URL");
-    await userEvent.type(screen.getByLabelText("Secret value"), "postgres://dev");
+    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "mixed" } });
+    fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "DATABASE_URL" } });
+    fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "postgres://dev" } });
     await userEvent.click(screen.getByRole("button", { name: "Add value" }));
-    await userEvent.type(screen.getByLabelText("Secret name 2"), "GOOGLE_DRIVE_REFRESH_TOKEN");
-    await userEvent.type(screen.getByLabelText("Secret value 2"), "refresh-token");
+    fireEvent.change(screen.getByLabelText("Secret name 2"), { target: { value: "GOOGLE_DRIVE_REFRESH_TOKEN" } });
+    fireEvent.change(screen.getByLabelText("Secret value 2"), { target: { value: "refresh-token" } });
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret file path"), "development.conf.json");
-    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
-    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "development.conf" } });
     fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"api":"secret"}' } });
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
@@ -249,8 +246,8 @@ describe("PreviewSettingsPage", () => {
           },
           {
             type: "file",
-            path: "development.conf.json",
-            format: "json",
+            path: "development.conf",
+            format: "raw",
             value: "secret:SECRET_FILE_CONTENT",
           },
         ],
@@ -372,11 +369,10 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "bad-json");
+    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "bad-json" } });
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret file path"), "config.json");
-    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
-    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "config.json" } });
+    await chooseSecretFileType("JSON");
     fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: "not valid json{{" } });
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
@@ -393,23 +389,27 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "json-file");
+    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "json-file" } });
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret file path"), "config.json");
-    await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
-    await userEvent.click(await screen.findByRole("option", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "config.json" } });
+    await chooseSecretFileType("JSON");
 
-    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: "not valid json{{" } });
-
-    await waitFor(() => {
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: "not valid json{{" } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
       expect(screen.getByText(/must be valid JSON/i)).toBeInTheDocument();
-    });
 
-    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"token":"ok"}' } });
-
-    await waitFor(() => {
+      fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"token":"ok"}' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
       expect(screen.queryByText(/must be valid JSON/i)).not.toBeInTheDocument();
-    });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("edits a preview secret bundle via the patch endpoint", async () => {
@@ -653,4 +653,9 @@ function bundle(id: string, repositoryId: string, name: string) {
     created_by_user_id: "user-1",
     created_at: "2026-05-27T00:00:00Z",
   };
+}
+
+async function chooseSecretFileType(optionName: string) {
+  await userEvent.click(screen.getByRole("combobox", { name: "Secret file type" }));
+  await userEvent.click(await screen.findByRole("option", { name: optionName }));
 }
