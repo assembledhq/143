@@ -1085,6 +1085,244 @@ func TestResolveConfig_Connected_PinsEverythingToBase(t *testing.T) {
 	require.Equal(t, baseCfg.Secrets, resolved.Secrets, "connected preview should pin secret bundle refs to base")
 }
 
+func TestResolvePreviewInstallCachePaths(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		want    []string
+		enabled bool
+	}{
+		{
+			name: "defaults to clean paths",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"package-lock.json"},
+				CleanPaths: []string{"node_modules"},
+			},
+			want:    []string{"node_modules"},
+			enabled: true,
+		},
+		{
+			name: "infers nested javascript dependency path",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"frontend/package-lock.json"},
+			},
+			want:    []string{"frontend/node_modules"},
+			enabled: true,
+		},
+		{
+			name: "infers nested python dependency path",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"services/api/poetry.lock"},
+			},
+			want:    []string{"services/api/.venv"},
+			enabled: true,
+		},
+		{
+			name: "infers go vendor dependency path",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod"},
+			},
+			want:    []string{"vendor"},
+			enabled: true,
+		},
+		{
+			name: "adds explicit cache paths and deduplicates",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"package-lock.json"},
+				CleanPaths: []string{"node_modules"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Paths: []string{".next/cache", "node_modules"},
+				},
+			},
+			want:    []string{".next/cache", "node_modules"},
+			enabled: true,
+		},
+		{
+			name: "explicit opt out disables paths",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"package-lock.json"},
+				CleanPaths: []string{"node_modules"},
+				Cache:      &models.PreviewInstallCacheConfig{Enabled: &disabled},
+			},
+			enabled: false,
+		},
+		{
+			name: "missing lockfiles disables cache",
+			install: &models.PreviewInstallConfig{
+				CleanPaths: []string{"node_modules"},
+			},
+			enabled: false,
+		},
+		{
+			name: "unknown lockfiles without paths disables cache",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"Cargo.lock"},
+			},
+			enabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, enabled := ResolvePreviewInstallCachePaths(tt.install)
+			require.Equal(t, tt.enabled, enabled, "cache resolver should return expected enabled state")
+			require.Equal(t, tt.want, got, "cache resolver should return expected effective paths")
+		})
+	}
+}
+
+func TestValidateConfig_PreviewInstallCache(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		wantErr string
+	}{
+		{
+			name: "valid cache path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".next/cache"}},
+			},
+		},
+		{
+			name: "cache paths require lockfiles",
+			install: &models.PreviewInstallConfig{
+				Command: []string{"npm", "ci"},
+				Cache:   &models.PreviewInstallCacheConfig{Paths: []string{".next/cache"}},
+			},
+			wantErr: "preview.install.cache.paths requires preview.install.lockfiles",
+		},
+		{
+			name: "rejects absolute path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{"/tmp/cache"}},
+			},
+			wantErr: "must be a relative path",
+		},
+		{
+			name: "rejects traversal",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{"../cache"}},
+			},
+			wantErr: "escapes the repo root",
+		},
+		{
+			name: "rejects git",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".git/modules"}},
+			},
+			wantErr: "must not target .git",
+		},
+		{
+			name: "rejects marker path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache/preview-install"}},
+			},
+			wantErr: "must not target preview install markers",
+		},
+		{
+			name: "rejects broad path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{"."}},
+			},
+			wantErr: "too broad to cache",
+		},
+		{
+			name: "rejects glob cache path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".pnpm-store/*"}},
+			},
+			wantErr: "glob paths are not allowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := validPreviewConfig()
+			cfg.Install = tt.install
+			errs := ValidateConfig(cfg)
+			if tt.wantErr == "" {
+				require.Empty(t, errs, "preview install cache config should validate")
+				return
+			}
+			require.NotEmpty(t, errs, "preview install cache config should be rejected")
+			require.Contains(t, strings.Join(errs, "; "), tt.wantErr, "validation error should explain the invalid cache config")
+		})
+	}
+}
+
+func TestParseNamedConfig_InstallCacheFieldMerge(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	_ = enabled
+	raw := []byte(`{
+		"preview": {
+			"install": {
+				"command": ["npm", "ci"],
+				"lockfiles": ["package-lock.json"],
+				"clean_paths": ["node_modules"],
+				"cache": {"enabled": true, "paths": [".next/cache"]}
+			},
+			"services": {
+				"web": {"command": ["npm", "run", "dev"], "port": 3000, "ready": {"http_path": "/"}}
+			},
+			"primary": "web",
+			"default": "web",
+			"configs": {
+				"web": {"name": "web"},
+				"docs": {
+					"name": "docs",
+					"install": {"cache": {"enabled": false}},
+					"services": {
+						"web": {"command": ["npm", "run", "docs"], "port": 3000, "ready": {"http_path": "/"}}
+					},
+					"primary": "web"
+				},
+				"turbo": {
+					"name": "turbo",
+					"install": {"cache": {"paths": [".turbo/cache"]}}
+				}
+			}
+		}
+	}`)
+
+	docs, err := ParseNamedConfig(raw, "docs")
+	require.NoError(t, err, "named config with cache.enabled override should parse")
+	require.NotNil(t, docs.Install.Cache, "named config should preserve cache object")
+	require.NotNil(t, docs.Install.Cache.Enabled, "named config should preserve explicit enabled override")
+	require.False(t, *docs.Install.Cache.Enabled, "named cache.enabled should override base enabled")
+	require.Equal(t, []string{".next/cache"}, docs.Install.Cache.Paths, "named cache.enabled-only override should inherit base cache paths")
+
+	turbo, err := ParseNamedConfig(raw, "turbo")
+	require.NoError(t, err, "named config with cache.paths override should parse")
+	require.NotNil(t, turbo.Install.Cache.Enabled, "named cache.paths-only override should inherit base enabled")
+	require.True(t, *turbo.Install.Cache.Enabled, "base cache.enabled should remain visible")
+	require.Equal(t, []string{".turbo/cache"}, turbo.Install.Cache.Paths, "named cache.paths should replace base cache paths")
+}
+
 func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 	t.Parallel()
 

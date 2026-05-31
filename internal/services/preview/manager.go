@@ -630,7 +630,13 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// of stdout/stderr when a service fails, so the user sees why.
 	observer := m.newServiceObserver(input.OrgID, instance.ID, input.MetricsSource, input.MetricsRepositoryFullName)
 	defer observer.Close()
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID), observer)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
+		OrgID:        input.OrgID,
+		RepositoryID: input.RepositoryID,
+		SessionID:    input.SessionID,
+		ConfigDigest: computeConfigDigest(input.Config),
+		ExtraEnv:     m.platformEnv(instance.ID),
+	}, observer)
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
@@ -1059,6 +1065,47 @@ func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
 		o.manager.logger.Warn().Err(err).
 			Str("preview_id", o.previewID.String()).
 			Msg("observer: failed to write preview install log")
+	}
+}
+
+func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
+	if status != "restore_failed" && status != "restored" {
+		return
+	}
+	level := "info"
+	msg := fmt.Sprintf("preview dependency cache %s", status)
+	if err != nil {
+		level = "warn"
+		msg = fmt.Sprintf("preview dependency cache restore failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) OnDependencyCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
+	if status != "save_failed" {
+		return
+	}
+	msg := fmt.Sprintf("preview dependency cache save failed: %v", err)
+	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey string, sizeBytes int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	metadata, _ := json.Marshal(map[string]any{
+		"cache_key":  cacheKey,
+		"size_bytes": sizeBytes,
+	})
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: o.previewID,
+		OrgID:             o.orgID,
+		Level:             level,
+		Step:              models.PreviewLogStepInstall,
+		Message:           msg,
+		Metadata:          metadata,
+	}
+	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
+		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to write preview dependency cache log")
 	}
 }
 
@@ -1658,7 +1705,13 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 			return fmt.Errorf("recycle: create runtime epoch: %w", err)
 		}
 	}
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID), observer)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
+		OrgID:        input.OrgID,
+		RepositoryID: input.RepositoryID,
+		SessionID:    input.SessionID,
+		ConfigDigest: computeConfigDigest(input.Config),
+		ExtraEnv:     m.platformEnv(previewID),
+	}, observer)
 	if err != nil {
 		if recycleRuntime != nil {
 			if runtimeErr := m.store.MarkPreviewRuntimeFailed(ctx, orgID, recycleRuntime.ID, err.Error()); runtimeErr != nil {
