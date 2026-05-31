@@ -3548,6 +3548,127 @@ func TestStartPreviewHandler_StaleSandboxClearedRetries(t *testing.T) {
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
 }
 
+func TestStartPreviewHandler_SandboxBusyRetries(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_BUSY: %w: another process attached first", previewsvc.ErrSandboxBusy)}
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox-busy preview starts should requeue instead of dead-lettering")
+	require.ErrorIs(t, retryable.Err, previewsvc.ErrSandboxBusy, "retryable error should preserve the sandbox-busy sentinel")
+	require.NotNil(t, retryable.RetryAfter, "sandbox-busy retry should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "sandbox-busy retry should run after the competing holder publishes or releases")
+	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_SandboxBusyTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	workerNodeID := "worker-recorded"
+	containerID := "container-on-recorded-worker"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_BUSY: %w: another process attached first", previewsvc.ErrSandboxBusy)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox-busy preview starts should requeue onto the session owner")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox-busy retry should pin to the worker that owns the live session sandbox")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "sandbox-busy retry should target the recorded session worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartPreviewHandler_SandboxWrongNodeTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	workerNodeID := "worker-recorded"
+	containerID := "container-on-recorded-worker"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_WRONG_NODE: %w", agent.ErrSandboxOnDifferentNode)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "wrong-node preview starts should requeue onto the session owner")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "wrong-node retry should pin to the worker that owns the live session sandbox")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node retry should target the recorded session worker")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node retry should bypass the generic retry window")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestStartPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
 	t.Parallel()
 

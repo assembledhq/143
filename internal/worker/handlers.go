@@ -142,6 +142,20 @@ func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zero
 	return nil, true
 }
 
+func previewBusyRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID) *string {
+	if stores == nil || stores.Sessions == nil {
+		return nil
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to load session worker target for sandbox-busy preview retry")
+		return nil
+	}
+	return models.SessionWorkerTarget(&session)
+}
+
 func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
 	if stores == nil || stores.Sessions == nil {
 		return
@@ -649,6 +663,34 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 					Dur("retry_after", retryAfter).
 					Msg("preview cleared stale sandbox container_id; retrying start_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
+			if errors.Is(err, agent.ErrSandboxOnDifferentNode) {
+				retryAfter := 2 * time.Second
+				targetNodeID := previewBusyRetryTarget(ctx, stores, logger, input.OrgID, input.SessionID)
+				logEvent := logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter)
+				if targetNodeID != nil {
+					logEvent = logEvent.Str("target_node_id", *targetNodeID)
+				}
+				logEvent.Msg("preview sandbox is on another worker; retrying start_preview on the recorded owner")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true, TargetNodeID: targetNodeID}
+			}
+			if errors.Is(err, previewsvc.ErrSandboxBusy) {
+				retryAfter := 2 * time.Second
+				targetNodeID := previewBusyRetryTarget(ctx, stores, logger, input.OrgID, input.SessionID)
+				logEvent := logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("session_id", input.SessionID.String()).
+					Dur("retry_after", retryAfter)
+				if targetNodeID != nil {
+					logEvent = logEvent.Str("target_node_id", *targetNodeID)
+				}
+				logEvent.Msg("preview sandbox is busy; retrying start_preview")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID}
 			}
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
 				EventKind: "preview.failed",

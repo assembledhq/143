@@ -2421,6 +2421,26 @@ func (s *SessionStore) PeekContainerID(ctx context.Context, orgID, sessionID uui
 	return containerID, nil
 }
 
+// PeekContainerOwnership returns the current container_id and worker_node_id
+// using a narrow lookup for sandbox race handling. Empty strings represent
+// NULL values or a missing row.
+func (s *SessionStore) PeekContainerOwnership(ctx context.Context, orgID, sessionID uuid.UUID) (containerID string, workerNodeID string, err error) {
+	query := `SELECT COALESCE(container_id, ''), COALESCE(worker_node_id, '')
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&containerID, &workerNodeID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("peek container ownership: %w", err)
+	}
+	return containerID, workerNodeID, nil
+}
+
 // PublishHydratedContainerID is the preview-hydrate CAS: a preview has just
 // created a container from the session's snapshot and wants to publish its
 // ID so a concurrent ContinueSession can attach to the same container.
