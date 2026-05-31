@@ -1107,7 +1107,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				updated_at = now()
 			FROM reclaimable r
 			WHERE j.id = r.id
-			RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id
+			RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id, j.job_type
 		),
 		updated_sessions AS (
 			UPDATE sessions s
@@ -1117,6 +1117,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 			    runtime_stop_reason = 'worker_recovery'
 			FROM updated_jobs uj
 			WHERE uj.session_id IS NOT NULL
+			  AND uj.job_type IN ('run_agent', 'continue_session')
 			  AND s.org_id = uj.org_id
 			  AND s.id = uj.session_id::uuid
 		)
