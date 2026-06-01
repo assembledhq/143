@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { Copy, Eye, HelpCircle, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
@@ -87,6 +87,10 @@ type BundleFormState = {
   fileContent: string;
 };
 
+type RevealTarget =
+  | { type: "file"; bundle: PreviewSecretBundleSummary }
+  | { type: "env"; bundle: PreviewSecretBundleSummary; rowId: string; key: string };
+
 /** Creates a new blank row with a stable unique ID for React reconciliation. */
 function makeRow(overrides?: Partial<Omit<SecretValueRow, "rowId">>): SecretValueRow {
   return { rowId: crypto.randomUUID(), key: "", value: "", ...overrides };
@@ -127,6 +131,7 @@ function PreviewSecretsSection() {
   const [formError, setFormError] = useState<string | null>(null);
   const [jsonValidationError, setJSONValidationError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<PreviewSecretBundleSummary | null>(null);
+  const [revealedEnvRowIds, setRevealedEnvRowIds] = useState<Map<string, string>>(() => new Map());
 
   const repositoriesQuery = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
@@ -200,26 +205,35 @@ function PreviewSecretsSection() {
     },
   });
 
-  const revealTargetId = useRef<string | null>(null);
   const revealMutation = useMutation({
-    mutationFn: (bundle: PreviewSecretBundleSummary) => {
-      revealTargetId.current = bundle.id;
-      return api.repositories.previewSecretBundles.reveal(bundle.id);
+    mutationFn: async (target: RevealTarget) => {
+      const response = await api.repositories.previewSecretBundles.reveal(target.bundle.id);
+      return { response, target };
     },
-    onSuccess: (response) => {
-      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== revealTargetId.current) return;
-      const content = getRevealedFileContent(response.data);
+    onSuccess: ({ response, target }) => {
+      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== target.bundle.id) return;
+      const content = getRevealedSecretValue(response.data, target);
       if (content === null) {
-        setFormError("Could not find stored file contents for this bundle.");
+        setFormError(target.type === "file"
+          ? "Could not find stored file contents for this bundle."
+          : `Could not find stored value for ${target.key}.`);
         return;
       }
-      setForm((current) => ({ ...current, fileContent: content }));
+      if (target.type === "file") {
+        setForm((current) => ({ ...current, fileContent: content }));
+      } else {
+        setForm((current) => ({
+          ...current,
+          rows: current.rows.map((row) => row.rowId === target.rowId ? { ...row, value: content } : row),
+        }));
+        setRevealedEnvRowIds((current) => new Map(current).set(target.rowId, target.key));
+      }
       setFormError(null);
       setJSONValidationError(null);
     },
-    onError: (error) => {
-      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== revealTargetId.current) return;
-      setFormError(error instanceof ApiError ? error.message : "Secret file contents could not be revealed.");
+    onError: (error, target) => {
+      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== target.bundle.id) return;
+      setFormError(error instanceof ApiError ? error.message : "Secret contents could not be revealed.");
     },
   });
 
@@ -245,6 +259,7 @@ function PreviewSecretsSection() {
     });
     setFormError(null);
     setJSONValidationError(null);
+    setRevealedEnvRowIds(new Map());
   }
 
   function closeBundleDialog() {
@@ -252,7 +267,7 @@ function PreviewSecretsSection() {
     setForm(makeEmptyBundleForm(effectiveSelectedRepositoryId));
     setFormError(null);
     setJSONValidationError(null);
-    revealTargetId.current = null;
+    setRevealedEnvRowIds(new Map());
     revealMutation.reset();
   }
 
@@ -285,12 +300,21 @@ function PreviewSecretsSection() {
   }
 
   function removeRow(index: number) {
+    const removed = form.rows[index];
     setForm((current) => ({
       ...current,
       rows: current.rows.length === 1
         ? [makeRow()]
         : current.rows.filter((_, rowIndex) => rowIndex !== index),
     }));
+    if (removed) {
+      setRevealedEnvRowIds((ids) => {
+        if (!ids.has(removed.rowId)) return ids;
+        const next = new Map(ids);
+        next.delete(removed.rowId);
+        return next;
+      });
+    }
   }
 
   function handleSave(event: FormEvent<HTMLFormElement>) {
@@ -383,12 +407,9 @@ function PreviewSecretsSection() {
         onRowChange={updateRow}
         onRowAdd={addRow}
         onRowRemove={removeRow}
-        onReveal={() => {
-          if (dialogMode?.type === "edit") {
-            revealMutation.mutate(dialogMode.bundle);
-          }
-        }}
-        revealing={revealMutation.isPending}
+        onReveal={(target) => revealMutation.mutate(target)}
+        revealingTarget={revealMutation.isPending ? revealMutation.variables ?? null : null}
+        revealedEnvRowIds={revealedEnvRowIds}
         onSubmit={handleSave}
       />
 
@@ -544,7 +565,8 @@ function BundleDialog({
   onRowAdd,
   onRowRemove,
   onReveal,
-  revealing,
+  revealingTarget,
+  revealedEnvRowIds,
   onSubmit,
 }: {
   mode: BundleDialogMode | null;
@@ -558,8 +580,9 @@ function BundleDialog({
   onRowChange: (index: number, patch: Partial<SecretValueRow>) => void;
   onRowAdd: () => void;
   onRowRemove: (index: number) => void;
-  onReveal: () => void;
-  revealing: boolean;
+  onReveal: (target: RevealTarget) => void;
+  revealingTarget: RevealTarget | null;
+  revealedEnvRowIds: Map<string, string>;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const isEdit = mode?.type === "edit";
@@ -644,17 +667,22 @@ function BundleDialog({
               <StoredSecretsFields
                 rows={form.rows}
                 description="Each secret name becomes an environment variable in the preview runtime. Existing values can stay blank unless you want to replace them."
+                canReveal={Boolean(editBundle)}
+                revealBundle={editBundle}
+                revealingTarget={revealingTarget}
+                revealedEnvRowIds={revealedEnvRowIds}
                 onRowChange={onRowChange}
                 onRowAdd={onRowAdd}
                 onRowRemove={onRowRemove}
+                onReveal={onReveal}
               />
             </TabsContent>
             <TabsContent value="file" className="space-y-4">
               <SecretFileFields
                 form={form}
                 canReveal={isEdit && editHasFileOutputs}
-                revealing={revealing}
-                onReveal={onReveal}
+                revealing={revealingTarget?.type === "file"}
+                onReveal={() => editBundle && onReveal({ type: "file", bundle: editBundle })}
                 onFormChange={onFormChange}
               />
             </TabsContent>
@@ -726,9 +754,16 @@ function SecretFileFields({
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <Label htmlFor="secret-file-content">Secret file contents</Label>
           {canReveal ? (
-            <Button type="button" variant="outline" size="sm" onClick={onReveal} disabled={revealing}>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              onClick={onReveal}
+              disabled={revealing}
+              aria-label="Reveal secret file contents"
+              title="Reveal secret file contents"
+            >
               <Eye className="h-4 w-4" />
-              {revealing ? "Revealing..." : "Reveal contents"}
             </Button>
           ) : null}
         </div>
@@ -749,15 +784,25 @@ function SecretFileFields({
 function StoredSecretsFields({
   rows,
   description,
+  canReveal,
+  revealBundle,
+  revealingTarget,
+  revealedEnvRowIds,
   onRowChange,
   onRowAdd,
   onRowRemove,
+  onReveal,
 }: {
   rows: SecretValueRow[];
   description: string;
+  canReveal: boolean;
+  revealBundle: PreviewSecretBundleSummary | null;
+  revealingTarget: RevealTarget | null;
+  revealedEnvRowIds: Map<string, string>;
   onRowChange: (index: number, patch: Partial<SecretValueRow>) => void;
   onRowAdd: () => void;
   onRowRemove: (index: number) => void;
+  onReveal: (target: RevealTarget) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -772,28 +817,47 @@ function StoredSecretsFields({
         <p className="text-xs text-muted-foreground">{description}</p>
       </div>
       <div className="space-y-2">
-        {rows.map((row, index) => (
-          <div key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-            <Input
-              value={row.key}
-              onChange={(event) => onRowChange(index, { key: normalizeEnvKey(event.target.value) })}
-              placeholder="API_TOKEN"
-              aria-label={index === 0 ? "Secret name" : `Secret name ${index + 1}`}
-              autoComplete="off"
-            />
-            <Input
-              value={row.value}
-              onChange={(event) => onRowChange(index, { value: event.target.value })}
-              placeholder="Secret value"
-              type="password"
-              aria-label={index === 0 ? "Secret value" : `Secret value ${index + 1}`}
-              autoComplete="new-password"
-            />
-            <Button type="button" variant="outline" size="icon" onClick={() => onRowRemove(index)} aria-label={`Remove secret row ${index + 1}`}>
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ))}
+        {rows.map((row, index) => {
+          const key = row.key.trim();
+          const canRevealRow = canReveal && Boolean(revealBundle) && Boolean(key);
+          const isRevealed = revealedEnvRowIds.get(row.rowId) === key;
+
+          return (
+            <div key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+              <Input
+                value={row.key}
+                onChange={(event) => onRowChange(index, { key: normalizeEnvKey(event.target.value) })}
+                placeholder="API_TOKEN"
+                aria-label={index === 0 ? "Secret name" : `Secret name ${index + 1}`}
+                autoComplete="off"
+              />
+              <Input
+                value={row.value}
+                onChange={(event) => onRowChange(index, { value: event.target.value })}
+                placeholder="Secret value"
+                type={isRevealed ? "text" : "password"}
+                aria-label={index === 0 ? "Secret value" : `Secret value ${index + 1}`}
+                autoComplete="new-password"
+              />
+              {canRevealRow ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={() => onReveal({ type: "env", bundle: revealBundle!, rowId: row.rowId, key })}
+                  disabled={Boolean(revealingTarget)}
+                  aria-label={`Reveal secret value ${key}`}
+                  title={`Reveal secret value ${key}`}
+                >
+                  <Eye className="h-4 w-4" />
+                </Button>
+              ) : <span />}
+              <Button type="button" variant="outline" size="icon" onClick={() => onRowRemove(index)} aria-label={`Remove secret row ${index + 1}`}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          );
+        })}
       </div>
       <Button type="button" variant="outline" size="sm" onClick={onRowAdd}>
         <Plus className="h-4 w-4" />
@@ -1206,12 +1270,28 @@ function fileOutputsFromBundle(bundle: PreviewSecretBundleSummary): PreviewSecre
     }));
 }
 
-function getRevealedFileContent(reveal: PreviewSecretBundleRevealResult): string | null {
-  const fileOutputs = reveal.outputs.filter((output) => output.type === "file" && output.value?.startsWith("secret:"));
-  if (fileOutputs.length !== 1) return null;
-  const sourceKey = fileOutputs[0].value!.slice("secret:".length);
+function getRevealedSecretValue(reveal: PreviewSecretBundleRevealResult, target: RevealTarget): string | null {
+  const sourceKey = target.type === "file"
+    ? getRevealedFileSourceKey(reveal)
+    : getRevealedEnvSourceKey(reveal, target.key);
   if (!sourceKey) return null;
   return reveal.source.values[sourceKey] ?? null;
+}
+
+function getRevealedFileSourceKey(reveal: PreviewSecretBundleRevealResult): string | null {
+  const fileOutputs = reveal.outputs.filter((output) => output.type === "file" && output.value?.startsWith("secret:"));
+  if (fileOutputs.length !== 1) return null;
+  return fileOutputs[0].value!.slice("secret:".length) || null;
+}
+
+function getRevealedEnvSourceKey(reveal: PreviewSecretBundleRevealResult, envName: string): string | null {
+  for (const output of reveal.outputs) {
+    const reference = output.type === "env" ? output.values?.[envName] : undefined;
+    if (reference?.startsWith("secret:")) {
+      return reference.slice("secret:".length) || null;
+    }
+  }
+  return Object.hasOwn(reveal.source.values, envName) ? envName : null;
 }
 
 function formatOutputSummary(output: PreviewSecretBundleSummary["outputs"][number]): string[] {
