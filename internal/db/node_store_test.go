@@ -277,3 +277,26 @@ func TestNodeStore_WorkerDeployImpactListsRuntimeIdentities(t *testing.T) {
 	}, impact.Items, "WorkerDeployImpact should preserve affected runtime identities")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestNodeStore_RetainActiveExecutorImagesCastsExpiry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	mock.ExpectExec("INSERT INTO worker_image_retention[\\s\\S]+@expires_at::timestamptz[\\s\\S]+FROM session_executors").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 2))
+
+	store := NewNodeStore(mock)
+	count, err := store.RetainActiveExecutorImages(context.Background(), RetainWorkerImagesParams{
+		NodeID:    "worker-1",
+		DeployID:  "deploy-1",
+		Reason:    "test retention",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	require.NoError(t, err, "RetainActiveExecutorImages should retain active image rows")
+	require.Equal(t, int64(2), count, "RetainActiveExecutorImages should return inserted row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "retention insert should cast expires_at for Postgres type inference")
+}

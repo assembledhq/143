@@ -1331,7 +1331,7 @@ to unhealthy nodes.
 #### Connection Pooling (PgBouncer) — When You Need It
 
 When total connections across all nodes approach 80% of `max_connections` (default
-100). Each node's pgx pool defaults to ~10 connections, so with 8+ nodes you're
+200). Each node's pgx pool defaults to ~10 connections, so with 16+ nodes you're
 getting close.
 
 Add to `docker-compose.db.yml`:
@@ -2131,7 +2131,7 @@ pool, _ := pgxpool.New(ctx, pgbouncerURL)  // port 6432
 
 This uses 1 Postgres connection per node for pub/sub (N connections total) while
 all regular queries still go through PgBouncer. At 20 nodes, that's 20 direct
-connections — well within `max_connections=100`.
+connections — well within `max_connections=200`.
 
 ### Frontend Containerization
 
@@ -2196,7 +2196,7 @@ on VPS with NVMe SSDs. Scale the memory settings with VPS RAM.
 # deploy/postgres/postgresql.conf
 
 # ── Connections ──────────────────────────────────────────────────────
-max_connections = 100
+max_connections = 200
 listen_addresses = '*'
 
 # ── Memory ───────────────────────────────────────────────────────────
