@@ -290,6 +290,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		AutomationRuns:      automationRunStore,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+		Previews:            db.NewPreviewStore(pool),
 	}
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores

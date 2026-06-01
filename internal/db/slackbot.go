@@ -315,6 +315,47 @@ func (s *SlackUserLinkStore) UpsertEmailMatch(ctx context.Context, link *models.
 	return nil
 }
 
+func (s *SlackUserLinkStore) UpsertAdminLink(ctx context.Context, link *models.SlackUserLink) error {
+	rows, err := s.db.Query(ctx, `
+		INSERT INTO slack_user_links (
+			org_id, slack_installation_id, user_id, slack_team_id, slack_user_id,
+			slack_email, slack_display_name, source, linked_at
+		)
+		VALUES (
+			@org_id, @slack_installation_id, @user_id, @slack_team_id, @slack_user_id,
+			@slack_email, @slack_display_name, 'admin_linked', now()
+		)
+		ON CONFLICT (org_id, slack_team_id, slack_user_id)
+		DO UPDATE SET
+			slack_installation_id = EXCLUDED.slack_installation_id,
+			user_id = EXCLUDED.user_id,
+			slack_email = EXCLUDED.slack_email,
+			slack_display_name = EXCLUDED.slack_display_name,
+			source = 'admin_linked',
+			linked_at = now(),
+			updated_at = now()
+		RETURNING id, org_id, slack_installation_id, user_id, slack_team_id, slack_user_id,
+			slack_email, slack_display_name, source, linked_at, created_at, updated_at`,
+		pgx.NamedArgs{
+			"org_id":                link.OrgID,
+			"slack_installation_id": link.SlackInstallationID,
+			"user_id":               link.UserID,
+			"slack_team_id":         link.SlackTeamID,
+			"slack_user_id":         link.SlackUserID,
+			"slack_email":           link.SlackEmail,
+			"slack_display_name":    link.SlackDisplayName,
+		})
+	if err != nil {
+		return fmt.Errorf("upsert slack admin link: %w", err)
+	}
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackUserLink])
+	if err != nil {
+		return fmt.Errorf("scan slack admin link: %w", err)
+	}
+	*link = updated
+	return nil
+}
+
 func (s *SlackUserLinkStore) DeleteSelfLink(ctx context.Context, orgID, userID uuid.UUID, teamID string) error {
 	_, err := s.db.Exec(ctx, `
 		DELETE FROM slack_user_links
@@ -324,6 +365,21 @@ func (s *SlackUserLinkStore) DeleteSelfLink(ctx context.Context, orgID, userID u
 		  AND source = 'self_linked'`,
 		pgx.NamedArgs{"org_id": orgID, "user_id": userID, "slack_team_id": teamID})
 	return err
+}
+
+func (s *SlackUserLinkStore) DeleteByID(ctx context.Context, orgID, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `
+		DELETE FROM slack_user_links
+		WHERE org_id = @org_id
+		  AND id = @id`,
+		pgx.NamedArgs{"org_id": orgID, "id": id})
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 type SlackChannelSettingsStore struct {
