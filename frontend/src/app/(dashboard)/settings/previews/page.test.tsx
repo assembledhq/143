@@ -524,10 +524,70 @@ describe("PreviewSettingsPage", () => {
 
     expect(screen.getByLabelText("Secret file contents")).toHaveValue("");
 
-    await userEvent.click(screen.getByRole("button", { name: "Reveal contents" }));
+    expect(screen.queryByRole("button", { name: "Reveal contents" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Reveal secret file contents" }));
 
     await waitFor(() => {
       expect(screen.getByLabelText("Secret file contents")).toHaveValue('{"token":"super-secret"}');
+    });
+  }, 10000);
+
+  it("reveals existing environment variable contents on explicit request", async () => {
+    const envBundle = bundle("bundle-env", "repo-1", "env-bundle");
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () =>
+        HttpResponse.json({ data: [envBundle], meta: {} }),
+      ),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.post("*/api/v1/preview-secret-bundles/bundle-env/reveal", () =>
+        HttpResponse.json({
+          data: {
+            bundle: envBundle,
+            source: { type: "managed", values: { DATABASE_URL: "postgres://secret-url" } },
+            outputs: [{ type: "env", values: { DATABASE_URL: "secret:DATABASE_URL" } }],
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle/i }))[0]);
+
+    expect(screen.getByLabelText("Secret value")).toHaveValue("");
+
+    await userEvent.click(screen.getByRole("button", { name: "Reveal secret value DATABASE_URL" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Secret value")).toHaveValue("postgres://secret-url");
+    });
+  }, 10000);
+
+  it("shows an error when the environment variable reveal API call fails", async () => {
+    const envBundle = bundle("bundle-env-err", "repo-1", "env-bundle-err");
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () =>
+        HttpResponse.json({ data: [envBundle], meta: {} }),
+      ),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.post("*/api/v1/preview-secret-bundles/bundle-env-err/reveal", () =>
+        HttpResponse.json({ error: { code: "FORBIDDEN", message: "Access denied" } }, { status: 403 }),
+      ),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle-err/i }))[0]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Reveal secret value DATABASE_URL" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Access denied")).toBeInTheDocument();
     });
   }, 10000);
 
