@@ -520,7 +520,7 @@ func (s *NodeStore) RetainActiveExecutorImages(ctx context.Context, params Retai
 		INSERT INTO worker_image_retention (
 			image, build_sha, node_id, executor_id, deploy_id, reason, expires_at
 		)
-		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, @expires_at
+		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, @expires_at::timestamptz
 		FROM session_executors
 		WHERE host_node_id = @node_id
 		  AND status IN ('starting', 'running', 'draining')
