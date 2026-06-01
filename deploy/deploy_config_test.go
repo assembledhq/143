@@ -344,6 +344,28 @@ func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testi
 	require.Contains(t, deploy, "impact --node-id", "worker deploy should emit a dry-run impact report for the old generation before routine drain")
 }
 
+func TestWorkerCapacityPreflightMeasuresIdleCPUMillicores(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	preflight := extractShellFunction(t, string(deployScript), "worker_host_capacity_preflight", "worker_support_service_fingerprint")
+
+	require.Contains(t, preflight, "cpu_count", "worker capacity preflight should detect the number of online CPUs")
+	require.Contains(t, preflight, "* 1000 * cpu_count", "worker capacity preflight should convert idle CPU fraction into host-level millicores")
+	require.NotContains(t, preflight, "* 1000) / delta", "worker capacity preflight should not treat idle CPU percent as millicores")
+}
+
+func TestWorkerComposeCapsDatabasePool(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read worker compose")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, "pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}", "worker generations should cap pgx pool size so blue/green overlap cannot exhaust Postgres connections")
+}
+
 func TestWorkerDeployProtectsActiveExecutorImages(t *testing.T) {
 	t.Parallel()
 
@@ -852,6 +874,28 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
 	require.Contains(t, string(makefile), "repair-deploy-sudoers:", "Makefile should expose the no-teardown sudoers repair as an operator target")
+}
+
+func TestProductionPostgresConnectionHeadroom(t *testing.T) {
+	t.Parallel()
+
+	conf, err := os.ReadFile("../deploy/postgres/postgresql.conf")
+	require.NoError(t, err, "test should read production PostgreSQL config")
+
+	require.Contains(t, string(conf), "max_connections = 200", "production Postgres should leave headroom for blue/green worker overlap and deploy-control clients")
+}
+
+func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `if [ "$ROLE" = "db" ]; then`, "db deploy should have role-specific sync for mounted Postgres config")
+	require.Contains(t, deployText, "$PROJECT_DIR/deploy/postgres/postgresql.conf", "db deploy should sync the mounted postgresql.conf")
+	require.Contains(t, deployText, "$PROJECT_DIR/deploy/postgres/pg_hba.conf", "db deploy should sync the mounted pg_hba.conf")
+	require.Contains(t, deployText, "mkdir -p /opt/143/deploy/postgres", "db deploy should ensure the mounted config directory exists")
 }
 
 func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {

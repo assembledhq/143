@@ -215,6 +215,11 @@ fi
 
 # Sync compose file so the remote always runs the latest version
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+if [ "$ROLE" = "db" ]; then
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy/postgres"
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/postgresql.conf" deploy@"$HOST":/opt/143/deploy/postgres/
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/pg_hba.conf" deploy@"$HOST":/opt/143/deploy/postgres/
+fi
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
@@ -1057,7 +1062,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}"
     local attempts="${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-3}"
     local retry_delay="${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-2}"
-    local free_mem idle_cpu idle1 total1 idle2 total2 delta
+    local free_mem idle_cpu idle1 total1 idle2 total2 delta cpu_count
     local attempt
 
     if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [ "$attempts" -lt 1 ]; then
@@ -1065,6 +1070,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
     if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
       retry_delay=2
+    fi
+    cpu_count="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+    if ! [[ "$cpu_count" =~ ^[0-9]+$ ]] || [ "$cpu_count" -lt 1 ]; then
+      cpu_count=1
     fi
 
     for ((attempt = 1; attempt <= attempts; attempt++)); do
@@ -1080,7 +1089,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       if [ "$delta" -le 0 ]; then
         idle_cpu=0
       else
-        idle_cpu=$((((idle2 - idle1) * 1000) / delta))
+        idle_cpu=$((((idle2 - idle1) * 1000 * cpu_count) / delta))
       fi
 
       if [ "$free_mem" -ge "$min_mem" ] && [ "$idle_cpu" -ge "$min_cpu" ]; then

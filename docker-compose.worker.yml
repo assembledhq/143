@@ -98,7 +98,7 @@ services:
     # or the node could heartbeat without a preview_internal_base_url.
     # If any error below fires, run: make provision-worker HOST=<this-host>
     environment:
-      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
+      DATABASE_URL: "postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable&pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}"
       ENV: production
       MODE: worker
       CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
