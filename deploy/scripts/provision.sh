@@ -484,29 +484,23 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/configure-docker-daemon.sh /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
 
-# Step 2a: Cap docker container log files (max-size/max-file in
-# /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
-# provision-to-first-deploy window where new containers would log
-# unboundedly. db gets a larger cap because postgres logs every
-# connection / slow query / lock wait, and the db host has no Vector log
-# shipping — the local docker log is the only copy of that trail.
+# Step 2a: Configure Docker daemon hardening in one pass BEFORE step 5
+# starts services. This pins bounded json-file logs and multi-provider DNS
+# resolvers while preserving existing daemon keys such as the worker runsc
+# runtime. Applying both settings through one helper avoids back-to-back
+# Docker restarts on fresh hosts, which can trip systemd's start-rate limit
+# after bootstrap/gVisor has already touched the daemon.
+#
+# db gets a larger log cap because postgres logs every connection / slow
+# query / lock wait, and the db host has no Vector log shipping — the local
+# docker log is the only copy of that trail.
 case "$ROLE" in
   db) LOG_MAX_SIZE="500m" ;;
   *)  LOG_MAX_SIZE="100m" ;;
 esac
-ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
-
-# Step 2a (continued): Pin Docker daemon DNS to multiple independent
-# resolvers. Without this, the embedded resolver at 127.0.0.11 inherits the
-# host's resolv.conf — usually a single provider DNS — so one upstream
-# outage takes the whole fleet's container DNS down at once. The
-# 2026-05-07T04:15Z incident hit three workers simultaneously this way.
-# Order is fastest first; Docker's embedded resolver falls through to the
-# next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
-# operators and networks.
-ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/configure-docker-daemon.sh --log-max-size $LOG_MAX_SIZE --log-max-file 5 --dns 1.1.1.1 8.8.8.8 9.9.9.9"
 wait_for_docker_daemon
 
 # Optional Tailscale enrollment. This runs before worker identity resolution
