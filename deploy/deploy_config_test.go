@@ -830,7 +830,8 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provision)
-	require.Contains(t, provisionText, "install-log-rotation.sh", "provision.sh should invoke install-log-rotation.sh after staging deploy/ so newly-provisioned hosts have rotation in place before services start (closes the provision-to-first-deploy unbounded-growth window)")
+	require.Contains(t, provisionText, "configure-docker-daemon.sh", "provision.sh should configure Docker daemon hardening through one helper so fresh hosts do not hit systemd start limits from sequential restarts")
+	require.NotContains(t, provisionText, `"/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"`, "provision.sh must not invoke the log-rotation helper directly because the DNS helper would perform a second Docker restart on fresh hosts")
 	require.GreaterOrEqual(t, strings.Count(provisionText, "/usr/bin/chown -R deploy\\:deploy /opt/143/deploy/scripts"), 3, "provision.sh inline bootstraps for db, logging, and redis must allow deploy to fix root-owned deploy/scripts before syncing helpers")
 	// db/logging/redis bootstraps don't run bootstrap.sh, so each must
 	// install its own /etc/sudoers.d/99-deploy or the deploy+sudo path
@@ -948,13 +949,82 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provision)
-	require.Contains(t, provisionText, "install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9", "provision.sh should pin DNS resolvers in /etc/docker/daemon.json before services start so newly-provisioned hosts don't inherit the host's single-upstream resolv.conf")
+	require.Contains(t, provisionText, "configure-docker-daemon.sh", "provision.sh should pin DNS resolvers as part of the single Docker daemon hardening pass before services start")
+	require.Contains(t, provisionText, "--dns 1.1.1.1 8.8.8.8 9.9.9.9", "provision.sh should pass three independent resolver operators into the daemon hardening helper")
+	require.NotContains(t, provisionText, `"/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"`, "provision.sh must not invoke the DNS helper directly because log rotation and DNS should share one Docker restart on fresh hosts")
 	require.GreaterOrEqual(t, strings.Count(provisionText, "/opt/143/deploy/scripts/install-docker-dns.sh *"), 3, "provision.sh inline bootstraps for db, logging, and redis must each grant deploy NOPASSWD sudo for install-docker-dns.sh")
 
 	repair, err := os.ReadFile("../deploy/scripts/repair-deploy-sudoers.sh")
 	require.NoError(t, err, "test should read repair-deploy-sudoers.sh")
 	repairText := string(repair)
 	require.Contains(t, repairText, "/opt/143/deploy/scripts/install-docker-dns.sh *", "repair-deploy-sudoers.sh should grant the install-docker-dns.sh sudoers entry — otherwise legacy-host repair via the no-teardown path leaves DNS pinning broken")
+}
+
+func TestConfigureDockerDaemonMergesHardeningInOnePass(t *testing.T) {
+	t.Parallel()
+
+	helper, err := os.ReadFile("../deploy/scripts/configure-docker-daemon.sh")
+	require.NoError(t, err, "test should read configure-docker-daemon.sh")
+	helperText := string(helper)
+	require.Contains(t, helperText, "systemctl reset-failed docker.service docker.socket", "configure-docker-daemon.sh should clear systemd start-rate limits before retrying Docker startup")
+	require.Contains(t, helperText, "systemctl restart docker", "configure-docker-daemon.sh should apply changed daemon config with a Docker restart")
+	require.Contains(t, helperText, "docker info", "configure-docker-daemon.sh should verify Docker is usable after restart")
+
+	tmp := t.TempDir()
+	daemonPath := filepath.Join(tmp, "daemon.json")
+	initial := `{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/bin/runsc",
+      "runtimeArgs": ["--ignore-cgroups", "--host-uds=open"]
+    }
+  },
+  "features": {
+    "containerd-snapshotter": true
+  }
+}`
+	require.NoError(t, os.WriteFile(daemonPath, []byte(initial), 0o640), "test should seed daemon.json with worker runtime and operator-owned keys")
+
+	cmd := exec.Command(
+		"bash",
+		"../deploy/scripts/configure-docker-daemon.sh",
+		"--log-max-size", "100m",
+		"--log-max-file", "5",
+		"--dns", "1.1.1.1", "8.8.8.8", "9.9.9.9",
+	)
+	cmd.Env = append(os.Environ(),
+		"DAEMON_JSON="+daemonPath,
+		"SKIP_DOCKER_RESTART=1",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "configure-docker-daemon.sh should merge Docker hardening settings without requiring a live daemon: %s", string(output))
+
+	raw, err := os.ReadFile(daemonPath)
+	require.NoError(t, err, "test should read the merged daemon.json")
+
+	var merged map[string]any
+	require.NoError(t, json.Unmarshal(raw, &merged), "merged daemon.json should remain valid JSON")
+	require.Equal(t, "json-file", merged["log-driver"], "merged daemon.json should set the json-file log driver")
+	require.Equal(t, []any{"1.1.1.1", "8.8.8.8", "9.9.9.9"}, merged["dns"], "merged daemon.json should set the complete resolver list")
+
+	logOpts, ok := merged["log-opts"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should include log-opts")
+	require.Equal(t, "100m", logOpts["max-size"], "merged daemon.json should set the requested max log size")
+	require.Equal(t, "5", logOpts["max-file"], "merged daemon.json should set the requested max log file count")
+
+	runtimes, ok := merged["runtimes"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should preserve existing runtimes")
+	runsc, ok := runtimes["runsc"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should preserve the runsc runtime block")
+	require.Equal(t, "/usr/bin/runsc", runsc["path"], "merged daemon.json should preserve runsc path")
+
+	features, ok := merged["features"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should preserve unrelated operator-owned keys")
+	require.Equal(t, true, features["containerd-snapshotter"], "merged daemon.json should preserve unrelated nested values")
+
+	info, err := os.Stat(daemonPath)
+	require.NoError(t, err, "test should stat daemon.json after merge")
+	require.Equal(t, os.FileMode(0o640), info.Mode().Perm(), "configure-docker-daemon.sh should preserve daemon.json file permissions")
 }
 
 func TestProvisionWaitsForDockerDaemonBeforePullingImages(t *testing.T) {
