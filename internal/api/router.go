@@ -1290,6 +1290,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels/{slack_channel_id}", integrationHandler.PatchSlackChannelSettings)
 				r.Get("/api/v1/integrations/slack/user-links", integrationHandler.ListSlackUserLinks)
+				r.Post("/api/v1/integrations/slack/user-links", integrationHandler.UpsertSlackUserLinkAdmin)
+				r.Delete("/api/v1/integrations/slack/user-links/{id}", integrationHandler.DeleteSlackUserLinkAdmin)
 				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
 				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
 				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)

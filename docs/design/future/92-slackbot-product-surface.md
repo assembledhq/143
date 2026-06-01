@@ -1,7 +1,7 @@
 # 92 - Slackbot Product Surface
 
 > **Status:** Partially implemented
-> **Last reviewed:** 2026-05-30
+> **Last reviewed:** 2026-05-31
 >
 > **Depends on:** Slack OAuth integration, session/job creation APIs, durable preview control plane, human input requests, and notification delivery primitives.
 
@@ -61,8 +61,10 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Slack App Home renders sections for start, pending responses, recent Slack-started sessions, active previews, recent automation runs, organization display, and Slack connection basics.
 - App Home can open a start-session modal, and modal submission starts a normal Slack-origin session.
 - Slack-started mention, DM, slash, and App Home sessions create or continue canonical 143 sessions with `origin = slack`.
+- Slack thread reuse checks the linked session status and starts a fresh session instead of continuing terminal non-resumable sessions.
 - Slack thread links persist team, channel/DM, thread key, permalink, triggering Slack user, mapped 143 user, and team-session flag in `slack_session_links`.
 - Slack user mapping supports self-linking from the authenticated product API and best-effort email matching from Slack profile data when scopes allow it.
+- Admin Slack user mapping APIs support creating, replacing, and deleting `admin_linked` Slack-to-143 user mappings.
 - Channel settings persist default repository, default branch, response visibility, allowed actions, and notification subscription JSON.
 - Authenticated Slack settings APIs expose bot install metadata, bot reinstall, bot-visible channels with connected settings, channel setting updates, user-link listing, self-link, and self-unlink.
 - Slack thread context, detected references, and file metadata are bounded and included in the initial session prompt.
@@ -72,6 +74,7 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Slack notifications can fan out to subscribed channels or configured Slack user DMs from channel setting subscription JSON.
 - Implemented notification event paths include session completion/failure, automation completion/failure through session completion hooks, PR opened, preview ready/failed, and human-input requested.
 - Preview actions are wired for open, refresh/restart, stop, and extend. Refresh/restart currently both recycle the preview.
+- Slack preview actions use a shared Slack authorization service for channel capability checks, mapped-user membership roles, and the narrow unmapped-user allowance for originating team sessions.
 - Slack channel invite setup posts a channel-visible setup message with configure/start actions.
 - Stored Slack inbound payloads redact known transient/secret fields such as `response_url`, `trigger_id`, and `token`.
 - Slackbot metrics exist for inbound events, session starts, outbound messages, Slack API failures, and interaction actions.
@@ -97,19 +100,18 @@ The current implementation provides the first usable Slackbot backend surface, b
 - `preview.stale` is not emitted.
 - Automation notification content is still basic and does not consistently include run result, PR links, preview links, and next actions.
 - Notification subscription management is only raw channel setting JSON; there is no Slack-native or richer product management flow.
-- Preview notification actions do not yet prove that an unmapped user is acting only on the originating team session.
+- Preview actions that are not tied to a Slack-originating team session, such as App Home preview controls or standalone preview notifications without session identity, still require a mapped authorized 143 user.
 - Channel configuration from Slack does not manage notification subscriptions.
 - The setup message's App Home action currently opens the start-session flow rather than switching Slack to App Home.
 - Slack-started sessions can be initiated by App Home, slash command, mention, and DM, but not generally by a "start work" button from arbitrary notifications/session updates.
-- Thread reuse does not check whether the linked session is resumable before continuing it.
-- If a linked Slack thread should start a new non-resumable session, there is no separate new-thread-message pointer model.
+- If a linked Slack thread starts a fresh session after a non-resumable terminal session, the link is repointed to the new session; there is still no separate historical new-thread-message pointer model.
 - Team sessions are stored but not clearly surfaced in Slack or 143 as "started from Slack without a mapped 143 user."
 - Slack session creation uses DB stores directly rather than the same higher-level creation service as `/sessions/new`.
 - Direct preview creation for PR, branch, commit, or repository is not implemented.
 - Slack preview creation for a session is currently an agent continuation prompt, not a direct durable preview-control-plane create call.
 - `Open preview` links to the 143 preview page, not necessarily a short-lived isolated preview-origin URL.
-- Admin-managed Slack user mapping APIs are missing.
-- RBAC enforcement is partial. Preview controls check role in some paths, but session start, PR requests, and other user-specific actions need consistent mapped-user authorization.
+- Admin-managed Slack user mapping APIs exist at the backend/API layer; richer product UI still needs to expose them.
+- RBAC enforcement is partial. Preview controls now use shared mapped-user/channel/team-session authorization, but session start, PR requests, and other user-specific actions need the same consistent mapped-user authorization.
 - User-authored PR creation from Slack is not implemented.
 - Slack install resolution is team/app based and does not fully handle enterprise-aware multi-org Slack workspaces.
 - Slash commands always enqueue a session; they do not open missing-context modals.
@@ -514,6 +516,8 @@ Admin/settings APIs should stay under normal app auth and RBAC.
 - `GET /api/v1/integrations/slack/channels`: Slack channels visible to bot, with connected settings.
 - `PATCH /api/v1/integrations/slack/channels/{slack_channel_id}`: set default repository, allowed actions, notification subscriptions.
 - `GET /api/v1/integrations/slack/user-links`: list Slack user mappings.
+- `POST /api/v1/integrations/slack/user-links`: admin-managed create/replace Slack user mapping with `source = admin_linked`.
+- `DELETE /api/v1/integrations/slack/user-links/{id}`: admin-managed delete for a Slack user mapping.
 - `POST /api/v1/integrations/slack/user-links/me`: link current 143 user to Slack user.
 - `DELETE /api/v1/integrations/slack/user-links/me`: unlink current user.
 
@@ -718,7 +722,7 @@ Handler responsibilities:
 1. Load channel settings and user mapping.
 2. Fetch thread context with `conversations.replies` when useful and permitted.
 3. Resolve repository/preview/session references.
-4. Create or resume a 143 session.
+4. Create or resume a 143 session. Existing Slack thread links continue active or resumable sessions; terminal non-resumable sessions start a fresh session and repoint the Slack thread link.
 5. Persist `slack_session_links`.
 6. Post/update the Slack ack message with the session URL.
 7. Enqueue normal `run_agent` / `continue_session` work.

@@ -239,6 +239,34 @@ func TestSlackThreadRoutingBySource(t *testing.T) {
 	}
 }
 
+func TestSlackShouldContinueLinkedSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   models.SessionStatus
+		expected bool
+	}{
+		{name: "pending linked session continues", status: models.SessionStatusPending, expected: true},
+		{name: "running linked session continues", status: models.SessionStatusRunning, expected: true},
+		{name: "idle linked session continues", status: models.SessionStatusIdle, expected: true},
+		{name: "completed linked session is resumable", status: models.SessionStatusCompleted, expected: true},
+		{name: "failed linked session is resumable", status: models.SessionStatusFailed, expected: true},
+		{name: "cancelled linked session is resumable", status: models.SessionStatusCancelled, expected: true},
+		{name: "skipped linked session starts fresh", status: models.SessionStatusSkipped, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := slackShouldContinueLinkedSession(tt.status)
+
+			require.Equal(t, tt.expected, actual, "Slack thread reuse should follow session resumability")
+		})
+	}
+}
+
 type workerLinearCredentialReader struct{}
 
 func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
