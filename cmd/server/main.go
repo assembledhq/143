@@ -114,7 +114,7 @@ func main() {
 		cfg.NodeID = hostname
 	}
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: cfg.DatabaseMaxConns})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}

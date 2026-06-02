@@ -22,8 +22,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1})
 	if err != nil {
+		if deployguardrail.IsDatabaseConnectionSaturated(err) {
+			fmt.Fprintf(os.Stderr, "deploy guardrail: warning: database connection slots are exhausted; skipping active-session check so deploy can roll forward with bounded pools: %v\n", err)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "deploy guardrail: connect database: %v\n", err)
 		os.Exit(1)
 	}

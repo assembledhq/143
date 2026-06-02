@@ -9,6 +9,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type PoolOptions struct {
+	MaxConns int32
+}
+
 // DBTX is the interface satisfied by pgxpool.Pool, pgx.Tx, and pgxmock.
 type DBTX interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -23,10 +27,25 @@ type TxStarter interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+func NewPoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database URL: %w", err)
+	}
+	if opts.MaxConns > 0 {
+		config.MaxConns = opts.MaxConns
+	}
+	return config, nil
+}
+
+func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	return NewPoolWithOptions(ctx, databaseURL, PoolOptions{})
+}
+
+func NewPoolWithOptions(ctx context.Context, databaseURL string, opts PoolOptions) (*pgxpool.Pool, error) {
+	config, err := NewPoolConfig(databaseURL, opts)
+	if err != nil {
+		return nil, err
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
