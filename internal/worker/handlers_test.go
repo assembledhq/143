@@ -239,6 +239,134 @@ func TestSlackThreadRoutingBySource(t *testing.T) {
 	}
 }
 
+func TestSlackDeliveryTargetFromVisibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		link            models.SlackSessionLink
+		replyThreadTS   string
+		responseVis     string
+		dmChannelID     string
+		expectedChannel string
+		expectedThread  string
+		expectedDM      bool
+	}{
+		{
+			name: "thread visibility keeps source channel and thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "thread",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+		{
+			name: "dm visibility uses opened dm channel without thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "dm",
+			dmChannelID:     "D123",
+			expectedChannel: "D123",
+			expectedDM:      true,
+		},
+		{
+			name: "dm visibility without a Slack user falls back to thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "dm",
+			dmChannelID:     "D123",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+		{
+			name: "unknown visibility is treated as thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "unexpected",
+			dmChannelID:     "D123",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			channelID, threadTS, usedDM := slackDeliveryTargetFromVisibility(tt.link, tt.replyThreadTS, tt.responseVis, tt.dmChannelID)
+
+			require.Equal(t, tt.expectedChannel, channelID, "Slack delivery target should choose the expected channel")
+			require.Equal(t, tt.expectedThread, threadTS, "Slack delivery target should choose the expected thread")
+			require.Equal(t, tt.expectedDM, usedDM, "Slack delivery target should report whether DM routing was used")
+		})
+	}
+}
+
+func TestAppendSlackSessionOutcomeIncludesConcreteLinksAndDiffStats(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	branchURL := "https://github.com/acme/repo/tree/143/session"
+	text := appendSlackSessionOutcomeDetails("Done.", slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:              sessionID,
+			BranchURL:       &branchURL,
+			DiffStats:       json.RawMessage(`{"files_changed":3,"added":42,"removed":7}`),
+			PRCreationState: models.PRCreationStateSucceeded,
+		},
+		PullRequest: &models.PullRequest{
+			GitHubPRURL:    "https://github.com/acme/repo/pull/42",
+			GitHubPRNumber: 42,
+			GitHubRepo:     "acme/repo",
+			Status:         models.PullRequestStatusOpen,
+			CIStatus:       models.PullRequestCIStatusPending,
+		},
+		Preview: &models.PreviewInstance{
+			ID:     previewID,
+			Name:   "web",
+			Status: models.PreviewStatusReady,
+		},
+		PreviewURL: "https://143.test/previews/" + previewID.String(),
+	})
+
+	require.Contains(t, text, "PR: https://github.com/acme/repo/pull/42", "Slack outcome should include concrete PR URL")
+	require.Contains(t, text, "Preview: ready - https://143.test/previews/"+previewID.String(), "Slack outcome should include preview status and URL")
+	require.Contains(t, text, "Branch: https://github.com/acme/repo/tree/143/session", "Slack outcome should include branch URL")
+	require.Contains(t, text, "Changes: 3 files, +42/-7", "Slack outcome should summarize diff stats")
+}
+
+func TestAppendSlackSessionOutcomeFallsBackForPRStateWithoutRow(t *testing.T) {
+	t.Parallel()
+
+	text := appendSlackSessionOutcomeDetails("Done.", slackSessionOutcomeDetails{
+		Session: models.Session{
+			PRCreationState: models.PRCreationStateSucceeded,
+		},
+	})
+
+	require.Contains(t, text, "PR: opened", "Slack outcome should preserve existing fallback when PR row is unavailable")
+}
+
+func TestSlackDiffStatsOutcomeLineSuppressesAllZeros(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", slackDiffStatsOutcomeLine(json.RawMessage(`{"files_changed":0,"added":0,"removed":0}`)), "zero diff stats should produce no output line")
+	require.Equal(t, "", slackDiffStatsOutcomeLine(json.RawMessage(`null`)), "null diff stats should produce no output line")
+	require.NotEmpty(t, slackDiffStatsOutcomeLine(json.RawMessage(`{"files_changed":1,"added":5,"removed":2}`)), "non-zero diff stats should produce an output line")
+}
+
 func TestSlackShouldContinueLinkedSession(t *testing.T) {
 	t.Parallel()
 

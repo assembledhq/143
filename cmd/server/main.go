@@ -495,6 +495,7 @@ func main() {
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
+			PullRequests:        pullRequestStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),

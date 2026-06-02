@@ -188,6 +188,7 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case models.SlackInboundEventTypeAppRateLimited:
+		h.metrics.RecordRateLimit(r.Context(), "events_api")
 		h.logger.Warn().Str("team_id", envelope.TeamID).Msg("Slack app rate limited events delivery")
 	case models.SlackInboundEventTypeMemberJoined:
 		payload := models.SlackInteractionJobPayload{

@@ -1,7 +1,7 @@
 # 92 - Slackbot Product Surface
 
 > **Status:** Partially implemented
-> **Last reviewed:** 2026-05-31
+> **Last reviewed:** 2026-06-01
 >
 > **Depends on:** Slack OAuth integration, session/job creation APIs, durable preview control plane, human input requests, and notification delivery primitives.
 
@@ -69,6 +69,7 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Authenticated Slack settings APIs expose bot install metadata, bot reinstall, bot-visible channels with connected settings, channel setting updates, user-link listing, self-link, and self-unlink.
 - Slack thread context, detected references, and file metadata are bounded and included in the initial session prompt.
 - Slack acks and final replies are posted back to Slack, and final replies truncate long assistant responses with a session link fallback.
+- Final Slack replies append concrete user-facing outcome context when available: branch URL, PR URL/status/CI state, preview URL/status, and compact diff stats.
 - Slack progress/final/human-input/notification messages are recorded in `slack_outbound_messages`.
 - Human-input requests can be delivered to the originating Slack thread and answered from Slack through choice buttons or a free-form modal by linked users.
 - Slack notifications can fan out to subscribed channels or configured Slack user DMs from channel setting subscription JSON.
@@ -76,8 +77,9 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Preview actions are wired for open, refresh/restart, stop, and extend. Refresh/restart currently both recycle the preview.
 - Slack preview actions use a shared Slack authorization service for channel capability checks, mapped-user membership roles, and the narrow unmapped-user allowance for originating team sessions.
 - Slack channel invite setup posts a channel-visible setup message with configure/start actions.
+- Channel `response_visibility = dm` is honored for Slack-started session acks, progress updates, final replies, and human-input delivery. DM delivery opens a bot DM to the originating Slack user and falls back to the thread if a DM cannot be opened.
 - Stored Slack inbound payloads redact known transient/secret fields such as `response_url`, `trigger_id`, and `token`.
-- Slackbot metrics exist for inbound events, session starts, outbound messages, Slack API failures, and interaction actions.
+- Slackbot metrics exist for inbound events, session starts, outbound messages, Slack API failures, interaction actions, Slack Events API rate-limit signals, and Slack message update latency.
 
 ### Remaining Work
 
@@ -87,11 +89,11 @@ The current implementation provides the first usable Slackbot backend surface, b
 - App Home Slack connection health does not yet show detailed install health, scopes, or remediation state.
 - Repository selection is offered for some missing-repository starts, but there are no full missing-context flows for preview target, PR, branch, issue, Sentry, or session resolution.
 - Mention/DM context detection does not yet resolve repository, PR, issue, Sentry URL, preview URL, branch, or file paths into structured typed context. Most detected references are still prompt text.
-- Channel `response_visibility = dm` is stored but not fully honored across ack, progress, final, human-input, and notification delivery.
+- Channel `response_visibility = dm` is not yet applied to general notification delivery; notification destinations still come from subscription JSON.
 - Slack progress rendering is still coarse. Runtime/tool/test/command/preview milestones are not normalized into sparse Slack updates.
 - Slack progress updates are not debounced by a per-thread timing policy.
 - The initial ack message is not consistently updated into the terminal state; later progress/final messages may be separate.
-- Final Slack output does not consistently append concrete PR URLs, preview URLs/status, changed-file summaries, or next-action buttons.
+- Final Slack output does not yet include next-action buttons for all outcomes.
 - Human-input requests do not have assigned-user DM delivery because the durable request model has no assigned-user field.
 - Human-input routing does not distinguish sensitive/personal requests from team-thread requests.
 - Team sessions with no mapped user cannot yet be claimed and answered from Slack by any authorized 143 user.
@@ -119,7 +121,6 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Raw Slack message text is stored in inbound event payloads for audit/retry visibility; private-message minimization has not been designed.
 - Session attribution is represented by `origin = slack` and `slack_session_links`, but there is no `session_attribution` row or `source_metadata` field carrying sanitized Slack source metadata.
 - Slack context enters sessions as prompt text rather than structured attachments/references.
-- Slackbot metrics do not yet include dedicated rate-limit counters or message update latency.
 
 ## Surfaces
 

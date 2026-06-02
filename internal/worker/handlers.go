@@ -437,6 +437,7 @@ type Stores struct {
 	ReviewLoops         *db.SessionReviewLoopStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
+	PullRequests        *db.PullRequestStore
 	SlackInstallations  *db.SlackInstallationStore
 	SlackUserLinks      *db.SlackUserLinkStore
 	SlackChannels       *db.SlackChannelSettingsStore
@@ -1515,10 +1516,11 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					return fmt.Errorf("enqueue slack session continuation: %w", err)
 				}
 				ackText := slackSessionAckText(services, session.ID, "Continuing")
-				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, payload.ChannelID, threadTS, ackText); err != nil {
+				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
+				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText); err != nil {
 					logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
 				} else {
-					recordSlackOutbound(ctx, stores, services, logger, existingLink, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
+					recordSlackOutboundInChannel(ctx, stores, services, logger, existingLink, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 				}
 				return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 			}
@@ -1600,15 +1602,16 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		ackBlocks := slackSessionAckBlocks(ctx, stores, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText)
 		var posted ingestion.SlackPostedMessage
 		var postErr error
+		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
 		if len(ackBlocks) > 0 {
-			posted, postErr = slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, payload.ChannelID, threadTS, ackText, ackBlocks)
+			posted, postErr = slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks)
 		} else {
-			posted, postErr = slackClient.PostMessage(ctx, slackCfg.AccessToken, payload.ChannelID, threadTS, ackText)
+			posted, postErr = slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText)
 		}
 		if postErr != nil {
 			logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack session acknowledgement")
 		} else {
-			recordSlackOutbound(ctx, stores, services, logger, *link, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
+			recordSlackOutboundInChannel(ctx, stores, services, logger, *link, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 		}
 		return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 	}
@@ -1653,6 +1656,52 @@ func slackReplyThreadTS(threadTS string) string {
 		return ""
 	}
 	return threadTS
+}
+
+func slackChannelResponseVisibility(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID string) string {
+	if stores == nil || stores.SlackChannels == nil || channelID == "" {
+		return "thread"
+	}
+	settings, err := stores.SlackChannels.GetByChannel(ctx, orgID, teamID, channelID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack response visibility")
+		}
+		return "thread"
+	}
+	return slackNormalizeResponseVisibility(settings.ResponseVisibility)
+}
+
+func slackNormalizeResponseVisibility(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "dm":
+		return "dm"
+	default:
+		return "thread"
+	}
+}
+
+func slackDeliveryTargetFromVisibility(link models.SlackSessionLink, replyThreadTS, responseVisibility, dmChannelID string) (string, string, bool) {
+	if slackNormalizeResponseVisibility(responseVisibility) == "dm" && link.SlackUserID != "" && dmChannelID != "" {
+		return dmChannelID, "", true
+	}
+	return link.SlackChannelID, replyThreadTS, false
+}
+
+func slackDeliveryTarget(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, accessToken string, logger zerolog.Logger, link models.SlackSessionLink, replyThreadTS string) (string, string) {
+	visibility := slackChannelResponseVisibility(ctx, stores, logger, link.OrgID, link.SlackTeamID, link.SlackChannelID)
+	if visibility != "dm" || link.SlackUserID == "" {
+		channelID, threadTS, _ := slackDeliveryTargetFromVisibility(link, replyThreadTS, visibility, "")
+		return channelID, threadTS
+	}
+	dmChannelID, err := slackClient.OpenDM(ctx, accessToken, link.SlackUserID)
+	if err != nil {
+		logger.Warn().Err(err).Str("slack_user_id", link.SlackUserID).Msg("failed to open Slack DM; falling back to thread reply")
+		channelID, threadTS, _ := slackDeliveryTargetFromVisibility(link, replyThreadTS, "thread", "")
+		return channelID, threadTS
+	}
+	channelID, threadTS, _ := slackDeliveryTargetFromVisibility(link, replyThreadTS, visibility, dmChannelID)
+	return channelID, threadTS
 }
 
 func slackStartSessionReplyThreadTS(payload models.SlackStartSessionJobPayload) string {
@@ -1948,6 +1997,10 @@ func slackHomeAutomationRunBlock(services *Services, items []db.SlackHomeAutomat
 }
 
 func recordSlackOutbound(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, ts string, kind models.SlackOutboundMessageKind, status, text string) {
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, link.SlackChannelID, ts, kind, status, text)
+}
+
+func recordSlackOutboundInChannel(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, channelID, ts string, kind models.SlackOutboundMessageKind, status, text string) {
 	if services != nil && services.SlackbotMetrics != nil {
 		services.SlackbotMetrics.RecordOutboundMessage(ctx, string(kind), status)
 	}
@@ -1959,7 +2012,7 @@ func recordSlackOutbound(ctx context.Context, stores *Stores, services *Services
 		OrgID:              link.OrgID,
 		SlackSessionLinkID: &link.ID,
 		SlackTeamID:        link.SlackTeamID,
-		SlackChannelID:     link.SlackChannelID,
+		SlackChannelID:     channelID,
 		SlackMessageTS:     ts,
 		MessageKind:        kind,
 		Status:             status,
@@ -2006,15 +2059,20 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 		if text == "" {
 			text = "143 session update"
 		}
+		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
-			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, link.SlackChannelID, *link.LatestStatusMessageTS, text); err != nil {
+			updateStarted := time.Now()
+			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, text); err == nil {
+				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
+				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", text)
+				return nil
+			} else {
+				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
+				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to update Slack progress message; posting a new update")
 				recordSlackAPIFailure(ctx, services, "chat.update")
-				return err
 			}
-			recordSlackOutbound(ctx, stores, services, logger, link, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", text)
-			return nil
 		}
-		posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, link.SlackChannelID, slackReplyThreadTS(link.SlackThreadTS), text)
+		posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, channelID, threadTS, text)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
@@ -2024,7 +2082,7 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack status message timestamp")
 			}
 		}
-		recordSlackOutbound(ctx, stores, services, logger, link, posted.Timestamp, models.SlackOutboundMessageKindProgress, "sent", text)
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindProgress, "sent", text)
 		return nil
 	}
 }
@@ -2062,20 +2120,24 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 		text := renderSlackFinal(services, msg.Content, sessionID)
 		if stores.Sessions != nil {
 			if session, sessionErr := stores.Sessions.GetByID(ctx, orgID, sessionID); sessionErr == nil {
-				text = appendSlackSessionOutcome(text, session)
+				text = appendSlackSessionOutcomeDetails(text, loadSlackSessionOutcomeDetails(ctx, stores, services, logger, session))
 			} else {
 				logger.Warn().Err(sessionErr).Str("session_id", sessionID.String()).Msg("failed to load session outcome for Slack final response")
 			}
 		}
+		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
 			terminal := "Completed\nSession: " + slackSessionURL(services, sessionID)
-			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, link.SlackChannelID, *link.LatestStatusMessageTS, terminal); err != nil {
+			updateStarted := time.Now()
+			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, terminal); err != nil {
+				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
 				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to update Slack progress message to terminal state")
 			} else {
-				recordSlackOutbound(ctx, stores, services, logger, link, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal)
+				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
+				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal)
 			}
 		}
-		posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, link.SlackChannelID, slackReplyThreadTS(link.SlackThreadTS), text)
+		posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, channelID, threadTS, text)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
@@ -2085,7 +2147,7 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack final message timestamp")
 			}
 		}
-		recordSlackOutbound(ctx, stores, services, logger, link, posted.Timestamp, models.SlackOutboundMessageKindFinal, "sent", text)
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindFinal, "sent", text)
 		return nil
 	}
 }
@@ -2125,12 +2187,13 @@ func newSlackDeliverHumanInputHandler(stores *Stores, services *Services, logger
 			return fmt.Errorf("unexpected slack credential type")
 		}
 		text, blocks := renderSlackHumanInput(services, req, sessionID)
-		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, link.SlackChannelID, slackReplyThreadTS(link.SlackThreadTS), text, blocks)
+		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
+		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
 		}
-		recordSlackOutbound(ctx, stores, services, logger, link, posted.Timestamp, models.SlackOutboundMessageKindHumanInput, "sent", text)
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindHumanInput, "sent", text)
 		return nil
 	}
 }
@@ -2378,6 +2441,13 @@ func recordSlackAPIFailure(ctx context.Context, services *Services, method strin
 	services.SlackbotMetrics.RecordAPIFailure(ctx, method)
 }
 
+func recordSlackMessageUpdateLatency(ctx context.Context, services *Services, method, outcome string, duration time.Duration) {
+	if services == nil || services.SlackbotMetrics == nil {
+		return
+	}
+	services.SlackbotMetrics.RecordMessageUpdateLatency(ctx, method, outcome, float64(duration.Milliseconds()))
+}
+
 func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, automationRunID *uuid.UUID, eventKind, title, body string) {
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 		EventKind: eventKind,
@@ -2540,7 +2610,7 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 				return handleSlackStartSessionModal(ctx, stores, input)
 			}
 			if input.CallbackID == "slack_human_input_freeform_modal" {
-				return handleSlackHumanInputFreeformModal(ctx, stores, slackClient, input)
+				return handleSlackHumanInputFreeformModal(ctx, stores, services, slackClient, input)
 			}
 			if input.CallbackID == "slack_configure_channel_modal" {
 				return handleSlackConfigureChannelModal(ctx, stores, input)
@@ -2561,7 +2631,7 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 		case "slack_open_preview":
 			return handleSlackOpenPreview(ctx, stores, services, slackClient, input)
 		case "slack_answer_human_input":
-			return handleSlackHumanInputAnswer(ctx, stores, slackClient, input)
+			return handleSlackHumanInputAnswer(ctx, stores, services, slackClient, input)
 		case "slack_answer_human_input_freeform":
 			return handleSlackHumanInputFreeformPrompt(ctx, stores, slackClient, input)
 		case "slack_member_joined_channel":
@@ -3285,7 +3355,7 @@ func slackHumanInputFreeformModal(privateMetadata string) ingestion.SlackHomeVie
 	}
 }
 
-func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
 	var payload struct {
 		View struct {
 			PrivateMetadata string `json:"private_metadata"`
@@ -3307,10 +3377,10 @@ func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, sla
 		"request_id": value.RequestID,
 		"answer":     answer,
 	})
-	return handleSlackHumanInputAnswer(ctx, stores, slackClient, input)
+	return handleSlackHumanInputAnswer(ctx, stores, services, slackClient, input)
 }
 
-func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
 	if stores == nil || stores.HumanInputRequests == nil || stores.SlackUserLinks == nil || stores.Jobs == nil {
 		return fmt.Errorf("slack human-input dependencies are not configured")
 	}
@@ -3346,9 +3416,12 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, slackClien
 		if cred, credErr := stores.Credentials.Get(ctx, orgID, models.ProviderSlack); credErr == nil {
 			if slackCfg, ok := cred.Config.(models.SlackConfig); ok {
 				updateText := fmt.Sprintf("Answered by <@%s>: %s", input.UserID, answer)
+				updateStarted := time.Now()
 				if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, input.ChannelID, input.MessageTS, updateText); err != nil {
+					recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
 					return fmt.Errorf("update Slack human-input message: %w", err)
 				}
+				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
 			}
 		} else {
 			return fmt.Errorf("get slack credentials: %w", credErr)
@@ -3395,23 +3468,108 @@ func renderSlackFinal(services *Services, content string, sessionID uuid.UUID) s
 	return trimmed + "\n\nSession: " + slackSessionURL(services, sessionID)
 }
 
+type slackSessionOutcomeDetails struct {
+	Session     models.Session
+	PullRequest *models.PullRequest
+	Preview     *models.PreviewInstance
+	PreviewURL  string
+}
+
+func loadSlackSessionOutcomeDetails(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) slackSessionOutcomeDetails {
+	details := slackSessionOutcomeDetails{Session: session}
+	if stores == nil {
+		return details
+	}
+	if stores.PullRequests != nil {
+		pr, err := stores.PullRequests.GetBySessionID(ctx, session.OrgID, session.ID)
+		if err == nil {
+			details.PullRequest = &pr
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load pull request for Slack final response")
+		}
+	}
+	if stores.Previews != nil {
+		preview, err := stores.Previews.GetActivePreviewForSession(ctx, session.OrgID, session.ID)
+		if err != nil && errors.Is(err, pgx.ErrNoRows) {
+			preview, err = stores.Previews.GetLatestFailedPreviewForSession(ctx, session.OrgID, session.ID)
+		}
+		if err != nil && errors.Is(err, pgx.ErrNoRows) {
+			preview, err = stores.Previews.GetLatestTerminalPreviewForSession(ctx, session.OrgID, session.ID)
+		}
+		if err == nil && preview != nil {
+			details.Preview = preview
+			details.PreviewURL = slackPreviewURL(services, preview.ID)
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load preview for Slack final response")
+		}
+	}
+	return details
+}
+
 func appendSlackSessionOutcome(text string, session models.Session) string {
+	return appendSlackSessionOutcomeDetails(text, slackSessionOutcomeDetails{Session: session})
+}
+
+func appendSlackSessionOutcomeDetails(text string, details slackSessionOutcomeDetails) string {
+	session := details.Session
 	lines := []string{}
 	if session.BranchURL != nil && strings.TrimSpace(*session.BranchURL) != "" {
 		lines = append(lines, "Branch: "+strings.TrimSpace(*session.BranchURL))
 	}
-	if session.PRCreationState == models.PRCreationStateSucceeded {
+	if details.PullRequest != nil && strings.TrimSpace(details.PullRequest.GitHubPRURL) != "" {
+		lines = append(lines, slackPullRequestOutcomeLine(*details.PullRequest))
+	} else if session.PRCreationState == models.PRCreationStateSucceeded {
 		lines = append(lines, "PR: opened")
 	} else if session.PRCreationState == models.PRCreationStateFailed && session.PRCreationError != nil && strings.TrimSpace(*session.PRCreationError) != "" {
 		lines = append(lines, "PR: failed - "+strings.TrimSpace(*session.PRCreationError))
 	}
-	if len(session.DiffStats) > 0 && string(session.DiffStats) != "null" {
-		lines = append(lines, "Changes: diff available in 143")
+	if details.Preview != nil && strings.TrimSpace(details.PreviewURL) != "" {
+		lines = append(lines, fmt.Sprintf("Preview: %s - %s", details.Preview.Status, details.PreviewURL))
+	}
+	if line := slackDiffStatsOutcomeLine(session.DiffStats); line != "" {
+		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		return text
 	}
 	return strings.TrimSpace(text) + "\n\n" + strings.Join(lines, "\n")
+}
+
+func slackPullRequestOutcomeLine(pr models.PullRequest) string {
+	line := "PR: " + strings.TrimSpace(pr.GitHubPRURL)
+	metadata := []string{}
+	if pr.Status != "" {
+		metadata = append(metadata, string(pr.Status))
+	}
+	if pr.CIStatus != "" {
+		metadata = append(metadata, "CI "+string(pr.CIStatus))
+	}
+	if len(metadata) > 0 {
+		line += " (" + strings.Join(metadata, ", ") + ")"
+	}
+	return line
+}
+
+func slackDiffStatsOutcomeLine(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var stats struct {
+		FilesChanged int `json:"files_changed"`
+		Added        int `json:"added"`
+		Removed      int `json:"removed"`
+	}
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return "Changes: diff available in 143"
+	}
+	if stats.FilesChanged == 0 && stats.Added == 0 && stats.Removed == 0 {
+		return ""
+	}
+	fileLabel := "files"
+	if stats.FilesChanged == 1 {
+		fileLabel = "file"
+	}
+	return fmt.Sprintf("Changes: %d %s, +%d/-%d", stats.FilesChanged, fileLabel, stats.Added, stats.Removed)
 }
 
 func fetchSlackThreadContext(ctx context.Context, client *ingestion.SlackAPIClient, accessToken, channelID, threadTS string, logger zerolog.Logger) []ingestion.SlackMessage {
