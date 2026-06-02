@@ -13,6 +13,8 @@ type SlackbotMetrics struct {
 	OutboundMessagesTotal   otelmetric.Int64Counter
 	SlackAPIFailuresTotal   otelmetric.Int64Counter
 	InteractionActionsTotal otelmetric.Int64Counter
+	RateLimitsTotal         otelmetric.Int64Counter
+	MessageUpdateLatency    otelmetric.Float64Histogram
 }
 
 func NewSlackbotMetrics() (*SlackbotMetrics, error) {
@@ -37,12 +39,29 @@ func NewSlackbotMetrics() (*SlackbotMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	rateLimits, err := meter.Int64Counter("slackbot.rate_limits",
+		otelmetric.WithDescription("Slack rate-limit signals observed by source"),
+		otelmetric.WithUnit("{event}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	updateLatency, err := meter.Float64Histogram("slackbot.message_update_latency_ms",
+		otelmetric.WithDescription("Latency for Slack message update API calls"),
+		otelmetric.WithUnit("ms"),
+		otelmetric.WithExplicitBucketBoundaries(25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+	)
+	if err != nil {
+		return nil, err
+	}
 	return &SlackbotMetrics{
 		InboundEventsTotal:      inbound,
 		SessionStartsTotal:      starts,
 		OutboundMessagesTotal:   outbound,
 		SlackAPIFailuresTotal:   failures,
 		InteractionActionsTotal: actions,
+		RateLimitsTotal:         rateLimits,
+		MessageUpdateLatency:    updateLatency,
 	}, nil
 }
 
@@ -79,4 +98,18 @@ func (m *SlackbotMetrics) RecordInteractionAction(ctx context.Context, actionID,
 		return
 	}
 	m.InteractionActionsTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("action_id", actionID), attrString("outcome", outcome)))
+}
+
+func (m *SlackbotMetrics) RecordRateLimit(ctx context.Context, source string) {
+	if m == nil {
+		return
+	}
+	m.RateLimitsTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("source", source)))
+}
+
+func (m *SlackbotMetrics) RecordMessageUpdateLatency(ctx context.Context, method, outcome string, latencyMS float64) {
+	if m == nil {
+		return
+	}
+	m.MessageUpdateLatency.Record(ctx, latencyMS, otelmetric.WithAttributes(attrString("method", method), attrString("outcome", outcome)))
 }
