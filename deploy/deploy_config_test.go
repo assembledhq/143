@@ -26,6 +26,20 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
 }
 
+func TestProductionComposeCapsDatabasePools(t *testing.T) {
+	t.Parallel()
+
+	appCompose, err := os.ReadFile("../docker-compose.app.yml")
+	require.NoError(t, err, "test should read the app compose file")
+	appText := string(appCompose)
+	require.Contains(t, appText, "DATABASE_MAX_CONNS: ${API_DATABASE_MAX_CONNS:-20}", "app compose should cap the API database pool below Postgres max_connections")
+
+	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	workerText := string(workerCompose)
+	require.Contains(t, workerText, "pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}", "worker compose should cap worker and inherited session-executor database pools")
+}
+
 func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
 	t.Parallel()
 

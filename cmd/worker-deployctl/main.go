@@ -24,7 +24,7 @@ func main() {
 	cfg := config.Load()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1})
 	if err != nil {
 		exitErr("connect database: %v", err)
 	}
