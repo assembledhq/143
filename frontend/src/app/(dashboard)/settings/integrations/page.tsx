@@ -10,10 +10,17 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import {
+  Command,
+  CommandCheckItem,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandList,
+} from "@/components/ui/command";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Sheet,
@@ -381,21 +388,25 @@ function SlackChannelPicker() {
         <p className="text-sm text-muted-foreground">No channels found.</p>
       ) : (
         <div className="space-y-3">
-          <div className="grid max-h-[24rem] gap-2 overflow-y-auto pr-1">
-            {channels.map((ch) => (
-              <Label
-                key={ch.id}
-                className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 transition-colors hover:bg-muted/50"
-              >
-                <Checkbox
-                  checked={selected.has(ch.id)}
-                  onCheckedChange={() => toggle(ch.id)}
-                  aria-label={`Monitor #${ch.name}`}
-                />
-                <span className="text-sm font-medium">#{ch.name}</span>
-              </Label>
-            ))}
-          </div>
+          <Command className="rounded-md border border-border">
+            <CommandInput placeholder="Search channels..." />
+            <CommandList className="max-h-[24rem]">
+              <CommandEmpty>No channels found.</CommandEmpty>
+              <CommandGroup>
+                {channels.map((ch) => (
+                  <CommandCheckItem
+                    key={ch.id}
+                    checked={selected.has(ch.id)}
+                    value={`${ch.name} #${ch.name}`}
+                    aria-label={`Monitor #${ch.name}`}
+                    onSelect={() => toggle(ch.id)}
+                  >
+                    <span className="truncate font-medium">#{ch.name}</span>
+                  </CommandCheckItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
           <p className="text-xs text-muted-foreground">
             {selected.size} channel{selected.size !== 1 ? "s" : ""} selected
           </p>
