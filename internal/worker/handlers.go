@@ -1516,6 +1516,9 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					return fmt.Errorf("enqueue slack session continuation: %w", err)
 				}
 				ackText := slackSessionAckText(services, session.ID, "Continuing")
+				if teamLine := slackTeamSessionLine(existingLink); teamLine != "" {
+					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
+				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
 				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText); err != nil {
 					logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
@@ -1599,6 +1602,9 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			return fmt.Errorf("enqueue slack-started session: %w", err)
 		}
 		ackText := slackSessionAckText(services, session.ID, "Starting")
+		if teamLine := slackTeamSessionLine(*link); teamLine != "" {
+			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
+		}
 		ackBlocks := slackSessionAckBlocks(ctx, stores, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText)
 		var posted ingestion.SlackPostedMessage
 		var postErr error
@@ -2113,12 +2119,19 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 		if !ok {
 			return fmt.Errorf("unexpected slack credential type")
 		}
-		text := renderSlackFinal(services, msg.Content, sessionID)
+		details := slackSessionOutcomeDetails{}
 		if stores.Sessions != nil {
 			if session, sessionErr := stores.Sessions.GetByID(ctx, orgID, sessionID); sessionErr == nil {
-				text = appendSlackSessionOutcomeDetails(text, loadSlackSessionOutcomeDetails(ctx, stores, services, logger, session))
+				details = loadSlackSessionOutcomeDetails(ctx, stores, services, logger, session)
 			} else {
 				logger.Warn().Err(sessionErr).Str("session_id", sessionID.String()).Msg("failed to load session outcome for Slack final response")
+			}
+		}
+		text, blocks := renderSlackFinalBlocks(services, msg.Content, orgID, sessionID, details)
+		if teamLine := slackTeamSessionLine(link); teamLine != "" {
+			text = strings.TrimSpace(text) + "\n\n" + teamLine
+			if len(blocks) > 0 && blocks[0].Text != nil {
+				blocks[0].Text.Text = strings.TrimSpace(blocks[0].Text.Text) + "\n\n" + teamLine
 			}
 		}
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
@@ -2133,7 +2146,7 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal)
 			}
 		}
-		posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, channelID, threadTS, text)
+		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
@@ -2985,6 +2998,22 @@ func slackConfigureChannelModal(input models.SlackInteractionJobPayload, repos [
 					{"text": map[string]string{"type": "plain_text", "text": "Human input"}, "value": "human_input"},
 				},
 			},
+		}, {
+			Type:     "input",
+			BlockID:  "notification_events",
+			Optional: true,
+			Label:    &ingestion.SlackTextObject{Type: "plain_text", Text: "Notifications"},
+			Element: map[string]any{
+				"type":      "checkboxes",
+				"action_id": "selected",
+				"options": []map[string]any{
+					{"text": map[string]string{"type": "plain_text", "text": "Session completed"}, "value": "session.completed"},
+					{"text": map[string]string{"type": "plain_text", "text": "Session failed"}, "value": "session.failed"},
+					{"text": map[string]string{"type": "plain_text", "text": "Automation completed"}, "value": "automation.run.completed"},
+					{"text": map[string]string{"type": "plain_text", "text": "Automation failed"}, "value": "automation.run.failed"},
+					{"text": map[string]string{"type": "plain_text", "text": "Preview ready or failed"}, "value": "preview.*"},
+				},
+			},
 		}},
 	}
 }
@@ -3032,6 +3061,7 @@ func handleSlackConfigureChannelModal(ctx context.Context, stores *Stores, input
 	if len(allowedActions) == 0 {
 		allowedActions = []string{"session", "preview"}
 	}
+	notificationSubscriptions := slackNotificationSubscriptionsFromModal(input.RawPayload)
 	settings := &models.SlackChannelSettings{
 		OrgID:                     orgID,
 		SlackInstallationID:       installationID,
@@ -3041,10 +3071,31 @@ func handleSlackConfigureChannelModal(ctx context.Context, stores *Stores, input
 		DefaultBranch:             &defaultBranch,
 		ResponseVisibility:        responseVisibility,
 		AllowedActions:            allowedActions,
-		NotificationSubscriptions: json.RawMessage(`{}`),
+		NotificationSubscriptions: notificationSubscriptions,
 		Active:                    true,
 	}
 	return stores.SlackChannels.Upsert(ctx, settings)
+}
+
+func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessage {
+	selected := slackModalSelectedValues(raw, "notification_events", "selected")
+	if len(selected) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	events := make([]string, 0, len(selected)+1)
+	for _, value := range selected {
+		switch value {
+		case "preview.*":
+			events = append(events, "preview.ready", "preview.failed")
+		default:
+			events = append(events, value)
+		}
+	}
+	encoded, err := json.Marshal(slackNotificationSubscriptionConfig{Events: events})
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return encoded
 }
 
 func handleSlackCreatePreview(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
@@ -3454,7 +3505,7 @@ func parseSlackSessionJobIDs(orgIDRaw, sessionIDRaw string) (uuid.UUID, uuid.UUI
 
 func renderSlackFinal(services *Services, content string, sessionID uuid.UUID) string {
 	trimmed := strings.TrimSpace(content)
-	const maxSlackFinal = 2800
+	const maxSlackFinal = 2400
 	if len(trimmed) > maxSlackFinal {
 		trimmed = strings.TrimSpace(trimmed[:maxSlackFinal]) + "\n\n[Truncated in Slack]"
 	}
@@ -3462,6 +3513,51 @@ func renderSlackFinal(services *Services, content string, sessionID uuid.UUID) s
 		trimmed = "143 session completed."
 	}
 	return trimmed + "\n\nSession: " + slackSessionURL(services, sessionID)
+}
+
+func renderSlackFinalBlocks(services *Services, content string, orgID, sessionID uuid.UUID, details slackSessionOutcomeDetails) (string, []ingestion.SlackBlock) {
+	text := appendSlackSessionOutcomeDetails(renderSlackFinal(services, content, sessionID), details)
+	blocks := []ingestion.SlackBlock{{
+		Type: "section",
+		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+	}}
+	elements := []map[string]any{{
+		"type": "button",
+		"text": map[string]string{"type": "plain_text", "text": "Open session"},
+		"url":  slackSessionURL(services, sessionID),
+	}}
+	if details.Preview != nil {
+		value := slackActionValue(map[string]string{
+			"org_id":     orgID.String(),
+			"session_id": sessionID.String(),
+			"preview_id": details.Preview.ID.String(),
+		})
+		elements = append(elements, map[string]any{
+			"type":      "button",
+			"action_id": "slack_open_preview",
+			"text":      map[string]string{"type": "plain_text", "text": "Open preview"},
+			"value":     value,
+		})
+	} else {
+		elements = append(elements, map[string]any{
+			"type":      "button",
+			"action_id": "slack_create_preview",
+			"text":      map[string]string{"type": "plain_text", "text": "Create preview"},
+			"value": slackActionValue(map[string]string{
+				"org_id":     orgID.String(),
+				"session_id": sessionID.String(),
+			}),
+		})
+	}
+	if details.PullRequest != nil && strings.TrimSpace(details.PullRequest.GitHubPRURL) != "" {
+		elements = append(elements, map[string]any{
+			"type": "button",
+			"text": map[string]string{"type": "plain_text", "text": "Open PR"},
+			"url":  strings.TrimSpace(details.PullRequest.GitHubPRURL),
+		})
+	}
+	blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
+	return text, blocks
 }
 
 type slackSessionOutcomeDetails struct {
@@ -3527,6 +3623,13 @@ func appendSlackSessionOutcomeDetails(text string, details slackSessionOutcomeDe
 	return strings.TrimSpace(text) + "\n\n" + strings.Join(lines, "\n")
 }
 
+func slackTeamSessionLine(link models.SlackSessionLink) string {
+	if !link.TeamSession {
+		return ""
+	}
+	return "_This is a team session started from Slack without a linked 143 user._"
+}
+
 func slackPullRequestOutcomeLine(pr models.PullRequest) string {
 	line := "PR: " + strings.TrimSpace(pr.GitHubPRURL)
 	metadata := []string{}
@@ -3586,7 +3689,7 @@ type slackContextFile struct {
 	Permalink string
 }
 
-func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []string, files []slackContextFile) string {
+func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile) string {
 	cleaned := strings.TrimSpace(text)
 	var b strings.Builder
 	b.WriteString(cleaned)
@@ -3598,7 +3701,9 @@ func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackM
 		b.WriteString("\n\nDetected references:")
 		for _, ref := range references {
 			b.WriteString("\n- ")
-			b.WriteString(ref)
+			b.WriteString(string(ref.Kind))
+			b.WriteString(": ")
+			b.WriteString(ref.Value)
 		}
 	}
 	if len(files) > 0 {
@@ -3676,19 +3781,76 @@ func fetchSlackContextFiles(ctx context.Context, client *ingestion.SlackAPIClien
 	return files
 }
 
-var slackReferencePattern = regexp.MustCompile(`https?://\S+|(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+#[0-9]+`)
+type slackReferenceKind string
 
-func detectSlackContextReferences(text string, threadMessages []ingestion.SlackMessage) []string {
+const (
+	slackReferenceKindURL         slackReferenceKind = "url"
+	slackReferenceKindRepository  slackReferenceKind = "repository"
+	slackReferenceKindPullRequest slackReferenceKind = "pull_request"
+	slackReferenceKindIssue       slackReferenceKind = "issue"
+	slackReferenceKindSentry      slackReferenceKind = "sentry"
+	slackReferenceKindPreview     slackReferenceKind = "preview"
+	slackReferenceKindBranch      slackReferenceKind = "branch"
+	slackReferenceKindFilePath    slackReferenceKind = "file_path"
+)
+
+type slackContextReference struct {
+	Kind  slackReferenceKind
+	Value string
+}
+
+var (
+	slackURLReferencePattern      = regexp.MustCompile(`https?://[^\s<>()]+`)
+	slackFilePathReferencePattern = regexp.MustCompile(`(?:^|[\s(])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+(?::[0-9]+)?)`)
+	slackRepoIssuePattern         = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9_.-]+#[0-9]+\b`)
+	slackLinearIssuePattern       = regexp.MustCompile(`\b[A-Z][A-Z0-9]+-[0-9]+\b`)
+	slackBranchPattern            = regexp.MustCompile(`(?i)\bbranch\s+([A-Za-z0-9._/-]+)`)
+)
+
+func detectSlackContextReferences(text string, threadMessages []ingestion.SlackMessage) []slackContextReference {
 	seen := map[string]bool{}
-	refs := []string{}
+	refs := []slackContextReference{}
+	addRef := func(kind slackReferenceKind, value string) {
+		value = strings.TrimRight(strings.TrimSpace(value), ".,)")
+		if value == "" || seen[string(kind)+":"+value] {
+			return
+		}
+		seen[string(kind)+":"+value] = true
+		refs = append(refs, slackContextReference{Kind: kind, Value: value})
+	}
 	addRefs := func(input string) {
-		for _, ref := range slackReferencePattern.FindAllString(input, -1) {
-			ref = strings.TrimRight(ref, ".,)")
-			if ref == "" || seen[ref] {
-				continue
+		for _, rawURL := range slackURLReferencePattern.FindAllString(input, -1) {
+			urlRef := strings.TrimRight(rawURL, ".,)")
+			kind := classifySlackURLReference(urlRef)
+			addRef(kind, urlRef)
+			if len(refs) >= 20 {
+				return
 			}
-			seen[ref] = true
-			refs = append(refs, ref)
+		}
+		for _, ref := range slackLinearIssuePattern.FindAllString(input, -1) {
+			addRef(slackReferenceKindIssue, ref)
+			if len(refs) >= 20 {
+				return
+			}
+		}
+		for _, ref := range slackRepoIssuePattern.FindAllString(input, -1) {
+			addRef(slackReferenceKindIssue, ref)
+			if len(refs) >= 20 {
+				return
+			}
+		}
+		for _, match := range slackBranchPattern.FindAllStringSubmatch(input, -1) {
+			if len(match) > 1 {
+				addRef(slackReferenceKindBranch, match[1])
+			}
+			if len(refs) >= 20 {
+				return
+			}
+		}
+		for _, match := range slackFilePathReferencePattern.FindAllStringSubmatch(input, -1) {
+			if len(match) > 1 {
+				addRef(slackReferenceKindFilePath, match[1])
+			}
 			if len(refs) >= 20 {
 				return
 			}
@@ -3702,6 +3864,24 @@ func detectSlackContextReferences(text string, threadMessages []ingestion.SlackM
 		addRefs(msg.Text)
 	}
 	return refs
+}
+
+func classifySlackURLReference(value string) slackReferenceKind {
+	lowered := strings.ToLower(value)
+	switch {
+	case strings.Contains(lowered, "sentry.io/"):
+		return slackReferenceKindSentry
+	case strings.Contains(lowered, "/pull/"):
+		return slackReferenceKindPullRequest
+	case strings.Contains(lowered, "/issues/"):
+		return slackReferenceKindIssue
+	case strings.Contains(lowered, "/previews/") || strings.Contains(lowered, "preview."):
+		return slackReferenceKindPreview
+	case strings.Contains(lowered, "github.com/"):
+		return slackReferenceKindRepository
+	default:
+		return slackReferenceKindURL
+	}
 }
 
 func resolveSlackUserByEmail(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, accessToken string, orgID, installationID uuid.UUID, teamID, slackUserID string, logger zerolog.Logger) *uuid.UUID {

@@ -57,6 +57,7 @@ type SlackBlock struct {
 	Fields    []SlackTextObject `json:"fields,omitempty"`
 	Accessory map[string]any    `json:"accessory,omitempty"`
 	BlockID   string            `json:"block_id,omitempty"`
+	Optional  bool              `json:"optional,omitempty"`
 }
 
 type SlackTextObject struct {
