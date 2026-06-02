@@ -1996,10 +1996,6 @@ func slackHomeAutomationRunBlock(services *Services, items []db.SlackHomeAutomat
 	}
 }
 
-func recordSlackOutbound(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, ts string, kind models.SlackOutboundMessageKind, status, text string) {
-	recordSlackOutboundInChannel(ctx, stores, services, logger, link, link.SlackChannelID, ts, kind, status, text)
-}
-
 func recordSlackOutboundInChannel(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, channelID, ts string, kind models.SlackOutboundMessageKind, status, text string) {
 	if services != nil && services.SlackbotMetrics != nil {
 		services.SlackbotMetrics.RecordOutboundMessage(ctx, string(kind), status)
@@ -3504,10 +3500,6 @@ func loadSlackSessionOutcomeDetails(ctx context.Context, stores *Stores, service
 		}
 	}
 	return details
-}
-
-func appendSlackSessionOutcome(text string, session models.Session) string {
-	return appendSlackSessionOutcomeDetails(text, slackSessionOutcomeDetails{Session: session})
 }
 
 func appendSlackSessionOutcomeDetails(text string, details slackSessionOutcomeDetails) string {
