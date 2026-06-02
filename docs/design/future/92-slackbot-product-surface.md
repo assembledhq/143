@@ -1,7 +1,7 @@
 # 92 - Slackbot Product Surface
 
 > **Status:** Partially implemented
-> **Last reviewed:** 2026-06-01
+> **Last reviewed:** 2026-06-02
 >
 > **Depends on:** Slack OAuth integration, session/job creation APIs, durable preview control plane, human input requests, and notification delivery primitives.
 
@@ -70,6 +70,10 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Slack thread context, detected references, and file metadata are bounded and included in the initial session prompt.
 - Slack acks and final replies are posted back to Slack, and final replies truncate long assistant responses with a session link fallback.
 - Final Slack replies append concrete user-facing outcome context when available: branch URL, PR URL/status/CI state, preview URL/status, and compact diff stats.
+- Final Slack replies include Block Kit next-action buttons for opening the session, opening an existing preview, creating a preview when no preview exists, and opening the PR when one exists.
+- Mention/DM context detection classifies common references into typed prompt context for GitHub PR/repository URLs, Linear-style issues, Sentry URLs, preview URLs, branches, and file paths.
+- Channel configuration from Slack can manage a compact initial notification event subscription set, persisted through the existing channel subscription JSON.
+- Slack-started team sessions are labeled in Slack acknowledgement and final messages when the triggering Slack user is not mapped to a 143 user.
 - Slack progress/final/human-input/notification messages are recorded in `slack_outbound_messages`.
 - Human-input requests can be delivered to the originating Slack thread and answered from Slack through choice buttons or a free-form modal by linked users.
 - Slack notifications can fan out to subscribed channels or configured Slack user DMs from channel setting subscription JSON.
@@ -88,12 +92,12 @@ The current implementation provides the first usable Slackbot backend surface, b
 - App Home active previews and automation runs are based on linked-user ownership, not full subscription membership.
 - App Home Slack connection health does not yet show detailed install health, scopes, or remediation state.
 - Repository selection is offered for some missing-repository starts, but there are no full missing-context flows for preview target, PR, branch, issue, Sentry, or session resolution.
-- Mention/DM context detection does not yet resolve repository, PR, issue, Sentry URL, preview URL, branch, or file paths into structured typed context. Most detected references are still prompt text.
+- Mention/DM context detection still enters references as typed prompt context rather than first-class structured session attachments.
 - Channel `response_visibility = dm` is not yet applied to general notification delivery; notification destinations still come from subscription JSON.
 - Slack progress rendering is still coarse. Runtime/tool/test/command/preview milestones are not normalized into sparse Slack updates.
 - Slack progress updates are not debounced by a per-thread timing policy.
 - The initial ack message is not consistently updated into the terminal state; later progress/final messages may be separate.
-- Final Slack output does not yet include next-action buttons for all outcomes.
+- Final Slack output has next-action buttons for session, preview, and PR outcomes; more specialized outcome-specific actions such as approve/deny, repair PR, merge, and claim team session still need dedicated buttons.
 - Human-input requests do not have assigned-user DM delivery because the durable request model has no assigned-user field.
 - Human-input routing does not distinguish sensitive/personal requests from team-thread requests.
 - Team sessions with no mapped user cannot yet be claimed and answered from Slack by any authorized 143 user.
@@ -101,13 +105,12 @@ The current implementation provides the first usable Slackbot backend surface, b
 - `automation.run.failure_streak` is not emitted.
 - `preview.stale` is not emitted.
 - Automation notification content is still basic and does not consistently include run result, PR links, preview links, and next actions.
-- Notification subscription management is only raw channel setting JSON; there is no Slack-native or richer product management flow.
+- Notification subscription management now has a compact Slack-native channel modal path, but richer product management and per-automation subscription flows are still missing.
 - Preview actions that are not tied to a Slack-originating team session, such as App Home preview controls or standalone preview notifications without session identity, still require a mapped authorized 143 user.
-- Channel configuration from Slack does not manage notification subscriptions.
 - The setup message's App Home action currently opens the start-session flow rather than switching Slack to App Home.
 - Slack-started sessions can be initiated by App Home, slash command, mention, and DM, but not generally by a "start work" button from arbitrary notifications/session updates.
 - If a linked Slack thread starts a fresh session after a non-resumable terminal session, the link is repointed to the new session; there is still no separate historical new-thread-message pointer model.
-- Team sessions are stored but not clearly surfaced in Slack or 143 as "started from Slack without a mapped 143 user."
+- Team sessions are surfaced in Slack acknowledgement/final messages as "started from Slack without a mapped 143 user," but 143 web surfaces still need clearer labeling.
 - Slack session creation uses DB stores directly rather than the same higher-level creation service as `/sessions/new`.
 - Direct preview creation for PR, branch, commit, or repository is not implemented.
 - Slack preview creation for a session is currently an agent continuation prompt, not a direct durable preview-control-plane create call.
