@@ -3,6 +3,7 @@ package deployguardrail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -51,6 +52,37 @@ func TestLoadWorkerSessionCounts_SchemaUnavailable(t *testing.T) {
 	require.ErrorIs(t, err, ErrGuardrailSchemaUnavailable, "LoadWorkerSessionCounts should expose a typed error before migrations are applied")
 	require.True(t, errors.Is(err, ErrGuardrailSchemaUnavailable), "schema error should be detectable through errors.Is")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIsDatabaseConnectionSaturated(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		saturated bool
+	}{
+		{
+			name:      "detects wrapped too many clients pg error",
+			err:       fmt.Errorf("ping database: %w", &pgconn.PgError{Code: "53300", Message: "sorry, too many clients already"}),
+			saturated: true,
+		},
+		{
+			name: "ignores unrelated pg errors",
+			err:  &pgconn.PgError{Code: "08006", Message: "connection failure"},
+		},
+		{
+			name: "ignores nil",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.saturated, IsDatabaseConnectionSaturated(tt.err), "IsDatabaseConnectionSaturated should only match Postgres resource exhaustion")
+		})
+	}
 }
 
 func TestWorkerSessionCountsQueryGuardsMalformedSessionIDs(t *testing.T) {

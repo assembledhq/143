@@ -31,6 +31,7 @@ type Config struct {
 
 	// Core
 	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
+	DatabaseMaxConns   int32    `env:"DATABASE_MAX_CONNS"    envDefault:"0"`
 	Port               int      `env:"PORT"                  envDefault:"8080"`
 	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
 	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
@@ -344,6 +345,9 @@ func Load() *Config {
 	}
 	if cfg.WorkerMaxActiveSandboxes < 0 {
 		cfg.WorkerMaxActiveSandboxes = 0
+	}
+	if cfg.DatabaseMaxConns < 0 {
+		cfg.DatabaseMaxConns = 0
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
