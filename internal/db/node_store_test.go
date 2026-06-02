@@ -20,6 +20,13 @@ var nodeStoreTestCols = []string{
 	"drain_requested_at", "drain_budget_expires_at", "drain_requested_by", "drain_reason",
 }
 
+type timestamptzArg struct{}
+
+func (timestamptzArg) Match(v interface{}) bool {
+	_, ok := v.(pgtype.Timestamptz)
+	return ok
+}
+
 func TestNodeStore_GetByID(t *testing.T) {
 	t.Parallel()
 
@@ -285,8 +292,8 @@ func TestNodeStore_RetainActiveExecutorImagesCastsExpiry(t *testing.T) {
 	require.NoError(t, err, "pgxmock pool should be created")
 	defer mock.Close()
 
-	mock.ExpectExec("INSERT INTO worker_image_retention[\\s\\S]+@expires_at::timestamptz[\\s\\S]+FROM session_executors").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec("INSERT INTO worker_image_retention[\\s\\S]+CAST\\(@expires_at AS timestamptz\\)[\\s\\S]+FROM session_executors").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), timestamptzArg{}, pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 2))
 
 	store := NewNodeStore(mock)
