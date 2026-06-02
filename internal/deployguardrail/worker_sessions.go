@@ -74,6 +74,14 @@ func LoadWorkerSessionCounts(ctx context.Context, db querier) (WorkerSessionCoun
 	return counts, nil
 }
 
+func IsDatabaseConnectionSaturated(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "53300"
+}
+
 func EvaluateWorkerSessionDeploy(counts WorkerSessionCounts, force bool) WorkerSessionDecision {
 	decision := WorkerSessionDecision{Counts: counts}
 	if counts.WorkerOwnedNoCheckpoint > 0 && !force {
