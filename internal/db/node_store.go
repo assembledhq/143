@@ -520,7 +520,7 @@ func (s *NodeStore) RetainActiveExecutorImages(ctx context.Context, params Retai
 		INSERT INTO worker_image_retention (
 			image, build_sha, node_id, executor_id, deploy_id, reason, expires_at
 		)
-		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, @expires_at::timestamptz
+		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, CAST(@expires_at AS timestamptz)
 		FROM session_executors
 		WHERE host_node_id = @node_id
 		  AND status IN ('starting', 'running', 'draining')
@@ -529,7 +529,7 @@ func (s *NodeStore) RetainActiveExecutorImages(ctx context.Context, params Retai
 			"node_id":    params.NodeID,
 			"deploy_id":  params.DeployID,
 			"reason":     params.Reason,
-			"expires_at": params.ExpiresAt.UTC(),
+			"expires_at": pgtype.Timestamptz{Time: params.ExpiresAt.UTC(), Valid: true},
 		})
 	if err != nil {
 		return 0, fmt.Errorf("retain active executor images: %w", err)
