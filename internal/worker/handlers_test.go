@@ -130,15 +130,35 @@ func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
 		"please inspect https://github.com/acme/repo/pull/42",
 		"https://slack.example/thread",
 		nil,
-		[]string{"https://sentry.io/issues/123", "src/app.ts"},
+		[]slackContextReference{
+			{Kind: slackReferenceKindSentry, Value: "https://sentry.io/issues/123"},
+			{Kind: slackReferenceKindFilePath, Value: "src/app.ts"},
+		},
 		[]slackContextFile{{Name: "trace.log", Title: "Trace", Mimetype: "text/plain", Permalink: "https://slack.example/file"}},
 	)
 
 	require.Contains(t, got, "Detected references:", "prompt should include detected references")
-	require.Contains(t, got, "https://sentry.io/issues/123", "prompt should include external references")
-	require.Contains(t, got, "src/app.ts", "prompt should include file path references")
+	require.Contains(t, got, "- sentry: https://sentry.io/issues/123", "prompt should include typed external references")
+	require.Contains(t, got, "- file_path: src/app.ts", "prompt should include typed file path references")
 	require.Contains(t, got, "Attached files:", "prompt should include attached file metadata")
 	require.Contains(t, got, "trace.log", "prompt should include Slack file names")
+}
+
+func TestDetectSlackContextReferencesClassifiesProductContext(t *testing.T) {
+	t.Parallel()
+
+	refs := detectSlackContextReferences(
+		"@143 check https://github.com/acme/repo/pull/42 and ENG-123 on branch jsmith/navbar-redesign",
+		[]ingestion.SlackMessage{{Text: "Sentry is https://acme.sentry.io/issues/123 and stack mentions src/app.ts:44"}},
+	)
+
+	require.Equal(t, []slackContextReference{
+		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42"},
+		{Kind: slackReferenceKindIssue, Value: "ENG-123"},
+		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign"},
+		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123"},
+		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44"},
+	}, refs, "Slack context detection should preserve ordered typed references")
 }
 
 func TestSlackModalsUseInputLabels(t *testing.T) {
@@ -174,6 +194,78 @@ func TestSlackModalsUseInputLabels(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	view := slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}})
+
+	require.Contains(t, slackBlockIDs(view.Blocks), "notification_events", "channel config modal should include Slack-native notification event selection")
+}
+
+func TestSlackTeamSessionLabel(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, slackTeamSessionLine(models.SlackSessionLink{TeamSession: true}), "team session", "team sessions should be clearly labeled")
+	require.Empty(t, slackTeamSessionLine(models.SlackSessionLink{}), "mapped user sessions should not include team-session copy")
+}
+
+func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	text, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+		Preview: &models.PreviewInstance{ID: previewID, Status: models.PreviewStatusReady},
+	})
+
+	require.Contains(t, text, "Session: https://143.test/sessions/"+sessionID.String(), "final text should include the session link")
+	require.True(t, slackBlocksContainAction(blocks, "slack_open_preview"), "final Slack blocks should include open-preview button when preview exists")
+	require.Contains(t, slackBlocksActionValue(blocks, "slack_open_preview"), orgID.String(), "open-preview action value must contain the correct org_id")
+}
+
+func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
+	ids := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.BlockID != "" {
+			ids = append(ids, block.BlockID)
+		}
+	}
+	return ids
+}
+
+func slackBlocksContainAction(blocks []ingestion.SlackBlock, actionID string) bool {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID {
+				return true
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID {
+			return true
+		}
+	}
+	return false
+}
+
+func slackBlocksActionValue(blocks []ingestion.SlackBlock, actionID string) string {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID {
+				if v, ok := element["value"].(string); ok {
+					return v
+				}
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID {
+			if v, ok := block.Accessory["value"].(string); ok {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 func TestSlackThreadRoutingBySource(t *testing.T) {
