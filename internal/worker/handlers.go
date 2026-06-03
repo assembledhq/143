@@ -444,6 +444,7 @@ type Stores struct {
 	SlackSessionLinks   *db.SlackSessionLinkStore
 	SlackInboundEvents  *db.SlackInboundEventStore
 	SlackOutbound       *db.SlackOutboundMessageStore
+	SessionAttributions *db.SessionAttributionStore
 }
 
 func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run models.Session) error {
@@ -1523,6 +1524,9 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText); err != nil {
 					logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
 				} else {
+					if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
+						logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack continuation status timestamp")
+					}
 					recordSlackOutboundInChannel(ctx, stores, services, logger, existingLink, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 				}
 				return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
@@ -1597,6 +1601,17 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		if err := stores.SlackSessionLinks.Upsert(ctx, link); err != nil {
 			return fmt.Errorf("persist slack session link: %w", err)
 		}
+		if stores.SessionAttributions != nil {
+			attribution := &models.SessionAttribution{
+				OrgID:          orgID,
+				SessionID:      session.ID,
+				Source:         models.SessionAttributionSourceSlack,
+				SourceMetadata: slackSessionAttributionMetadata(*link),
+			}
+			if err := stores.SessionAttributions.Create(ctx, attribution); err != nil {
+				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to persist Slack session attribution")
+			}
+		}
 		dedupeKey := db.RunAgentDedupeKey(session.ID)
 		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
 			return fmt.Errorf("enqueue slack-started session: %w", err)
@@ -1617,10 +1632,33 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		if postErr != nil {
 			logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack session acknowledgement")
 		} else {
+			if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
+				logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack acknowledgement status timestamp")
+			}
 			recordSlackOutboundInChannel(ctx, stores, services, logger, *link, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 		}
 		return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 	}
+}
+
+func slackSessionAttributionMetadata(link models.SlackSessionLink) json.RawMessage {
+	metadata := map[string]any{
+		"slack_team_id":           link.SlackTeamID,
+		"slack_channel_id":        link.SlackChannelID,
+		"slack_thread_ts":         link.SlackThreadTS,
+		"slack_root_ts":           link.SlackRootTS,
+		"slack_message_permalink": link.SlackMessagePermalink,
+		"slack_user_id":           link.SlackUserID,
+		"team_session":            link.TeamSession,
+	}
+	if link.MappedUserID != nil {
+		metadata["mapped_user_id"] = link.MappedUserID.String()
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return raw
 }
 
 func newSlackSyncAppHomeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -2358,13 +2396,29 @@ func slackNotificationSubscriptionMatches(raw json.RawMessage, eventKind string,
 	if len(cfg.Events) == 0 {
 		return false
 	}
-	if !stringSliceContains(cfg.Events, "*") && !stringSliceContains(cfg.Events, eventKind) {
+	if !slackNotificationEventMatches(cfg.Events, eventKind) {
 		return false
 	}
 	if automationID != nil && len(cfg.Automations) > 0 {
 		return stringSliceContains(cfg.Automations, automationID.String())
 	}
 	return true
+}
+
+func slackNotificationEventMatches(events []string, eventKind string) bool {
+	for _, event := range events {
+		event = strings.TrimSpace(event)
+		if event == "*" || event == eventKind {
+			return true
+		}
+		if strings.HasSuffix(event, ".*") {
+			prefix := strings.TrimSuffix(event, "*")
+			if strings.HasPrefix(eventKind, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type slackNotificationFanoutInput struct {
@@ -2483,6 +2537,62 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		SessionID:    &sessionID,
 		AutomationID: &run.AutomationID,
 	})
+	if automationKind == "automation.run.failed" {
+		streak, streakErr := stores.AutomationRuns.CountConsecutiveFailures(ctx, orgID, run.AutomationID)
+		if streakErr != nil {
+			logger.Warn().Err(streakErr).Str("automation_id", run.AutomationID.String()).Msg("failed to count automation failure streak for Slack notification")
+			return
+		}
+		if streak >= 3 {
+			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+				EventKind:    "automation.run.failure_streak",
+				Title:        "Automation failure streak",
+				Body:         fmt.Sprintf("%d consecutive automation runs failed.", streak),
+				SessionID:    &sessionID,
+				AutomationID: &run.AutomationID,
+			})
+		}
+	}
+}
+
+func enqueueSlackPreviewStaleIfNeeded(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	if stores == nil || stores.Sessions == nil || stores.Previews == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for Slack preview stale notification")
+		return
+	}
+	preview, err := stores.Previews.GetActivePreviewForSession(ctx, orgID, sessionID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load active preview for Slack stale notification")
+		}
+		return
+	}
+	if !slackPreviewIsStaleForSession(session, *preview) {
+		return
+	}
+	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+		EventKind: "preview.stale",
+		Title:     "Preview stale",
+		Body:      "The session has newer workspace changes than the active preview. Refresh the preview to pick up the latest changes.",
+		SessionID: &sessionID,
+		PreviewID: &preview.ID,
+	})
+}
+
+func slackPreviewIsStaleForSession(session models.Session, preview models.PreviewInstance) bool {
+	if preview.SourceWorkspaceRevision == nil {
+		return false
+	}
+	if session.WorkspaceRevision <= *preview.SourceWorkspaceRevision {
+		return false
+	}
+	return preview.Status == models.PreviewStatusReady ||
+		preview.Status == models.PreviewStatusPartiallyReady ||
+		preview.Status == models.PreviewStatusUnhealthy
 }
 
 func renderSlackHumanInput(services *Services, req models.HumanInputRequest, sessionID uuid.UUID) (string, []ingestion.SlackBlock) {
@@ -3011,7 +3121,8 @@ func slackConfigureChannelModal(input models.SlackInteractionJobPayload, repos [
 					{"text": map[string]string{"type": "plain_text", "text": "Session failed"}, "value": "session.failed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation completed"}, "value": "automation.run.completed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation failed"}, "value": "automation.run.failed"},
-					{"text": map[string]string{"type": "plain_text", "text": "Preview ready or failed"}, "value": "preview.*"},
+					{"text": map[string]string{"type": "plain_text", "text": "Automation failure streak"}, "value": "automation.run.failure_streak"},
+					{"text": map[string]string{"type": "plain_text", "text": "All preview events (ready, failed, stale)"}, "value": "preview.*"},
 				},
 			},
 		}},
@@ -3084,12 +3195,7 @@ func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessag
 	}
 	events := make([]string, 0, len(selected)+1)
 	for _, value := range selected {
-		switch value {
-		case "preview.*":
-			events = append(events, "preview.ready", "preview.failed")
-		default:
-			events = append(events, value)
-		}
+		events = append(events, value)
 	}
 	encoded, err := json.Marshal(slackNotificationSubscriptionConfig{Events: events})
 	if err != nil {
@@ -4250,6 +4356,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, runID)
 		enqueueSlackFinalIfLinked(ctx, stores, logger, orgID, runID)
 		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.completed", "143 session completed", "The session finished successfully.")
+		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
 		return nil
 	}
 }

@@ -92,6 +92,18 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 			expected:  true,
 		},
 		{
+			name:      "event family wildcard matches event",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "preview.stale",
+			expected:  true,
+		},
+		{
+			name:      "event family wildcard rejects other family",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "session.completed",
+			expected:  false,
+		},
+		{
 			name:         "automation list matches automation event",
 			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, automationID)),
 			eventKind:    "automation.run.completed",
@@ -202,6 +214,11 @@ func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.
 	view := slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}})
 
 	require.Contains(t, slackBlockIDs(view.Blocks), "notification_events", "channel config modal should include Slack-native notification event selection")
+	blocksJSON, err := json.Marshal(view.Blocks)
+	require.NoError(t, err, "channel config modal blocks should marshal to JSON")
+	blocksStr := string(blocksJSON)
+	require.Contains(t, blocksStr, "automation.run.failure_streak", "channel config modal should expose automation failure-streak notifications")
+	require.Contains(t, blocksStr, `"preview.*"`, "channel config modal should expose all-preview-events wildcard subscription")
 }
 
 func TestSlackTeamSessionLabel(t *testing.T) {
@@ -209,6 +226,78 @@ func TestSlackTeamSessionLabel(t *testing.T) {
 
 	require.Contains(t, slackTeamSessionLine(models.SlackSessionLink{TeamSession: true}), "team session", "team sessions should be clearly labeled")
 	require.Empty(t, slackTeamSessionLine(models.SlackSessionLink{}), "mapped user sessions should not include team-session copy")
+}
+
+func TestSlackSessionAttributionMetadataIsSanitized(t *testing.T) {
+	t.Parallel()
+
+	mappedUserID := uuid.New()
+	raw := slackSessionAttributionMetadata(models.SlackSessionLink{
+		SlackTeamID:           "T123",
+		SlackChannelID:        "C123",
+		SlackThreadTS:         "1710000000.000000",
+		SlackRootTS:           "1710000000.000000",
+		SlackMessagePermalink: "https://slack.example/thread",
+		SlackUserID:           "U123",
+		MappedUserID:          &mappedUserID,
+		TeamSession:           false,
+	})
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got), "metadata should be valid JSON")
+	require.Equal(t, "T123", got["slack_team_id"], "metadata should include Slack team attribution")
+	require.Equal(t, "C123", got["slack_channel_id"], "metadata should include Slack channel attribution")
+	require.Equal(t, "1710000000.000000", got["slack_thread_ts"], "metadata should include Slack thread attribution")
+	require.Equal(t, mappedUserID.String(), got["mapped_user_id"], "metadata should include mapped user attribution")
+	require.NotContains(t, got, "text", "metadata should not store raw Slack message text")
+	require.NotContains(t, got, "raw_payload", "metadata should not duplicate raw Slack payloads")
+}
+
+func TestSlackPreviewIsStaleForSession(t *testing.T) {
+	t.Parallel()
+
+	oldRevision := int64(2)
+	currentRevision := int64(4)
+	tests := []struct {
+		name     string
+		session  models.Session
+		preview  models.PreviewInstance
+		expected bool
+	}{
+		{
+			name:     "active preview behind session is stale",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &oldRevision, Status: models.PreviewStatusReady},
+			expected: true,
+		},
+		{
+			name:     "matching revision is current",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &currentRevision, Status: models.PreviewStatusReady},
+			expected: false,
+		},
+		{
+			name:     "terminal preview is not notified as stale",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &oldRevision, Status: models.PreviewStatusStopped},
+			expected: false,
+		},
+		{
+			name:     "preview without source revision is unknown",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{Status: models.PreviewStatusReady},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackPreviewIsStaleForSession(tt.session, tt.preview)
+			require.Equal(t, tt.expected, got, "stale preview detection should match session and preview revisions")
+		})
+	}
 }
 
 func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
