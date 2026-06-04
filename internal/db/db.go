@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -10,7 +11,8 @@ import (
 )
 
 type PoolOptions struct {
-	MaxConns int32
+	MaxConns        int32
+	MaxConnIdleTime time.Duration
 }
 
 // DBTX is the interface satisfied by pgxpool.Pool, pgx.Tx, and pgxmock.
@@ -34,6 +36,9 @@ func NewPoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error
 	}
 	if opts.MaxConns > 0 {
 		config.MaxConns = opts.MaxConns
+	}
+	if opts.MaxConnIdleTime > 0 {
+		config.MaxConnIdleTime = opts.MaxConnIdleTime
 	}
 	return config, nil
 }

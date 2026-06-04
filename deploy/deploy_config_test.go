@@ -33,6 +33,7 @@ func TestProductionComposeCapsDatabasePools(t *testing.T) {
 	require.NoError(t, err, "test should read the app compose file")
 	appText := string(appCompose)
 	require.Contains(t, appText, "DATABASE_MAX_CONNS: ${API_DATABASE_MAX_CONNS:-20}", "app compose should cap the API database pool below Postgres max_connections")
+	require.Contains(t, appText, "DATABASE_MAX_CONN_IDLE_TIME: ${API_DATABASE_MAX_CONN_IDLE_TIME:-5m}", "app compose should release idle API database connections after traffic bursts")
 
 	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
 	require.NoError(t, err, "test should read the worker compose file")
