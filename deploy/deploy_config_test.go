@@ -569,6 +569,7 @@ func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
+	require.Contains(t, deployText, `[ -z "${!key:-}" ]`, "deploy.sh should fill empty exported env vars from .env.production.enc like provision.sh")
 	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the primary private bind address")
 	require.Contains(t, deployText, "DB_BIND_IP=%s", "db deploy should preserve DB_BIND_IP in /opt/143/.env for compose interpolation")
 }
