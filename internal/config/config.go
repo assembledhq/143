@@ -30,17 +30,18 @@ type Config struct {
 	Env string `env:"ENV" envDefault:"development"`
 
 	// Core
-	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
-	DatabaseMaxConns   int32    `env:"DATABASE_MAX_CONNS"    envDefault:"0"`
-	Port               int      `env:"PORT"                  envDefault:"8080"`
-	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
-	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
-	NodeID             string   `env:"NODE_ID"`
-	NodeRegion         string   `env:"NODE_REGION"`
-	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
-	FrontendURL        string   `env:"FRONTEND_URL"`
-	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
-	Mode               string   `env:"MODE"                  envDefault:"all"`
+	DatabaseURL             string        `env:"DATABASE_URL"                envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
+	DatabaseMaxConns        int32         `env:"DATABASE_MAX_CONNS"          envDefault:"0"`
+	DatabaseMaxConnIdleTime time.Duration `env:"DATABASE_MAX_CONN_IDLE_TIME" envDefault:"0"`
+	Port                    int           `env:"PORT"                  envDefault:"8080"`
+	LogLevel                string        `env:"LOG_LEVEL"             envDefault:"info"`
+	SessionSecret           string        `env:"SESSION_SECRET"` // #nosec G117 -- env config field
+	NodeID                  string        `env:"NODE_ID"`
+	NodeRegion              string        `env:"NODE_REGION"`
+	BaseURL                 string        `env:"BASE_URL"              envDefault:"http://localhost:8080"`
+	FrontendURL             string        `env:"FRONTEND_URL"`
+	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
+	Mode                    string        `env:"MODE"                  envDefault:"all"`
 	// DemoMode tells the server it is running a public demo/dogfood preview
 	// with seeded data and no real GitHub App. Enables a credential banner
 	// on the login page and short-circuits GitHub client construction.
@@ -348,6 +349,9 @@ func Load() *Config {
 	}
 	if cfg.DatabaseMaxConns < 0 {
 		cfg.DatabaseMaxConns = 0
+	}
+	if cfg.DatabaseMaxConnIdleTime < 0 {
+		cfg.DatabaseMaxConnIdleTime = 0
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
