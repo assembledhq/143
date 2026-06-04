@@ -30,15 +30,18 @@ type Config struct {
 	Env string `env:"ENV" envDefault:"development"`
 
 	// Core
-	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
-	Port               int      `env:"PORT"                  envDefault:"8080"`
-	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
-	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
-	NodeID             string   `env:"NODE_ID"`
-	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
-	FrontendURL        string   `env:"FRONTEND_URL"`
-	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
-	Mode               string   `env:"MODE"                  envDefault:"all"`
+	DatabaseURL             string        `env:"DATABASE_URL"                envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
+	DatabaseMaxConns        int32         `env:"DATABASE_MAX_CONNS"          envDefault:"0"`
+	DatabaseMaxConnIdleTime time.Duration `env:"DATABASE_MAX_CONN_IDLE_TIME" envDefault:"0"`
+	Port                    int           `env:"PORT"                  envDefault:"8080"`
+	LogLevel                string        `env:"LOG_LEVEL"             envDefault:"info"`
+	SessionSecret           string        `env:"SESSION_SECRET"` // #nosec G117 -- env config field
+	NodeID                  string        `env:"NODE_ID"`
+	NodeRegion              string        `env:"NODE_REGION"`
+	BaseURL                 string        `env:"BASE_URL"              envDefault:"http://localhost:8080"`
+	FrontendURL             string        `env:"FRONTEND_URL"`
+	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
+	Mode                    string        `env:"MODE"                  envDefault:"all"`
 	// DemoMode tells the server it is running a public demo/dogfood preview
 	// with seeded data and no real GitHub App. Enables a credential banner
 	// on the login page and short-circuits GitHub client construction.
@@ -64,6 +67,10 @@ type Config struct {
 	// SessionExecutorDockerNetwork optionally attaches executor containers to
 	// the same Docker network as worker-side dependencies such as chrome.
 	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
+	// SessionExecutorStopTimeout is the Docker stop timeout for executor
+	// containers. Routine deploys should not stop active executors, but this
+	// keeps maintenance/emergency stops aligned with runtime policy.
+	SessionExecutorStopTimeout time.Duration `env:"SESSION_EXECUTOR_STOP_TIMEOUT" envDefault:"2h"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
@@ -129,6 +136,7 @@ type Config struct {
 	// Slack OAuth
 	SlackOAuthClientID     string `env:"SLACK_OAUTH_CLIENT_ID"`
 	SlackOAuthClientSecret string `env:"SLACK_OAUTH_CLIENT_SECRET"`
+	SlackSigningSecret     string `env:"SLACK_SIGNING_SECRET"`
 	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5.4-nano"`
 
 	// GitHub App
@@ -143,7 +151,9 @@ type Config struct {
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
 
 	// Encryption
-	EncryptionMasterKey string `env:"ENCRYPTION_MASTER_KEY"`
+	EncryptionMasterKey           string `env:"ENCRYPTION_MASTER_KEY"`
+	PreviewSecretBundleKEK        string `env:"PREVIEW_SECRET_BUNDLE_KEK"`
+	PreviewSecretBundleKEKVersion string `env:"PREVIEW_SECRET_BUNDLE_KEK_VERSION" envDefault:"preview-secret-bundles-v1"`
 
 	// LLM
 	LLMModel           string `env:"LLM_MODEL"`
@@ -246,12 +256,22 @@ type Config struct {
 	SessionFilesCacheMaxBytes int64 `env:"SESSION_FILES_CACHE_MAX_BYTES" envDefault:"5368709120"`
 
 	// Preview system
-	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
-	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
-	PreviewGatewayPort      int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
-	PreviewInternalBaseURL  string `env:"PREVIEW_INTERNAL_BASE_URL"`
-	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
-	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	ChromeWSURL                             string        `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
+	PreviewOriginTemplate                   string        `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
+	PreviewGatewayPort                      int           `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	PreviewInternalBaseURL                  string        `env:"PREVIEW_INTERNAL_BASE_URL"`
+	PreviewSnapshotCacheDir                 string        `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
+	PreviewHMRBlobDir                       string        `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	PreviewDependencyCacheBucket            string        `env:"PREVIEW_DEPENDENCY_CACHE_BUCKET"`
+	PreviewDependencyCachePrefix            string        `env:"PREVIEW_DEPENDENCY_CACHE_PREFIX" envDefault:"preview-dependency-cache"`
+	PreviewDependencyCacheS3Region          string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_REGION"`
+	PreviewDependencyCacheS3Endpoint        string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_ENDPOINT"`
+	PreviewDependencyCacheS3UsePathStyle    bool          `env:"PREVIEW_DEPENDENCY_CACHE_S3_USE_PATH_STYLE" envDefault:"false"`
+	PreviewDependencyCacheLocalDir          string        `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR"`
+	PreviewDependencyCacheLocalMaxBytes     int64         `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES" envDefault:"10737418240"`
+	PreviewDependencyCacheRetentionDays     int           `env:"PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS" envDefault:"30"`
+	PreviewDependencyCacheKeepNewestPerRepo int           `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO" envDefault:"50"`
+	PreviewDependencyCacheCleanupInterval   time.Duration `env:"PREVIEW_DEPENDENCY_CACHE_CLEANUP_INTERVAL" envDefault:"1h"`
 
 	// Concurrency caps for the preview subsystem. Each StartPreview checks
 	// these before hydrating a sandbox, so an overloaded worker returns a
@@ -331,6 +351,12 @@ func Load() *Config {
 	}
 	if cfg.WorkerMaxActiveSandboxes < 0 {
 		cfg.WorkerMaxActiveSandboxes = 0
+	}
+	if cfg.DatabaseMaxConns < 0 {
+		cfg.DatabaseMaxConns = 0
+	}
+	if cfg.DatabaseMaxConnIdleTime < 0 {
+		cfg.DatabaseMaxConnIdleTime = 0
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
@@ -555,8 +581,8 @@ func (c *Config) SentryEnvironmentOrDefault() string {
 // minimum strength requirements when running in production.
 func (c *Config) ValidateSecrets() error {
 	// Retention day validation applies in all environments.
-	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 {
-		return errors.New("DATA_RETENTION_*_DAYS values must not be negative")
+	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
+		return errors.New("DATA_RETENTION_*_DAYS, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")
 	}
 
 	if c.Env != "production" {

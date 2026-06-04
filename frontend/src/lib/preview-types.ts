@@ -7,10 +7,20 @@ export type PreviewStatus =
   | "unhealthy"
   | "stopped"
   | "failed"
-  | "expired";
+  | "expired"
+  | "unavailable";
 
-export const ACTIVE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy", "starting"];
-export const CONTROLLABLE_PREVIEW_STATUSES: PreviewStatus[] = ["ready", "partially_ready", "unhealthy"];
+export const ACTIVE_PREVIEW_STATUSES: PreviewStatus[] = [
+  "ready",
+  "partially_ready",
+  "unhealthy",
+  "starting",
+];
+export const CONTROLLABLE_PREVIEW_STATUSES: PreviewStatus[] = [
+  "ready",
+  "partially_ready",
+  "unhealthy",
+];
 
 export function formatPreviewStatus(status: PreviewStatus | string): string {
   return status.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -78,6 +88,9 @@ export const PREVIEW_ERROR_CODES = {
   // crashed at boot or is bound to a different port than it declares in
   // .143/config.json.
   SERVICE_NOT_READY: "PREVIEW_SERVICE_NOT_READY",
+  // 503 — the preview URL is still valid, but the owning worker runtime is
+  // gone or its lease expired. Restarting the preview creates a new runtime.
+  RUNTIME_UNAVAILABLE: "PREVIEW_RUNTIME_UNAVAILABLE",
 } as const;
 
 export type PreviewErrorCode =
@@ -106,12 +119,35 @@ export interface PreviewInstance {
   cpu_limit_millis: number;
   disk_limit_mb: number;
   error?: string;
+  unavailable_reason?:
+    | "owner_lost"
+    | "deploy_drain_timeout"
+    | "host_maintenance"
+    | "emergency_force"
+    | "lease_expired";
   created_at: string;
   updated_at: string;
+  source_workspace_revision?: number;
+  source_workspace_revision_updated_at?: string;
   // When set and in the future, the backend has flagged this preview for an
   // imminent restart (recycle grace period). The frontend surfaces a warning
   // so users can save state before the restart.
   recycle_scheduled_at?: string;
+}
+
+export type PreviewFreshnessState =
+  | "current"
+  | "out_of_date"
+  | "updating"
+  | "unknown";
+
+export interface PreviewFreshness {
+  state: PreviewFreshnessState;
+  current_workspace_revision: number;
+  current_workspace_revision_updated_at: string;
+  preview_workspace_revision?: number;
+  preview_workspace_revision_updated_at?: string;
+  reason?: string;
 }
 
 export type PreviewServiceRole = "primary" | "support";
@@ -166,6 +202,7 @@ export interface PreviewStatusResponse {
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
   preview_origin?: string;
+  freshness?: PreviewFreshness;
 }
 
 export interface EnsurePreviewResponse {
@@ -212,11 +249,23 @@ export interface ElementInfo {
 
 // Preview detection
 
-export type PreviewReadiness = "ready" | "partial" | "not_supported";
+export type PreviewReadiness =
+  | "ready"
+  | "admin_setup_required"
+  | "partial"
+  | "not_supported";
 
 export interface MissingCredential {
   credential_set: string;
   env_vars: string[];
+}
+
+export interface MissingSecretBundle {
+  bundle: string;
+  services?: string[];
+  env?: string[];
+  files?: string[];
+  status: string;
 }
 
 export interface PreviewDetectionResult {
@@ -226,6 +275,7 @@ export interface PreviewDetectionResult {
   primary_service?: string;
   infrastructure?: string[];
   missing_credentials?: MissingCredential[];
+  missing_secret_bundles?: MissingSecretBundle[];
   missing_destinations?: string[];
   validation_errors?: string[];
 }

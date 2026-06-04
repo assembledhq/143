@@ -161,7 +161,7 @@ export function AutomationEmojiPicker({
   className?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
-  trigger?: "select" | "icon";
+  trigger?: "select" | "icon" | "inline";
   triggerLabel?: string;
   disabled?: boolean;
 }) {
@@ -208,7 +208,21 @@ export function AutomationEmojiPicker({
   return (
     <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
       <PopoverTrigger asChild>
-        {trigger === "icon" ? (
+        {trigger === "inline" ? (
+          <Button
+            type="button"
+            variant="ghost"
+            aria-label={triggerLabel}
+            disabled={disabled}
+            className={cn(
+              "h-auto min-h-0 rounded-sm p-0 align-baseline text-[0.95em] font-semibold leading-none hover:bg-transparent hover:text-foreground",
+              "focus-visible:ring-2 focus-visible:ring-ring/40",
+              className,
+            )}
+          >
+            {selected.emoji}
+          </Button>
+        ) : trigger === "icon" ? (
           <Button
             type="button"
             variant="outline"

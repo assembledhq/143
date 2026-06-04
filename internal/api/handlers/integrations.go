@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -76,6 +77,10 @@ type githubMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 }
 
+type slackUserInfoClient interface {
+	FetchUserInfo(ctx context.Context, accessToken, userID string) (ingestion.SlackUser, error)
+}
+
 // --- Linear types ---
 
 type linearTokenResponse struct {
@@ -121,6 +126,12 @@ type slackTokenResponse struct {
 	TokenType   string        `json:"token_type"`
 	Scope       string        `json:"scope"`
 	Team        slackTeamInfo `json:"team"`
+	AppID       string        `json:"app_id"`
+	BotUserID   string        `json:"bot_user_id"`
+	BotID       string        `json:"bot_id"`
+	Enterprise  *struct {
+		ID string `json:"id"`
+	} `json:"enterprise,omitempty"`
 }
 
 type slackTeamInfo struct {
@@ -182,8 +193,12 @@ type IntegrationHandler struct {
 	setupSigningKey     string
 
 	// Slack OAuth
-	slackClientID string
-	slackSecret   string
+	slackClientID          string
+	slackSecret            string
+	slackInstallationStore *db.SlackInstallationStore
+	slackUserLinkStore     *db.SlackUserLinkStore
+	slackChannelStore      *db.SlackChannelSettingsStore
+	slackUserInfoClient    slackUserInfoClient
 
 	// PM context auto-trigger (nil-safe: disabled if not configured)
 	pmAutoTriggerJobs   pmAutoTriggerJobStore
@@ -259,6 +274,9 @@ func NewIntegrationHandler(
 		baseURL:          baseURL,
 		frontendURL:      frontendURL,
 		client:           http.DefaultClient,
+		slackUserInfoClient: ingestion.NewSlackAPIClient(
+			zerolog.Nop(),
+		),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -353,6 +371,30 @@ func WithSlackOAuth(clientID, secret string) IntegrationHandlerOption {
 	}
 }
 
+func WithSlackInstallationStore(store *db.SlackInstallationStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackInstallationStore = store
+	}
+}
+
+func WithSlackUserLinkStore(store *db.SlackUserLinkStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackUserLinkStore = store
+	}
+}
+
+func WithSlackChannelSettingsStore(store *db.SlackChannelSettingsStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackChannelStore = store
+	}
+}
+
+func WithSlackUserInfoClient(client slackUserInfoClient) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackUserInfoClient = client
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // List integrations
 // ──────────────────────────────────────────────────────────────────────────────
@@ -402,6 +444,8 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 		}
 	}
 
+	h.deriveSafeCredentialMetadata(ctx, integration)
+
 	if integration.Provider != models.IntegrationProviderGitHub {
 		return
 	}
@@ -443,6 +487,41 @@ func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integr
 			integration.GitHubRepoSelectionRequired = &required
 		}
 	}
+}
+
+func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, integration *models.Integration) {
+	if h.credentialStore == nil || integration.Status != models.IntegrationStatusActive {
+		return
+	}
+
+	switch integration.Provider {
+	case models.IntegrationProviderNotion, models.IntegrationProviderCircleCI:
+	default:
+		return
+	}
+
+	credential, err := h.credentialStore.Get(ctx, integration.OrgID, models.ProviderName(integration.Provider))
+	if err != nil || credential == nil {
+		return
+	}
+
+	switch cfg := credential.Config.(type) {
+	case models.NotionConfig:
+		if cfg.WorkspaceID != "" {
+			integration.NotionWorkspaceID = integrationStringPtr(cfg.WorkspaceID)
+		}
+		if cfg.WorkspaceName != "" {
+			integration.NotionWorkspaceName = integrationStringPtr(cfg.WorkspaceName)
+		}
+	case models.CircleCIConfig:
+		if cfg.ProjectSlug != "" {
+			integration.CircleCIProjectSlug = integrationStringPtr(cfg.ProjectSlug)
+		}
+	}
+}
+
+func integrationStringPtr(value string) *string {
+	return &value
 }
 
 // readAuthErrorFromConfig extracts the auth-error pair the linear service
@@ -1617,8 +1696,22 @@ func (h *IntegrationHandler) StartSlackOAuth(w http.ResponseWriter, r *http.Requ
 	params := url.Values{
 		"client_id":    {h.slackClientID},
 		"redirect_uri": {h.slackRedirectURL()},
-		"scope":        {"channels:history,channels:read,groups:read,groups:history,users:read"},
-		"state":        {state},
+		"scope": {strings.Join([]string{
+			"app_mentions:read",
+			"channels:history",
+			"channels:read",
+			"chat:write",
+			"commands",
+			"files:read",
+			"groups:history",
+			"groups:read",
+			"im:history",
+			"im:read",
+			"im:write",
+			"users:read",
+			"users:read.email",
+		}, ",")},
+		"state": {state},
 	}
 
 	http.Redirect(w, r, slackAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
@@ -1647,6 +1740,8 @@ func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *
 		AccessToken: token.AccessToken,
 		TeamID:      token.Team.ID,
 		TeamName:    token.Team.Name,
+		BotUserID:   token.BotUserID,
+		BotID:       token.BotID,
 		Scope:       token.Scope,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, slackConfig); err != nil {
@@ -1654,9 +1749,37 @@ func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *
 		return
 	}
 
-	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack); err != nil {
+	integration, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration", err)
 		return
+	}
+	if h.slackInstallationStore != nil {
+		var enterpriseID *string
+		if token.Enterprise != nil && token.Enterprise.ID != "" {
+			enterpriseID = &token.Enterprise.ID
+		}
+		var installedBy *uuid.UUID
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			installedBy = &user.ID
+		}
+		installation := &models.SlackInstallation{
+			OrgID:             orgID,
+			IntegrationID:     integration.ID,
+			TeamID:            token.Team.ID,
+			TeamName:          token.Team.Name,
+			EnterpriseID:      enterpriseID,
+			APIAppID:          token.AppID,
+			BotUserID:         token.BotUserID,
+			BotID:             token.BotID,
+			Scope:             strings.FieldsFunc(token.Scope, func(r rune) bool { return r == ',' || r == ' ' }),
+			Status:            models.SlackInstallationStatusActive,
+			InstalledByUserID: installedBy,
+		}
+		if err := h.slackInstallationStore.Upsert(r.Context(), installation); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to store slack bot installation", err)
+			return
+		}
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?slack=connected", http.StatusTemporaryRedirect)
@@ -1687,7 +1810,7 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		slackAPIURL+"/conversations.list?types=public_channel&exclude_archived=true&limit=200", nil)
+		slackAPIURL+"/conversations.list?types=public_channel,private_channel&exclude_archived=true&limit=200", nil)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create request", err)
 		return
@@ -1719,11 +1842,18 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 	}
 
 	type channelEntry struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Selected bool   `json:"selected"`
+		ID       string                       `json:"id"`
+		Name     string                       `json:"name"`
+		Selected bool                         `json:"selected"`
+		Settings *models.SlackChannelSettings `json:"settings,omitempty"`
 	}
 	channels := make([]channelEntry, 0, len(slackResp.Channels))
+	var installation *models.SlackInstallation
+	if h.slackInstallationStore != nil {
+		if active, lookupErr := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID); lookupErr == nil {
+			installation = &active
+		}
+	}
 	for _, ch := range slackResp.Channels {
 		selected := false
 		for _, id := range cred.ChannelIDs {
@@ -1732,7 +1862,17 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 				break
 			}
 		}
-		channels = append(channels, channelEntry{ID: ch.ID, Name: ch.Name, Selected: selected})
+		entry := channelEntry{ID: ch.ID, Name: ch.Name, Selected: selected}
+		if installation != nil && h.slackChannelStore != nil {
+			settings, settingsErr := h.slackChannelStore.GetByChannel(r.Context(), orgID, installation.TeamID, ch.ID)
+			if settingsErr == nil {
+				entry.Settings = &settings
+			} else if !errors.Is(settingsErr, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusInternalServerError, "SLACK_CHANNEL_SETTINGS_FAILED", "failed to load slack channel settings", settingsErr)
+				return
+			}
+		}
+		channels = append(channels, entry)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": channels})
@@ -1763,6 +1903,303 @@ func (h *IntegrationHandler) UpdateSlackChannels(w http.ResponseWriter, r *http.
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"channel_ids": body.ChannelIDs}})
+}
+
+func (h *IntegrationHandler) GetSlackBot(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackInstallationStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SLACK_LOOKUP_FAILED", "failed to load slack bot installation", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackInstallation]{Data: installation})
+}
+
+func (h *IntegrationHandler) ReinstallSlackBot(w http.ResponseWriter, r *http.Request) {
+	h.StartSlackOAuth(w, r)
+}
+
+func (h *IntegrationHandler) ListSlackUserLinks(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	links, err := h.slackUserLinkStore.ListByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINKS_FAILED", "failed to list slack user links", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SlackUserLink]{Data: links, Meta: models.PaginationMeta{}})
+}
+
+func (h *IntegrationHandler) UpsertSlackUserLinkAdmin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	if h.memberships == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "MEMBERSHIP_STORE_NOT_CONFIGURED", "membership validation is not configured")
+		return
+	}
+	var body struct {
+		UserID           uuid.UUID `json:"user_id"`
+		SlackUserID      string    `json:"slack_user_id"`
+		SlackEmail       string    `json:"slack_email"`
+		SlackDisplayName string    `json:"slack_display_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	body.SlackUserID = strings.TrimSpace(body.SlackUserID)
+	body.SlackEmail = strings.TrimSpace(body.SlackEmail)
+	body.SlackDisplayName = strings.TrimSpace(body.SlackDisplayName)
+	if body.UserID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_USER_ID", "user_id is required")
+		return
+	}
+	if body.SlackUserID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_SLACK_USER_ID", "slack_user_id is required")
+		return
+	}
+	if _, err := h.memberships.Get(r.Context(), body.UserID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusBadRequest, "USER_NOT_IN_ORG", "user_id must belong to the current org")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "MEMBERSHIP_LOOKUP_FAILED", "failed to validate user membership", err)
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	var emailPtr *string
+	if body.SlackEmail != "" {
+		emailPtr = &body.SlackEmail
+	}
+	link := &models.SlackUserLink{
+		OrgID:               orgID,
+		SlackInstallationID: installation.ID,
+		UserID:              &body.UserID,
+		SlackTeamID:         installation.TeamID,
+		SlackUserID:         body.SlackUserID,
+		SlackEmail:          emailPtr,
+		SlackDisplayName:    body.SlackDisplayName,
+	}
+	if err := h.slackUserLinkStore.UpsertAdminLink(r.Context(), link); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to upsert slack user link", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
+}
+
+func (h *IntegrationHandler) DeleteSlackUserLinkAdmin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	linkID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LINK_ID", "id must be a valid UUID")
+		return
+	}
+	if err := h.slackUserLinkStore.DeleteByID(r.Context(), orgID, linkID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SLACK_USER_LINK_NOT_FOUND", "slack user link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_DELETE_FAILED", "failed to delete slack user link", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *IntegrationHandler) LinkSlackUserMe(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "user is required")
+		return
+	}
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil || h.credentialStore == nil || h.slackUserInfoClient == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	var body struct {
+		SlackUserID string `json:"slack_user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	body.SlackUserID = strings.TrimSpace(body.SlackUserID)
+	if body.SlackUserID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_SLACK_USER_ID", "slack_user_id is required")
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	cred, err := h.credentialStore.Get(r.Context(), orgID, models.ProviderSlack)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_CREDENTIAL_FAILED", "failed to load slack credentials", err)
+		return
+	}
+	if cred == nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot credentials are not connected")
+		return
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok || strings.TrimSpace(slackCfg.AccessToken) == "" {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_CREDENTIAL_INVALID", "slack bot credentials are invalid")
+		return
+	}
+	slackUser, err := h.slackUserInfoClient.FetchUserInfo(r.Context(), slackCfg.AccessToken, body.SlackUserID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "SLACK_USER_LOOKUP_FAILED", "failed to verify slack user", err)
+		return
+	}
+	slackEmail := strings.TrimSpace(slackUser.Profile.Email)
+	if slackEmail == "" || !strings.EqualFold(slackEmail, strings.TrimSpace(user.Email)) {
+		writeError(w, r, http.StatusForbidden, "SLACK_USER_EMAIL_MISMATCH", "slack user email does not match the authenticated user")
+		return
+	}
+	displayName := strings.TrimSpace(slackUser.Profile.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(slackUser.RealName)
+	}
+	if displayName == "" {
+		displayName = strings.TrimSpace(slackUser.Name)
+	}
+	emailPtr := &slackEmail
+	link := &models.SlackUserLink{
+		OrgID:               orgID,
+		SlackInstallationID: installation.ID,
+		UserID:              &user.ID,
+		SlackTeamID:         installation.TeamID,
+		SlackUserID:         body.SlackUserID,
+		SlackEmail:          emailPtr,
+		SlackDisplayName:    displayName,
+	}
+	if err := h.slackUserLinkStore.UpsertSelfLink(r.Context(), link); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to link slack user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
+}
+
+func (h *IntegrationHandler) UnlinkSlackUserMe(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "user is required")
+		return
+	}
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	if err := h.slackUserLinkStore.DeleteSelfLink(r.Context(), orgID, user.ID, installation.TeamID); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_UNLINK_FAILED", "failed to unlink slack user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *IntegrationHandler) PatchSlackChannelSettings(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	channelID := chi.URLParam(r, "slack_channel_id")
+	if channelID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_CHANNEL_ID", "slack_channel_id is required")
+		return
+	}
+	if h.slackInstallationStore == nil || h.slackChannelStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	var body struct {
+		SlackChannelName          string          `json:"slack_channel_name"`
+		ChannelType               string          `json:"channel_type"`
+		DefaultRepositoryID       *uuid.UUID      `json:"default_repository_id"`
+		DefaultBranch             *string         `json:"default_branch"`
+		ResponseVisibility        string          `json:"response_visibility"`
+		AllowedActions            []string        `json:"allowed_actions"`
+		NotificationSubscriptions json.RawMessage `json:"notification_subscriptions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if body.ChannelType == "" {
+		body.ChannelType = "channel"
+	}
+	if body.ResponseVisibility == "" {
+		body.ResponseVisibility = "thread"
+	}
+	if len(body.AllowedActions) == 0 {
+		body.AllowedActions = []string{"session", "preview"}
+	}
+	if len(body.NotificationSubscriptions) == 0 {
+		body.NotificationSubscriptions = json.RawMessage(`{}`)
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	if body.DefaultRepositoryID != nil {
+		if h.repoStore == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "REPOSITORY_STORE_NOT_CONFIGURED", "repository validation is not configured")
+			return
+		}
+		if _, err := h.repoStore.GetByID(r.Context(), orgID, *body.DefaultRepositoryID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY", "default_repository_id must belong to the current org")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to validate default repository", err)
+			return
+		}
+	}
+	settings := &models.SlackChannelSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installation.ID,
+		SlackTeamID:               installation.TeamID,
+		SlackChannelID:            channelID,
+		SlackChannelName:          body.SlackChannelName,
+		ChannelType:               body.ChannelType,
+		DefaultRepositoryID:       body.DefaultRepositoryID,
+		DefaultBranch:             body.DefaultBranch,
+		ResponseVisibility:        body.ResponseVisibility,
+		AllowedActions:            body.AllowedActions,
+		NotificationSubscriptions: body.NotificationSubscriptions,
+		Active:                    true,
+	}
+	if err := h.slackChannelStore.Upsert(r.Context(), settings); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_CHANNEL_UPDATE_FAILED", "failed to update slack channel settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackChannelSettings]{Data: *settings})
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2425,6 +2862,9 @@ func (h *IntegrationHandler) ConnectNotion(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_NOTION_FAILED", "failed to create Notion integration", err)
 		return
 	}
+	h.deriveIntegrationStatus(r.Context(), &integration, map[models.IntegrationProvider]bool{
+		models.IntegrationProviderNotion: true,
+	})
 
 	if created {
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
@@ -2523,6 +2963,9 @@ func (h *IntegrationHandler) ConnectCircleCI(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_CIRCLECI_FAILED", "failed to create CircleCI integration", err)
 		return
 	}
+	h.deriveIntegrationStatus(r.Context(), &integration, map[models.IntegrationProvider]bool{
+		models.IntegrationProviderCircleCI: true,
+	})
 
 	if created {
 		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})

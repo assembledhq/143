@@ -122,7 +122,7 @@ We intentionally do **not** introduce a per-user generation counter. Doing so wo
 
 ### 2.5 Stream Cleanup
 
-Streams expire "1h after session ends" via `EXPIREAT` (see Section 9). The session teardown path must call `EXPIREAT` on both the `:logs` and `:status` streams when a session reaches a terminal state. However, if a session crashes without clean teardown, these streams leak.
+Streams expire "1h after session ends" via `EXPIREAT` (see Section 9). The session teardown path must call `EXPIREAT` on the `:logs`, `:status`, and `:events` streams when a session reaches a terminal state. However, if a session crashes without clean teardown, these streams leak.
 
 **Safety net:** Run a periodic cleanup goroutine (e.g., every 10 minutes) that:
 1. Queries Postgres for sessions in a terminal state (`completed`, `failed`, `cancelled`) that ended more than 1 hour ago, **limited to 500 rows per tick** (`LIMIT 500`). This prevents a backlog from creating a single-tick spike that slams Redis and Postgres.
@@ -487,8 +487,9 @@ If/when we move to Redis Cluster (multiple shards):
 4. Modify SSE handler to accept `?last_event_id=...` on reconnect. On connect: (a) replay from ring buffer if last-seen is in range, (b) else `XRANGE` catch-up from stream, (c) else Postgres backfill. Then register with fan-out.
 5. Implement slow-consumer handling: if fan-out send-to-client would block, close the client channel. SSE handler sends `event: error` / `data: slow consumer` and disconnects; client reconnects via the catch-up path.
 6. Modify session status updates to `XADD` to `stream:session:{id}:status`
-7. Add `EXPIREAT` calls in session teardown path for both `:logs` and `:status` streams
-8. Add periodic cleanup goroutine (every 10 min, batched at 500 rows — see §2.5) to delete orphaned streams for terminated sessions
+7. Publish narrow session UI events to `stream:session:{id}:events`, including `thread.inbox.*`, `thread.runtime.*`, and `session.workspace.generation_changed`
+8. Add `EXPIREAT` calls in session teardown path for `:logs`, `:status`, and `:events` streams
+9. Add periodic cleanup goroutine (every 10 min, batched at 500 rows — see §2.5) to delete orphaned streams for terminated sessions
 
 ### Phase 4: Distributed Rate Limiting (gated)
 1. Create `internal/cache/ratelimit.go` with fixed-window `INCR`/`EXPIRE` counter
@@ -641,12 +642,13 @@ Both are well within what a correctly-indexed Postgres handles, but the auth-loo
 
 All Redis keys use the `143:` prefix to avoid collisions if Redis is shared with other services in the future.
 
-**Hash tag strategy (Cluster mode — future, not needed at current scale):** Only session stream keys use hash tags (`{ses:ID}`) to co-locate the `:logs` and `:status` streams for the same session on one shard. Auth and rate-limit keys are accessed independently and don't need co-location, so they intentionally omit hash tags — this distributes them evenly across shards. Until we actually run a Redis Cluster (§6.5), the hash tags are inert (a standalone Redis ignores them).
+**Hash tag strategy (Cluster mode — future, not needed at current scale):** Only session stream keys use hash tags (`{ses:ID}`) to co-locate the `:logs`, `:status`, and `:events` streams for the same session on one shard. Auth and rate-limit keys are accessed independently and don't need co-location, so they intentionally omit hash tags — this distributes them evenly across shards. Until we actually run a Redis Cluster (§6.5), the hash tags are inert (a standalone Redis ignores them).
 
 | Key pattern | Type | TTL | Size estimate | Purpose |
 |-------------|------|-----|---------------|---------|
 | `143:stream:{ses:ID}:logs` | Stream | `MAXLEN ~ 10000` on every `XADD`; entries clamped to 4KB; whole stream expires via `EXPIREAT` 1h after session ends (set by teardown path; orphans cleaned by periodic goroutine — see §2.5) | ~500B per entry (~5MB max) | Log streaming |
 | `143:stream:{ses:ID}:status` | Stream | `MAXLEN ~ 100`; same idle expiry | ~200B per entry | Status broadcasts |
+| `143:stream:{ses:ID}:events` | Stream | `MAXLEN ~ 1000`; same idle expiry | ~300B per entry | Narrow session UI events |
 | `143:ratelimit:org:{id}:{window}` | String (counter) | `EXPIRE` 2x window duration; self-cleans; only used once limiter keys are isolated from stream eviction | ~32B | Rate limiting |
 | `143:auth:token:{hash}` | String | Matches `expires_at` (typ. 24h) | ~1KB | Auth session cache (Phase 6; deferred — see §2.4) |
 | `143:jobs:notify` | Pub/Sub channel | N/A (ephemeral) | N/A | Job wake-up signal |

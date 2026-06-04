@@ -94,6 +94,7 @@ const (
 	SessionOriginProject      SessionOrigin = "project"
 	SessionOriginAutomation   SessionOrigin = "automation"
 	SessionOriginRevision     SessionOrigin = "revision"
+	SessionOriginSlack        SessionOrigin = "slack"
 )
 
 func (o SessionOrigin) Validate() error {
@@ -102,7 +103,8 @@ func (o SessionOrigin) Validate() error {
 		SessionOriginManual,
 		SessionOriginProject,
 		SessionOriginAutomation,
-		SessionOriginRevision:
+		SessionOriginRevision,
+		SessionOriginSlack:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionOrigin: %q", o)
@@ -124,6 +126,23 @@ func (m SessionInteractionMode) Validate() error {
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionInteractionMode: %q", m)
+	}
+}
+
+// SessionRetryMode controls how a failed session retry is dispatched.
+type SessionRetryMode string
+
+const (
+	SessionRetryModeCheckpoint SessionRetryMode = "checkpoint"
+	SessionRetryModeStartOver  SessionRetryMode = "start_over"
+)
+
+func (m SessionRetryMode) Validate() error {
+	switch m {
+	case SessionRetryModeCheckpoint, SessionRetryModeStartOver:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionRetryMode: %q", m)
 	}
 }
 

@@ -160,6 +160,47 @@ describe('api client', () => {
       expect(url.searchParams.get('triggered_by_user_ids')).toBe('user-1,user-2');
     });
 
+    it('normalizes timeline payloads at the API boundary', async () => {
+      server.use(
+        http.get('/api/v1/sessions/:id/timeline', () => {
+          return HttpResponse.json({
+            data: [
+              {
+                kind: 'message',
+                created_at: '2026-01-01T00:00:01Z',
+                message: {
+                  id: 1,
+                  session_id: 'session-1',
+                  org_id: 'org-1',
+                  turn_number: 1,
+                  role: 'user',
+                  content: 'hello',
+                },
+              },
+              {
+                kind: 'log',
+                created_at: '2026-01-01T00:00:02Z',
+                log: {
+                  id: 2,
+                  session_id: 'session-1',
+                  level: 'info',
+                  message: 'working',
+                  metadata: null,
+                  turn_number: 1,
+                },
+              },
+            ],
+            meta: {},
+          });
+        }),
+      );
+
+      const result = await api.sessions.getTimeline('session-1');
+
+      expect(result.data[0].message?.created_at).toBe('2026-01-01T00:00:01Z');
+      expect(result.data[1].log?.created_at).toBe('2026-01-01T00:00:02Z');
+    });
+
     it('fetches single session', async () => {
       const mockSession = {
         data: {
@@ -239,6 +280,71 @@ describe('api client', () => {
       expect(capturedUrl).toBeDefined();
       const url = new URL(capturedUrl!);
       expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
+    });
+
+    it('fetches recoverable thread inbox entries', async () => {
+      const mockEntries = {
+        data: [
+          {
+            id: 'entry-1',
+            org_id: 'org-1',
+            session_id: 'session-abc',
+            thread_id: 'thread-1',
+            sequence_no: 12,
+            message_id: 99,
+            entry_type: 'user_message',
+            payload: { content: 'Please continue' },
+            delivery_state: 'dead_letter',
+            delivery_attempts: 2,
+            last_error: 'payload serialization failed',
+            accepted_at: '2026-05-26T10:00:00Z',
+            created_at: '2026-05-26T10:00:00Z',
+          },
+        ],
+        meta: {},
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:threadId/inbox/recoverable', () => {
+          return HttpResponse.json(mockEntries);
+        }),
+      );
+
+      const result = await api.sessions.listRecoverableThreadInboxEntries('session-abc', 'thread-1');
+
+      expect(result).toEqual(mockEntries);
+    });
+
+    it('retries a recoverable thread inbox entry', async () => {
+      let capturedBody: unknown;
+      const mockEntry = {
+        data: {
+          id: 'entry-1',
+          org_id: 'org-1',
+          session_id: 'session-abc',
+          thread_id: 'thread-1',
+          sequence_no: 12,
+          message_id: 99,
+          entry_type: 'user_message',
+          payload: { content: 'Please continue' },
+          delivery_state: 'pending',
+          delivery_attempts: 0,
+          accepted_at: '2026-05-26T10:00:00Z',
+          created_at: '2026-05-26T10:00:00Z',
+        },
+      };
+
+      server.use(
+        http.post('/api/v1/sessions/:id/threads/:threadId/inbox/:entryId/retry', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json(mockEntry);
+        }),
+      );
+
+      const result = await api.sessions.retryThreadInboxEntry('session-abc', 'thread-1', 'entry-1', { replayUnknownDelivery: true });
+
+      expect(result).toEqual(mockEntry);
+      expect(capturedBody).toEqual({ replay_unknown_delivery: true });
     });
 
     it('answers question with backend contract field', async () => {
@@ -1548,6 +1654,179 @@ describe('api client', () => {
         candidate_indices: [0, 2],
       });
       expect(result.data).toHaveLength(1);
+    });
+  });
+
+  describe('repository preview secret bundles', () => {
+    it('lists preview secret bundles for a repository', async () => {
+      server.use(
+        http.get('/api/v1/repositories/repo-1/preview-secret-bundles', () => {
+          return HttpResponse.json({
+            data: [{
+              id: 'bundle-1',
+              repository_id: 'repo-1',
+              name: 'staging',
+              source_type: 'managed',
+              exposure_policy: 'preview_runtime',
+              outputs: [{ type: 'env', env: ['API_TOKEN'] }],
+              created_by_user_id: 'user-1',
+              created_at: '2026-01-01T00:00:00Z',
+            }],
+          });
+        }),
+      );
+
+      const result = await api.repositories.previewSecretBundles.list('repo-1');
+
+      expect(result.data[0].name).toBe('staging');
+      expect(result.data[0].outputs[0].env).toEqual(['API_TOKEN']);
+    });
+
+    it('upserts preview secret bundles for a repository', async () => {
+      let capturedBody: unknown;
+      let capturedUrl: string | undefined;
+      server.use(
+        http.post('/api/v1/repositories/repo-1/preview-secret-bundles', async ({ request }) => {
+          capturedUrl = request.url;
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'bundle-1',
+              repository_id: 'repo-1',
+              name: 'staging-api',
+              source_type: 'managed',
+              exposure_policy: 'preview_runtime',
+              outputs: [{ type: 'env', env: ['API_TOKEN'] }],
+              created_by_user_id: 'user-1',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      await api.repositories.previewSecretBundles.upsert('repo-1', {
+        name: 'staging-api',
+        source: { type: 'managed', values: { API_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { API_TOKEN: 'secret:API_TOKEN' } }],
+        exposure_policy: 'preview_runtime',
+      });
+
+      expect(capturedUrl).toContain('/api/v1/repositories/repo-1/preview-secret-bundles');
+      expect(capturedBody).toEqual({
+        name: 'staging-api',
+        source: { type: 'managed', values: { API_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { API_TOKEN: 'secret:API_TOKEN' } }],
+        exposure_policy: 'preview_runtime',
+      });
+    });
+
+    it('tests a preview secret bundle by ID', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.post('/api/v1/preview-secret-bundles/:bundleId/test', ({ params }) => {
+          capturedUrl = `/api/v1/preview-secret-bundles/${params.bundleId as string}/test`;
+          return HttpResponse.json({
+            data: {
+              status: 'ready',
+              bundle: {
+                id: 'bundle-1',
+                repository_id: 'repo-1',
+                name: 'staging',
+                source_type: 'managed',
+                exposure_policy: 'preview_runtime',
+                outputs: [{ type: 'env', env: ['API_TOKEN'] }],
+                created_by_user_id: 'user-1',
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            },
+          });
+        }),
+      );
+
+      const result = await api.repositories.previewSecretBundles.test('bundle-1');
+
+      expect(capturedUrl).toBe('/api/v1/preview-secret-bundles/bundle-1/test');
+      expect(result.data.status).toBe('ready');
+      expect(result.data.bundle.name).toBe('staging');
+    });
+
+    it('reveals preview secret bundle source by ID', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.post('/api/v1/preview-secret-bundles/:bundleId/reveal', ({ params }) => {
+          capturedUrl = `/api/v1/preview-secret-bundles/${params.bundleId as string}/reveal`;
+          return HttpResponse.json({
+            data: {
+              bundle: {
+                id: 'bundle-1',
+                repository_id: 'repo-1',
+                name: 'staging',
+                source_type: 'managed',
+                exposure_policy: 'preview_runtime',
+                outputs: [{ type: 'file', path: 'development.conf.json', format: 'json' }],
+                created_by_user_id: 'user-1',
+                created_at: '2026-01-01T00:00:00Z',
+              },
+              source: { type: 'managed', values: { SECRET_FILE_CONTENT: '{"token":"super-secret"}' } },
+              outputs: [{ type: 'file', path: 'development.conf.json', format: 'json', value: 'secret:SECRET_FILE_CONTENT' }],
+            },
+          });
+        }),
+      );
+
+      const result = await api.repositories.previewSecretBundles.reveal('bundle-1');
+
+      expect(capturedUrl).toBe('/api/v1/preview-secret-bundles/bundle-1/reveal');
+      expect(result.data.source.values.SECRET_FILE_CONTENT).toBe('{"token":"super-secret"}');
+    });
+
+    it('patches a preview secret bundle by ID', async () => {
+      let capturedBody: unknown;
+      let capturedUrl: string | undefined;
+      server.use(
+        http.patch('/api/v1/preview-secret-bundles/:bundleId', async ({ request, params }) => {
+          capturedUrl = `/api/v1/preview-secret-bundles/${params.bundleId as string}`;
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'bundle-1',
+              repository_id: 'repo-1',
+              name: 'staging-renamed',
+              source_type: 'managed',
+              exposure_policy: 'preview_runtime',
+              outputs: [{ type: 'env', env: ['NEW_TOKEN'] }],
+              created_by_user_id: 'user-1',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      await api.repositories.previewSecretBundles.patch('bundle-1', {
+        name: 'staging-renamed',
+        source: { type: 'managed', values: { NEW_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { NEW_TOKEN: 'secret:NEW_TOKEN' } }],
+      });
+
+      expect(capturedUrl).toBe('/api/v1/preview-secret-bundles/bundle-1');
+      expect(capturedBody).toEqual({
+        name: 'staging-renamed',
+        source: { type: 'managed', values: { NEW_TOKEN: 'secret' } },
+        outputs: [{ type: 'env', values: { NEW_TOKEN: 'secret:NEW_TOKEN' } }],
+      });
+    });
+
+    it('deletes preview secret bundles for a repository', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.delete('/api/v1/repositories/repo-1/preview-secret-bundles/:name', ({ request }) => {
+          capturedUrl = request.url;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await expect(api.repositories.previewSecretBundles.delete('repo-1', 'staging')).resolves.toBeUndefined();
+      expect(capturedUrl).toContain('/api/v1/repositories/repo-1/preview-secret-bundles/staging');
     });
   });
 });

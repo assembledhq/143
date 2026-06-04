@@ -215,6 +215,18 @@ func (s *JobStore) Notify(ctx context.Context, id uuid.UUID) {
 	s.notify(ctx, id)
 }
 
+// Wake publishes a best-effort queue wake-up after an existing job was made
+// runnable by a direct state transition rather than by Enqueue.
+// lint:allow-no-orgid reason="process-wide Redis wake-up for already-scoped runnable job rows"
+func (s *JobStore) Wake(ctx context.Context) {
+	if s.notifier == nil {
+		return
+	}
+	if err := s.notifier.Publish(ctx); err != nil {
+		s.logger.Warn().Err(err).Msg("failed to publish Redis job wake-up")
+	}
+}
+
 func (s *JobStore) notify(ctx context.Context, id uuid.UUID) {
 	if s.notifier == nil || id == uuid.Nil {
 		return
@@ -502,10 +514,18 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 			FROM nodes
 			WHERE status = 'dead' OR last_heartbeat_at < @dead_before
 		),
+		claiming_node AS (
+			SELECT id
+			FROM nodes
+			WHERE id = @node_id
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+		),
 		next_job AS (
 			SELECT j.id
 			FROM jobs j
 			LEFT JOIN dead_target_nodes d ON d.id = j.target_node_id
+			JOIN claiming_node cn ON TRUE
 			WHERE j.status = 'pending' AND j.run_at <= now()
 			  AND (
 			    j.target_node_id IS NULL
@@ -1087,6 +1107,73 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				updated_at = now()
 			FROM reclaimable r
 			WHERE j.id = r.id
+			RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id, j.job_type
+		),
+		updated_sessions AS (
+			UPDATE sessions s
+			SET recovery_state = 'queued',
+			    recovery_queued_at = now(),
+			    recovery_started_at = NULL,
+			    runtime_stop_reason = 'worker_recovery'
+			FROM updated_jobs uj
+			WHERE uj.session_id IS NOT NULL
+			  AND uj.job_type IN ('run_agent', 'continue_session')
+			  AND s.org_id = uj.org_id
+			  AND s.id = uj.session_id::uuid
+		)
+		SELECT COUNT(*) FROM updated_jobs`
+
+	var reclaimed int64
+	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim lost running jobs: %w", err)
+	}
+	return reclaimed, nil
+}
+
+// ReclaimLostRunningSessionJobsForSession is the targeted version of
+// ReclaimLostRunningJobs used on user input paths to proactively recover a
+// single leaderless session instead of waiting for the periodic sweep.
+func (s *JobStore) ReclaimLostRunningSessionJobsForSession(ctx context.Context, orgID, sessionID uuid.UUID, staleBefore time.Time, limit int) (int64, error) {
+	query := `
+		WITH dead_nodes AS (
+			SELECT id
+			FROM nodes
+			WHERE status = 'dead'
+			   OR last_heartbeat_at < $3
+		),
+		reclaimable AS (
+			SELECT j.id, j.org_id
+			FROM jobs j
+			LEFT JOIN dead_nodes d ON d.id = j.locked_by_node_id
+			WHERE j.org_id = $1
+			  AND j.status = 'running'
+			  AND j.job_type IN ('run_agent', 'continue_session')
+			  AND j.payload->>'session_id' = $2::text
+			  AND (
+				j.lease_expires_at < now()
+				OR (j.lease_expires_at IS NULL AND d.id IS NOT NULL)
+				OR d.id IS NOT NULL
+			  )
+			ORDER BY j.locked_at ASC
+			FOR UPDATE OF j SKIP LOCKED
+			LIMIT $4
+		),
+		updated_jobs AS (
+			UPDATE jobs j
+			SET status = 'pending',
+				last_error = 'job ownership lost; queued for bounded recovery',
+				locked_by_node_id = NULL,
+				run_owner_id = NULL,
+				owner_kind = 'worker',
+				lock_token = NULL,
+				locked_at = NULL,
+				lease_expires_at = NULL,
+				run_at = now(),
+				updated_at = now()
+			FROM reclaimable r
+			WHERE j.org_id = r.org_id
+			  AND j.id = r.id
 			RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id
 		),
 		updated_sessions AS (
@@ -1103,9 +1190,9 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 		SELECT COUNT(*) FROM updated_jobs`
 
 	var reclaimed int64
-	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed)
+	err := s.db.QueryRow(ctx, query, orgID, sessionID, staleBefore, limit).Scan(&reclaimed)
 	if err != nil {
-		return 0, fmt.Errorf("reclaim lost running jobs: %w", err)
+		return 0, fmt.Errorf("reclaim lost running session jobs for session: %w", err)
 	}
 	return reclaimed, nil
 }
@@ -1123,6 +1210,53 @@ func (s *JobStore) CountRunningOwnedByNode(ctx context.Context, nodeID string) (
 		return 0, fmt.Errorf("count running jobs by node: %w", err)
 	}
 	return count, nil
+}
+
+// SelectWorkerWithSandboxCapacity picks an active worker that currently
+// advertises free local sandbox slots in its heartbeat metadata. The result is
+// best-effort and still fenced by the worker-local admission gate when the job
+// runs, because metadata can be stale between heartbeats.
+// lint:allow-no-orgid reason="cross-org worker capacity routing for sandbox admission retries"
+func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeNodeID string) (*string, error) {
+	var nodeID string
+	err := s.db.QueryRow(ctx, `
+		WITH candidates AS (
+			SELECT
+				id,
+				COALESCE(NULLIF(metadata->>'live_sandbox_count', '')::int, 0) AS live_sandboxes,
+				COALESCE(NULLIF(metadata->>'reserved_sandbox_count', '')::int, 0) AS reserved_sandboxes,
+				COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) AS max_active_sandboxes,
+				COALESCE(NULLIF(metadata->>'active_job_count', '')::int, 0) AS active_job_count,
+				last_heartbeat_at
+			FROM nodes
+			WHERE mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+			  AND (@exclude_node_id = '' OR id <> @exclude_node_id)
+		)
+		SELECT id
+		FROM candidates
+		WHERE max_active_sandboxes > 0
+		  AND live_sandboxes + reserved_sandboxes < max_active_sandboxes
+		ORDER BY
+			live_sandboxes + reserved_sandboxes ASC,
+			active_job_count ASC,
+			last_heartbeat_at DESC,
+			id ASC
+		LIMIT 1`,
+		pgx.NamedArgs{
+			"exclude_node_id": excludeNodeID,
+			"dead_before":     time.Now().Add(-nodeDeadHeartbeatThreshold),
+		},
+	).Scan(&nodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select worker with sandbox capacity: %w", err)
+	}
+	return &nodeID, nil
 }
 
 func (s *JobStore) execLeaseTerminalUpdate(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {

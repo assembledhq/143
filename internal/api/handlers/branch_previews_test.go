@@ -54,7 +54,7 @@ var branchPreviewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
 }
 
 func (f fakeBranchPreviewGitHub) GetInstallationToken(context.Context, int64) (string, error) {
@@ -78,6 +78,50 @@ func (f fakeBranchPreviewGitHub) GetFileContent(context.Context, string, string,
 		return f.configContent, nil
 	}
 	return `{"preview":{"name":"web","command":["npm","run","dev"],"port":3000}}`, nil
+}
+
+func TestBranchPreviewHandler_ResponseForPreviewUsesTargetPreviewOrigin(t *testing.T) {
+	t.Parallel()
+
+	targetID := uuid.New()
+	previewID := uuid.New()
+	repoID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	handler := NewBranchPreviewHandler(
+		nil,
+		nil,
+		nil,
+		nil,
+		"https://143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	target := &models.PreviewTarget{
+		ID:              targetID,
+		OrgID:           orgID,
+		RepositoryID:    repoID,
+		Branch:          "feature/login",
+		CommitSHA:       "abcdef1234567890abcdef1234567890abcdef12",
+		SourceType:      models.PreviewSourceTypePullRequest,
+		SourceID:        "acme/app#7",
+		CreatedByUserID: userID,
+		CreatedAt:       now,
+	}
+	instance := &models.PreviewInstance{
+		ID:              previewID,
+		PreviewTargetID: &targetID,
+		OrgID:           orgID,
+		UserID:          userID,
+		Status:          models.PreviewStatusReady,
+		ExpiresAt:       now.Add(time.Hour),
+	}
+
+	resp := handler.responseForPreview(targetID.String(), target, instance)
+
+	require.NotNil(t, resp.PreviewURL, "response should expose a preview URL when a template is configured")
+	require.Equal(t, "https://"+targetID.String()+".preview.143.dev", *resp.PreviewURL, "branch preview URL should use the stable preview target host instead of the runtime instance host")
+	require.NotContains(t, *resp.PreviewURL, previewID.String(), "branch preview URL should survive runtime restarts that replace the instance ID")
 }
 
 func TestBranchPreviewHandler_CreateResolvesBranchHeadAndCreatesTarget(t *testing.T) {
@@ -326,6 +370,7 @@ func TestBranchPreviewHandler_StopRejectsPreviewTokenWithoutStopScope(t *testing
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 
@@ -390,6 +435,7 @@ func TestBranchPreviewHandler_RestartRejectsPreviewTokenWithoutCreateScope(t *te
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 
@@ -462,6 +508,7 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 
@@ -532,6 +579,7 @@ func TestBranchPreviewHandler_MintBootstrapTokenRejectsPreviewTokenForDifferentR
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 
@@ -780,6 +828,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			"", "", "hdl-session-1", "", 0,
 			"", head, now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 
@@ -791,6 +840,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			"", "", "", "", 0,
 			"", head, now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 
@@ -1283,6 +1333,7 @@ func TestBranchPreviewHandler_StopFailsClosedOnPreviewTargetDBError(t *testing.T
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), "",
 			false,
 		))
 

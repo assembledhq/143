@@ -190,7 +190,7 @@ func TestIntegration_SendMessage_RejectsDestroyedSnapshot(t *testing.T) {
 // a useful refactor signal.
 func newTestSessionHandler(pool *pgxpool.Pool) *handlers.SessionHandler {
 	logger := zerolog.Nop()
-	return handlers.NewSessionHandler(
+	h := handlers.NewSessionHandler(
 		db.NewSessionStore(pool),
 		db.NewSessionLogStore(pool),
 		db.NewSessionQuestionStore(pool),
@@ -204,6 +204,8 @@ func newTestSessionHandler(pool *pgxpool.Pool) *handlers.SessionHandler {
 		nil, // llmClient — CreateManual treats nil as "skip title generation"
 		logger,
 	)
+	h.SetTxStarter(pool)
+	return h
 }
 
 // buildAuthedRequest constructs an *http.Request as if it had passed the

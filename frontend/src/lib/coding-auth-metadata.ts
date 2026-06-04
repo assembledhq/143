@@ -61,6 +61,7 @@ export const ORG_PROVIDER_OPTIONS: Array<{
   {
     key: "pi",
     label: "Pi",
+    iconSrc: "/agents/pi.svg",
     supportsSubscription: false,
     supportsStackOrder: true,
   },
@@ -81,7 +82,7 @@ export const PERSONAL_PROVIDER_OPTIONS: Array<{
   { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg", supportsSubscription: true },
   { key: "gemini", label: "Gemini CLI", iconSrc: "/agents/gemini_cli.svg", supportsSubscription: false },
   { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg", supportsSubscription: false },
-  { key: "pi", label: "Pi", supportsSubscription: false },
+  { key: "pi", label: "Pi", iconSrc: "/agents/pi.svg", supportsSubscription: false },
 ];
 
 export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {

@@ -122,6 +122,7 @@ export const mockPRHealth: PullRequestHealthResponse = {
   enrichment_ready: true,
   conflict_detail_available: true,
   failing_test_detail_available: false,
+  merge_when_ready: { state: 'off' },
 };
 
 export const mockProjectDetail: ProjectDetail = {
@@ -438,6 +439,18 @@ export const handlers = [
         repair_action_type: 'resolve_conflicts',
       },
     } satisfies SingleResponse<PullRequestRepairResponse>);
+  }),
+
+  http.post('/api/v1/pull-requests/:id/merge-when-ready', () => {
+    return HttpResponse.json({
+      data: { state: 'queued', requested_head_sha: 'head-sha', requested_health_version: 1 },
+    } satisfies SingleResponse<import('@/lib/types').PullRequestMergeWhenReadyStatus>);
+  }),
+
+  http.delete('/api/v1/pull-requests/:id/merge-when-ready', () => {
+    return HttpResponse.json({
+      data: { state: 'cancelled', requested_head_sha: 'head-sha', requested_health_version: 1 },
+    } satisfies SingleResponse<import('@/lib/types').PullRequestMergeWhenReadyStatus>);
   }),
 
   http.get('/api/v1/sessions/:id/messages', () => {
@@ -804,8 +817,10 @@ export const handlers = [
     return HttpResponse.json({ data: { ...mockSessions[0], status: 'cancelled' } });
   }),
 
-  http.post('/api/v1/sessions/:id/retry', () => {
-    return HttpResponse.json({ data: { ...mockSessions[0], status: 'pending' } });
+  http.post('/api/v1/sessions/:id/retry', async ({ request }) => {
+    const body = await request.json().catch(() => ({ mode: 'checkpoint' }));
+    const mode = typeof body === 'object' && body && 'mode' in body ? body.mode : 'checkpoint';
+    return HttpResponse.json({ data: { ...mockSessions[0], status: mode === 'checkpoint' ? 'running' : 'pending' } });
   }),
 
   http.get('/api/v1/users/me/github-status', () => {

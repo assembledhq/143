@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { Command, CommandCheckItem, CommandGroup, CommandList } from "./command";
+import { Command, CommandCheckItem, CommandGroup, CommandInput, CommandList } from "./command";
+
+describe("CommandInput", () => {
+  it("uses a mobile-safe font size and keeps compact desktop sizing", () => {
+    render(
+      <Command>
+        <CommandInput placeholder="Filter people..." />
+      </Command>,
+    );
+
+    const input = screen.getByPlaceholderText("Filter people...");
+    expect(input).toHaveClass("max-sm:text-base");
+    expect(input).toHaveClass("sm:text-sm");
+  });
+});
 
 describe("CommandCheckItem", () => {
   it("renders a high-contrast checked indicator", () => {

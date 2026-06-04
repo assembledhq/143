@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 import {
   Collapsible,
   CollapsibleTrigger,
@@ -53,7 +54,7 @@ const settingsGroups: SettingsGroup[] = [
       { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
       { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
-      { label: "Preview API", icon: KeyRound, href: "/settings/previews", adminOnly: true },
+      { label: "Preview", icon: KeyRound, href: "/settings/previews", adminOnly: true },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
@@ -126,13 +127,14 @@ export function SidebarSettingsSection({
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <div className="mt-4 mb-1 mx-0 border-t border-border/50" />
+      <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-border/50" />
       <CollapsibleTrigger asChild>
-        <button
+        <Button
           type="button"
+          variant="ghost"
           className={cn(
-            "flex w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
-            isMobile ? "gap-2.5 py-3 text-sm" : "gap-2 py-1.5 text-xs",
+            "flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
+            isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] text-xs",
             onSettingsPage
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
               : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -147,7 +149,7 @@ export function SidebarSettingsSection({
               isOpen && "rotate-90"
             )}
           />
-        </button>
+        </Button>
       </CollapsibleTrigger>
       <CollapsibleContent forceMount className={cn(
         "overflow-hidden transition-all duration-200",

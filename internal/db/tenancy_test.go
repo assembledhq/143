@@ -69,6 +69,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"sessions", "where sandbox_state"},                    // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
 		{"sessions", "where pending_snapshot_key is not null"}, // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
 		{"sessions", "where container_id is not null"},         // ListReferencedContainerIDs: worker-local Docker GC must compare host containers against all DB-owned container references
+		{"sessions", "where worker_node_id = @node_id"},        // WorkerDeployStatus: node-scoped deploy drain status
 		{"sessions", "diff_history"},                           // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
@@ -80,6 +81,8 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"jobs", "count(*) filter"},                                     // QueueHealthSamples: platform-wide queue pressure sampler
 		{"jobs", "left join dead_nodes"},                                // ReclaimLostRunningJobs: cross-org recovery loop
 		{"jobs", "where status = 'running' and locked_by_node_id = $1"}, // CountRunningOwnedByNode: node-scoped drain status
+		{"jobs", "locked_by_node_id = @node_id"},                        // WorkerDeployStatus: node-scoped deploy drain status
+		{"session_sandbox_holders", "owner_node_id = @node_id"},         // WorkerDeployStatus: node-scoped sandbox holder drain status
 		{"session_logs", "from session_logs"},                           // no org_id column; scoped via session_id FK
 		{"session_logs", "into session_logs"},                           // no org_id column; scoped via session_id FK
 		{"users", "where github_id"},                                    // pre-auth lookup by GitHub ID

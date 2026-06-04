@@ -26,6 +26,12 @@ const (
 	prHealthSyncJobType      = "sync_pull_request_state"
 	prHealthReconcileJobType = "reconcile_pull_request_state"
 	prHealthEnrichJobType    = "enrich_pull_request_health"
+	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
+)
+
+var (
+	ErrPullRequestMergeabilityPending = errors.New("pull request mergeability is still being checked by GitHub")
+	defaultMergeabilityRetryDelays    = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
 )
 
 type gitHubPullRequestDetails struct {
@@ -94,7 +100,11 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 
 	if (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen {
 		if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
-			s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to sync pull request health inline")
+			if errors.Is(err, ErrPullRequestMergeabilityPending) {
+				s.enqueuePullRequestStateSync(ctx, pr)
+			} else {
+				s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to sync pull request health inline")
+			}
 		}
 		pr, err = s.pullRequests.GetByID(ctx, orgID, pullRequestID)
 		if err != nil {
@@ -130,6 +140,14 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 		NeedsAgentAction:    pr.NeedsAgentAction,
 		GitHubStateSyncedAt: pr.GitHubStateSyncedAt,
 		HealthVersion:       pr.HealthVersion,
+		MergeWhenReady: models.PullRequestMergeWhenReadyStatus{
+			State:                  pr.MergeWhenReadyState,
+			RequestedByUserID:      pr.MergeWhenReadyRequestedBy,
+			RequestedAt:            pr.MergeWhenReadyRequestedAt,
+			RequestedHeadSHA:       pr.MergeWhenReadyHeadSHA,
+			RequestedHealthVersion: pr.MergeWhenReadyHealthVersion,
+			LastError:              pr.MergeWhenReadyError,
+		},
 	}
 	derivePullRequestRepairActions(resp)
 	if pr.HeadSHA != nil {
@@ -364,6 +382,9 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 				Bool("merge_state_indeterminate", mergeStateIndeterminate).
 				Bool("tests_indeterminate", testsIndeterminate).
 				Msg("skipping pull request health snapshot write; GitHub data still indeterminate on same head SHA")
+			if mergeStateIndeterminate {
+				return ErrPullRequestMergeabilityPending
+			}
 			return nil
 		}
 	}
@@ -379,6 +400,10 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 
 	s.publishPullRequestUpdated(ctx, pr, current)
+	s.enqueueMergeWhenReadyProcessing(ctx, pr)
+	if mergeStateIndeterminate {
+		return ErrPullRequestMergeabilityPending
+	}
 	return nil
 }
 
@@ -389,8 +414,19 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 	}
 	for _, pr := range stale {
 		if err := s.SyncPullRequestState(ctx, orgID, pr.ID); err != nil {
+			if errors.Is(err, ErrPullRequestMergeabilityPending) {
+				s.logger.Debug().Str("pull_request_id", pr.ID.String()).Msg("pull request mergeability is still pending during reconciliation")
+				continue
+			}
 			s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to reconcile pull request health")
 		}
+	}
+	queued, err := s.pullRequests.ListMergeWhenReadyForProcessing(ctx, orgID, time.Now().Add(-mergeWhenReadyMergingStaleAfter), limit)
+	if err != nil {
+		return err
+	}
+	for _, pr := range queued {
+		s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	}
 	return nil
 }
@@ -772,7 +808,8 @@ func repairResponseMode(workspaceMode models.PullRequestRepairWorkspaceMode) str
 
 func (s *PRService) fetchPullRequestDetails(ctx context.Context, token, owner, repo string, number int) (*gitHubPullRequestDetails, error) {
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
-	for attempt := 0; attempt < 3; attempt++ {
+	delays := s.mergeabilityBackoffDelays()
+	for attempt := 0; ; attempt++ {
 		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, err
@@ -781,16 +818,41 @@ func (s *PRService) fetchPullRequestDetails(ctx context.Context, token, owner, r
 		if err := json.Unmarshal(body, &details); err != nil {
 			return nil, fmt.Errorf("decode GitHub pull request details: %w", err)
 		}
-		if details.Mergeable != nil || attempt == 2 {
+		if details.Mergeable != nil || isDefinitiveNullMergeabilityState(details.MergeableState) || attempt >= len(delays) {
 			return &details, nil
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+		delay := delays[attempt]
+		s.logger.Debug().
+			Str("repo", owner+"/"+repo).
+			Int("pull_request_number", number).
+			Int("attempt", attempt+1).
+			Dur("delay", delay).
+			Msg("GitHub mergeability still pending; retrying pull request details")
+		if err := s.waitForMergeabilityBackoff(ctx, delay); err != nil {
+			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("unreachable")
+}
+
+func (s *PRService) mergeabilityBackoffDelays() []time.Duration {
+	if s.mergeabilityRetryDelays != nil {
+		return s.mergeabilityRetryDelays
+	}
+	return defaultMergeabilityRetryDelays
+}
+
+func (s *PRService) waitForMergeabilityBackoff(ctx context.Context, delay time.Duration) error {
+	if s.mergeabilityRetryWait != nil {
+		return s.mergeabilityRetryWait(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo, ref string) ([]gitHubCheckRun, error) {
@@ -873,10 +935,14 @@ func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, 
 }
 
 func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.PullRequest) {
+	s.enqueuePullRequestStateSyncWithScope(ctx, pr, "")
+}
+
+func (s *PRService) enqueuePullRequestStateSyncWithScope(ctx context.Context, pr models.PullRequest, scope string) {
 	if s.jobs == nil {
 		return
 	}
-	dedupeKey := fmt.Sprintf("%s:%s", prHealthSyncJobType, pr.ID.String())
+	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID, scope)
 	_, err := s.jobs.Enqueue(ctx, pr.OrgID, prHealthSyncQueue, prHealthSyncJobType, map[string]string{
 		"org_id":          pr.OrgID.String(),
 		"pull_request_id": pr.ID.String(),
@@ -884,6 +950,14 @@ func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.P
 	if err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health sync")
 	}
+}
+
+func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID, scope string) string {
+	dedupeKey := fmt.Sprintf("%s:%s", prHealthSyncJobType, pullRequestID.String())
+	if scope != "" {
+		dedupeKey = fmt.Sprintf("%s:%s", dedupeKey, scope)
+	}
+	return dedupeKey
 }
 
 func (s *PRService) enqueuePullRequestHealthEnrichment(ctx context.Context, pr models.PullRequest, version int64) {
@@ -899,6 +973,24 @@ func (s *PRService) enqueuePullRequestHealthEnrichment(ctx context.Context, pr m
 	if err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue pull request health enrichment")
 	}
+}
+
+func (s *PRService) enqueueMergeWhenReadyProcessing(ctx context.Context, pr models.PullRequest) {
+	if s.jobs == nil || !isMergeWhenReadyProcessable(pr, time.Now()) {
+		return
+	}
+	dedupeKey := fmt.Sprintf("%s:%s", prMergeWhenReadyJobType, pr.ID.String())
+	_, err := s.jobs.Enqueue(ctx, pr.OrgID, prHealthSyncQueue, prMergeWhenReadyJobType, map[string]string{
+		"org_id":          pr.OrgID.String(),
+		"pull_request_id": pr.ID.String(),
+	}, 7, &dedupeKey)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to enqueue merge-when-ready processing")
+	}
+}
+
+func isMergeWhenReadyProcessable(pr models.PullRequest, now time.Time) bool {
+	return pr.MergeWhenReadyState == models.PullRequestMergeWhenReadyStateQueued || isStaleMergeWhenReadyMerging(pr, now)
 }
 
 func (s *PRService) publishPullRequestUpdated(ctx context.Context, pr models.PullRequest, current models.PullRequestHealthCurrent) {
@@ -934,7 +1026,7 @@ func repairPromptForAction(action models.PullRequestRepairActionType) string {
 
 func normalizeRepairMergeState(existing models.PullRequestMergeState, mergeable *bool, githubState string) models.PullRequestMergeState {
 	normalized, _ := normalizeMergeState(mergeable, githubState)
-	if normalized != models.PullRequestMergeStateUnknown {
+	if normalized != models.PullRequestMergeStateUnknown && normalized != models.PullRequestMergeStateMergeabilityPending {
 		return normalized
 	}
 	return existing

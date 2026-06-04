@@ -69,22 +69,25 @@ type PRService struct {
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
-	users            *db.UserStore
-	orgs             *db.OrganizationStore
-	prTemplates      *db.PRTemplateStore
-	previews         *db.PreviewStore
-	previewStopper   PreviewStopper
-	prHealthStreams  *cache.PullRequestStreams
-	llmClient        llm.Client
-	audit            *db.AuditEmitter
-	sandboxProvider  agent.SandboxProvider   // used by the push-based PR flow
-	snapshots        storage.SnapshotStore   // used by the push-based PR flow
-	sandboxAuth      agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
-	logger           zerolog.Logger
-	baseURL          string
-	appBaseURL       string
-	httpClient       *http.Client
-	linearMilestones LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
+	users                   *db.UserStore
+	orgs                    *db.OrganizationStore
+	prTemplates             *db.PRTemplateStore
+	previews                *db.PreviewStore
+	previewStopper          PreviewStopper
+	prHealthStreams         *cache.PullRequestStreams
+	llmClient               llm.Client
+	audit                   *db.AuditEmitter
+	sandboxProvider         agent.SandboxProvider   // used by the push-based PR flow
+	snapshots               storage.SnapshotStore   // used by the push-based PR flow
+	sandboxAuth             agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
+	logger                  zerolog.Logger
+	baseURL                 string
+	appBaseURL              string
+	previewOriginTemplate   string
+	httpClient              *http.Client
+	mergeabilityRetryDelays []time.Duration
+	mergeabilityRetryWait   func(context.Context, time.Duration) error
+	linearMilestones        LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -419,6 +422,12 @@ func (s *PRService) SetAppBaseURL(url string) {
 	s.appBaseURL = strings.TrimRight(url, "/")
 }
 
+// SetPreviewOriginTemplate overrides the preview-origin URL template used in
+// generated PR preview links.
+func (s *PRService) SetPreviewOriginTemplate(template string) {
+	s.previewOriginTemplate = template
+}
+
 func (s *PRService) sessionURL(sessionID uuid.UUID) string {
 	baseURL := strings.TrimRight(s.appBaseURL, "/")
 	if baseURL == "" {
@@ -625,7 +634,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
-	if previewLink := s.prPreviewURL(owner, repoName, prNumber); previewLink != "" && !strings.Contains(body, previewLink) {
+	if previewLink := s.prPreviewURL(ctx, run, &repo, owner, repoName, prNumber, branchName, pushed.HeadSHA, prURL); previewLink != "" && !strings.Contains(body, previewLink) {
 		body = strings.TrimSpace(body) + fmt.Sprintf("\n\nPreview: %s", previewLink)
 		if bodyErr := s.updatePullRequestBody(ctx, token, owner, repoName, prNumber, body); bodyErr != nil {
 			s.logger.Warn().Err(bodyErr).Int("pr_number", prNumber).Msg("failed to append preview link to PR body")
@@ -2223,12 +2232,84 @@ func (s *PRService) updatePullRequestBody(ctx context.Context, token, owner, rep
 	return err
 }
 
-func (s *PRService) prPreviewURL(owner, repo string, number int) string {
+func (s *PRService) stablePRPreviewURL(owner, repo string, number int) string {
 	baseURL := strings.TrimRight(s.appBaseURL, "/")
 	if baseURL == "" {
 		baseURL = defaultAppBaseURL
 	}
 	return fmt.Sprintf("%s/previews/github/%s/%s/pull/%d", baseURL, owner, repo, number)
+}
+
+func (s *PRService) prPreviewURL(ctx context.Context, run *models.Session, repo *models.Repository, owner, repoName string, number int, branchName, headSHA, prURL string) string {
+	stableURL := s.stablePRPreviewURL(owner, repoName, number)
+	if s.previews == nil || s.previewOriginTemplate == "" || run == nil || repo == nil || run.TriggeredByUserID == nil || repo.ID == uuid.Nil || headSHA == "" {
+		return stableURL
+	}
+
+	sourceID := fmt.Sprintf("%s/%s#%d@%s", owner, repoName, number, headSHA)
+	target := &models.PreviewTarget{
+		OrgID:           run.OrgID,
+		RepositoryID:    repo.ID,
+		Branch:          branchName,
+		CommitSHA:       headSHA,
+		SourceType:      models.PreviewSourceTypePullRequest,
+		SourceID:        sourceID,
+		SourceURL:       prURL,
+		CreatedByUserID: *run.TriggeredByUserID,
+	}
+	if err := s.previews.CreatePreviewTarget(ctx, target); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", run.ID.String()).
+			Int("pr_number", number).
+			Msg("failed to create PR preview target; falling back to stable app preview URL")
+		return stableURL
+	}
+
+	prNumber := number
+	link := &models.PreviewLink{
+		OrgID:           run.OrgID,
+		PreviewTargetID: target.ID,
+		LinkType:        models.PreviewLinkTypePullRequest,
+		Slug:            fmt.Sprintf("github/%s/%s/pull/%d", owner, repoName, number),
+		RepositoryID:    &repo.ID,
+		PRNumber:        &prNumber,
+	}
+	if err := s.previews.UpsertPreviewLink(ctx, link); err != nil {
+		s.logger.Warn().Err(err).
+			Str("preview_target_id", target.ID.String()).
+			Int("pr_number", number).
+			Msg("failed to create PR preview link; falling back to stable app preview URL")
+		return stableURL
+	}
+
+	s.attachMatchingSessionPreview(ctx, run, target, headSHA)
+
+	return strings.ReplaceAll(s.previewOriginTemplate, "{id}", target.ID.String())
+}
+
+func (s *PRService) attachMatchingSessionPreview(ctx context.Context, run *models.Session, target *models.PreviewTarget, headSHA string) {
+	active, err := s.previews.GetActivePreviewForSession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).
+				Str("session_id", run.ID.String()).
+				Str("preview_target_id", target.ID.String()).
+				Msg("failed to check for reusable session preview")
+		}
+		return
+	}
+	if active == nil ||
+		active.BaseCommitSHA != headSHA ||
+		active.PreviewHandle == "" ||
+		(active.Status != models.PreviewStatusReady && active.Status != models.PreviewStatusPartiallyReady) {
+		return
+	}
+	if _, err := s.previews.AttachPreviewTarget(ctx, run.OrgID, active.ID, target.ID); err != nil {
+		s.logger.Warn().Err(err).
+			Str("preview_id", active.ID.String()).
+			Str("preview_target_id", target.ID.String()).
+			Msg("failed to attach active session preview to PR target")
+	}
 }
 
 func (s *PRService) createPullRequest(ctx context.Context, token, owner, repo, title, body, head, base string, opts ...prCreateOption) (int, string, error) {
@@ -3185,7 +3266,7 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 		if err := s.pullRequests.UpdateCIStatus(ctx, pr.OrgID, pr.ID, ciStatus); err != nil {
 			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to update CI status")
 		}
-		s.enqueuePullRequestStateSync(ctx, pr)
+		s.enqueuePullRequestStateSyncWithScope(ctx, pr, "check_suite_completed")
 	}
 
 	return nil
@@ -3217,7 +3298,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		if err != nil {
 			continue // Not a 143-managed PR.
 		}
-		s.enqueuePullRequestStateSync(ctx, pr)
+		s.enqueuePullRequestStateSyncWithScope(ctx, pr, "check_run_completed")
 	}
 
 	return nil

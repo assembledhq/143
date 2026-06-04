@@ -48,23 +48,17 @@ beforeEach(() => {
     logout: logoutMock,
   });
 
-  // The layout fetches proposal summary which isn't in the default handlers
-  server.use(
-    http.get("/api/v1/projects/proposals/summary", () => {
-      return HttpResponse.json({ data: { count: 0 } });
-    }),
-  );
 });
 
 describe("AuthenticatedLayout", () => {
-  it("shows projects in the primary navigation", () => {
+  it("hides projects from the primary navigation", () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/projects");
+    expect(screen.queryByRole("link", { name: "Projects" })).not.toBeInTheDocument();
   });
 
   it("shows Autopilot in the primary navigation", () => {
@@ -86,6 +80,67 @@ describe("AuthenticatedLayout", () => {
 
     const sidebar = container.querySelector("[data-testid='app-sidebar']");
     expect(sidebar).toHaveStyle({ "--app-sidebar-w": "236px" });
+  });
+
+  it("collapses the app sidebar to a slim rail between mobile and wide desktop", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const fullSidebar = container.querySelector("[data-testid='app-sidebar']");
+    expect(fullSidebar).toHaveClass("hidden");
+    expect(fullSidebar).toHaveClass("xl:flex");
+
+    const compactRail = container.querySelector("[data-testid='app-sidebar-rail']");
+    expect(compactRail).toHaveClass("hidden");
+    expect(compactRail).toHaveClass("md:flex");
+    expect(compactRail).toHaveClass("xl:hidden");
+    expect(compactRail).toHaveClass("w-14");
+  });
+
+  it("renders compact rail Settings inside primary nav with matching sizing", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const compactRail = container.querySelector("[data-testid='app-sidebar-rail']");
+    expect(compactRail).not.toBeNull();
+
+    const quickActions = compactRail?.querySelector("[data-testid='app-sidebar-rail-quick-actions']");
+    expect(quickActions).not.toBeNull();
+    expect(within(quickActions as HTMLElement).queryByRole("link", { name: "Settings" })).toBeNull();
+    expect(within(quickActions as HTMLElement).getByRole("button", { name: "Search" })).toHaveClass("h-7", "w-10");
+
+    const primaryNav = compactRail?.querySelector("nav");
+    expect(primaryNav).not.toBeNull();
+    expect(primaryNav).toHaveClass("gap-0.5");
+
+    const sessionsLink = within(primaryNav as HTMLElement).getByRole("link", { name: "Sessions" });
+    expect(sessionsLink).toHaveClass("h-[30px]", "w-10");
+
+    const settingsNavLink = within(primaryNav as HTMLElement).getByRole("link", { name: "Settings" });
+    expect(settingsNavLink).toHaveClass("h-[30px]", "w-10");
+    expect(settingsNavLink).not.toHaveClass("h-10");
+    expect(settingsNavLink.querySelector("svg")).toHaveClass("h-4", "w-4");
+  });
+
+  it("keeps workspace and account actions reachable from the compact rail", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open workspace menu" }));
+
+    expect(await screen.findByText("Workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Log out" })).toBeInTheDocument();
   });
 
   it("restores the app sidebar width from localStorage after mount", async () => {
@@ -149,6 +204,23 @@ describe("AuthenticatedLayout", () => {
     const contentWrapper = container.querySelector("main > div:last-child");
     expect(contentWrapper).toHaveClass("flex-1");
     expect(contentWrapper).toHaveClass("min-h-0");
+  });
+
+  it("pins the authenticated app shell to the visual viewport and contains overscroll", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const appShell = container.firstElementChild;
+    expect(appShell).toHaveClass("fixed");
+    expect(appShell).toHaveClass("inset-0");
+    expect(appShell).toHaveClass("overflow-hidden");
+    expect(appShell).toHaveClass("overscroll-none");
+
+    const main = container.querySelector("main");
+    expect(main).toHaveClass("overscroll-contain");
   });
 
   it("shows settings entries in the collapsible sidebar section", async () => {

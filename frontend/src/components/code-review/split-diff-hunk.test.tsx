@@ -151,6 +151,14 @@ describe("SplitDiffHunk", () => {
     expect(content).toHaveClass("break-words");
   });
 
+  it("contains split row layout and paint work so wrapped offscreen lines stay cheap to scroll", () => {
+    const hunk = makeHunk([contextLine]);
+    const { container } = render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const row = container.querySelector(".flex.divide-x");
+    expect(row).toHaveClass("[content-visibility:auto]");
+    expect(row).toHaveClass("[contain-intrinsic-size:auto_20px]");
+  });
+
   it("renders comment thread when comments exist", () => {
     const comment: SessionReviewComment = {
       id: "c-1",

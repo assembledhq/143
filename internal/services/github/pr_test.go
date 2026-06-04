@@ -66,7 +66,24 @@ var prTestPullRequestColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-	"health_version", "merged_at", "created_at", "updated_at",
+	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+}
+
+var prTestPreviewTargetColumns = []string{
+	"id", "org_id", "repository_id", "branch", "commit_sha",
+	"preview_config_name", "resolved_config_digest", "source_type", "source_id", "source_url",
+	"created_by_user_id", "request_id", "created_at",
+}
+
+var prTestPreviewLinkColumns = []string{
+	"id", "org_id", "preview_target_id", "link_type", "slug",
+	"repository_id", "pr_number", "created_at", "updated_at",
+}
+
+func ptrInt(v int) *int {
+	return &v
 }
 
 func newPRTestRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo string, now time.Time, body *string) []any {
@@ -96,6 +113,13 @@ func newPRTestRowWithTitle(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID
 		false,
 		nil,
 		int64(0),
+		models.PullRequestMergeWhenReadyStateOff,
+		(*uuid.UUID)(nil),
+		(*time.Time)(nil),
+		"",
+		(*int64)(nil),
+		"",
+		(*time.Time)(nil),
 		(*time.Time)(nil),
 		now,
 		now,
@@ -393,7 +417,7 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	require.NoError(t, err, "should create pgxmock pool")
 	defer mock.Close()
 
-	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, db.NewJobStore(mock), zerolog.Nop())
+	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, zerolog.Nop())
 	sessionMessages := db.NewSessionMessageStore(mock)
 	service.SetSessionMessageStore(sessionMessages)
 	require.Same(t, sessionMessages, service.sessionMessages, "SetSessionMessageStore should store the session message dependency")
@@ -403,22 +427,13 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	require.Same(t, streams, service.prHealthStreams, "SetPullRequestStreams should store the stream dependency")
 
 	repoName := "assembledhq/143"
+	prID := uuid.New()
+	orgID := uuid.New()
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
-			newPRTestRow(uuid.New(), nil, uuid.New(), repoName, time.Now(), nil)...,
+			newPRTestRow(prID, nil, orgID, repoName, time.Now(), nil)...,
 		))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     pgxmock.AnyArg(),
-			"queue":      "default",
-			"job_type":   "sync_pull_request_state",
-			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
-			"dedupe_key": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-
 	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
 		Action: "completed",
 		CheckRun: struct {
@@ -2144,6 +2159,70 @@ func TestFormatPRBody_SessionLinkUsesConfiguredAppBaseURL(t *testing.T) {
 	body := svc.formatPRBody(context.Background(), run, nil)
 	require.Contains(t, body, "https://frontend.example.com/sessions/abcdef01-2345-6789-abcd-ef0123456789", "should use the configured app base URL for the session link")
 	require.NotContains(t, body, "//sessions/", "should trim trailing slashes when building the session link")
+}
+
+func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	targetID := uuid.New()
+	repo := &models.Repository{
+		ID:       repoID,
+		OrgID:    orgID,
+		FullName: "owner/repo",
+	}
+	run := &models.Session{
+		ID:                sessionID,
+		OrgID:             orgID,
+		RepositoryID:      &repoID,
+		TriggeredByUserID: &userID,
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_targets").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPreviewTargetColumns).AddRow(
+				targetID, orgID, repoID, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345",
+				"", "", string(models.PreviewSourceTypePullRequest), "owner/repo#42@abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42",
+				userID, nil, now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPreviewLinkColumns).AddRow(
+				uuid.New(), orgID, targetID, string(models.PreviewLinkTypePullRequest), "github/owner/repo/pull/42",
+				&repoID, ptrInt(42), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+			"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+			"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+			"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+			"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
+		}))
+
+	svc := &PRService{
+		previews:              db.NewPreviewStore(mock),
+		previewOriginTemplate: "https://{id}.preview.143.dev",
+		logger:                zerolog.Nop(),
+	}
+
+	url := svc.prPreviewURL(context.Background(), run, repo, "owner", "repo", 42, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42")
+
+	require.Equal(t, "https://"+targetID.String()+".preview.143.dev", url, "PR preview URL should point at the durable preview-origin target host")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestFormatPRBody_WithIssueContext(t *testing.T) {
@@ -4420,9 +4499,10 @@ func TestDispatchPostPRSnapshotUpload_PromotesOnSuccess(t *testing.T) {
 	sessionID := uuid.New()
 	const newKey = "snapshots/org/session/post-pr.tar.zst"
 
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+			AddRow(int64(2), time.Now().UTC()))
 
 	store := &blockingSnapshotStore{
 		saveStarted: make(chan struct{}),
@@ -4537,7 +4617,7 @@ func TestDispatchPostPRSnapshotUpload_LogsPromoteFailure(t *testing.T) {
 	defer mock.Close()
 
 	// Promote returns an error from the DB; no follow-up Clear call.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("connection reset"))
 
@@ -4851,9 +4931,10 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 	// PromotePendingSnapshot: the async write fired by the upload
 	// goroutine after Save() succeeds. SQL order is @id, @org_id,
 	// @expected_key, so the key guard is arg #2.
-	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), wantPendingKey).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
+			AddRow(int64(2), time.Now().UTC()))
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(

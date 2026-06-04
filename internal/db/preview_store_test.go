@@ -35,7 +35,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -61,6 +61,12 @@ var previewLogTestCols = []string{
 var previewAccessSessionTestCols = []string{
 	"id", "org_id", "user_id", "preview_instance_id",
 	"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+}
+
+var previewRuntimeTestCols = []string{
+	"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+	"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
 }
 
 var previewStartupCacheTestCols = []string{
@@ -92,6 +98,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", previewStringPtr("req-1"), "", now, now, now, nil,
+		(*int64)(nil), (*time.Time)(nil), "",
 		false,
 	}
 }
@@ -108,6 +115,14 @@ func newPreviewLinkRow(id, orgID, targetID, repoID uuid.UUID, now time.Time) []a
 	return []any{
 		id, orgID, targetID, "target", "slug-1", &repoID,
 		(*int)(nil), now, now,
+	}
+}
+
+func newPreviewRuntimeRow(id, orgID, previewID uuid.UUID, now time.Time) []any {
+	return []any{
+		id, orgID, previewID, 1, "worker-1",
+		"http://worker-runtime:8080", "handle-1", 3000, "ready", now.Add(45 * time.Second),
+		now, nil, nil, "", "", now, now,
 	}
 }
 
@@ -175,6 +190,67 @@ func TestPreviewStore_GetActivePreviewForTargetScopesByOrg(t *testing.T) {
 	instance, err := store.GetActivePreviewForTarget(context.Background(), orgID, targetID)
 	require.NoError(t, err, "GetActivePreviewForTarget should return an active target preview")
 	require.Equal(t, previewID, instance.ID, "GetActivePreviewForTarget should return the matching preview instance")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_GetLatestPreviewForTargetScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	orgID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)
+	row[2] = &targetID
+	row[7] = string(models.PreviewStatusStopped)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+
+	instance, err := store.GetLatestPreviewForTarget(context.Background(), orgID, targetID)
+	require.NoError(t, err, "GetLatestPreviewForTarget should return the newest target preview")
+	require.Equal(t, previewID, instance.ID, "GetLatestPreviewForTarget should return the matching preview instance")
+	require.Equal(t, &targetID, instance.PreviewTargetID, "GetLatestPreviewForTarget should preserve the target ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_GetPreviewForPublicHost(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	orgID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	stoppedAt := now.Add(-5 * time.Minute)
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)
+	row[2] = &targetID
+	row[7] = string(models.PreviewStatusStopped)
+	row[17] = &stoppedAt
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+
+	instance, err := store.GetPreviewForPublicHost(context.Background(), targetID)
+	require.NoError(t, err, "GetPreviewForPublicHost should return the newest runtime for the public host")
+	require.Equal(t, previewID, instance.ID, "GetPreviewForPublicHost should return the matching preview instance")
+	require.Equal(t, &targetID, instance.PreviewTargetID, "GetPreviewForPublicHost should preserve the target ID")
+	require.Equal(t, &stoppedAt, instance.StoppedAt, "GetPreviewForPublicHost should preserve stopped time")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -247,18 +323,33 @@ func TestPreviewStore_CreatePreviewInstance(t *testing.T) {
 		RecycleConfig:  json.RawMessage(`{"version":"3"}`),
 		RecycleSandbox: json.RawMessage(`{"id":"sandbox-1"}`),
 	}
+	revision := int64(7)
+	revisionUpdatedAt := now.Add(-time.Minute)
+	p.SourceWorkspaceRevision = &revision
+	p.SourceWorkspaceRevisionUpdatedAt = &revisionUpdatedAt
+	row := newPreviewInstanceRow(generatedID, sessionID, orgID, userID, now)
+	for i, column := range previewInstanceTestCols {
+		switch column {
+		case "source_workspace_revision":
+			row[i] = &revision
+		case "source_workspace_revision_updated_at":
+			row[i] = &revisionUpdatedAt
+		}
+	}
 
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(previewAnyArgs(24)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(generatedID, sessionID, orgID, userID, now)...),
+				AddRow(row...),
 		)
 
 	err = store.CreatePreviewInstance(context.Background(), p)
 	require.NoError(t, err)
 	require.Equal(t, generatedID, p.ID)
 	require.Equal(t, 10240, p.DiskLimitMB)
+	require.Equal(t, &revision, p.SourceWorkspaceRevision)
+	require.Equal(t, &revisionUpdatedAt, p.SourceWorkspaceRevisionUpdatedAt)
 	require.Equal(t, now, p.CreatedAt)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -391,7 +482,7 @@ func TestPreviewStore_GetLatestTerminalPreviewForSession(t *testing.T) {
 	userID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances.+status IN \\('stopped', 'expired', 'failed'\\).+ORDER BY created_at DESC").
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+status IN \\('stopped', 'expired', 'failed', 'unavailable'\\).+ORDER BY created_at DESC").
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
@@ -485,6 +576,32 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalCascadesChildren(t *testing.T)
 
 	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
 	require.NoError(t, err, "terminal status update should cascade children")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatus_TerminalClearsPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+preview_holding_container = FALSE.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.NoError(t, err, "terminal status update should clear the preview sandbox hold")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -675,6 +792,33 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadesChildren(t *te
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalClearsPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+preview_holding_container = FALSE.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.NoError(t, err, "terminal conditional status update should clear the preview sandbox hold")
+	require.True(t, updated, "conditional terminal status update should report the row was changed")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalUpdateError(t *testing.T) {
 	t.Parallel()
 
@@ -806,6 +950,9 @@ func TestPreviewStore_StopPreview(t *testing.T) {
 				mock.ExpectExec("UPDATE preview_infrastructure SET").
 					WithArgs(previewAnyArgs(5)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+				mock.ExpectExec("UPDATE preview_runtimes").
+					WithArgs(previewAnyArgs(2)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			}
 
 			err = store.StopPreview(context.Background(), uuid.New(), uuid.New())
@@ -1854,6 +2001,9 @@ func TestPreviewStore_StopPreviewWithRevocation(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(previewAnyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
@@ -1986,7 +2136,7 @@ func TestPreviewStore_CountActivePreviewsByWorker(t *testing.T) {
 
 	store := NewPreviewStore(mock)
 
-	mock.ExpectQuery("SELECT COUNT").
+	mock.ExpectQuery("SELECT COUNT[\\s\\S]+lease_expires_at > now\\(\\)").
 		WithArgs(previewAnyArgs(1)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 
@@ -1994,6 +2144,185 @@ func TestPreviewStore_CountActivePreviewsByWorker(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_CreatePreviewRuntime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	runtime := &models.PreviewRuntime{
+		OrgID:             orgID,
+		PreviewInstanceID: previewID,
+		RuntimeEpoch:      1,
+		WorkerNodeID:      "worker-1",
+		EndpointURL:       "http://worker-1:8080",
+		Status:            models.PreviewRuntimeStatusStarting,
+		LeaseExpiresAt:    now.Add(time.Minute),
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+
+	err = store.CreatePreviewRuntime(context.Background(), runtime)
+	require.NoError(t, err, "CreatePreviewRuntime should insert a runtime scoped to org and preview")
+	require.Equal(t, runtimeID, runtime.ID, "CreatePreviewRuntime should hydrate the generated runtime ID")
+	require.Equal(t, models.PreviewRuntimeStatusReady, runtime.Status, "CreatePreviewRuntime should hydrate runtime status from the database")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CreateNextPreviewRuntimeStopsPreviousEpoch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(runtime_epoch\\), 0\\) \\+ 1").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"runtime_epoch"}).AddRow(3))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+	mock.ExpectCommit()
+
+	runtime, err := store.CreateNextPreviewRuntime(context.Background(), orgID, previewID, "worker-2", "http://worker-2.internal")
+	require.NoError(t, err, "CreateNextPreviewRuntime should atomically replace the active runtime")
+	require.Equal(t, runtimeID, runtime.ID, "CreateNextPreviewRuntime should return the inserted runtime")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_ReassignPreviewWorkerUpdatesReservationAndRuntime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET worker_node_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT COALESCE\\(MAX\\(runtime_epoch\\), 0\\) \\+ 1").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"runtime_epoch"}).AddRow(2))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+	mock.ExpectCommit()
+
+	err = store.ReassignPreviewWorker(context.Background(), orgID, previewID, "worker-2", "http://worker-2.internal")
+	require.NoError(t, err, "ReassignPreviewWorker should atomically update reservation ownership and runtime routing")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_GetActivePreviewRuntimeScopesByOrgAndLease(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+
+	runtime, err := store.GetActivePreviewRuntime(context.Background(), orgID, previewID)
+	require.NoError(t, err, "GetActivePreviewRuntime should return the live runtime")
+	require.Equal(t, runtimeID, runtime.ID, "GetActivePreviewRuntime should return the matching runtime")
+	require.Equal(t, "http://worker-runtime:8080", runtime.EndpointURL, "GetActivePreviewRuntime should return the endpoint from the runtime row")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerMarksPreviewUnavailable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+UPDATE preview_instances[\\s\\S]+preview_holding_container = FALSE").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	updated, err := store.MarkActivePreviewRuntimesLostByWorker(context.Background(), "worker-1", "drain timeout")
+	require.NoError(t, err, "MarkActivePreviewRuntimesLostByWorker should mark runtimes lost")
+	require.Equal(t, int64(2), updated, "MarkActivePreviewRuntimesLostByWorker should return affected preview count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerRecordsUnavailableReason(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	updated, err := store.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), "worker-1", "drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout)
+	require.NoError(t, err, "MarkActivePreviewRuntimesLostByWorkerWithReason should persist a deploy-specific reason")
+	require.Equal(t, int64(1), updated, "MarkActivePreviewRuntimesLostByWorkerWithReason should report updated previews")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkExpiredPreviewRuntimesLostClearsPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+UPDATE preview_instances[\\s\\S]+preview_holding_container = FALSE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	updated, err := store.MarkExpiredPreviewRuntimesLost(context.Background(), time.Now(), "preview runtime lease expired")
+	require.NoError(t, err, "MarkExpiredPreviewRuntimesLost should mark expired runtimes lost")
+	require.Equal(t, int64(1), updated, "MarkExpiredPreviewRuntimesLost should report updated previews")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_ListIdlePreviews(t *testing.T) {
@@ -2010,7 +2339,7 @@ func TestPreviewStore_ListIdlePreviews(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances.+last_accessed_at").
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+session_sandbox_holders.+last_accessed_at").
 		WithArgs(previewAnyArgs(1)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
@@ -2038,7 +2367,7 @@ func TestPreviewStore_ListIdlePreviewsForWorker(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = .+last_accessed_at").
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = .+session_sandbox_holders.+last_accessed_at").
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
@@ -2346,4 +2675,22 @@ func TestPreviewStore_UpdatePreviewReservationConfig_ExecError(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "update preview reservation config")
+}
+
+func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	cutoff := time.Now().UTC()
+	mock.ExpectExec("DELETE FROM preview_dependency_cache_locations").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 7))
+
+	deleted, err := NewPreviewStore(mock).DeleteExpiredDependencyCacheLocations(context.Background(), cutoff)
+	require.NoError(t, err, "DeleteExpiredDependencyCacheLocations should delete stale location hints")
+	require.Equal(t, int64(7), deleted, "DeleteExpiredDependencyCacheLocations should report deleted rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

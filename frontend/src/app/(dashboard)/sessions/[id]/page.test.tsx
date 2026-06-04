@@ -161,6 +161,13 @@ describe('SessionDetailPage', () => {
     expect(elements.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('protects the conversation workspace from collapsing on compact desktop widths', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-conversation-workspace')).toHaveClass('md:min-w-[440px]');
+  });
+
   it('updates the browser tab title with the session title', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
@@ -745,7 +752,15 @@ describe('SessionDetailPage', () => {
 
     expect(screen.getByTestId('session-main-header')).toHaveClass('h-14');
     expect(screen.getByTestId('session-detail-header')).toHaveClass('h-14');
-    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-full');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
+  });
+
+  it('clips crowded session header metadata before it can overlap the detail toggle', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByTestId('session-header-summary')).toHaveClass('overflow-hidden');
+    expect(screen.getByTestId('session-header-actions')).toHaveClass('shrink-0');
   });
 
   it('uses a dedicated mobile close button that does not compete with PR actions', async () => {
@@ -1124,8 +1139,8 @@ describe('SessionDetailPage', () => {
 
     expect(mainHeader).toHaveClass('h-14', 'border-b');
     expect(detailHeader).toHaveClass('h-14', 'border-b');
-    expect(detailHeaderBar).toHaveClass('h-full');
-    expect(detailHeaderBar).not.toHaveClass('h-14');
+    expect(detailHeaderBar).toHaveClass('h-14');
+    expect(detailHeaderBar).not.toHaveClass('h-full');
   });
 
   it('shows the desktop agent tab row as soon as a second tab is being created', async () => {
@@ -1315,7 +1330,7 @@ describe('SessionDetailPage', () => {
       },
     ];
     const patchedBodies: Array<{ agent_type?: string; label?: string; model?: string }> = [];
-    let postedMessageBody: { message: string } | null = null;
+    let postedMessageBody: { message: string; client_message_id?: string } | null = null;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -1377,7 +1392,7 @@ describe('SessionDetailPage', () => {
         return HttpResponse.json({ data: updatedThread } satisfies SingleResponse<SessionThread>);
       }),
       http.post('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {
-        postedMessageBody = await request.json() as { message: string };
+        postedMessageBody = await request.json() as { message: string; client_message_id?: string };
         return HttpResponse.json({
           data: {
             id: 101,
@@ -1414,8 +1429,17 @@ describe('SessionDetailPage', () => {
       expect(patchedBodies).toContainEqual({ label: 'Codex 2', model: 'gpt-5.4-mini' });
     });
     await waitFor(() => {
-      expect(postedMessageBody).toEqual({ message: 'Use the selected model.' });
+      // Send carries a generated client_message_id (durable inbox
+      // idempotency token). Assert the user-meaningful payload here and
+      // verify the idempotency token shape separately so the test is not
+      // coupled to crypto.randomUUID output.
+      expect(postedMessageBody).toMatchObject({ message: 'Use the selected model.' });
     });
+    // TS narrows postedMessageBody to `null` outside the msw closure (it
+    // doesn't follow the closure assignment), so refer to the captured
+    // value through a typed local that preserves the declared shape.
+    const sentBody = postedMessageBody as { message: string; client_message_id?: string } | null;
+    expect(sentBody?.client_message_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it('shows the agent selector before model override on a new blank tab composer', async () => {
@@ -1544,6 +1568,213 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('group', { name: /Codex/ })).toBeInTheDocument();
   });
 
+  it('refreshes thread state when session status SSE payload omits thread detail', async () => {
+    const sessionId = 'session-status-refreshes-thread-state';
+    const thread: SessionThread = {
+      id: 'thread-main',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Main',
+      status: 'idle',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    let sessionFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            sandbox_state: sessionFetchCount >= 2 ? 'running' : 'snapshotted',
+            threads: [{
+              ...thread,
+              status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            }],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Start work',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Start work')).toBeInTheDocument();
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'running',
+        sandbox_state: 'running',
+      });
+    });
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('refreshes thread state when the session SSE stream opens', async () => {
+    const sessionId = 'session-open-refreshes-thread-state';
+    const thread: SessionThread = {
+      id: 'thread-main',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Main',
+      status: 'idle',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    let sessionFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            sandbox_state: sessionFetchCount >= 2 ? 'running' : 'snapshotted',
+            threads: [{
+              ...thread,
+              status: sessionFetchCount >= 2 ? 'running' : 'idle',
+            }],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Start work',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Start work')).toBeInTheDocument();
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].onopen?.(new Event('open'));
+    });
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('polls active session detail so missed status events self-heal', async () => {
+    const sessionId = 'session-active-detail-polling';
+    const thread: SessionThread = {
+      id: 'thread-main',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Main',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+    let sessionFetchCount = 0;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: sessionFetchCount >= 2 ? 'completed' : 'running',
+            sandbox_state: sessionFetchCount >= 2 ? 'snapshotted' : 'running',
+            threads: [{
+              ...thread,
+              status: sessionFetchCount >= 2 ? 'completed' : 'running',
+            }],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Start work',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
+    }, { timeout: 5000 });
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+  }, 10000);
+
   it('clears stale running thread UI when a cancelled session status omits thread detail', async () => {
     const sessionId = 'session-cancelled-thread-omitted';
     const thread: SessionThread = {
@@ -1612,6 +1843,76 @@ describe('SessionDetailPage', () => {
       expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
     });
     expect(screen.getByText('Session stopped')).toBeInTheDocument();
+  });
+
+  it('clears stale running thread UI when an idle session status omits thread detail', async () => {
+    const sessionId = 'session-idle-thread-omitted';
+    const thread: SessionThread = {
+      id: 'thread-codex',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'codex',
+      label: 'Codex',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-02-17T07:00:00Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 1,
+            session_id: sessionId,
+            org_id: 'org-1',
+            thread_id: thread.id,
+            turn_number: 1,
+            role: 'user',
+            content: 'Finish this run',
+            created_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<SessionMessage>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        status: 'idle',
+        sandbox_state: 'snapshotted',
+        snapshot_key: 'snapshots/session-idle-thread-omitted.tar',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    });
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
   });
 
   it('archives a closed thread and switches focus to a remaining tab', async () => {
@@ -3457,6 +3758,47 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
   });
 
+  it('uses merged health as terminal while the cached PR row still says open', async () => {
+    const prCreatedSession: Session = {
+      ...mockSessions[0],
+      status: 'pr_created',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: prCreatedSession,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPR,
+            status: 'open',
+            merged_at: null,
+          },
+        } satisfies SingleResponse<PullRequest>);
+      }),
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            status: 'merged',
+            can_merge: false,
+            summary: 'PR #42 was merged successfully.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findAllByText('PR merged')).toHaveLength(2);
+    expect(screen.getByText('PR #42 merged')).toBeInTheDocument();
+    expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
+    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+  });
+
   it('updates the header status when the PR stream reports a merge', async () => {
     const prCreatedSession: Session = {
       ...mockSessions[0],
@@ -3848,6 +4190,8 @@ describe('SessionDetailPage', () => {
       failure_category: 'test_failure',
       failure_next_steps: ['Check logs', 'Retry with debug'],
       failure_retry_advised: true,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
     };
 
     server.use(
@@ -3861,7 +4205,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('test_failure')).toBeInTheDocument();
     expect(screen.getByText('Check logs')).toBeInTheDocument();
     expect(screen.getByText('Retry with debug')).toBeInTheDocument();
-    expect(screen.getByText('Retry')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeInTheDocument();
   });
 
   it('shows duration for completed session', async () => {
@@ -4476,6 +4820,49 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('keeps Create PR at full opacity while the request is queueing', async () => {
+    let releaseCreatePR: (() => void) | undefined;
+    const createPRResponse = new Promise<Response>((resolve) => {
+      releaseCreatePR = () => resolve(HttpResponse.json({ status: 'queued' }, { status: 202 }));
+    });
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', async () => {
+        return createPRResponse;
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const user = userEvent.setup();
+    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
+    await user.click(createPRButton);
+
+    const queueingButton = await screen.findByRole('button', { name: /Queueing PR/ });
+    expect(queueingButton).toBeDisabled();
+    expect(queueingButton).toHaveAttribute('data-loading', 'true');
+    expect(queueingButton).toHaveClass('disabled:data-[loading=true]:opacity-100');
+
+    releaseCreatePR?.();
+  });
+
   it('does not queue duplicate create PR requests from the keyboard while one is pending', async () => {
     let createPRCalls = 0;
 
@@ -4635,6 +5022,38 @@ describe('SessionDetailPage', () => {
     expect(alert).toHaveTextContent("Couldn't create the PR");
     expect(alert).toHaveTextContent('GitHub rejected the branch push.');
     expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('lets the detail header grow when showing a PR error notice', async () => {
+    const sessionWithPRFailure: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'failed',
+      pr_creation_error: 'No changes to push.',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithPRFailure } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't create the PR");
+    expect(screen.getByTestId('session-detail-header')).toHaveClass('min-h-14');
+    expect(screen.getByTestId('session-detail-header')).not.toHaveClass('h-14');
+    expect(screen.getByTestId('session-detail-header-bar')).toHaveClass('h-14');
   });
 
   it('shows the PR authorship modal and falls back to app mode when requested', async () => {
@@ -5689,6 +6108,7 @@ describe('SessionDetailPage', () => {
       ...mockSessions[1],
       failure_category: 'codex_auth_expired',
       failure_explanation: 'Codex token expired',
+      failure_retry_advised: true,
       agent_type: 'codex',
     };
 
@@ -5705,8 +6125,84 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
     await screen.findByText('Failure details');
     expect(
-      await screen.findByText(/ChatGPT connected/),
+      await screen.findByText('ChatGPT connected — open the retry menu and choose Start over from beginning.'),
     ).toBeInTheDocument();
+  });
+
+  it('points codex auth users to Retry when saved progress exists', async () => {
+    const codexAuthSession: Session = {
+      ...mockSessions[1],
+      failure_category: 'codex_auth_expired',
+      failure_explanation: 'Codex token expired',
+      failure_retry_advised: true,
+      agent_type: 'codex',
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: codexAuthSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/codex-auth/status', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('scope')).toBe('personal');
+        return HttpResponse.json({ data: { status: 'completed' } });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+    expect(
+      await screen.findByText('ChatGPT connected — click Retry to continue this session.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeEnabled();
+  });
+
+  it('shows runtime restoration while keeping follow-up input enabled', async () => {
+    const recoveringSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+      recovery_state: 'queued',
+      recovery_queued_at: '2026-05-28T12:00:00Z',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: recoveringSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findAllByText('Restoring runtime from checkpoint')).not.toHaveLength(0);
+    expect(screen.getAllByText('Follow-up messages will be queued and delivered after the runtime is restored.')).not.toHaveLength(0);
+    const composer = screen.getByPlaceholderText('Send a follow-up message...');
+    expect(composer).toBeEnabled();
+  });
+
+  it('disables checkpoint retry while recovery is active', async () => {
+    const recoveringFailedSession: Session = {
+      ...mockSessions[1],
+      failure_retry_advised: true,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
+      recovery_state: 'recovering',
+      recovery_started_at: '2026-05-28T12:00:00Z',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: recoveringFailedSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await screen.findByText('Failure details');
+    expect(screen.getAllByText('Restoring runtime from checkpoint')).not.toHaveLength(0);
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeDisabled();
   });
 
   it('can toggle the detail panel visibility', async () => {
@@ -6893,9 +7389,8 @@ describe('SessionDetailPage', () => {
     const changesTab = screen.getByRole('tab', { name: /^Changes/ });
     await user.click(changesTab);
 
-    // Click "Review 1 file" button to enter review mode
-    const reviewButton = await screen.findByText(/Review 1 file/);
-    await user.click(reviewButton);
+    expect(screen.queryByRole('button', { name: /Review 1 file/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
 
     // Should show the file content in the review diff view
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
@@ -7380,7 +7875,7 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/environment has expired/i)).toBeVisible();
   });
 
-  it('keeps the no-headless-resume warning visible in review mode with the shared composer', async () => {
+  it('does not show the no-headless-resume warning for Amp in review mode', async () => {
     const ampSessionWithDiff: Session = {
       ...mockSessions[0],
       agent_type: 'amp',
@@ -7395,12 +7890,13 @@ describe('SessionDetailPage', () => {
     mockSessionDetailWithLazyDiff(ampSessionWithDiff);
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText(/doesn't support headless conversation resume/i);
+    expect(await screen.findAllByText('Fixed TypeError by adding null check')).not.toHaveLength(0);
+    expect(screen.queryByText(/doesn't support headless conversation resume/i)).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getAllByTitle('View changes')[0]);
 
-    expect(await screen.findByText(/doesn't support headless conversation resume/i)).toBeVisible();
+    expect(screen.queryByText(/doesn't support headless conversation resume/i)).not.toBeInTheDocument();
   });
 
   it('shares composer draft state and review comment attachments between chat and review mode', async () => {
@@ -7505,7 +8001,7 @@ describe('SessionDetailPage', () => {
     expect(screen.getByTitle('Hide details')).toBeInTheDocument();
   });
 
-  it('shows review file count in Changes tab and file click works', async () => {
+  it('uses the Changes tab file list as the desktop review entry point', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;',
@@ -7521,11 +8017,13 @@ describe('SessionDetailPage', () => {
     const changesTab = screen.getByRole('tab', { name: /^Changes/ });
     await user.click(changesTab);
 
-    // Should show "Review 2 files" button
-    expect(await screen.findByText(/Review 2 files/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Review 2 files/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
+
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
 
-  it('keeps the review diff file set aligned with the Changes tab attribution filter', async () => {
+  it('opens review from the Changes tab without a tab attribution filter', async () => {
     const sessionId = 'session-abcdef12-3456-7890';
     const codexThread: SessionThread = {
       id: 'thread-codex',
@@ -7643,19 +8141,15 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: /^Changes/ }));
 
     const changesPanel = screen.getByRole('tabpanel', { name: /^Changes/ });
-    await user.click(within(changesPanel).getByRole('combobox'));
-    await user.click(await screen.findByRole('option', { name: 'Touched by Codex' }));
+    expect(within(changesPanel).queryByRole('combobox')).not.toBeInTheDocument();
 
-    expect(await screen.findByText('Review 2 files')).toBeInTheDocument();
-    expect(screen.queryByText(/^automation-model-select\.tsx$/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review 3 files' })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Review 2 files' }));
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
 
     expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
     expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();
-    expect(
-      screen.queryByText('frontend/src/components/automation-model-select.tsx')
-    ).not.toBeInTheDocument();
+    expect(screen.getByText('frontend/src/components/automation-model-select.tsx')).toBeInTheDocument();
   });
 
   it('shows model selector for agents with available models', async () => {
@@ -8181,21 +8675,23 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('Unknown user')).not.toBeInTheDocument();
   });
 
-  it('calls retry API when Retry button is clicked on failed session', async () => {
-    let retryCalled = false;
+  it('calls checkpoint retry API when primary retry button is clicked on failed session', async () => {
+    let retryBody: unknown;
 
     const failedSession: Session = {
       ...mockSessions[1],
       failure_explanation: 'Something broke',
       failure_retry_advised: true,
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snapshot/test',
     };
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
       }),
-      http.post('/api/v1/sessions/:id/retry', () => {
-        retryCalled = true;
+      http.post('/api/v1/sessions/:id/retry', async ({ request }) => {
+        retryBody = await request.json();
         return HttpResponse.json({ data: { ...failedSession, status: 'pending' } });
       }),
     );
@@ -8204,11 +8700,73 @@ describe('SessionDetailPage', () => {
     await screen.findByText('Failure details');
 
     const user = userEvent.setup();
-    const retryButton = screen.getByText('Retry');
+    const retryButton = screen.getByRole('button', { name: /^Retry$/i });
     await user.click(retryButton);
 
     await waitFor(() => {
-      expect(retryCalled).toBe(true);
+      expect(retryBody).toEqual({ mode: 'checkpoint' });
+    });
+  });
+
+  it('disables checkpoint retry without a checkpoint but keeps start-over available', async () => {
+    const failedSession: Session = {
+      ...mockSessions[1],
+      failure_explanation: 'Something broke',
+      failure_retry_advised: true,
+      sandbox_state: 'none',
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+
+    expect(screen.getByRole('button', { name: /^Retry$/i })).toBeDisabled();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /More retry actions/i }));
+    expect(await screen.findByRole('menuitem', { name: /Start over from beginning/i })).toBeInTheDocument();
+  });
+
+  it('requires confirmation before posting start-over retry mode', async () => {
+    let retryBody: unknown;
+    const failedSession: Session = {
+      ...mockSessions[1],
+      failure_explanation: 'Something broke',
+      failure_retry_advised: true,
+      sandbox_state: 'none',
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/retry', async ({ request }) => {
+        retryBody = await request.json();
+        return HttpResponse.json({ data: { ...failedSession, status: 'pending' } });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+    await screen.findByText('Failure details');
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /More retry actions/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /Start over from beginning/i }));
+
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(retryBody).toBeUndefined();
+
+    await user.click(screen.getByRole('button', { name: /^Start over$/i }));
+
+    await waitFor(() => {
+      expect(retryBody).toEqual({ mode: 'start_over' });
     });
   });
 

@@ -3,7 +3,6 @@
 import {
   Zap,
   Play,
-  FolderKanban,
   RefreshCw,
   LogOut,
   ChevronsUpDown,
@@ -14,6 +13,7 @@ import {
   Check,
   Menu,
   X,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -27,7 +27,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Sheet,
   SheetClose,
@@ -40,10 +39,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
 import { useCallback, useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
@@ -112,21 +114,18 @@ type NavItem = {
   label: string;
   icon: LucideIcon;
   href: string;
-  showProposalBadge: boolean;
 };
 
 const navItems: NavItem[] = [
-  { label: "Sessions", icon: Play, href: "/sessions", showProposalBadge: false },
-  { label: "Automations", icon: RefreshCw, href: "/automations", showProposalBadge: false },
-  { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
-  { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
+  { label: "Sessions", icon: Play, href: "/sessions" },
+  { label: "Automations", icon: RefreshCw, href: "/automations" },
+  { label: "Autopilot", icon: Zap, href: "/autopilot" },
 ];
 
 type SidebarBodyProps = {
   variant: "desktop" | "mobile";
   user: SidebarUser;
   pathname: string;
-  proposalCount: number;
   onPaletteOpen: () => void;
   onCreateSession: () => void;
   onNavigate?: () => void;
@@ -137,7 +136,6 @@ function SidebarBody({
   variant,
   user,
   pathname,
-  proposalCount,
   onPaletteOpen,
   onCreateSession,
   onNavigate,
@@ -236,11 +234,6 @@ function SidebarBody({
             >
               <item.icon className="h-4 w-4 shrink-0" />
               {item.label}
-              {item.showProposalBadge && proposalCount > 0 && (
-                <Badge variant="secondary" className="ml-auto text-xs px-1.5 py-0 h-5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">
-                  {proposalCount}
-                </Badge>
-              )}
             </Link>
           );
         })}
@@ -306,6 +299,166 @@ function SidebarBody({
   );
 }
 
+type CompactSidebarRailProps = {
+  user: SidebarUser;
+  pathname: string;
+  onPaletteOpen: () => void;
+  onCreateSession: () => void;
+  onLogout: () => void;
+};
+
+function CompactSidebarRail({
+  user,
+  pathname,
+  onPaletteOpen,
+  onCreateSession,
+  onLogout,
+}: CompactSidebarRailProps) {
+  return (
+    <TooltipProvider>
+      <aside
+        data-testid="app-sidebar-rail"
+        className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2"
+        aria-label="Primary navigation"
+      >
+        <div data-testid="app-sidebar-rail-quick-actions" className="flex flex-col items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onPaletteOpen}
+                className="h-7 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                aria-label="Search"
+              >
+                <Search className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Search</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onCreateSession}
+                className="h-7 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                aria-label="New session"
+              >
+                <PenSquare className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>New session</TooltipContent>
+          </Tooltip>
+        </div>
+
+        <nav className="mt-2 flex flex-1 flex-col items-center gap-0.5">
+          {navItems.map((item) => {
+            const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+            return (
+              <Tooltip key={item.href}>
+                <TooltipTrigger asChild>
+                  <Link
+                    href={item.href}
+                    aria-label={item.label}
+                    aria-current={isActive ? "page" : undefined}
+                    className={cn(
+                      "relative flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
+                      isActive
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                        : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                    )}
+                  >
+                    <item.icon className="h-4 w-4" />
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent side="right" sideOffset={8}>{item.label}</TooltipContent>
+              </Tooltip>
+            );
+          })}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                href="/settings"
+                aria-label="Settings"
+                aria-current={pathname.startsWith("/settings") ? "page" : undefined}
+                className={cn(
+                  "flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
+                  pathname.startsWith("/settings")
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Settings className="h-4 w-4" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Settings</TooltipContent>
+          </Tooltip>
+        </nav>
+
+        <Popover>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="mt-1 h-10 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  aria-label="Open workspace menu"
+                >
+                  {user?.avatar_url ? (
+                    /* eslint-disable-next-line @next/next/no-img-element */
+                    <img
+                      src={user.avatar_url}
+                      alt=""
+                      className="h-5 w-5 rounded-full"
+                    />
+                  ) : (
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium">
+                      {user?.name?.[0]?.toUpperCase() ?? "?"}
+                    </span>
+                  )}
+                </Button>
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>Workspace</TooltipContent>
+          </Tooltip>
+          <PopoverContent
+            side="right"
+            align="end"
+            sideOffset={8}
+            className="w-72 p-0"
+          >
+            <div className="space-y-3 p-3">
+              <div className="space-y-1">
+                <p className="px-1 text-xs font-medium text-muted-foreground">Workspace</p>
+                <div className="rounded-md border border-border/60 bg-background px-2 py-1.5">
+                  <OrgSwitcher userEmail={user?.email} />
+                </div>
+              </div>
+              <div className="rounded-md border border-border/60 bg-background p-1">
+                <RepoContextSwitcher />
+              </div>
+              <div className="border-t border-border/60 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
+                  onClick={onLogout}
+                >
+                  <LogOut className="h-4 w-4" />
+                  Log out
+                </Button>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
+      </aside>
+    </TooltipProvider>
+  );
+}
+
 type MobileTopBarProps = {
   onOpenMenu: () => void;
   onPaletteOpen: () => void;
@@ -367,20 +520,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     user,
     isLoading,
     isFetching,
-    isAuthenticated,
     isUnauthorized,
     isTransientError,
     refetchUser,
     logout,
   } = useAuth();
-
-  const { data: proposalSummary } = useQuery({
-    queryKey: ["proposalSummary"],
-    queryFn: () => api.projects.proposalSummary(),
-    refetchInterval: 30000,
-    enabled: isAuthenticated,
-  });
-  const proposalCount = proposalSummary?.data?.count ?? 0;
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -471,12 +615,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   if (showLoadingSkeleton) {
     return (
-      <div className="flex h-dvh">
+      <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
+        {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
+        <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2" />
         <aside
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            "hidden md:flex bg-sidebar flex-col w-[var(--app-sidebar-w)]"
+            "hidden xl:flex bg-sidebar flex-col w-[var(--app-sidebar-w)]"
           )}
         >
           <div className="px-4 py-4">
@@ -497,7 +643,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             </div>
           </div>
         </aside>
-        <div className="hidden md:block">
+        <div className="hidden xl:block">
           <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
         </div>
         <div className="flex flex-1 min-w-0 flex-col">
@@ -506,7 +652,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
           </header>
-          <main className="flex-1 overflow-auto bg-background">
+          <main className="flex-1 overflow-auto overscroll-contain bg-background">
             <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
               <div className="h-7 w-40 rounded bg-muted animate-pulse" />
               <div className="space-y-3">
@@ -530,26 +676,32 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="flex h-dvh">
+    <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
       {/* Desktop sidebar (md and up) */}
+      <CompactSidebarRail
+        user={user}
+        pathname={pathname}
+        onPaletteOpen={handlePaletteOpen}
+        onCreateSession={handleCreateSessionOpen}
+        onLogout={logout}
+      />
       <aside
         data-testid="app-sidebar"
         style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          "hidden md:flex bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
+          "hidden xl:flex bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
         )}
       >
         <SidebarBody
           variant="desktop"
           user={user}
           pathname={pathname}
-          proposalCount={proposalCount}
           onPaletteOpen={handlePaletteOpen}
           onCreateSession={handleCreateSessionOpen}
           onLogout={logout}
         />
       </aside>
-      <div className="hidden md:block">
+      <div className="hidden xl:block">
         <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
       </div>
 
@@ -566,7 +718,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             variant="mobile"
             user={user}
             pathname={pathname}
-            proposalCount={proposalCount}
             onPaletteOpen={handlePaletteOpen}
             onCreateSession={handleCreateSessionOpen}
             onNavigate={handleCloseMobileMenu}
@@ -584,7 +735,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             onCreateSession={handleCreateSessionOpen}
           />
         ) : null}
-        <main className="flex-1 overflow-auto bg-background relative flex flex-col">
+        <main className="flex-1 overflow-auto overscroll-contain bg-background relative flex flex-col">
           <div className="relative max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 flex-1 min-h-0">
             {children}
           </div>

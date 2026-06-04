@@ -172,7 +172,7 @@ func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
 	require.Equal(t, orgIDs[0].String(), firstPayload["org_id"], "scheduler should include the target org ID in the reconciliation payload")
 	require.Equal(t, pullRequestReconcileBatch, firstPayload["limit"], "scheduler should include the configured reconciliation batch size")
 	require.Len(t, jobs.dedupeKeys, 2, "should compute one dedupe key per reconciliation job")
-	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":2026042322", "dedupe key should include the org and UTC hour bucket")
+	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":20260423220", "dedupe key should include the org and UTC ten-minute bucket")
 }
 
 func TestScheduler_ScheduleLinearTeamKeyRefresh_OncePerUTCDay(t *testing.T) {

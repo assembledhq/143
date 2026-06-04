@@ -59,7 +59,10 @@ func runSessionExecutorMain() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
+		MaxConns:        cfg.DatabaseMaxConns,
+		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -151,9 +154,11 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	sessionStreams := cache.NewSessionStreams(redisClient, logger, redisMetrics)
 	sessionStore.SetLogger(logger)
 	sessionLogStore.SetLogger(logger)
+	sessionThreadStore.SetLogger(logger)
 	if sessionStreams != nil {
 		sessionStore.SetStreams(sessionStreams)
 		sessionLogStore.SetStreams(sessionStreams)
+		sessionThreadStore.SetStreams(sessionStreams)
 	}
 
 	containerUsageStore := db.NewContainerUsageStore(pool)
@@ -255,6 +260,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		orgSettingsCache,
 		sandboxCapacity,
 		redisClient,
+		sessionStreams,
 		fileReader,
 	)
 	if services == nil {
@@ -287,6 +293,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		AutomationRuns:      automationRunStore,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+		Previews:            db.NewPreviewStore(pool),
+		PullRequests:        pullRequestStore,
 	}
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores

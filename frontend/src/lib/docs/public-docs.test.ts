@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import getStartedMeta from "../../../../docs/public/getting-started/meta.json";
 import guidesMeta from "../../../../docs/public/guides/meta.json";
@@ -11,6 +13,44 @@ import {
   getPublicDocsLlmsText,
   type LlmsPage,
 } from "./public-docs";
+
+const publicDocsPath = join(process.cwd(), "..", "docs", "public");
+
+function publicMdxFiles(dir = publicDocsPath): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      return publicMdxFiles(entryPath);
+    }
+
+    return entry.isFile() && entry.name.endsWith(".mdx") ? [entryPath] : [];
+  });
+}
+
+function readPublicMdx(filePath: string) {
+  const content = readFileSync(filePath, "utf8");
+  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+
+  if (!match) {
+    throw new Error(`${filePath} is missing frontmatter`);
+  }
+
+  const title = match[1].match(/^title:\s*(.+)$/m)?.[1].replace(/^"|"$/g, "");
+  const description = match[1]
+    .match(/^description:\s*(.+)$/m)?.[1]
+    .replace(/^"|"$/g, "");
+
+  if (!title || !description) {
+    throw new Error(`${filePath} is missing title or description`);
+  }
+
+  return {
+    body: match[2].trimStart(),
+    description,
+    title,
+  };
+}
 
 describe("public docs source", () => {
   it("uses docs/public as the only public content root", () => {
@@ -37,6 +77,37 @@ describe("public docs source", () => {
     expect(sectionMetas.every((meta) => !("root" in meta))).toBe(true);
   });
 
+  it("lets the docs layout own page titles instead of repeating them in MDX", () => {
+    for (const filePath of publicMdxFiles()) {
+      const page = readPublicMdx(filePath);
+
+      expect(page.body).not.toMatch(new RegExp(`^#\\s+${page.title}\\s*$`, "m"));
+    }
+  });
+
+  it("uses body introductions for content that goes beyond the metadata description", () => {
+    for (const filePath of publicMdxFiles()) {
+      const page = readPublicMdx(filePath);
+      const firstParagraph = page.body
+        .split(/\n\s*\n/u)
+        .find((block) => !block.startsWith("import ")) ?? "";
+
+      expect(firstParagraph).not.toContain(page.description);
+    }
+  });
+
+  it("documents the public docs authoring model for future pages", () => {
+    const agentsPath = join(publicDocsPath, "AGENTS.md");
+
+    expect(existsSync(agentsPath)).toBe(true);
+
+    const content = readFileSync(agentsPath, "utf8");
+
+    expect(content).toContain("Fumadocs owns the visible page title and lede");
+    expect(content).toContain("Do not start MDX pages with a duplicate `# Title`");
+    expect(content).toContain("first body paragraph");
+  });
+
   it("lists curated public docs with stable urls and metadata", () => {
     const docs = getAllPublicDocs();
 
@@ -55,6 +126,15 @@ describe("public docs source", () => {
     expect(raw.content).toContain("# Repo config");
     expect(raw.content).toContain("`.143/config.json`");
     expect(raw.content).not.toContain("Design: Public Docs");
+  });
+
+  it("keeps preview setup and secret guidance in the public preview docs", () => {
+    const raw = getRawPublicDocBySlug(["guides", "previews"]);
+
+    expect(raw.content).toContain("## Set up the config");
+    expect(raw.content).toContain("## Secrets and config");
+    expect(raw.content).toContain("`preview.credentials`");
+    expect(raw.content).toContain("admin-managed values");
   });
 
   it("generates llms.txt from the public docs index", () => {

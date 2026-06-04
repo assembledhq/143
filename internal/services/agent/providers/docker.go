@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,7 +82,13 @@ func envSliceFromMap(env map[string]string) []string {
 		return nil
 	}
 	out := make([]string, 0, len(env))
-	for k, v := range env {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := env[k]
 		out = append(out, k+"="+v)
 	}
 	return out
@@ -975,7 +982,7 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 // empty so the exec runs as the container's default user (sandbox).
 func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	log := d.scopedLogger(sb)
-	log.Debug().Str("cmd", cmd).Msg("executing command in sandbox")
+	log.Debug().Str("cmd", redactSandboxCommandForLog(cmd)).Msg("executing command in sandbox")
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"sh", "-c", cmd},
@@ -1009,6 +1016,13 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 	return inspectResp.ExitCode, nil
 }
 
+func redactSandboxCommandForLog(cmd string) string {
+	if strings.Contains(cmd, "__143_SECRET_FILE__") {
+		return "[redacted preview secret file write]"
+	}
+	return cmd
+}
+
 // ReadFile reads a file from the sandbox filesystem by exec-ing cat.
 func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
 	var stdout bytes.Buffer
@@ -1027,9 +1041,18 @@ func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path s
 
 // WriteFile writes data to a file inside the sandbox.
 func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, filePath string, data []byte) error {
+	return d.WriteFileFromReader(ctx, sb, filePath, bytes.NewReader(data), int64(len(data)))
+}
+
+// WriteFileFromReader writes a file into the sandbox without requiring callers
+// to materialize the entire payload as a byte slice.
+func (d *DockerProvider) WriteFileFromReader(ctx context.Context, sb *agent.Sandbox, filePath string, reader io.Reader, sizeBytes int64) error {
 	cleanPath := filepath.ToSlash(filepath.Clean(filePath))
 	if cleanPath == "." {
 		return fmt.Errorf("write file %s: invalid path", filePath)
+	}
+	if sizeBytes < 0 {
+		return fmt.Errorf("write file %s: invalid size", filePath)
 	}
 	relPath := strings.TrimPrefix(cleanPath, "/")
 	if relPath == "" {
@@ -1041,21 +1064,6 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, fileP
 		}
 	}
 	extractDir, archiveName := writeFileTarTarget(sb, cleanPath, relPath)
-
-	var archive bytes.Buffer
-	tw := tar.NewWriter(&archive)
-	if err := writeTarDirs(tw, path.Dir(archiveName)); err != nil {
-		return fmt.Errorf("write file %s: build tar dirs: %w", filePath, err)
-	}
-	if err := tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: int64(len(data))}); err != nil {
-		return fmt.Errorf("write file %s: build tar header: %w", filePath, err)
-	}
-	if _, err := tw.Write(data); err != nil {
-		return fmt.Errorf("write file %s: build tar body: %w", filePath, err)
-	}
-	if err := tw.Close(); err != nil {
-		return fmt.Errorf("write file %s: close tar: %w", filePath, err)
-	}
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"tar", "xf", "-", "-C", extractDir},
@@ -1072,8 +1080,36 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, fileP
 		return fmt.Errorf("write file %s: attach: %w", filePath, err)
 	}
 	defer attachResp.Close()
-	if _, err := io.Copy(attachResp.Conn, &archive); err != nil {
+
+	pr, pw := io.Pipe()
+	writeErrCh := make(chan error, 1)
+	go func() {
+		tw := tar.NewWriter(pw)
+		var err error
+		if err = writeTarDirs(tw, path.Dir(archiveName)); err == nil {
+			err = tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: sizeBytes})
+		}
+		if err == nil {
+			_, err = io.Copy(tw, reader)
+		}
+		if closeErr := tw.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			writeErrCh <- err
+			return
+		}
+		writeErrCh <- pw.Close()
+	}()
+	if _, err := io.Copy(attachResp.Conn, pr); err != nil {
+		// Close the read end so the writer goroutine unblocks and exits.
+		_ = pr.CloseWithError(err)
+		<-writeErrCh // wait for goroutine to finish before returning
 		return fmt.Errorf("write file %s: stream tar: %w", filePath, err)
+	}
+	if err := <-writeErrCh; err != nil {
+		return fmt.Errorf("write file %s: build tar stream: %w", filePath, err)
 	}
 	_ = attachResp.CloseWrite()
 	stderrBuf := newCappedBuffer(tarStderrCap)
@@ -1443,11 +1479,40 @@ func (d *DockerProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd 
 		Str("cmd", cmd).
 		Msg("exec-stream command in sandbox")
 
+	return d.ExecStreamWithOptions(ctx, sb, agent.ExecStreamOptions{
+		Cmd:        []string{"sh", "-c", cmd},
+		WorkingDir: sb.WorkDir,
+	}, onLine, stderr)
+}
+
+// ExecStreamWithOptions runs a structured command inside the sandbox and calls
+// onLine for each newline-delimited line of stdout as it arrives.
+func (d *DockerProvider) ExecStreamWithOptions(ctx context.Context, sb *agent.Sandbox, opts agent.ExecStreamOptions, onLine func(line []byte), stderr io.Writer) (int, error) {
+	if len(opts.Cmd) == 0 {
+		return -1, fmt.Errorf("exec-stream command is required")
+	}
+	workingDir := opts.WorkingDir
+	if workingDir == "" {
+		workingDir = sb.WorkDir
+	}
+	envKeys := make([]string, 0, len(opts.Env))
+	for k := range opts.Env {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	d.logger.Debug().
+		Str("container_id", sb.ID).
+		Str("cmd", strings.Join(opts.Cmd, " ")).
+		Strs("env_keys", envKeys).
+		Str("working_dir", workingDir).
+		Msg("exec-stream command in sandbox")
+
 	execCfg := container.ExecOptions{
-		Cmd:          []string{"sh", "-c", cmd},
+		Cmd:          append([]string(nil), opts.Cmd...),
+		Env:          envSliceFromMap(opts.Env),
 		AttachStdout: true,
 		AttachStderr: true,
-		WorkingDir:   sb.WorkDir,
+		WorkingDir:   workingDir,
 	}
 
 	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)

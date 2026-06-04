@@ -63,7 +63,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL)
+			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL, "")
 
 			if _, ok := metadata["build_sha"]; !ok {
 				t.Errorf("expected build_sha to always be present")
@@ -97,7 +97,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -118,7 +118,7 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, false, "", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -134,7 +134,7 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	t.Parallel()
 
 	ready := false
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready }, nil, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return ready }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
@@ -207,6 +207,46 @@ func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
 			got := resolveWorkerMaxActiveSandboxes(tt.workerProcessCount, tt.configured)
 
 			require.Equal(t, tt.expected, got, "resolved live sandbox capacity should follow the configured precedence")
+		})
+	}
+}
+
+func TestPreviewDependencyCacheEnabledWithConfiguredBucket(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{
+			name: "bucket enables cache by default",
+			cfg: config.Config{
+				PreviewDependencyCacheBucket: "preview-dependency-cache",
+			},
+			want: true,
+		},
+		{
+			name: "empty bucket keeps cache disabled",
+			cfg:  config.Config{},
+			want: false,
+		},
+		{
+			name: "blank bucket keeps cache disabled",
+			cfg: config.Config{
+				PreviewDependencyCacheBucket: "   ",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := previewDependencyCacheEnabled(tt.cfg)
+
+			require.Equal(t, tt.want, got, "dependency cache should be enabled exactly when an L2 bucket is configured")
 		})
 	}
 }
@@ -307,7 +347,7 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 		NodeID:    "worker-1",
 		Logger:    zerolog.Nop(),
 	})
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, gate, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, gate, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -327,7 +367,7 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
 
 	body := string(src)
-	startWorkers := strings.Index(body, "\n\t\tprocessWorkers = startProcessWorkers(")
+	startWorkers := strings.Index(body, "processWorkers = startProcessWorkers(")
 	rehydrate := strings.Index(body, "orch.RehydrateSandboxAuthListeners(")
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
@@ -481,6 +521,23 @@ func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {
 	require.Less(t, ready, serve, "preview routing should be advertised before serving blocks")
 }
 
+func TestMainRunsControlPlaneHealthAlertsOutsideWorkerMode(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for control-plane alert wiring test")
+
+	body := string(src)
+	alertGuard := strings.Index(body, "if cfg.Mode != \"worker\"")
+	alertStart := strings.Index(body, "worker.RunControlPlaneHealthAlerts(")
+	workerBlock := strings.Index(body, "if cfg.Mode == \"all\" || cfg.Mode == \"worker\"")
+	require.NotEqual(t, -1, alertGuard, "startup should gate control-plane alerts away from worker-only mode")
+	require.NotEqual(t, -1, alertStart, "startup should run queue and worker-heartbeat alerts from an API-capable process")
+	require.NotEqual(t, -1, workerBlock, "startup should still have an explicit worker-mode block")
+	require.Less(t, alertGuard, alertStart, "control-plane alert guard should wrap the sampler start")
+	require.Less(t, alertStart, workerBlock, "control-plane alerts must start outside worker-only startup so they still run when workers are down")
+}
+
 func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
 	t.Parallel()
 
@@ -533,8 +590,16 @@ func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {
 	require.NoError(t, err, "deploy workflow should be readable for worker rollover regression test")
 
 	body := string(src)
-	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "4200"`,
-		"worker rollover verification should cover the full 45m drain plus recreate/healthcheck with margin")
+	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "360"`,
+		"worker rollover verification should fail quickly because routine blue/green deploys do not wait for the old drain")
+	require.Contains(t, body, `POLL_INTERVAL_SECONDS: "10"`,
+		"worker rollover verification should poll often enough for a short deploy budget")
+	require.Contains(t, body, "verify_worker()",
+		"worker rollover verification should put per-host polling in a reusable function")
+	require.Contains(t, body, "verify_worker \"$host\" &",
+		"worker rollover verification should poll worker hosts in parallel")
+	require.Contains(t, body, "for pid in \"${pids[@]}\"; do",
+		"worker rollover verification should wait for all parallel host checks")
 	require.Contains(t, body, `outcome="timeout"`,
 		"worker rollover timeout should be reported as timeout, not successful in_progress")
 	require.Contains(t, body, "overall_rc=1",

@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Play,
@@ -18,14 +25,13 @@ import {
   X,
   ChevronDown,
   MoreHorizontal,
+  Copy,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Card, CardContent } from "@/components/ui/card";
+import { errorSurfaceClassNames } from "@/components/ui/error-styles";
 import {
   Tooltip,
   TooltipContent,
@@ -47,17 +53,22 @@ import {
   type PreviewStatus,
   type PreviewInfrastructure,
   type PreviewService,
+  type PreviewFreshnessState,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { TTLWarning } from "./ttl-warning";
+import {
+  buildPreviewBootstrapSrc,
+  PREVIEW_BOOTSTRAP_READY_EVENT,
+  PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+} from "@/lib/preview-bootstrap";
 
-export const PREVIEW_BOOTSTRAP_READY_EVENT = "preview_bootstrap_ready";
-export const PREVIEW_BOOTSTRAP_TOKEN_EVENT = "preview_bootstrap_token";
+export { PREVIEW_BOOTSTRAP_READY_EVENT, PREVIEW_BOOTSTRAP_TOKEN_EVENT };
 
 export function buildPreviewIframeSrc(previewOrigin: string): string {
-  return `${previewOrigin}/bootstrap`;
+  return buildPreviewBootstrapSrc(previewOrigin);
 }
 
 export interface PreviewPanelProps {
@@ -79,13 +90,14 @@ const STATUS_LABELS: Record<PreviewStatus, string> = {
   stopped: "Stopped",
   failed: "Failed",
   expired: "Expired",
+  unavailable: "Unavailable",
 };
 
-const STARTUP_PHASES = ["Provisioning", "Starting", "Opening"] as const;
 const STARTUP_PHASE_RAIL_STACK_WIDTH = 300;
 const STARTUP_PHASE_RAIL_COMPACT_WIDTH = 420;
 
 type StartupPhaseRailLayout = "default" | "compact" | "stacked";
+type CopiedLogTarget = "preview" | "error";
 
 function getStartupPhaseRailLayout(
   width: number,
@@ -114,6 +126,7 @@ function statusColor(status: PreviewStatus): string {
       return "bg-destructive/15 text-destructive border-destructive/20";
     case "stopped":
     case "expired":
+    case "unavailable":
       return "bg-muted text-muted-foreground border-border";
     default:
       return "bg-primary/15 text-primary border-primary/20";
@@ -138,8 +151,11 @@ function buildStartupChecklist(
   // these on terminal transitions; this defensive layer also covers
   // historical rows from before the cascade landed.
   const parentTerminal =
-    status === "failed" || status === "stopped" || status === "expired";
-  const parentFailed = status === "failed";
+    status === "failed" ||
+    status === "stopped" ||
+    status === "expired" ||
+    status === "unavailable";
+  const parentFailed = status === "failed" || status === "unavailable";
 
   const infraFailed = infrastructure.find(
     (item) => item.status === "failed" || item.status === "unhealthy",
@@ -152,16 +168,22 @@ function buildStartupChecklist(
     infrastructure.every((item) => item.status === "healthy");
 
   const serviceFailed = services.find((service) => service.status === "failed");
-  const serviceStarting = services.find((service) => service.status === "starting");
+  const serviceStarting = services.find(
+    (service) => service.status === "starting",
+  );
+  const anyServiceReady = services.some((service) => service.status === "ready");
   const allServicesReady =
-    services.length > 0 && services.every((service) => service.status === "ready");
+    services.length > 0 &&
+    services.every((service) => service.status === "ready");
+  const servicesCanStart =
+    infrastructure.length === 0 || allInfraHealthy || anyServiceReady;
 
   const openPreviewState: StartupChecklistStepState =
-    status === "failed"
+    status === "failed" || status === "unavailable"
       ? "failed"
       : status === "ready" || status === "partially_ready"
         ? "complete"
-        : status === "starting"
+        : status === "starting" && allServicesReady
           ? "active"
           : "pending";
 
@@ -172,7 +194,9 @@ function buildStartupChecklist(
         ? "Primary service is ready while background services finish."
         : status === "failed"
           ? "Preview startup failed before the app became reachable."
-          : "Waiting for the preview URL to become reachable.";
+          : status === "unavailable"
+            ? "The worker runtime that owned this preview is unavailable."
+            : "Waiting for the preview URL to become reachable.";
 
   const steps: StartupChecklistStep[] = [];
 
@@ -201,7 +225,11 @@ function buildStartupChecklist(
       infraState = "pending";
       infraDetail = "Waiting to start preview infrastructure.";
     }
-    steps.push({ title: "Spin up infrastructure", state: infraState, detail: infraDetail });
+    steps.push({
+      title: "Infrastructure",
+      state: infraState,
+      detail: infraDetail,
+    });
   }
 
   let serviceState: StartupChecklistStepState;
@@ -213,7 +241,7 @@ function buildStartupChecklist(
     serviceState = "complete";
     serviceDetail = `${
       services.length === 1
-        ? services[0]?.service_name ?? "App"
+        ? (services[0]?.service_name ?? "App")
         : `${services.length} services`
     } ready`;
   } else if (parentTerminal) {
@@ -224,14 +252,17 @@ function buildStartupChecklist(
   } else if (serviceStarting) {
     serviceState = "active";
     serviceDetail = `${serviceStarting.service_name} is starting`;
+  } else if (status === "starting" && servicesCanStart) {
+    serviceState = "active";
+    serviceDetail = "Waiting for services to boot.";
   } else {
     serviceState = "pending";
     serviceDetail = "Waiting for services to boot.";
   }
-  steps.push({ title: "Start services", state: serviceState, detail: serviceDetail });
+  steps.push({ title: "Services", state: serviceState, detail: serviceDetail });
 
   steps.push({
-    title: "Open the preview",
+    title: "Preview",
     state: openPreviewState,
     detail: openPreviewDetail,
   });
@@ -270,41 +301,6 @@ function getStartupSubtitle(
   }
 
   return "Starting services";
-}
-
-function startupPhaseState(
-  phase: (typeof STARTUP_PHASES)[number],
-  services: PreviewService[],
-  infrastructure: PreviewInfrastructure[],
-): StartupChecklistStepState {
-  const hasInfrastructure = infrastructure.length > 0;
-  const allInfrastructureHealthy =
-    hasInfrastructure && infrastructure.every((item) => item.status === "healthy");
-  const provisioning = infrastructure.some((item) => item.status === "provisioning");
-  const anyServiceReady = services.some((service) => service.status === "ready");
-  const anyServiceStarting = services.some((service) => service.status === "starting");
-  const allServicesReady =
-    services.length > 0 && services.every((service) => service.status === "ready");
-
-  if (phase === "Provisioning") {
-    if (!hasInfrastructure || allInfrastructureHealthy) return "complete";
-    if (provisioning) return "active";
-    return "pending";
-  }
-
-  if (phase === "Starting") {
-    if (allServicesReady) return "complete";
-    if (!hasInfrastructure || allInfrastructureHealthy || anyServiceStarting || anyServiceReady) {
-      return "active";
-    }
-    return "pending";
-  }
-
-  // "Opening" has no `complete` state inside this canvas — completion is
-  // signalled by the canvas unmounting once the parent transitions to
-  // partially_ready or ready.
-  if (allServicesReady) return "active";
-  return "pending";
 }
 
 function formatPreviewShutdownTime(expiresAt: string): string {
@@ -373,7 +369,8 @@ function PreviewActionsMenu({
                 Preview lifetime
               </span>
               <span className="block text-xs font-normal text-muted-foreground">
-                Shuts off at {formatPreviewShutdownTime(expiresAt)} · {formatPreviewRemaining(expiresAt)}
+                Shuts off at {formatPreviewShutdownTime(expiresAt)} ·{" "}
+                {formatPreviewRemaining(expiresAt)}
               </span>
             </DropdownMenuLabel>
             {PREVIEW_LIFETIME_OPTIONS.map((option) => (
@@ -406,6 +403,22 @@ function previewStatusMetadata(status?: PreviewStatus): string | undefined {
   }
 }
 
+function freshnessLabel(
+  freshness: PreviewFreshnessState | undefined,
+  mutationPending: boolean,
+): string | undefined {
+  if (mutationPending || freshness === "updating") {
+    return "Updating preview...";
+  }
+  if (freshness === "out_of_date") {
+    return "New changes available";
+  }
+  if (freshness === "unknown") {
+    return "Preview freshness could not be verified.";
+  }
+  return undefined;
+}
+
 export function PreviewPanel({
   sessionId,
   previewOriginTemplate,
@@ -418,9 +431,35 @@ export function PreviewPanel({
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
   const [showPreviewRuntimeLogs, setShowPreviewRuntimeLogs] = useState(false);
-  const [startupPhaseRailLayout, setStartupPhaseRailLayout] = useState<StartupPhaseRailLayout>("default");
+  const [copiedLogTarget, setCopiedLogTarget] =
+    useState<CopiedLogTarget | null>(null);
+  const [startupPhaseRailLayout, setStartupPhaseRailLayout] =
+    useState<StartupPhaseRailLayout>("default");
   const startupErrorLogsId = useId();
   const previewRuntimeLogsId = useId();
+
+  useEffect(() => {
+    if (!copiedLogTarget) return;
+    const timer = window.setTimeout(() => setCopiedLogTarget(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copiedLogTarget]);
+
+  const copyLogs = useCallback(
+    (target: CopiedLogTarget, logs: string) => {
+      if (!navigator.clipboard) {
+        console.error("Clipboard API is unavailable.");
+        return;
+      }
+
+      void navigator.clipboard
+        .writeText(logs)
+        .then(() => setCopiedLogTarget(target))
+        .catch((err: unknown) => {
+          console.error("Failed to copy preview logs.", err);
+        });
+    },
+    [],
+  );
 
   // Poll preview status every 3s when active
   const {
@@ -438,12 +477,21 @@ export function PreviewPanel({
       }),
     refetchInterval: (query) => {
       const st = query.state.data?.instance?.status;
-      if (!st || st === "stopped" || st === "failed" || st === "expired") return false;
+      if (
+        !st ||
+        st === "stopped" ||
+        st === "failed" ||
+        st === "expired" ||
+        st === "unavailable"
+      ) {
+        return false;
+      }
       return 3000;
     },
     retry: (failureCount, error) => {
       // Don't retry NO_ACTIVE_PREVIEW — it's a normal state, not a transient failure.
-      if ((error as { code?: string })?.code === "NO_ACTIVE_PREVIEW") return false;
+      if ((error as { code?: string })?.code === "NO_ACTIVE_PREVIEW")
+        return false;
       return failureCount < 2;
     },
   });
@@ -461,8 +509,9 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const freshnessState = previewStatus?.freshness?.state;
   const lastPreviewStoppedAt =
-    status === "stopped" || status === "expired"
+    status === "stopped" || status === "expired" || status === "unavailable"
       ? instance?.stopped_at || instance?.updated_at
       : undefined;
   const isPreparing = status === "starting";
@@ -473,12 +522,18 @@ export function PreviewPanel({
   const isReady = status === "ready" || status === "partially_ready";
   const hasStartupRows = services.length > 0 || infrastructure.length > 0;
   const showStartupProgress =
-    isPreparing || (status === "failed" && hasStartupRows);
+    isPreparing ||
+    ((status === "failed" || status === "unavailable") && hasStartupRows);
   const previewLogsTail = showPreviewRuntimeLogs && isPreparing;
   const shouldLoadPreviewLogs =
-    status === "failed" || previewLogsTail;
+    status === "failed" || status === "unavailable" || previewLogsTail;
   const previewLogsQuery = useQuery({
-    queryKey: ["preview-logs", sessionId, instance?.id, previewLogsTail ? "tail" : "default"],
+    queryKey: [
+      "preview-logs",
+      sessionId,
+      instance?.id,
+      previewLogsTail ? "tail" : "default",
+    ],
     queryFn: () =>
       previewLogsTail
         ? api.sessions.preview.logs(sessionId, { tail: true })
@@ -513,7 +568,19 @@ export function PreviewPanel({
       .filter(Boolean)
       .join("\n");
     return logs || "No preview logs have been captured yet.";
-  }, [previewLogsQuery.data, previewLogsQuery.isError, previewLogsQuery.isLoading]);
+  }, [
+    previewLogsQuery.data,
+    previewLogsQuery.isError,
+    previewLogsQuery.isLoading,
+  ]);
+  const canCopyPreviewRuntimeLogs =
+    !previewLogsQuery.isLoading &&
+    !previewLogsQuery.isError &&
+    visiblePreviewRuntimeLogs !== "No preview logs have been captured yet.";
+  const canCopyStartupErrorLogs =
+    !previewLogsQuery.isLoading &&
+    !previewLogsQuery.isError &&
+    startupErrorLogs.trim().length > 0;
 
   // Ensure preview
   const startMutation = useMutation({
@@ -536,19 +603,19 @@ export function PreviewPanel({
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_EXPIRED) {
         setMutationError(
-          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again."
+          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again.",
         );
         return;
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_UNAVAILABLE) {
         setMutationError(
-          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
+          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again.",
         );
         return;
       }
       if (code === PREVIEW_ERROR_CODES.NO_SANDBOX) {
         setMutationError(
-          "Preview is unavailable on this server (Docker not configured). Contact an admin."
+          "Preview is unavailable on this server (Docker not configured). Contact an admin.",
         );
         return;
       }
@@ -557,7 +624,7 @@ export function PreviewPanel({
         // backend already destroyed our half-built container; the user just
         // needs to wait a beat and click again.
         setMutationError(
-          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again.",
         );
         return;
       }
@@ -567,7 +634,7 @@ export function PreviewPanel({
         // error code; suggest retry rather than burying the cause under the
         // generic "Failed to start preview:" prefix.
         setMutationError(
-          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
+          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy.",
         );
         return;
       }
@@ -631,7 +698,9 @@ export function PreviewPanel({
 
   const lifetimeMutation = useMutation({
     mutationFn: (durationSeconds: number) =>
-      api.sessions.preview.setLifetime(sessionId, { duration_seconds: durationSeconds }),
+      api.sessions.preview.setLifetime(sessionId, {
+        duration_seconds: durationSeconds,
+      }),
     onSuccess: () => {
       setMutationError(null);
       queryClient.invalidateQueries({
@@ -656,9 +725,9 @@ export function PreviewPanel({
     bootstrapMutateRef.current = bootstrapMutation.mutate;
   }, [bootstrapMutation.mutate]);
 
-  const previewOrigin = runtimePreviewOrigin || (instance
-    ? previewOriginTemplate.replace("{id}", instance.id)
-    : "");
+  const previewOrigin =
+    runtimePreviewOrigin ||
+    (instance ? previewOriginTemplate.replace("{id}", instance.id) : "");
 
   // Cache the parsed origin to avoid re-parsing on every postMessage event
   const parsedOrigin = useMemo(() => {
@@ -678,7 +747,7 @@ export function PreviewPanel({
         "[143 Preview] Preview origin matches app origin (%s). " +
           "This breaks iframe sandbox isolation. " +
           "Ensure PREVIEW_ORIGIN_TEMPLATE uses a different domain/port.",
-        parsedOrigin
+        parsedOrigin,
       );
     }
   }, [parsedOrigin]);
@@ -699,41 +768,36 @@ export function PreviewPanel({
   const pendingLoadCleanupRef = useRef<(() => void) | null>(null);
 
   // Post bootstrap token to iframe, retrying on iframe load if needed
-  const sendBootstrapToken = useCallback(
-    (token: string, origin: string) => {
-      // Clean up any previous pending listener
-      pendingLoadCleanupRef.current?.();
-      pendingLoadCleanupRef.current = null;
+  const sendBootstrapToken = useCallback((token: string, origin: string) => {
+    // Clean up any previous pending listener
+    pendingLoadCleanupRef.current?.();
+    pendingLoadCleanupRef.current = null;
 
-      const contentWindow = iframeRef.current?.contentWindow;
-      if (contentWindow) {
-        contentWindow.postMessage(
-          { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
-          origin
-        );
+    const contentWindow = iframeRef.current?.contentWindow;
+    if (contentWindow) {
+      contentWindow.postMessage(
+        { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
+        origin,
+      );
+      setBootstrapComplete(true);
+      return;
+    }
+    // Iframe not loaded yet - wait for load event and retry
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const onLoad = () => {
+      pendingLoadCleanupRef.current = null;
+      iframe.removeEventListener("load", onLoad);
+      const cw = iframe.contentWindow;
+      if (cw) {
+        cw.postMessage({ type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token }, origin);
         setBootstrapComplete(true);
-        return;
       }
-      // Iframe not loaded yet - wait for load event and retry
-      const iframe = iframeRef.current;
-      if (!iframe) return;
-      const onLoad = () => {
-        pendingLoadCleanupRef.current = null;
-        iframe.removeEventListener("load", onLoad);
-        const cw = iframe.contentWindow;
-        if (cw) {
-          cw.postMessage(
-            { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
-            origin
-          );
-          setBootstrapComplete(true);
-        }
-      };
-      iframe.addEventListener("load", onLoad);
-      pendingLoadCleanupRef.current = () => iframe.removeEventListener("load", onLoad);
-    },
-    []
-  );
+    };
+    iframe.addEventListener("load", onLoad);
+    pendingLoadCleanupRef.current = () =>
+      iframe.removeEventListener("load", onLoad);
+  }, []);
 
   // Clean up pending load listener on unmount
   useEffect(() => {
@@ -756,7 +820,7 @@ export function PreviewPanel({
         });
       }
     },
-    [parsedOrigin, sendBootstrapToken]
+    [parsedOrigin, sendBootstrapToken],
   );
 
   useEffect(() => {
@@ -774,6 +838,27 @@ export function PreviewPanel({
     restartMutation.isPending ||
     lifetimeMutation.isPending;
   const showStartupCanvas = isPreparing;
+  const isPreviewOutOfDate = freshnessState === "out_of_date";
+  const isPreviewFreshnessUnknown = freshnessState === "unknown";
+  const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
+  const freshnessCalloutText =
+    isManageable && !isPreviewFreshnessUnknown ? freshnessText : undefined;
+  const previewRecoveryAction =
+    isPreviewOutOfDate && isReady
+      ? "refresh"
+      : status === "failed" || status === "unhealthy"
+        ? "retry"
+        : undefined;
+  const shouldShowRefreshPreview = previewRecoveryAction === "refresh";
+  const shouldShowRetryPreview = previewRecoveryAction === "retry";
+  const freshnessOutOfDateHelpText =
+    previewRecoveryAction === "refresh"
+      ? "Restart the preview to see the latest session changes."
+      : previewRecoveryAction === "retry"
+        ? "Retry the preview to use the latest session changes."
+        : undefined;
+  const startupFreshnessText =
+    showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
@@ -783,12 +868,11 @@ export function PreviewPanel({
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
   const showTopControls =
-    status !== "starting" && status !== "stopped" && status !== "expired";
+    status !== "starting" &&
+    status !== "stopped" &&
+    status !== "expired" &&
+    status !== "unavailable";
   const statusMetadata = previewStatusMetadata(status);
-  const visibleStartupPhases = STARTUP_PHASES.filter(
-    (phase) => phase !== "Provisioning" || infrastructure.length > 0,
-  );
-
   useEffect(() => {
     const rail = startupPhaseRailRef.current;
     if (!rail) {
@@ -797,7 +881,7 @@ export function PreviewPanel({
 
     const updateLayout = (width: number) => {
       setStartupPhaseRailLayout(
-        getStartupPhaseRailLayout(width, visibleStartupPhases.length),
+        getStartupPhaseRailLayout(width, startupChecklist.length),
       );
     };
 
@@ -816,7 +900,7 @@ export function PreviewPanel({
     });
     observer.observe(rail);
     return () => observer.disconnect();
-  }, [visibleStartupPhases.length]);
+  }, [startupChecklist.length]);
 
   if (statusLoading) {
     return (
@@ -844,10 +928,13 @@ export function PreviewPanel({
                     <ConsoleBadge sessionId={sessionId} />
                   </ErrorBoundary>
                 )}
+                {isPreviewFreshnessUnknown && freshnessText && (
+                  <span>{freshnessText}</span>
+                )}
               </div>
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex max-w-full shrink-0 flex-wrap items-center justify-start gap-2 sm:justify-end">
               {isReady && (
                 <TooltipProvider>
                   <Tooltip>
@@ -873,7 +960,9 @@ export function PreviewPanel({
                   disabled={isMutating}
                   onStop={() => stopMutation.mutate()}
                   onRestart={() => restartMutation.mutate()}
-                  onSetLifetime={(durationSeconds) => lifetimeMutation.mutate(durationSeconds)}
+                  onSetLifetime={(durationSeconds) =>
+                    lifetimeMutation.mutate(durationSeconds)
+                  }
                 />
               )}
 
@@ -890,15 +979,17 @@ export function PreviewPanel({
                 </Button>
               )}
 
-              {status === "failed" && (
+              {shouldShowRetryPreview && (
                 <Button
                   size="sm"
                   onClick={() => startMutation.mutate()}
                   disabled={isMutating}
                   loading={startMutation.isPending}
                 >
-                  {!startMutation.isPending && <RotateCw className="size-3.5" />}
-                  Retry Preview
+                  {!startMutation.isPending && (
+                    <RotateCw className="size-3.5" />
+                  )}
+                  Retry preview
                 </Button>
               )}
             </div>
@@ -910,6 +1001,56 @@ export function PreviewPanel({
               sessionId={sessionId}
               recycleScheduledAt={instance.recycle_scheduled_at}
             />
+          )}
+
+          {freshnessCalloutText && (
+            <div
+              data-testid="preview-freshness-callout"
+              className={cn(
+                "flex flex-col gap-3 rounded-md border px-2.5 py-2 text-xs sm:flex-row sm:items-center sm:justify-between",
+                isPreviewOutOfDate
+                  ? "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                  : "border-border bg-muted/40 text-muted-foreground",
+              )}
+            >
+              <div className="flex min-w-0 items-start gap-2">
+                {isPreviewOutOfDate ? (
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                ) : (
+                  <RefreshCw
+                    className={cn(
+                      "mt-0.5 size-3.5 shrink-0",
+                      startMutation.isPending && "animate-spin",
+                    )}
+                  />
+                )}
+                <div className="min-w-0">
+                  <div className="font-medium">{freshnessCalloutText}</div>
+                  {freshnessOutOfDateHelpText && (
+                    <div className="text-muted-foreground">
+                      {freshnessOutOfDateHelpText}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {shouldShowRefreshPreview && (
+                <div className="flex shrink-0 justify-start sm:justify-end">
+                  <Button
+                    size="sm"
+                    variant="default"
+                    className="w-full sm:w-auto"
+                    onClick={() => startMutation.mutate()}
+                    disabled={isMutating}
+                    loading={startMutation.isPending}
+                  >
+                    {!startMutation.isPending && (
+                      <RefreshCw className="size-3.5" />
+                    )}
+                    Refresh preview
+                  </Button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -937,14 +1078,8 @@ export function PreviewPanel({
             <AlertTriangle className="size-4" />
             Failed to load preview status
           </div>
-          <p className="text-xs text-muted-foreground">
-            {statusError.message}
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => refetchStatus()}
-          >
+          <p className="text-xs text-muted-foreground">{statusError.message}</p>
+          <Button size="sm" variant="outline" onClick={() => refetchStatus()}>
             <RefreshCw className="size-3.5" />
             Retry
           </Button>
@@ -967,7 +1102,9 @@ export function PreviewPanel({
                       disabled={isMutating}
                       loading={stopMutation.isPending}
                     >
-                      {!stopMutation.isPending && <Square className="size-3.5" />}
+                      {!stopMutation.isPending && (
+                        <Square className="size-3.5" />
+                      )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Stop preview</TooltipContent>
@@ -979,8 +1116,17 @@ export function PreviewPanel({
                 <Loader2 className="size-5 animate-spin text-primary" />
               </div>
               <div className="space-y-1">
-                <p className="text-lg font-semibold text-foreground">Preparing preview</p>
-                <p className="text-sm text-muted-foreground">{startupSubtitle}</p>
+                <p className="text-lg font-semibold text-foreground">
+                  Preparing preview
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {startupSubtitle}
+                </p>
+                {startupFreshnessText && (
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {startupFreshnessText}
+                  </p>
+                )}
               </div>
               <div
                 ref={startupPhaseRailRef}
@@ -992,31 +1138,31 @@ export function PreviewPanel({
                     ? "grid-cols-1"
                     : startupPhaseRailLayout === "compact"
                       ? "grid-cols-2"
-                      : visibleStartupPhases.length === 3
+                      : startupChecklist.length === 3
                         ? "grid-cols-3"
                         : "grid-cols-2",
                 )}
               >
-                {visibleStartupPhases.map((phase) => {
-                  const phaseState = startupPhaseState(phase, services, infrastructure);
+                {startupChecklist.map((step) => {
                   return (
                     <div
-                      key={phase}
+                      key={step.title}
                       className={cn(
-                        "flex flex-col items-center gap-2 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
-                        phaseState === "active" && "border-primary/30 text-foreground shadow-sm",
-                        phaseState === "complete" && "text-emerald-600 dark:text-emerald-400",
+                        "flex min-h-24 flex-col items-center gap-1.5 rounded-lg border bg-card/70 px-3.5 py-3 text-center text-xs leading-tight text-muted-foreground",
+                        step.state === "active" &&
+                          "border-primary/30 text-foreground shadow-sm",
+                        step.state === "complete" &&
+                          "text-emerald-600 dark:text-emerald-400",
+                        step.state === "failed" &&
+                          "border-destructive/30 text-destructive",
                       )}
                     >
-                      {phaseState === "complete" ? (
-                        <CheckCircle2 className="size-3.5" />
-                      ) : phaseState === "active" ? (
-                        <Loader2 className="size-3.5 animate-spin text-primary" />
-                      ) : (
-                        <Circle className="size-3.5" />
-                      )}
-                      <span className={cn("text-balance", phaseState === "active" ? "font-medium" : undefined)}>
-                        {phase}
+                      {startupStepIcon(step.state)}
+                      <span className="text-balance font-medium">
+                        {step.title}
+                      </span>
+                      <span className="text-balance text-muted-foreground">
+                        {step.detail}
                       </span>
                     </div>
                   );
@@ -1024,150 +1170,193 @@ export function PreviewPanel({
               </div>
             </div>
           </div>
-          <Collapsible>
-            <div className="border-t bg-card/60 px-3 py-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <CollapsibleTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="group h-7 px-2 text-xs text-muted-foreground"
-                  >
-                    Details
-                    <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
-                  </Button>
-                </CollapsibleTrigger>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs text-muted-foreground"
-                  aria-expanded={showPreviewRuntimeLogs}
-                  aria-controls={previewRuntimeLogsId}
-                  onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
-                >
-                  {showPreviewRuntimeLogs ? "Hide preview logs" : "Show preview logs"}
-                  <ChevronDown
-                    className={cn(
-                      "size-3.5 transition-transform duration-200",
-                      showPreviewRuntimeLogs && "rotate-180",
-                    )}
-                  />
-                </Button>
-              </div>
-              <CollapsibleContent className="pt-2 pb-1">
-                <div className="space-y-1.5">
-                  {startupChecklist.map((step) => (
-                    <div
-                      key={step.title}
-                      className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
-                    >
-                      <div className="mt-0.5">{startupStepIcon(step.state)}</div>
-                      <div className="min-w-0">
-                        <div className="font-medium text-foreground">{step.title}</div>
-                        <div className="text-xs text-muted-foreground">{step.detail}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CollapsibleContent>
-              {showPreviewRuntimeLogs && (
-                <pre
-                  id={previewRuntimeLogsId}
-                  aria-label="Preview container logs"
+          <div className="border-t bg-card/60 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground"
+                aria-expanded={showPreviewRuntimeLogs}
+                aria-controls={previewRuntimeLogsId}
+                onClick={() => setShowPreviewRuntimeLogs((open) => !open)}
+              >
+                {showPreviewRuntimeLogs
+                  ? "Hide preview logs"
+                  : "Show preview logs"}
+                <ChevronDown
                   className={cn(
-                    "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
-                    previewLogsQuery.isError && "text-muted-foreground",
+                    "size-3.5 transition-transform duration-200",
+                    showPreviewRuntimeLogs && "rotate-180",
                   )}
+                />
+              </Button>
+              {showPreviewRuntimeLogs && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                  aria-label="Copy preview logs"
+                  title="Copy preview logs"
+                  disabled={!canCopyPreviewRuntimeLogs}
+                  onClick={() => copyLogs("preview", visiblePreviewRuntimeLogs)}
                 >
-                  {visiblePreviewRuntimeLogs}
-                </pre>
+                  {copiedLogTarget === "preview" ? (
+                    <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                  ) : (
+                    <Copy className="size-3.5" aria-hidden="true" />
+                  )}
+                </Button>
               )}
             </div>
-          </Collapsible>
+            {showPreviewRuntimeLogs && (
+              <pre
+                id={previewRuntimeLogsId}
+                aria-label="Preview container logs"
+                className={cn(
+                  "mt-2 max-h-[min(48vh,22rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background/70 px-3 py-2 font-mono text-xs leading-5 text-foreground",
+                  previewLogsQuery.isError && "text-muted-foreground",
+                )}
+              >
+                {visiblePreviewRuntimeLogs}
+              </pre>
+            )}
+          </div>
         </div>
       )}
 
       {/* Failure diagnostics */}
       {status === "failed" && instance && (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-2">
-          <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-            <AlertTriangle className="size-4" />
-            Preview failed to start
-          </div>
-          {visibleStartupErrorLogs && (
-            <pre
-              id={startupErrorLogsId}
-              aria-label="Preview startup error logs"
-              className={cn(
-                "overflow-y-hidden whitespace-pre-wrap break-words rounded-md bg-background/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground",
-                showFullStartupLogs
-                  ? "max-h-[min(56vh,28rem)] overflow-y-auto text-foreground"
-                  : "line-clamp-6",
-                previewLogsQuery.isError && showFullStartupLogs && "text-muted-foreground",
-              )}
-            >
-              {visibleStartupErrorLogs}
-            </pre>
+        <Card
+          role="alert"
+          className={cn(
+            "rounded-lg shadow-sm hover:border-destructive/25",
+            errorSurfaceClassNames.container,
           )}
-          <div className="flex flex-wrap items-center gap-2">
-            {(startupErrorLogs || previewLogsQuery.isLoading || previewLogsQuery.isError) && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-xs text-muted-foreground"
-                aria-expanded={showFullStartupLogs}
-                aria-controls={startupErrorLogsId}
-                onClick={() => setShowFullStartupLogs((open) => !open)}
-              >
-                {showFullStartupLogs ? "Show summary" : "Show full error logs"}
-                <ChevronDown
-                  className={cn(
-                    "size-3.5 transition-transform duration-200",
-                    showFullStartupLogs && "rotate-180",
-                  )}
-                />
-              </Button>
-            )}
-          </div>
-          {hasStartupRows && (
-            <Collapsible>
-              <CollapsibleTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="group h-7 px-2 text-xs text-muted-foreground"
-                >
-                  Details
-                  <ChevronDown className="size-3.5 transition-transform duration-200 group-data-[state=open]:rotate-180" />
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="pt-2 pb-1">
-                <div className="space-y-1.5">
-                  {startupChecklist.map((step) => (
-                    <div
-                      key={step.title}
-                      className="flex items-start gap-2 rounded-md px-2 py-1.5 text-sm"
+        >
+          <CardContent className="space-y-3.5 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-2.5">
+                <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-destructive/20 bg-background/80 text-destructive">
+                  <AlertTriangle className="size-3.5" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium leading-5 text-foreground">
+                    Preview failed to start
+                  </div>
+                  <div className="text-xs leading-5 text-muted-foreground">
+                    The app never became reachable during startup.
+                  </div>
+                </div>
+              </div>
+              {visibleStartupErrorLogs &&
+                (startupErrorLogs ||
+                  previewLogsQuery.isLoading ||
+                  previewLogsQuery.isError) && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="h-7 shrink-0 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    aria-expanded={showFullStartupLogs}
+                    aria-controls={startupErrorLogsId}
+                    onClick={() => setShowFullStartupLogs((open) => !open)}
+                  >
+                    {showFullStartupLogs
+                      ? "Show startup summary"
+                      : "View full error log"}
+                    <ChevronDown
+                      className={cn(
+                        "size-3 transition-transform duration-200",
+                        showFullStartupLogs && "rotate-180",
+                      )}
+                      aria-hidden="true"
+                    />
+                  </Button>
+                )}
+            </div>
+
+            {visibleStartupErrorLogs && (
+              <div className="border-t border-destructive/10 pt-3">
+                <div className="mb-1.5 flex min-w-0 items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-destructive"
+                      aria-hidden="true"
+                    />
+                    <div className="truncate text-xs font-medium text-foreground">
+                      {showFullStartupLogs
+                        ? "Full error log"
+                        : "Startup summary"}
+                    </div>
+                  </div>
+                  {showFullStartupLogs && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                      aria-label="Copy error log"
+                      title="Copy error log"
+                      disabled={!canCopyStartupErrorLogs}
+                      onClick={() => copyLogs("error", visibleStartupErrorLogs)}
                     >
-                      <div className="mt-0.5">{startupStepIcon(step.state)}</div>
-                      <div className="min-w-0">
-                        <div className="font-medium text-foreground">{step.title}</div>
-                        <div className="text-xs text-muted-foreground">{step.detail}</div>
+                      {copiedLogTarget === "error" ? (
+                        <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                      ) : (
+                        <Copy className="size-3.5" aria-hidden="true" />
+                      )}
+                    </Button>
+                  )}
+                </div>
+                <pre
+                  id={startupErrorLogsId}
+                  aria-label="Preview startup error logs"
+                  className={cn(
+                    "whitespace-pre-wrap break-words font-mono text-xs leading-5 text-foreground/85",
+                    showFullStartupLogs
+                      ? "max-h-[min(56vh,28rem)] overflow-y-auto"
+                      : "max-h-28 overflow-hidden [mask-image:linear-gradient(to_bottom,black_75%,transparent_100%)]",
+                    previewLogsQuery.isError &&
+                      showFullStartupLogs &&
+                      "text-muted-foreground",
+                  )}
+                >
+                  {visibleStartupErrorLogs}
+                </pre>
+              </div>
+            )}
+
+            {hasStartupRows && startupChecklist.length > 0 && (
+              <div className="space-y-1 border-t border-destructive/10 pt-2">
+                <div className="px-1 text-xs font-medium text-muted-foreground">
+                  Startup status
+                </div>
+                {startupChecklist.map((step) => (
+                  <div
+                    key={step.title}
+                    className="flex items-start gap-2 rounded-md px-1 py-1 text-sm"
+                  >
+                    <div className="mt-0.5">{startupStepIcon(step.state)}</div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium leading-5 text-foreground">
+                        {step.title}
+                      </div>
+                      <div className="text-xs leading-5 text-muted-foreground">
+                        {step.detail}
                       </div>
                     </div>
-                  ))}
-                </div>
-              </CollapsibleContent>
-            </Collapsible>
-          )}
-        </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Preview iframe */}
       {isReady && iframeSrc && (
         <div className="relative rounded-lg border bg-muted/30 overflow-hidden">
-          <div
-            className="mx-auto w-full"
-          >
+          <div className="mx-auto w-full">
             <div className="relative" style={{ paddingBottom: "62.5%" }}>
               {/* Sandbox threat model: allow-same-origin is required so the
                   iframe can set cookies and use localStorage on its own
@@ -1196,9 +1385,7 @@ export function PreviewPanel({
               {/* Design mode overlay */}
               {designMode && bootstrapComplete && (
                 <ErrorBoundary fallback={null}>
-                  <DesignModeOverlay
-                    sessionId={sessionId}
-                  />
+                  <DesignModeOverlay sessionId={sessionId} />
                 </ErrorBoundary>
               )}
             </div>
@@ -1207,41 +1394,48 @@ export function PreviewPanel({
       )}
 
       {/* Idle state */}
-      {(!status || status === "stopped" || status === "expired") && !statusLoading && (
-        <div className="rounded-lg border border-dashed p-8 flex flex-col items-center justify-center gap-3 text-center">
-          <div className="rounded-full bg-muted p-3">
-            <Monitor className="size-5 text-muted-foreground" />
+      {(!status ||
+        status === "stopped" ||
+        status === "expired" ||
+        status === "unavailable") &&
+        !statusLoading && (
+          <div className="rounded-lg border border-dashed p-8 flex flex-col items-center justify-center gap-3 text-center">
+            <div className="rounded-full bg-muted p-3">
+              <Monitor className="size-5 text-muted-foreground" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-medium">No preview running</p>
+              <p className="text-xs text-muted-foreground">
+                Start a preview to see live changes from the agent. Note that it
+                can take a few minutes for the environment to finish booting.
+              </p>
+              {instance?.created_at && lastPreviewStoppedAt && (
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    Started {formatTimeAgo(instance.created_at)}
+                  </span>
+                  <Badge
+                    variant="secondary"
+                    className={cn(statusColor(status ?? "stopped"))}
+                  >
+                    {status === "unavailable" ? "Unavailable" : "Stopped"}{" "}
+                    {formatTimeAgo(lastPreviewStoppedAt)}
+                  </Badge>
+                </div>
+              )}
+            </div>
+            <Button
+              size="sm"
+              onClick={() => startMutation.mutate()}
+              disabled={isMutating}
+              loading={startMutation.isPending}
+            >
+              {!startMutation.isPending && <Play className="size-3.5" />}
+              Start Preview
+            </Button>
+            <p className="text-xs text-muted-foreground"></p>
           </div>
-          <div className="space-y-1">
-            <p className="text-sm font-medium">No preview running</p>
-            <p className="text-xs text-muted-foreground">
-              Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
-            </p>
-            {instance?.created_at && lastPreviewStoppedAt && (
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                <span className="text-xs text-muted-foreground">
-                  Started {formatTimeAgo(instance.created_at)}
-                </span>
-                <Badge variant="secondary" className={cn(statusColor(status ?? "stopped"))}>
-                  Stopped {formatTimeAgo(lastPreviewStoppedAt)}
-                </Badge>
-              </div>
-            )}
-          </div>
-          <Button
-            size="sm"
-            onClick={() => startMutation.mutate()}
-            disabled={isMutating}
-            loading={startMutation.isPending}
-          >
-            {!startMutation.isPending && <Play className="size-3.5" />}
-            Start Preview
-          </Button>
-          <p className="text-xs text-muted-foreground">
-          </p>
-        </div>
-      )}
-
+        )}
     </div>
   );
 }

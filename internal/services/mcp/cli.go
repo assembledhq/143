@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -117,6 +118,12 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 				// Accept comma-separated values: --states triage,backlog,in_progress
 				parts := strings.Split(value, ",")
 				result[key] = parts
+			case "boolean":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("flag --%s: expected boolean, got %q", key, value)
+				}
+				result[key] = b
 			default:
 				result[key] = value
 			}

@@ -18,6 +18,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	// string the same as unset when the field has an envDefault, so defaults apply.
 	t.Setenv("PORT", "")
 	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DATABASE_MAX_CONNS", "")
+	t.Setenv("DATABASE_MAX_CONN_IDLE_TIME", "")
 	t.Setenv("LOG_LEVEL", "")
 	t.Setenv("BASE_URL", "")
 	t.Setenv("FRONTEND_URL", "")
@@ -35,6 +37,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 
 	require.Equal(t, 8080, cfg.Port, "Load should default to port 8080")
 	require.Equal(t, "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable", cfg.DatabaseURL, "Load should default the database URL")
+	require.Equal(t, int32(0), cfg.DatabaseMaxConns, "Load should default database max connections to pgxpool defaults")
+	require.Equal(t, time.Duration(0), cfg.DatabaseMaxConnIdleTime, "Load should default database idle timeout to pgxpool defaults")
 	require.Equal(t, "info", cfg.LogLevel, "Load should default log level to info")
 	require.Equal(t, "http://localhost:8080", cfg.BaseURL, "Load should default base URL")
 	require.Equal(t, "http://localhost:8080", cfg.FrontendURL, "FrontendURL should default to BaseURL")
@@ -53,6 +57,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("PORT", "9090")
 	t.Setenv("DATABASE_URL", "postgres://custom")
+	t.Setenv("DATABASE_MAX_CONNS", "12")
+	t.Setenv("DATABASE_MAX_CONN_IDLE_TIME", "5m")
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("BASE_URL", "https://api.example.com")
 	t.Setenv("FRONTEND_URL", "https://app.example.com")
@@ -68,6 +74,8 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 
 	require.Equal(t, 9090, cfg.Port, "Load should read PORT from the environment")
 	require.Equal(t, "postgres://custom", cfg.DatabaseURL, "Load should read DATABASE_URL from the environment")
+	require.Equal(t, int32(12), cfg.DatabaseMaxConns, "Load should parse DATABASE_MAX_CONNS from the environment")
+	require.Equal(t, 5*time.Minute, cfg.DatabaseMaxConnIdleTime, "Load should parse DATABASE_MAX_CONN_IDLE_TIME from the environment")
 	require.Equal(t, "debug", cfg.LogLevel, "Load should read LOG_LEVEL from the environment")
 	require.Equal(t, "https://api.example.com", cfg.BaseURL, "Load should read BASE_URL from the environment")
 	require.Equal(t, "https://app.example.com", cfg.FrontendURL, "Load should read FRONTEND_URL from the environment")
@@ -78,6 +86,15 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
 	require.Equal(t, 90*time.Minute, cfg.WorkerPreviewDrainTimeout, "Load should parse WORKER_PREVIEW_DRAIN_TIMEOUT from the environment")
 	require.Equal(t, "registry.example.com/health/busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should read SANDBOX_HEALTH_CHECK_IMAGE from the environment")
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestLoad_PreviewSecretBundleKEKVersion(t *testing.T) {
+	t.Setenv("PREVIEW_SECRET_BUNDLE_KEK_VERSION", "preview-secrets-2026-05")
+
+	cfg := Load()
+
+	require.Equal(t, "preview-secrets-2026-05", cfg.PreviewSecretBundleKEKVersion, "Load should read PREVIEW_SECRET_BUNDLE_KEK_VERSION from the environment")
 }
 
 //nolint:paralleltest // uses t.Setenv

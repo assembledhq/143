@@ -93,6 +93,12 @@ describe("session-pr-snapshot", () => {
       expect(prErrorTitle(null, "PR_RESUME_EXPIRED")).toBe("Couldn't resume PR creation");
     });
 
+    it("maps snapshot quiescence errors to actionable titles", () => {
+      expect(prErrorTitle(null, "SNAPSHOT_PENDING")).toBe("Snapshot still saving");
+      expect(prErrorTitle(null, "SESSION_RUNNING")).toBe("Session still running");
+      expect(prErrorTitle(null, "SNAPSHOT_NOT_QUIESCENT")).toBe("Active tabs still running");
+    });
+
     it("falls back to the generic PR creation title", () => {
       expect(prErrorTitle(null, "SOMETHING_ELSE")).toBe("Couldn't create the PR");
     });

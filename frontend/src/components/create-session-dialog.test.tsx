@@ -274,7 +274,9 @@ describe("CreateSessionDialog", () => {
     expect(dialog).toHaveClass("h-dvh");
     expect(dialog).toHaveClass("max-w-none");
     expect(dialog).toHaveClass("overflow-y-auto");
-    expect(textarea).toHaveClass("text-base");
+    expect(textarea).toHaveClass("max-sm:text-base");
+    expect(textarea).toHaveClass("text-xs");
+    expect(textarea).not.toHaveClass("text-base");
   });
 
   it("shows attachment button", () => {

@@ -63,6 +63,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     const fileRefs = useRef<Map<number, HTMLDivElement>>(new Map());
     const lastReportedActiveFileIndexRef = useRef<number | null>(activeFileIndex ?? null);
     const lastScrollTopRef = useRef(0);
+    const scrollFrameRef = useRef<number | null>(null);
 
     // Once any expander hits a NO_SANDBOX response, the session container is
     // gone for good — flip every expander on this pane into the disabled state
@@ -155,7 +156,8 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
       onActiveFileChange(nextActiveIndex);
     }, [onActiveFileChange]);
 
-    const handleScroll = useCallback(() => {
+    const runScrollWork = useCallback(() => {
+      scrollFrameRef.current = null;
       reportVisibleActiveFile();
       if (!onScrollMetricsChange || !containerRef.current) return;
       const scrollTop = containerRef.current.scrollTop;
@@ -165,6 +167,19 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
         Math.abs(delta) < 4 ? "idle" : delta > 0 ? "down" : "up";
       onScrollMetricsChange({ scrollTop, direction });
     }, [onScrollMetricsChange, reportVisibleActiveFile]);
+
+    const handleScroll = useCallback(() => {
+      if (scrollFrameRef.current != null) return;
+      scrollFrameRef.current = window.requestAnimationFrame(runScrollWork);
+    }, [runScrollWork]);
+
+    useEffect(() => {
+      return () => {
+        if (scrollFrameRef.current != null) {
+          window.cancelAnimationFrame(scrollFrameRef.current);
+        }
+      };
+    }, []);
 
     useEffect(() => {
       lastReportedActiveFileIndexRef.current = activeFileIndex ?? null;

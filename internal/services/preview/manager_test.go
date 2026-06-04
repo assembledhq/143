@@ -28,6 +28,7 @@ import (
 type mockProvider struct {
 	startHandle *PreviewHandle
 	startErr    error
+	startConfig *models.PreviewConfig
 	stopErr     error
 	dialErr     error
 	dialStream  PreviewStream
@@ -35,7 +36,8 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string, _ ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ StartPreviewOptions, _ ServiceObserver) (*PreviewHandle, error) {
+	m.startConfig = cfg
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -68,6 +70,33 @@ type mockStream struct {
 }
 
 func (m *mockStream) Close() error { return nil }
+
+type fakePreviewSecretBundleReader struct {
+	row     models.PreviewSecretBundle
+	source  models.PreviewSecretBundleSource
+	outputs []models.PreviewSecretBundleOutput
+}
+
+func (f *fakePreviewSecretBundleReader) GetActive(_ context.Context, orgID, repositoryID uuid.UUID, name string) (*models.PreviewSecretBundle, error) {
+	if f.row.OrgID != orgID || f.row.RepositoryID != repositoryID || f.row.Name != name {
+		return nil, pgx.ErrNoRows
+	}
+	return &f.row, nil
+}
+
+func (f *fakePreviewSecretBundleReader) DecryptSource(_ context.Context, orgID uuid.UUID, row models.PreviewSecretBundle) (models.PreviewSecretBundleSource, error) {
+	if row.OrgID != orgID {
+		return models.PreviewSecretBundleSource{}, pgx.ErrNoRows
+	}
+	return f.source, nil
+}
+
+func (f *fakePreviewSecretBundleReader) DecryptOutputs(_ context.Context, orgID uuid.UUID, row models.PreviewSecretBundle) ([]models.PreviewSecretBundleOutput, error) {
+	if row.OrgID != orgID {
+		return nil, pgx.ErrNoRows
+	}
+	return f.outputs, nil
+}
 
 type mockInspector struct {
 	closed bool
@@ -127,7 +156,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -153,14 +182,14 @@ var sessionTestCols = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	// Migration 102 — Linear session-linking columns. Migration 100 — git
 	// identity audit columns. Mocks must include both so SessionStore.GetByID's
 	// row decode finds every selected field.
@@ -178,8 +207,20 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", stringPtr("req-1"), "", now, now, now, nil,
+		(*int64)(nil), (*time.Time)(nil),
+		"",
 		false,
 	}
+}
+
+func setPreviewInstanceRowColumn(row []any, column string, value any) {
+	for i, name := range previewInstanceTestCols {
+		if name == column {
+			row[i] = value
+			return
+		}
+	}
+	panic(fmt.Sprintf("unknown preview instance test column %q", column))
 }
 
 func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash string, expiresAt time.Time, revokedAt *time.Time, now time.Time) []any {
@@ -209,6 +250,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		"current_turn":                   0,
 		"last_activity_at":               now,
 		"sandbox_state":                  "running",
+		"workspace_generation":           int64(0),
 		"runtime_last_progress_type":     "",
 		"runtime_last_progress_strength": "",
 		"runtime_extension_count":        0,
@@ -1400,6 +1442,107 @@ func TestRecyclePreview_ReconstructsInputFromStoredState(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRecyclePreview_SecretResolutionFailureMarksFailed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	cfg := validPreviewConfig()
+	cfg.Secrets = []models.PreviewSecretBundleRef{{
+		Bundle:   "repo-dev",
+		Services: []string{"web"},
+		Env:      []string{"DATABASE_URL"},
+	}}
+	recycleConfig, err := json.Marshal(cfg)
+	require.NoError(t, err, "test preview config should marshal")
+
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	row[22] = recycleConfig
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(row...),
+		)
+	// Atomic conditional status transition (UpdatePreviewStatusIfActive).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// RevokeAllForPreview during recycle.
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	expectUpdatePreviewStatusFailed(mock)
+
+	mgr := NewManager(ManagerConfig{
+		Store:          db.NewPreviewStore(mock),
+		Provider:       &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SecretResolver: NewPreviewSecretResolver(&fakePreviewSecretBundleReader{}),
+		Logger:         zerolog.Nop(),
+		WorkerNodeID:   "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "RecyclePreview should fail when secret bundle resolution fails")
+	require.Contains(t, err.Error(), "preview secrets require a repository id", "RecyclePreview should return the secret resolution error")
+	require.NoError(t, mock.ExpectationsWereMet(), "secret resolution failure should mark the preview failed")
+}
+
+func TestRecyclePreview_StartFailureReleasesPreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	containerID := "sandbox-recycle"
+
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-recycle","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"sandbox-recycle"}}`))
+	setPreviewInstanceRowColumn(row, "preview_holding_container", true)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(row...),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectQuery(`WITH released AS \(\s*UPDATE preview_instances\s+SET preview_holding_container = FALSE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, containerID, true),
+		)
+
+	mgr := newTestManager(mock, &mockProvider{startErr: errors.New("service exited before ready")})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "RecyclePreview should return the provider start failure")
+	require.Contains(t, err.Error(), "service exited before ready", "RecyclePreview should preserve the provider error")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed recycle should release the preview sandbox hold")
+}
+
 func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {
 	t.Parallel()
 
@@ -1553,6 +1696,9 @@ func TestStopActivePreviewForSession_StopsActivePreview(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1619,6 +1765,9 @@ func TestStopPreview_DestroysSandboxWhenTurnDoesNotHold(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1687,6 +1836,9 @@ func TestStopPreview_LeavesSandboxWhenNewHolderAcquiredAfterRelease(t *testing.T
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1753,6 +1905,9 @@ func TestStopPreview_LeavesSandboxWhenTurnStillHolds(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1818,6 +1973,9 @@ func TestStopPreview_FinalizeErrorLeavesContainerForReconciler(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_infrastructure SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1865,11 +2023,27 @@ func validPreviewConfig() *models.PreviewConfig {
 // inserts a row and returns the row back. Tests inject a known preview ID via
 // the returned row, and the caller reads p.ID from the model after the call.
 func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time) {
+	expectCreatePreviewInstanceWithWorkspaceRevision(mock, previewID, sessionID, orgID, userID, status, now, nil, nil)
+}
+
+func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, revision *int64, revisionUpdatedAt *time.Time) {
+	args := previewAnyArgs(24)
+	args[22] = revision
+	args[23] = revisionUpdatedAt
+	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)
+	for i, column := range previewInstanceTestCols {
+		switch column {
+		case "source_workspace_revision":
+			row[i] = revision
+		case "source_workspace_revision_updated_at":
+			row[i] = revisionUpdatedAt
+		}
+	}
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(22)...).
+		WithArgs(args...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)...),
+				AddRow(row...),
 		)
 }
 
@@ -1967,6 +2141,8 @@ func TestReservePreview_Success(t *testing.T) {
 	sessionID := uuid.New()
 	previewID := uuid.New()
 	now := time.Now()
+	workspaceRevision := int64(7)
+	workspaceRevisionUpdatedAt := now.Add(-time.Minute)
 
 	// GetActivePreviewForSession: no rows.
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
@@ -1984,21 +2160,25 @@ func TestReservePreview_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
-	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	expectCreatePreviewInstanceWithWorkspaceRevision(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now, &workspaceRevision, &workspaceRevisionUpdatedAt)
 
 	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
 
 	instance, err := mgr.ReservePreview(context.Background(), StartPreviewInput{
-		SessionID: sessionID,
-		OrgID:     orgID,
-		UserID:    userID,
-		Config:    validPreviewConfig(),
+		SessionID:                  sessionID,
+		OrgID:                      orgID,
+		UserID:                     userID,
+		Config:                     validPreviewConfig(),
+		WorkspaceRevision:          workspaceRevision,
+		WorkspaceRevisionUpdatedAt: workspaceRevisionUpdatedAt,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, instance)
 	require.Equal(t, previewID, instance.ID)
+	require.Equal(t, &workspaceRevision, instance.SourceWorkspaceRevision, "ReservePreview should stamp the source workspace revision")
+	require.Equal(t, &workspaceRevisionUpdatedAt, instance.SourceWorkspaceRevisionUpdatedAt, "ReservePreview should stamp the source workspace revision timestamp")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -2034,7 +2214,13 @@ func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mgr := newTestManager(mock, &mockProvider{})
+	mgr := NewManager(ManagerConfig{
+		Store:                  db.NewPreviewStore(mock),
+		Provider:               &mockProvider{},
+		Logger:                 zerolog.Nop(),
+		WorkerNodeID:           "worker-1",
+		PreviewInternalBaseURL: "http://worker-1.internal",
+	})
 
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -2077,6 +2263,66 @@ func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "acquire preview hold")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestReservePreview_RuntimeCreateErrorReleasesHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := NewManager(ManagerConfig{
+		Store:                  db.NewPreviewStore(mock),
+		Provider:               &mockProvider{},
+		Logger:                 zerolog.Nop(),
+		WorkerNodeID:           "worker-1",
+		PreviewInternalBaseURL: "http://worker-1.internal",
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnError(fmt.Errorf("runtime insert failed"))
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "", true),
+		)
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Config:    validPreviewConfig(),
+	})
+
+	require.Error(t, err, "ReservePreview should return runtime insert errors")
+	require.Contains(t, err.Error(), "create preview runtime", "ReservePreview should identify runtime insert failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestLaunchPreview_NilProviderErrors(t *testing.T) {
@@ -2189,6 +2435,90 @@ func TestLaunchPreview_Success(t *testing.T) {
 	require.Equal(t, models.PreviewStatusReady, launched.Status)
 	require.Equal(t, "handle-new", launched.PreviewHandle)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_ResolvesSecretsForFinalConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{
+			Handle:      "handle-new",
+			PrimaryPort: 3000,
+		},
+		statusSnap: &PreviewStatusSnapshot{},
+	}
+	bundleReader := &fakePreviewSecretBundleReader{
+		row: models.PreviewSecretBundle{
+			ID:           uuid.New(),
+			OrgID:        uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+			RepositoryID: uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+			Name:         "repo-dev",
+			Active:       true,
+			SourceType:   "managed",
+		},
+		source: models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"database_url": "postgres://dev"}},
+		outputs: []models.PreviewSecretBundleOutput{{
+			Type:   "env",
+			Values: map[string]string{"DATABASE_URL": "secret:database_url"},
+		}},
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:          db.NewPreviewStore(mock),
+		Provider:       provider,
+		SecretResolver: NewPreviewSecretResolver(bundleReader),
+		Logger:         zerolog.Nop(),
+		WorkerNodeID:   "worker-1",
+	})
+
+	orgID := bundleReader.row.OrgID
+	repoID := bundleReader.row.RepositoryID
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	cfg := validPreviewConfig()
+	cfg.Secrets = []models.PreviewSecretBundleRef{{
+		Bundle:   "repo-dev",
+		Services: []string{"web"},
+		Env:      []string{"DATABASE_URL"},
+	}}
+	instance := &models.PreviewInstance{
+		ID:        previewID,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Status:    models.PreviewStatusStarting,
+	}
+
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(10)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), previewID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", time.Now()),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID:    sessionID,
+		OrgID:        orgID,
+		UserID:       uuid.New(),
+		Sandbox:      &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:       cfg,
+		RepositoryID: repoID,
+	})
+
+	require.NoError(t, err, "LaunchPreview should resolve secrets before starting the provider")
+	require.Equal(t, "postgres://dev", provider.startConfig.RuntimeSecretEnv["web"]["DATABASE_URL"], "provider should receive resolved secret env for the final launch config")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestLaunchPreview_ReservationNoLongerPending(t *testing.T) {

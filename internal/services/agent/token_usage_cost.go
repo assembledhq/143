@@ -38,8 +38,10 @@ var codexCreditRates = map[string]tokenRate{
 }
 
 var anthropicRates = map[string]tokenRate{
+	models.ClaudeCodeModelOpus48:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus47:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus46:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
+	models.PiModelClaudeOpus48:     {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.PiModelClaudeOpus47:     {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelSonnet46: {inputPerMTok: 3.00, cachedInputPerMTok: 0.30, cacheCreationPerMTok: 3.75, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.PiModelClaudeSonnet46:   {inputPerMTok: 3.00, cachedInputPerMTok: 0.30, cacheCreationPerMTok: 3.75, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},

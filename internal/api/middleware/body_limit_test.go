@@ -13,12 +13,18 @@ import (
 func TestMaxBodySize(t *testing.T) {
 	t.Parallel()
 
+	const (
+		tinyLimitBytes      int64 = 100
+		streamingLimitBytes int64 = 50
+	)
+
 	tests := []struct {
 		name         string
 		maxSize      int64
 		method       string
 		body         func() *http.Request
 		expectedCode int
+		expectedBody string
 	}{
 		{
 			name:    "allows request with body smaller than limit",
@@ -34,7 +40,7 @@ func TestMaxBodySize(t *testing.T) {
 		},
 		{
 			name:    "rejects request with Content-Length exceeding limit",
-			maxSize: 100,
+			maxSize: tinyLimitBytes,
 			method:  http.MethodPost,
 			body: func() *http.Request {
 				body := bytes.NewReader(make([]byte, 200))
@@ -43,10 +49,11 @@ func TestMaxBodySize(t *testing.T) {
 				return req
 			},
 			expectedCode: http.StatusRequestEntityTooLarge,
+			expectedBody: `{"error":{"code":"PAYLOAD_TOO_LARGE","message":"Request body too large (max 100 bytes)"}}` + "\n",
 		},
 		{
 			name:    "wraps body with MaxBytesReader to reject oversized streaming body",
-			maxSize: 50,
+			maxSize: streamingLimitBytes,
 			method:  http.MethodPost,
 			body: func() *http.Request {
 				body := strings.NewReader(strings.Repeat("x", 100))
@@ -102,6 +109,71 @@ func TestMaxBodySize(t *testing.T) {
 
 			handler.ServeHTTP(w, req)
 			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+			if tt.expectedBody != "" {
+				require.Equal(t, tt.expectedBody, w.Body.String(), "should return a capitalized message with the max body size")
+			}
+		})
+	}
+}
+
+func TestMaxBodySizeForPaths(t *testing.T) {
+	t.Parallel()
+
+	const (
+		normalAPIPath      = "/api/v1/sessions/manual"
+		uploadAPIPath      = "/api/v1/uploads"
+		uploadMaxBodyBytes = 11 * bytesPerMiB
+	)
+
+	tests := []struct {
+		name         string
+		path         string
+		contentSize  int64
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name:         "uses default limit for normal API paths",
+			path:         normalAPIPath,
+			contentSize:  DefaultMaxBodyBytes + 1,
+			expectedCode: http.StatusRequestEntityTooLarge,
+			expectedBody: `{"error":{"code":"PAYLOAD_TOO_LARGE","message":"Request body too large (max 1 MB)"}}` + "\n",
+		},
+		{
+			name:         "allows upload path above the default limit",
+			path:         uploadAPIPath,
+			contentSize:  DefaultMaxBodyBytes + 1,
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:         "rejects upload path above the upload limit",
+			path:         uploadAPIPath,
+			contentSize:  uploadMaxBodyBytes + 1,
+			expectedCode: http.StatusRequestEntityTooLarge,
+			expectedBody: `{"error":{"code":"PAYLOAD_TOO_LARGE","message":"Request body too large (max 11 MB)"}}` + "\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := MaxBodySizeForPaths(DefaultMaxBodyBytes, map[string]int64{
+				uploadAPIPath: uploadMaxBodyBytes,
+			})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(make([]byte, int(tt.contentSize))))
+			req.ContentLength = tt.contentSize
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			require.Equal(t, tt.expectedCode, w.Code, "should return expected HTTP status code")
+			if tt.expectedBody != "" {
+				require.Equal(t, tt.expectedBody, w.Body.String(), "should include the effective max body size in the error response")
+			}
 		})
 	}
 }

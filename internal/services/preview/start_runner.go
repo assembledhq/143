@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +27,8 @@ import (
 
 const previewNoConfigMessage = "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run."
 
+var ErrSandboxBusy = errors.New("session sandbox is busy")
+
 // StartRunner completes durable preview startup jobs after the API has
 // reserved the preview row and enqueued start_preview.
 type StartRunner struct {
@@ -37,6 +42,7 @@ type StartRunner struct {
 	sandboxCapacity *agent.SandboxCapacityGate
 	staticEgress    agent.StaticEgressRuntimeConfig
 	snapshots       storage.SnapshotStore
+	snapshotCache   previewStartupCache
 	github          branchPreviewGitHub
 	nodeID          string
 	logger          zerolog.Logger
@@ -53,6 +59,7 @@ type StartRunnerConfig struct {
 	SandboxCapacity *agent.SandboxCapacityGate
 	StaticEgress    agent.StaticEgressRuntimeConfig
 	Snapshots       storage.SnapshotStore
+	SnapshotCache   *SnapshotCache
 	GitHub          branchPreviewGitHub
 	NodeID          string
 	Logger          zerolog.Logger
@@ -63,6 +70,12 @@ type branchPreviewGitHub interface {
 }
 
 func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
+	var snapshotCache previewStartupCache
+	if cfg.SnapshotCache != nil {
+		snapshotCache = cfg.SnapshotCache
+	} else if cfg.Manager != nil {
+		snapshotCache = cfg.Manager.SnapshotCache()
+	}
 	return &StartRunner{
 		manager:         cfg.Manager,
 		previews:        cfg.Previews,
@@ -74,6 +87,7 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 		sandboxCapacity: cfg.SandboxCapacity,
 		staticEgress:    cfg.StaticEgress,
 		snapshots:       cfg.Snapshots,
+		snapshotCache:   snapshotCache,
 		github:          cfg.GitHub,
 		nodeID:          cfg.NodeID,
 		logger:          cfg.Logger,
@@ -81,6 +95,12 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 }
 
 var gitCommitSHARe = regexp.MustCompile(`\A[0-9a-fA-F]{7,40}\z`)
+
+type previewStartupCache interface {
+	FindSnapshot(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*CacheHit, error)
+	RestoreSnapshot(ctx context.Context, sb *agent.Sandbox, hit *CacheHit) error
+	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error
+}
 
 // StartReservedBranchPreview completes a target-owned branch preview by
 // creating a fresh sandbox, cloning the repository, checking out the pinned
@@ -100,11 +120,8 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.abort(ctx, reservation, "", "preview reservation no longer matches target")
 		return fmt.Errorf("reserved branch preview target mismatch")
 	}
-	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
-		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
-			return fmt.Errorf("reassign branch preview worker: %w", err)
-		}
-		reservation.WorkerNodeID = r.nodeID
+	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("reassign branch preview worker: %w", err)
 	}
 
 	target, err := r.previews.GetPreviewTarget(ctx, payload.OrgID, payload.PreviewTargetID)
@@ -231,12 +248,14 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		UserID:                    payload.UserID,
 		Config:                    cfg,
 		Sandbox:                   sb,
+		RepositoryID:              target.RepositoryID,
 		BaseCommitSHA:             target.CommitSHA,
 		ProfileName:               payload.ProfileName,
 		RequestID:                 derefStringPtr(target.RequestID),
 		MetricsSource:             string(target.SourceType),
 		MetricsRepositoryFullName: repo.FullName,
 	}
+	startupCacheKey := r.maybeRestoreBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, target.CommitSHA, sb, cfg)
 	metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, 1)
 	defer metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, -1)
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
@@ -246,6 +265,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
+	r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKey, sb, cfg)
 	return nil
 }
 
@@ -263,11 +283,17 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	if reservation.Status != models.PreviewStatusStarting {
 		return fmt.Errorf("reserved preview is not starting (status=%s)", reservation.Status)
 	}
-	if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); ok && shouldReassignPreviewWorker(deadTarget, reservation.WorkerNodeID, r.nodeID) {
-		if err := r.previews.UpdatePreviewWorkerNodeID(ctx, payload.OrgID, payload.PreviewID, r.nodeID); err != nil {
-			return fmt.Errorf("reassign preview worker: %w", err)
+	// Skip revision validation for jobs created before workspace revision tracking
+	// was deployed (backward compatibility for rolling deploys).
+	if !payload.WorkspaceRevisionUpdatedAt.IsZero() {
+		if reservation.SourceWorkspaceRevision == nil ||
+			*reservation.SourceWorkspaceRevision != payload.WorkspaceRevision {
+			r.abort(ctx, reservation, "", "preview reservation no longer matches workspace revision")
+			return fmt.Errorf("reserved preview workspace revision mismatch")
 		}
-		reservation.WorkerNodeID = r.nodeID
+	}
+	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("reassign preview worker: %w", err)
 	}
 
 	session, err := r.sessions.GetByID(ctx, payload.OrgID, payload.SessionID)
@@ -286,18 +312,32 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 			r.registerCapacityDeadLetter(ctx, reservation)
 			return fmt.Errorf("%s: %w", acq.ErrCode, acq.Err)
 		}
+		if errors.Is(acq.Err, agent.ErrStaleSandboxIDCleared) {
+			return fmt.Errorf("%s: %w", acq.ErrCodeOr("STALE_SANDBOX_CLEARED"), acq.Err)
+		}
+		if errors.Is(acq.Err, agent.ErrSandboxOnDifferentNode) {
+			r.registerSandboxBusyDeadLetter(ctx, reservation)
+			return fmt.Errorf("%s: %w", acq.ErrCodeOr("SANDBOX_WRONG_NODE"), acq.Err)
+		}
+		if acq.ErrCode == "SANDBOX_BUSY" {
+			r.registerSandboxBusyDeadLetter(ctx, reservation)
+			return fmt.Errorf("%s: %w: %v", acq.ErrCode, ErrSandboxBusy, acq.Err)
+		}
 		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
 
 	input := StartPreviewInput{
-		SessionID:     payload.SessionID,
-		OrgID:         payload.OrgID,
-		UserID:        payload.UserID,
-		Config:        payload.Config,
-		Sandbox:       acq.Sandbox,
-		BaseCommitSHA: payload.BaseCommitSHA,
-		ProfileName:   payload.ProfileName,
+		SessionID:                  payload.SessionID,
+		OrgID:                      payload.OrgID,
+		UserID:                     payload.UserID,
+		Config:                     payload.Config,
+		Sandbox:                    acq.Sandbox,
+		RepositoryID:               uuidPointerValue(session.RepositoryID),
+		BaseCommitSHA:              payload.BaseCommitSHA,
+		ProfileName:                payload.ProfileName,
+		WorkspaceRevision:          payload.WorkspaceRevision,
+		WorkspaceRevisionUpdatedAt: payload.WorkspaceRevisionUpdatedAt,
 	}
 	hydratedID := ""
 	if acq.Hydrated {
@@ -343,8 +383,23 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	return nil
 }
 
-func shouldReassignPreviewWorker(deadTargetNode, reservationWorkerNode, claimingWorkerNode string) bool {
-	return deadTargetNode != "" && claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
+func (r *StartRunner) reassignReservationWorkerIfNeeded(ctx context.Context, orgID, previewID uuid.UUID, reservation *models.PreviewInstance) error {
+	if reservation == nil || !shouldReassignPreviewWorker("", reservation.WorkerNodeID, r.nodeID) {
+		return nil
+	}
+	endpointURL := ""
+	if r.manager != nil {
+		endpointURL = r.manager.previewInternalBaseURL
+	}
+	if err := r.previews.ReassignPreviewWorker(ctx, orgID, previewID, r.nodeID, endpointURL); err != nil {
+		return err
+	}
+	reservation.WorkerNodeID = r.nodeID
+	return nil
+}
+
+func shouldReassignPreviewWorker(_ string, reservationWorkerNode, claimingWorkerNode string) bool {
+	return claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
 }
 
 func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
@@ -359,6 +414,21 @@ func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservatio
 				Msg("preview start dead-lettered after capacity retries")
 		}
 		r.manager.AbortReservation(hookCtx, reservation, "", PreviewCapacityRetryExhaustedMessage)
+	})
+}
+
+func (r *StartRunner) registerSandboxBusyDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
+	if r == nil || r.manager == nil || reservation == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if deadLetterErr != nil {
+			r.logger.Warn().Err(deadLetterErr).
+				Str("preview_id", reservation.ID.String()).
+				Str("session_id", reservation.SessionID.String()).
+				Msg("preview start dead-lettered after sandbox-busy retries")
+		}
+		r.manager.AbortReservation(hookCtx, reservation, "", "Preview could not start because the session sandbox stayed busy. Try again after the current agent turn finishes.")
 	})
 }
 
@@ -448,6 +518,9 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	}
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
+		if ownerCheck := r.checkLiveContainerWorker(session.WorkerNodeID); ownerCheck.Err != nil {
+			return ownerCheck
+		}
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
@@ -494,11 +567,19 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: err}
 	}
 
-	winningID, freshErr := r.sessions.PeekContainerID(ctx, orgID, session.ID)
+	winningID, winningWorkerID, freshErr := r.sessions.PeekContainerOwnership(ctx, orgID, session.ID)
 	switch {
 	case freshErr != nil:
 		r.logger.Warn().Err(freshErr).Str("session_id", session.ID.String()).Msg("preview hydrate: pre-hydrate peek failed; falling through to CAS race detection")
 	case winningID != "":
+		if ownerCheck := r.checkLiveContainerWorker(&winningWorkerID); ownerCheck.Err != nil {
+			return ownerCheck
+		}
+		if cleared, clearErr := r.clearStalePreviewContainer(ctx, orgID, session, winningID, workDir); clearErr != nil {
+			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEAR_FAILED", Err: clearErr}
+		} else if cleared {
+			return acquireSandboxResult{ErrCode: "STALE_SANDBOX_CLEARED", Err: fmt.Errorf("%w", agent.ErrStaleSandboxIDCleared)}
+		}
 		return acquireSandboxResult{ErrCode: "SANDBOX_BUSY", Err: fmt.Errorf("another process attached to this session's sandbox first; please retry")}
 	}
 
@@ -539,6 +620,74 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
 }
 
+func (r *StartRunner) checkLiveContainerWorker(workerNodeID *string) acquireSandboxResult {
+	if r == nil || r.nodeID == "" {
+		return acquireSandboxResult{}
+	}
+	owner := ""
+	if workerNodeID != nil {
+		owner = strings.TrimSpace(*workerNodeID)
+	}
+	if owner == "" {
+		return acquireSandboxResult{
+			ErrCode: "SANDBOX_BUSY",
+			Err:     fmt.Errorf("%w: session sandbox worker ownership is not recorded yet", ErrSandboxBusy),
+		}
+	}
+	if owner != r.nodeID {
+		return acquireSandboxResult{
+			ErrCode: "SANDBOX_WRONG_NODE",
+			Err:     fmt.Errorf("%w: session sandbox belongs to worker %s", agent.ErrSandboxOnDifferentNode, owner),
+		}
+	}
+	return acquireSandboxResult{}
+}
+
+func (r *StartRunner) clearStalePreviewContainer(ctx context.Context, orgID uuid.UUID, session *models.Session, containerID, workDir string) (bool, error) {
+	if r == nil || r.sandboxProvider == nil || r.sessions == nil || session == nil || containerID == "" {
+		return false, nil
+	}
+	candidate := &agent.Sandbox{
+		ID:        containerID,
+		Provider:  "docker",
+		WorkDir:   workDir,
+		SessionID: session.ID.String(),
+		OrgID:     session.OrgID.String(),
+		Purpose:   "preview_hydrate",
+	}
+	alive, inspectErr := r.sandboxProvider.IsAlive(ctx, candidate)
+	if inspectErr != nil {
+		r.logger.Warn().Err(inspectErr).
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: stale container probe failed; leaving row for retry/reconciler")
+		return false, nil
+	}
+	if alive {
+		return false, nil
+	}
+	cleared, clearErr := r.sessions.ClearContainerID(ctx, orgID, session.ID, containerID)
+	if clearErr != nil {
+		r.logger.Warn().Err(clearErr).
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: failed to clear stale container_id")
+		return false, fmt.Errorf("clear stale container_id: %w", clearErr)
+	}
+	if !cleared {
+		r.logger.Info().
+			Str("session_id", session.ID.String()).
+			Str("container_id", containerID).
+			Msg("preview hydrate: stale container clear lost CAS")
+		return false, nil
+	}
+	r.logger.Info().
+		Str("session_id", session.ID.String()).
+		Str("container_id", containerID).
+		Msg("preview hydrate: cleared stale container_id; retrying against clean row")
+	return true, nil
+}
+
 func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID, previewConfigName string) (*models.PreviewConfig, error) {
 	if r.fileReader == nil {
 		return nil, nil
@@ -557,4 +706,137 @@ func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.
 		return nil, fmt.Errorf("%w: parse %s: %w", ErrInvalidConfig, repoconfig.ConfigPath, err)
 	}
 	return cfg, nil
+}
+
+func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, commitSHA string, sb *agent.Sandbox, cfg *models.PreviewConfig) string {
+	if r == nil || r.snapshotCache == nil || r.sandboxProvider == nil || sb == nil || cfg == nil || commitSHA == "" {
+		return ""
+	}
+	if previewConfigHasRuntimeSecretFiles(cfg) {
+		// Runtime secret files are written into the shared workspace during
+		// LaunchPreview. The startup cache snapshots that workspace after
+		// launch, so do not read or write cache entries for these configs:
+		// otherwise worker-local cache blobs could retain plaintext secrets.
+		r.logger.Debug().
+			Str("repository_id", repoID.String()).
+			Msg("branch preview startup cache skipped because config delivers preview secrets as files")
+		return ""
+	}
+	snapshotKey, err := r.computeBranchPreviewStartupCacheKey(ctx, sb, cfg, commitSHA)
+	if err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("commit_sha", commitSHA).
+			Msg("branch preview startup cache key unavailable; launching cold")
+		return ""
+	}
+	hit, err := r.snapshotCache.FindSnapshot(ctx, orgID, repoID, snapshotKey)
+	if err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache lookup failed; launching cold")
+		return snapshotKey
+	}
+	if hit == nil {
+		r.logger.Debug().
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache miss")
+		return snapshotKey
+	}
+	if err := r.snapshotCache.RestoreSnapshot(ctx, sb, hit); err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache restore failed; launching cold")
+		return snapshotKey
+	}
+	r.logger.Info().
+		Str("repository_id", repoID.String()).
+		Str("snapshot_key", snapshotKey).
+		Msg("branch preview startup cache restored")
+	return snapshotKey
+}
+
+func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string, sb *agent.Sandbox, cfg *models.PreviewConfig) {
+	if r == nil || r.snapshotCache == nil || sb == nil || snapshotKey == "" {
+		return
+	}
+	if previewConfigHasRuntimeSecretFiles(cfg) {
+		// See maybeRestoreBranchPreviewStartupCache for why secret-file
+		// configs are excluded from the workspace snapshot cache.
+		r.logger.Debug().
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	defer cancel()
+	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, snapshotKey, SnapshotMetadata{OrgID: orgID, RepoID: repoID}); err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", snapshotKey).
+			Msg("failed to create branch preview startup cache")
+	}
+}
+
+func (r *StartRunner) computeBranchPreviewStartupCacheKey(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, commitSHA string) (string, error) {
+	lockfiles := branchPreviewStartupCacheLockfiles(cfg)
+	var lockInput bytes.Buffer
+	for _, lockfile := range lockfiles {
+		cleanPath, err := cleanBranchPreviewStartupCachePath(lockfile)
+		if err != nil {
+			return "", fmt.Errorf("preview.install.lockfiles path %q: %w", lockfile, err)
+		}
+		body, err := r.sandboxProvider.ReadFile(ctx, sb, cleanPath)
+		if err != nil {
+			return "", fmt.Errorf("read preview.install lockfile %q: %w", cleanPath, err)
+		}
+		lockInput.WriteString(cleanPath)
+		lockInput.WriteByte(0)
+		lockInput.Write(body)
+		lockInput.WriteByte(0)
+	}
+	return ComputeSnapshotKey(lockInput.Bytes(), commitSHA, computeConfigDigest(cfg)), nil
+}
+
+func branchPreviewStartupCacheLockfiles(cfg *models.PreviewConfig) []string {
+	if cfg == nil || cfg.Install == nil || len(cfg.Install.Lockfiles) == 0 {
+		return nil
+	}
+	lockfiles := append([]string(nil), cfg.Install.Lockfiles...)
+	sort.Strings(lockfiles)
+	return lockfiles
+}
+
+func previewConfigHasRuntimeSecretFiles(cfg *models.PreviewConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.RuntimeSecretFiles) > 0 {
+		return true
+	}
+	for _, ref := range SecretBundleRefs(cfg) {
+		if len(ref.Files) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanBranchPreviewStartupCachePath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return "", fmt.Errorf("path must be relative")
+	}
+	clean := path.Clean(trimmed)
+	if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." {
+		return "", fmt.Errorf("path must stay inside the repository")
+	}
+	return clean, nil
 }

@@ -23,6 +23,23 @@ vi.mock("@/lib/errors", () => ({
   captureError: captureErrorMock,
 }));
 
+function setMobileMatch(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 639px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 describe("ClaudeCodeAuthModal", () => {
   beforeEach(() => {
     initiateMock.mockReset();
@@ -43,6 +60,16 @@ describe("ClaudeCodeAuthModal", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("uses the shared mobile sheet layout", async () => {
+    setMobileMatch(true);
+
+    render(<ClaudeCodeAuthModal label="team-a" onClose={vi.fn()} />);
+
+    const dialog = await screen.findByRole("dialog", { name: "Connect your Claude subscription" });
+    expect(dialog).toHaveAttribute("data-slot", "sheet-content");
+    expect(dialog).toHaveClass("max-h-[100svh]", "overflow-hidden");
   });
 
   it("calls onClose when Escape is pressed", async () => {

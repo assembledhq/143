@@ -69,13 +69,17 @@ type SessionHandler struct {
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
 	orgStore           *db.OrganizationStore
+	userStore          *db.UserStore
 	jobStore           *db.JobStore
+	txStarter          db.TxStarter
 	messageStore       *db.SessionMessageStore
 	reviewLoopStore    *db.SessionReviewLoopStore
 	reviewCommentStore *db.SessionReviewCommentStore
 	linkStore          *db.SessionIssueLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
+	threadInboxStore   *db.ThreadInboxStore
+	sandboxHolders     *db.SessionSandboxHolderStore
 	viewStore          *db.SessionViewStore
 	memberships        sessionMembershipStore
 	prCredentials      githubStatusCredentialStore
@@ -403,6 +407,10 @@ func (h *SessionHandler) SetStreams(streams *cache.SessionStreams) {
 	h.streams = streams
 }
 
+func (h *SessionHandler) SetTxStarter(txStarter db.TxStarter) {
+	h.txStarter = txStarter
+}
+
 // SetShutdownSignal wires a channel that is closed when the server is
 // shutting down. SSE stream handlers listen on it so they return promptly
 // during graceful shutdown instead of blocking Server.Shutdown until its
@@ -462,6 +470,14 @@ func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRe
 	)
 }
 
+func (h *SessionHandler) SetThreadInboxStore(store *db.ThreadInboxStore) {
+	h.threadInboxStore = store
+}
+
+func (h *SessionHandler) SetSessionSandboxHolderStore(store *db.SessionSandboxHolderStore) {
+	h.sandboxHolders = store
+}
+
 func NewSessionHandler(
 	runStore *db.SessionStore,
 	logStore *db.SessionLogStore,
@@ -485,10 +501,89 @@ func NewSessionHandler(
 		repoStore:        repoStore,
 		orgStore:         orgStore,
 		jobStore:         jobStore,
+		txStarter:        nil,
 		messageStore:     messageStore,
 		threadStore:      threadStore,
 		llmClient:        llmClient,
 		logger:           logger,
+	}
+}
+
+func (h *SessionHandler) SetUserStore(store *db.UserStore) {
+	h.userStore = store
+}
+
+type publishActionTxError struct {
+	phase string
+	err   error
+}
+
+func (e *publishActionTxError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.phase + ": " + e.err.Error()
+}
+
+func (e *publishActionTxError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (h *SessionHandler) enqueuePublishActionInTx(
+	ctx context.Context,
+	orgID uuid.UUID,
+	sessionID uuid.UUID,
+	queue string,
+	jobType string,
+	payload any,
+	dedupeKey string,
+	markQueued func(context.Context, *db.SessionStore) (bool, error),
+) (bool, error) {
+	if h.txStarter == nil {
+		return false, &publishActionTxError{phase: "begin", err: errors.New("transaction starter not configured")}
+	}
+	tx, err := h.txStarter.Begin(ctx)
+	if err != nil {
+		return false, &publishActionTxError{phase: "begin", err: err}
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txSessions := db.NewSessionStore(tx)
+	txSessions.SetLogger(h.logger)
+	queued, err := markQueued(ctx, txSessions)
+	if err != nil {
+		return false, &publishActionTxError{phase: "state", err: err}
+	}
+	if !queued {
+		return false, nil
+	}
+
+	jobID, err := h.jobStore.EnqueueInTx(ctx, tx, orgID, queue, jobType, payload, 5, &dedupeKey)
+	if err != nil {
+		return false, &publishActionTxError{phase: "enqueue", err: err}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, &publishActionTxError{phase: "commit", err: err}
+	}
+	h.jobStore.Notify(context.WithoutCancel(ctx), jobID)
+	h.publishSessionStatusAfterCommit(ctx, orgID, sessionID)
+	return true, nil
+}
+
+func (h *SessionHandler) publishSessionStatusAfterCommit(ctx context.Context, orgID, sessionID uuid.UUID) {
+	if h.streams == nil {
+		return
+	}
+	session, err := h.runStore.GetByID(context.WithoutCancel(ctx), orgID, sessionID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to reload session after queued publish action")
+		return
+	}
+	if err := h.streams.PublishStatus(context.WithoutCancel(ctx), &session); err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to publish queued session status")
 	}
 }
 
@@ -709,12 +804,58 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		if threads == nil {
 			threads = []models.SessionThread{}
 		}
+		if err := h.attachThreadInboxDeliverySummaries(r.Context(), orgID, runID, threads); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", runID.String()).Msg("failed to load thread inbox delivery summaries for session")
+		}
 		detail.Threads = threads
 	} else {
 		detail.Threads = []models.SessionThread{}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) attachThreadInboxDeliverySummaries(ctx context.Context, orgID, sessionID uuid.UUID, threads []models.SessionThread) error {
+	if h.threadInboxStore == nil || len(threads) == 0 {
+		return nil
+	}
+	summaries, err := h.threadInboxStore.ListDeliverySummariesBySession(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("list thread inbox delivery summaries: %w", err)
+	}
+	for i := range threads {
+		summary, ok := summaries[threads[i].ID]
+		if !ok {
+			summary = models.ThreadInboxDeliverySummary{ThreadID: threads[i].ID}
+			summary.Normalize()
+		}
+		threads[i].InboxDelivery = &summary
+	}
+	return nil
+}
+
+func (h *SessionHandler) requireSnapshotQuiescent(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, action string) bool {
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
+		return false
+	}
+	if session.Status == models.SessionStatusRunning {
+		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before "+action)
+		return false
+	}
+	if h.sandboxHolders == nil {
+		return true
+	}
+	active, err := h.sandboxHolders.CountActiveThreadRuntimesBySession(r.Context(), orgID, session.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "QUIESCENCE_CHECK_FAILED", "failed to check active thread runtimes", err)
+		return false
+	}
+	if active > 0 {
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_QUIESCENT", "wait for active tabs to finish before "+action)
+		return false
+	}
+	return true
 }
 
 func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
@@ -949,7 +1090,11 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *run})
 }
 
-// RetrySession resets a failed session back to pending and re-enqueues it.
+const retryCheckpointTranscriptNote = "Retrying from the latest saved progress."
+
+// RetrySession retries a failed session. The default mode resumes from the
+// latest durable checkpoint; start_over preserves the old destructive rerun
+// path for explicit user selection.
 func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -958,6 +1103,40 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mode, err := parseRetrySessionMode(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_RETRY_MODE", "invalid retry mode", err)
+		return
+	}
+
+	switch mode {
+	case models.SessionRetryModeCheckpoint:
+		h.retrySessionFromCheckpoint(w, r, orgID, sessionID)
+	case models.SessionRetryModeStartOver:
+		h.retrySessionStartOver(w, r, orgID, sessionID)
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_RETRY_MODE", "invalid retry mode")
+	}
+}
+
+func parseRetrySessionMode(r *http.Request) (models.SessionRetryMode, error) {
+	var req models.RetrySessionRequest
+	if r.Body != nil {
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+	}
+	if req.Mode == "" {
+		req.Mode = models.SessionRetryModeCheckpoint
+	}
+	if err := req.Mode.Validate(); err != nil {
+		return "", err
+	}
+	return req.Mode, nil
+}
+
+func (h *SessionHandler) retrySessionStartOver(w http.ResponseWriter, r *http.Request, orgID, sessionID uuid.UUID) {
 	if err := h.runStore.ResetForRetry(r.Context(), orgID, sessionID); err != nil {
 		if errors.Is(err, db.ErrSessionNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
@@ -998,7 +1177,8 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 
 	sessionIDStr := sessionID.String()
 	retryDetails := sessionAuditSnapshot(&session, nil, map[string]any{
-		"job_type": "run_agent",
+		"job_type":   "run_agent",
+		"retry_mode": string(models.SessionRetryModeStartOver),
 		"changes": map[string]any{
 			"status": auditChange("failed", session.Status),
 		},
@@ -1006,6 +1186,132 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionRetried, models.AuditResourceSession, &sessionIDStr, &sessionID, nil,
 		marshalAuditDetails(h.logger, retryDetails))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
+}
+
+func (h *SessionHandler) retrySessionFromCheckpoint(w http.ResponseWriter, r *http.Request, orgID, sessionID uuid.UUID) {
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, db.ErrSessionNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch session", err)
+		return
+	}
+	if session.Status != models.SessionStatusFailed {
+		writeError(w, r, http.StatusConflict, "NOT_FAILED", "session is not in failed status")
+		return
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" || session.SandboxState == models.SandboxStateDestroyed {
+		writeError(w, r, http.StatusConflict, "CHECKPOINT_UNAVAILABLE", "No saved progress is available.")
+		return
+	}
+	if session.PendingSnapshotKey != nil && strings.TrimSpace(*session.PendingSnapshotKey) != "" {
+		writeError(w, r, http.StatusConflict, "CHECKPOINT_PENDING", "checkpoint upload is still pending")
+		return
+	}
+
+	targetThread, err := h.threadStore.GetRetryTarget(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusConflict, "NO_RETRY_THREAD", "no visible retry thread is available")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "THREAD_LOOKUP_FAILED", "failed to find retry thread", err)
+		return
+	}
+
+	claimedSession, err := h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusConflict, "CHECKPOINT_UNAVAILABLE", "No saved progress is available.")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "RETRY_FAILED", "failed to claim session for checkpoint retry", err)
+		return
+	}
+
+	claimedThread, err := h.claimRetryThread(r.Context(), orgID, sessionID, targetThread)
+	if err != nil {
+		h.revertCheckpointRetry(r.Context(), orgID, sessionID, uuid.Nil, models.ThreadStatus(""))
+		if errors.Is(err, db.ErrThreadRunningLimitReached) || errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusConflict, "THREAD_NOT_RETRYABLE", "retry thread is not available")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "THREAD_CLAIM_FAILED", "failed to claim retry thread", err)
+		return
+	}
+
+	messageThreadID := claimedThread.ID
+	note := models.SessionMessage{
+		SessionID:  sessionID,
+		OrgID:      orgID,
+		ThreadID:   &messageThreadID,
+		TurnNumber: claimedThread.CurrentTurn + 1,
+		Role:       models.MessageRoleAssistant,
+		Content:    retryCheckpointTranscriptNote,
+	}
+	if err := h.messageStore.Create(r.Context(), &note); err != nil {
+		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
+		writeError(w, r, http.StatusInternalServerError, "MESSAGE_FAILED", "failed to add retry transcript note", err)
+		return
+	}
+
+	dedupeKey := db.ContinueSessionDedupeKey(claimedThread.ID)
+	payload := map[string]string{
+		"session_id": sessionID.String(),
+		"thread_id":  claimedThread.ID.String(),
+		"org_id":     orgID.String(),
+	}
+	if _, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(&claimedSession)); err != nil {
+		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue session continuation job", err)
+		return
+	}
+
+	h.enrichSessionLinks(r.Context(), orgID, &claimedSession)
+	sessionIDStr := sessionID.String()
+	retryDetails := sessionAuditSnapshot(&claimedSession, nil, map[string]any{
+		"job_type":   "continue_session",
+		"retry_mode": string(models.SessionRetryModeCheckpoint),
+		"thread_id":  claimedThread.ID.String(),
+		"changes": map[string]any{
+			"status": auditChange(session.Status, claimedSession.Status),
+		},
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionRetried, models.AuditResourceSession, &sessionIDStr, &sessionID, nil,
+		marshalAuditDetails(h.logger, retryDetails))
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: claimedSession})
+}
+
+func (h *SessionHandler) claimRetryThread(ctx context.Context, orgID, sessionID uuid.UUID, targetThread models.SessionThread) (models.SessionThread, error) {
+	if targetThread.Status == models.ThreadStatusIdle {
+		return h.threadStore.ClaimIdleForSession(ctx, orgID, sessionID, targetThread.ID, models.MaxRunningThreadsPerSession)
+	}
+	if retryThreadStatusResumable(targetThread.Status) {
+		return h.threadStore.ClaimForResumeInSession(ctx, orgID, sessionID, targetThread.ID, models.MaxRunningThreadsPerSession)
+	}
+	return models.SessionThread{}, pgx.ErrNoRows
+}
+
+func retryThreadStatusResumable(status models.ThreadStatus) bool {
+	for _, resumable := range models.ResumableThreadStatuses {
+		if status == resumable {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *SessionHandler) revertCheckpointRetry(ctx context.Context, orgID, sessionID, threadID uuid.UUID, previousThreadStatus models.ThreadStatus) {
+	if err := h.runStore.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusFailed); err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to revert checkpoint retry session status")
+	}
+	if threadID != uuid.Nil && previousThreadStatus != "" {
+		if err := h.threadStore.UpdateStatus(ctx, orgID, threadID, previousThreadStatus); err != nil {
+			h.logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to revert checkpoint retry thread status")
+		}
+	}
 }
 
 // GetLogs returns all logs for a run as a JSON array.
@@ -1186,7 +1492,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 	}
 
 	lastStatus := run.Status
-	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+	if err := sw.WriteEvent(sse.EventStatus, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to SSE stream")
 		return
 	}
@@ -1241,7 +1547,8 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 			// Send a status event whenever the session status changes.
 			if run.Status != lastStatus {
 				lastStatus = run.Status
-				if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+				statusPayload := h.sessionStatusPayload(ctx, orgID, run)
+				if err := sw.WriteEvent(sse.EventStatus, statusPayload); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write status event to SSE stream")
 					return
 				}
@@ -1250,7 +1557,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 			sw.Flush()
 
 			if isTerminalStatus(run.Status) {
-				if err := sw.WriteEvent(sse.EventDone, run); err != nil {
+				if err := sw.WriteEvent(sse.EventDone, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write done event to SSE stream")
 					return
 				}
@@ -1277,6 +1584,13 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 	}
 	defer statusSub.Close()
 
+	eventSub, err := h.streams.SubscribeEvents(run.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to subscribe to Redis session event stream")
+		return false
+	}
+	defer eventSub.Close()
+
 	logs, err := h.catchUpLogs(ctx, orgID, run.ID, lastEventID)
 	if err != nil {
 		logger.Warn().Err(err).Str("session_id", run.ID.String()).Str("last_event_id", lastEventID).Msg("failed to catch up logs from Redis-backed stream")
@@ -1291,7 +1605,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 		}
 		lastDeliveredStreamID = streamID
 	}
-	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+	if err := sw.WriteEvent(sse.EventStatus, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to Redis-backed SSE stream")
 		return false
 	}
@@ -1348,21 +1662,57 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				sw.Flush()
 				return true
 			}
-			if err := sw.WriteEvent(sse.EventStatus, updated); err != nil {
+			statusPayload := h.sessionStatusPayload(ctx, orgID, updated)
+			if err := sw.WriteEvent(sse.EventStatus, statusPayload); err != nil {
 				logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis status event to SSE stream")
 				return true
 			}
 			sw.Flush()
 			if isTerminalStatus(updated.Status) {
-				if err := sw.WriteEvent(sse.EventDone, updated); err != nil {
+				if err := sw.WriteEvent(sse.EventDone, statusPayload); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis done event to SSE stream")
 					return true
 				}
 				sw.Flush()
 				return true
 			}
+		case event, ok := <-eventSub.C:
+			if !ok {
+				closeReason := eventSub.CloseReason()
+				logger.Warn().Str("session_id", run.ID.String()).Str("reason", closeReason).Msg("Redis event subscription closed; client should reconnect")
+				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
+					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis event subscription closed")
+				}
+				sw.Flush()
+				return true
+			}
+			if err := writeSessionStreamSSEEvent(sw, event); err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Str("event_type", string(event.Type)).Msg("failed to write Redis session event to SSE stream")
+				return true
+			}
+			sw.Flush()
 		}
 	}
+}
+
+func (h *SessionHandler) sessionStatusPayload(ctx context.Context, orgID uuid.UUID, session models.Session) models.SessionDetail {
+	detail := models.SessionDetail{
+		Session: session,
+		Threads: []models.SessionThread{},
+	}
+	if h.threadStore == nil {
+		return detail
+	}
+	threads, err := h.threadStore.ListBySession(ctx, orgID, session.ID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load threads for session SSE status")
+		return detail
+	}
+	if threads == nil {
+		return detail
+	}
+	detail.Threads = threads
+	return detail
 }
 
 func (h *SessionHandler) catchUpLogs(ctx context.Context, orgID, runID uuid.UUID, lastEventID string) ([]models.SessionLog, error) {
@@ -1432,6 +1782,21 @@ func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.S
 		}
 	}
 	return nil
+}
+
+func writeSessionStreamSSEEvent(sw *sse.Writer, event models.SessionStreamEvent) error {
+	switch event.Type {
+	case models.SessionStreamEventThreadInboxQueued:
+		return sw.WriteEvent(sse.EventThreadInboxQueued, event.Data)
+	case models.SessionStreamEventThreadInboxCleared:
+		return sw.WriteEvent(sse.EventThreadInboxCleared, event.Data)
+	case models.SessionStreamEventThreadRuntimeUpdated:
+		return sw.WriteEvent(sse.EventThreadRuntimeUpdated, event.Data)
+	case models.SessionStreamEventWorkspaceGenerationChanged:
+		return sw.WriteEvent(sse.EventSessionWorkspaceGenerationChanged, event.Data)
+	default:
+		return fmt.Errorf("unsupported session stream event type: %s", event.Type)
+	}
 }
 
 func humanInputSSEEventType(log models.SessionLog) (sse.EventType, bool) {
@@ -1537,6 +1902,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a PR") {
+		return
+	}
 
 	switch session.PRCreationState {
 	case models.PRCreationStateQueued, models.PRCreationStatePushing:
@@ -1619,15 +1987,29 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"agent",
+		"open_pr",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
+		},
+	)
+	if err != nil {
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR creation as queued", err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
 		return
 	}
-
-	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-		zerolog.Ctx(r.Context()).Warn().Err(err).
-			Str("session_id", sessionID.String()).
-			Msg("failed to mark PR creation as queued")
+	if !queued {
+		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+		return
 	}
 
 	sessionIDStr := sessionID.String()
@@ -1665,12 +2047,7 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
-		return
-	}
-	if session.Status == models.SessionStatusRunning {
-		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before creating a branch")
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "creating a branch") {
 		return
 	}
 	switch session.BranchCreationState {
@@ -1725,13 +2102,24 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("create_branch:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "create_branch", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue branch creation job", err)
-		return
-	}
-	queued, err := h.runStore.TryMarkBranchCreationQueued(r.Context(), orgID, sessionID)
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"agent",
+		"create_branch",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkBranchCreationQueued(ctx, orgID, sessionID)
+		},
+	)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue branch creation job", err)
 		return
 	}
 	if !queued {
@@ -1781,17 +2169,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
-	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		writeError(w, r, http.StatusConflict, "SNAPSHOT_PENDING", "a snapshot upload is still finishing; try again in a moment")
-		return
-	}
-	// Defense-in-depth against the frontend's isRunning gate: pushing while a
-	// turn is in flight would race the active sandbox and the snapshot we'd
-	// hydrate could be stale relative to commits the running turn is about
-	// to make. Reject server-side so a racing client (or a stale tab whose
-	// session.status hadn't refreshed) can't slip through.
-	if session.Status == models.SessionStatusRunning {
-		writeError(w, r, http.StatusConflict, "SESSION_RUNNING", "wait for the session to finish before pushing")
+	if !h.requireSnapshotQuiescent(w, r, orgID, session, "pushing changes") {
 		return
 	}
 
@@ -1869,21 +2247,29 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "push_pr_changes", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue push job", err)
-		return
-	}
-
 	// Atomically transition pr_push_state from any non-in-flight state to
 	// 'queued'. The in-memory precheck above rejects the obvious case where
 	// the column is already queued/pushing, but two concurrent requests can
 	// both pass that check and reach this line. CAS resolves the race: the
-	// loser sees rows-affected=0 and returns 409 — the dedupeKey on the
-	// enqueue above already collapsed both requests onto a single worker
-	// job, so no duplicate work runs.
-	queued, err := h.runStore.TryMarkPRPushQueued(r.Context(), orgID, sessionID)
+	// loser sees rows-affected=0 and returns 409 before inserting a job.
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"agent",
+		"push_pr_changes",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkPRPushQueued(ctx, orgID, sessionID)
+		},
+	)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue push job", err)
 		return
 	}
 	if !queued {
@@ -2709,14 +3095,29 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+	queued, err := h.enqueuePublishActionInTx(
+		r.Context(),
+		orgID,
+		sessionID,
+		"default",
+		"open_pr",
+		payload,
+		dedupeKey,
+		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
+		},
+	)
+	if err != nil {
+		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR creation as queued", err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
 		return
 	}
-	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-		zerolog.Ctx(r.Context()).Warn().Err(err).
-			Str("session_id", sessionID.String()).
-			Msg("failed to mark PR creation as queued on session end")
+	if !queued {
+		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+		return
 	}
 
 	// Snapshot cleanup is handled by the reaper, which will find this session
@@ -2986,6 +3387,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentType := models.AgentType(body.AgentType)
+	if body.Model == "" && agentType == "" && h.userStore != nil {
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			userWithSettings, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+			if err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to load user settings for default model")
+			} else if userWithSettings.Settings.CodingAgentModelDefault != "" {
+				resolvedAgentType := models.AgentTypeForModel(userWithSettings.Settings.CodingAgentModelDefault)
+				if resolvedAgentType != "" {
+					body.Model = userWithSettings.Settings.CodingAgentModelDefault
+					agentType = resolvedAgentType
+				}
+			}
+		}
+	}
 	if agentType == "" {
 		agentType = orgSettings.DefaultAgentType
 		if agentType == "" {
@@ -3155,6 +3570,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			SessionTitle:            title,
 			BranchName:              body.Branch,
 			ReferenceText:           linearReferenceText(body.References),
+			RepositoryID:            repoID,
 			UserID:                  userID,
 			LinearPrivate:           body.LinearPrivate,
 			LinearStateSyncDisabled: body.LinearStateSyncDisabled,

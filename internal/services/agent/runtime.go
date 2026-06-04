@@ -84,6 +84,10 @@ func stopReasonToRuntime(reason StopReason) models.RuntimeStopReason {
 		return models.RuntimeStopReasonNoProgress
 	case StopReasonAbsoluteCeiling:
 		return models.RuntimeStopReasonAbsoluteCeiling
+	case StopReasonWorkerDrain:
+		return models.RuntimeStopReasonWorkerDrain
+	case StopReasonDeployBudgetExpired:
+		return models.RuntimeStopReasonDeployBudgetExpired
 	default:
 		return models.RuntimeStopReasonNone
 	}
@@ -352,6 +356,7 @@ type runtimeController struct {
 	maxConcurrent int
 	isDraining    func() bool
 	tracker       *runtimeProgressTracker
+	stopFallback  context.CancelCauseFunc
 
 	mu            sync.Mutex
 	startedAt     time.Time
@@ -383,6 +388,10 @@ func newRuntimeController(
 		isDraining:    isDraining,
 		tracker:       tracker,
 	}
+}
+
+func (c *runtimeController) SetStopFallback(cancel context.CancelCauseFunc) {
+	c.stopFallback = cancel
 }
 
 func (c *runtimeController) Begin(ctx context.Context, startedAt time.Time, capability models.CheckpointCapability) error {
@@ -421,7 +430,19 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 	c.stopRequested = reason
 	c.mu.Unlock()
 	if c.cancels != nil {
-		c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow)
+		if !c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow) && c.stopFallback != nil {
+			c.logger.Warn().
+				Str("session_id", c.sessionID.String()).
+				Str("stop_reason", string(reason)).
+				Msg("runtime stop requested before cancel registry entry was available; cancelling execution context")
+			c.stopFallback(cancelCauseForStopReason(reason))
+		}
+	} else if c.stopFallback != nil {
+		c.logger.Warn().
+			Str("session_id", c.sessionID.String()).
+			Str("stop_reason", string(reason)).
+			Msg("runtime stop requested without cancel registry; cancelling execution context")
+		c.stopFallback(cancelCauseForStopReason(reason))
 	}
 	runtimeReason := stopReasonToRuntime(reason)
 	if runtimeReason != models.RuntimeStopReasonNone {

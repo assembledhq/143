@@ -40,6 +40,8 @@ const (
 	ProviderSlack                 ProviderName = "slack"
 	ProviderNotion                ProviderName = "notion"
 	ProviderCircleCI              ProviderName = "circleci"
+	ProviderVictoriaLogs          ProviderName = "victorialogs"
+	ProviderMezmo                 ProviderName = "mezmo"
 )
 
 // AllProviders is the canonical list of credential providers.
@@ -49,7 +51,7 @@ var AllProviders = []ProviderName{
 	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
-	ProviderCircleCI,
+	ProviderCircleCI, ProviderVictoriaLogs, ProviderMezmo,
 }
 
 // LLMProviders is the subset of providers that serve LLM completions.
@@ -268,6 +270,8 @@ type SlackConfig struct {
 	AccessToken string   `json:"access_token"` // #nosec G117 -- JSON config field
 	TeamID      string   `json:"team_id"`
 	TeamName    string   `json:"team_name"`
+	BotUserID   string   `json:"bot_user_id,omitempty"`
+	BotID       string   `json:"bot_id,omitempty"`
 	Scope       string   `json:"scope"`
 	ChannelIDs  []string `json:"channel_ids"`
 }

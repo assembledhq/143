@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContextExpander } from "./context-expander";
 
@@ -30,29 +30,66 @@ describe("ContextExpander", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders directional controls", () => {
+  it("renders a top boundary up-arrow with a blank row label", () => {
     render(
       <ContextExpander
-        kind="middle"
+        kind="top"
         hiddenLineCount={15}
         hiddenStart={6}
         hiddenEnd={20}
       />
     );
-    expect(screen.getByText("Show 15 hidden lines")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show 20 above" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show 20 below" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show all hidden lines" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reveal context above" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reveal context below" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("context-expander-label")).toBeEmptyDOMElement();
+    expect(screen.queryByText("Before change")).not.toBeInTheDocument();
+    expect(screen.queryByText("Show 20 above")).not.toBeInTheDocument();
+    expect(screen.queryByText("Show 20 below")).not.toBeInTheDocument();
+    expect(screen.queryByText("Show all")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show all hidden lines" })).not.toBeInTheDocument();
+  });
+
+  it("renders a bottom boundary down-arrow with a blank row label", () => {
+    render(
+      <ContextExpander
+        kind="bottom"
+        hiddenLineCount={15}
+        hiddenStart={6}
+        hiddenEnd={20}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: "Reveal context above" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reveal context below" })).toBeInTheDocument();
+    expect(screen.getByTestId("context-expander-label")).toBeEmptyDOMElement();
+    expect(screen.queryByText("After change")).not.toBeInTheDocument();
+  });
+
+  it("anchors expansion controls in the line-number gutter", () => {
+    render(
+      <ContextExpander
+        kind="top"
+        hiddenLineCount={15}
+        hiddenStart={6}
+        hiddenEnd={20}
+      />
+    );
+
+    const gutter = screen.getByTestId("context-expander-gutter-controls");
+    expect(within(gutter).getByRole("button", { name: "Reveal context above" })).toBeInTheDocument();
+    expect(within(gutter).queryByRole("button", { name: "Reveal context below" })).not.toBeInTheDocument();
+    expect(within(gutter).queryByRole("button", { name: "Show all hidden lines" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("context-expander-prefix-spacer")).toBeInTheDocument();
+    expect(screen.getByTestId("context-expander-label")).toBeEmptyDOMElement();
   });
 
   it("is disabled when sessionId/filePath/startLine are missing", () => {
     render(<ContextExpander kind="middle" hiddenLineCount={10} hiddenStart={6} hiddenEnd={15} />);
-    expect(screen.getByRole("button", { name: "Show 20 above" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show 20 below" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show all hidden lines" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context above" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context below" })).toBeDisabled();
   });
 
-  it("is enabled when all expand props are provided", () => {
+  it("is enabled when required expand props are provided", () => {
     render(
       <ContextExpander
         kind="middle"
@@ -64,9 +101,8 @@ describe("ContextExpander", () => {
         onExpand={vi.fn()}
       />
     );
-    expect(screen.getByRole("button", { name: "Show 20 above" })).not.toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show 20 below" })).not.toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show all hidden lines" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context above" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context below" })).not.toBeDisabled();
   });
 
   it("shows correct title when expandable", () => {
@@ -81,7 +117,7 @@ describe("ContextExpander", () => {
         onExpand={vi.fn()}
       />
     );
-    expect(screen.getByTitle("Show 10 hidden lines")).toBeInTheDocument();
+    expect(screen.getByTitle("Reveal 10 hidden context lines")).toBeInTheDocument();
   });
 
   it("shows unavailable title when not expandable", () => {
@@ -118,7 +154,7 @@ describe("ContextExpander", () => {
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Show 20 above" }));
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
 
     expect(api.sessions.getFileContext).toHaveBeenCalledWith("s1", "src/app.ts", 6, 0, 4);
     expect(onExpand).toHaveBeenCalledWith("above", mockLines, {
@@ -158,7 +194,7 @@ describe("ContextExpander", () => {
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Show 20 below" }));
+    await user.click(screen.getByRole("button", { name: "Reveal context below" }));
 
     expect(api.sessions.getFileContext).toHaveBeenCalledWith("s1", "f.ts", 16, 0, 0);
     expect(onExpand).toHaveBeenCalledWith("below", [{ number: 16, content: "x" }], {
@@ -168,41 +204,6 @@ describe("ContextExpander", () => {
       hasMoreBelow: false,
       totalLines: 16,
     });
-  });
-
-  it("fetches the full hidden range when show all is clicked", async () => {
-    const onExpand = vi.fn();
-    vi.mocked(api.sessions.getFileContext).mockResolvedValue({
-      data: {
-        lines: [
-          { number: 6, content: "line 6" },
-          { number: 7, content: "line 7" },
-        ],
-        start_line: 6,
-        end_line: 7,
-        has_more_above: false,
-        has_more_below: false,
-        total_lines: 7,
-      },
-    } as ReturnType<typeof api.sessions.getFileContext> extends Promise<infer T> ? T : never);
-
-    const user = userEvent.setup();
-    render(
-      <ContextExpander
-        kind="middle"
-        hiddenLineCount={2}
-        sessionId="s1"
-        filePath="f.ts"
-        hiddenStart={6}
-        hiddenEnd={7}
-        onExpand={onExpand}
-      />
-    );
-
-    await user.click(screen.getByRole("button", { name: "Show all hidden lines" }));
-
-    expect(api.sessions.getFileContext).toHaveBeenCalledWith("s1", "f.ts", 6, 0, 1);
-    expect(onExpand).toHaveBeenCalled();
   });
 
   it("does not call onExpand on API error", async () => {
@@ -222,10 +223,10 @@ describe("ContextExpander", () => {
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Show 20 above" }));
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
     expect(onExpand).not.toHaveBeenCalled();
     // Button should still be visible (not expanded)
-    expect(screen.getByRole("button", { name: "Show 20 above" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reveal context above" })).toBeInTheDocument();
   });
 
   it("calls onContextUnavailable on NO_SANDBOX response", async () => {
@@ -248,7 +249,7 @@ describe("ContextExpander", () => {
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Show 20 above" }));
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
     expect(onContextUnavailable).toHaveBeenCalledTimes(1);
   });
 
@@ -272,7 +273,7 @@ describe("ContextExpander", () => {
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Show 20 above" }));
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
     expect(onContextUnavailable).not.toHaveBeenCalled();
   });
 
@@ -290,9 +291,8 @@ describe("ContextExpander", () => {
       />
     );
 
-    expect(screen.getByRole("button", { name: "Show 20 above" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show 20 below" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show all hidden lines" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context above" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context below" })).toBeDisabled();
     expect(
       screen.getByText("Additional file context unavailable for this session")
     ).toBeInTheDocument();
@@ -313,8 +313,7 @@ describe("ContextExpander", () => {
       />
     );
 
-    expect(screen.getByRole("button", { name: "Show 20 above" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show 20 below" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Show all hidden lines" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context above" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reveal context below" })).toBeDisabled();
   });
 });

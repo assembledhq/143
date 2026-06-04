@@ -1,4 +1,5 @@
 import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
+import { normalizeAPIResponse } from './api-normalize';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
@@ -21,7 +22,7 @@ async function parseSuccessBody<T>(res: Response): Promise<T> {
     return undefined as T;
   }
 
-  return JSON.parse(text) as T;
+  return normalizeAPIResponse(JSON.parse(text)) as T;
 }
 
 function getCSRFToken(): string {
@@ -216,12 +217,28 @@ export const api = {
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
     branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
+    previewSecretBundles: {
+      list: (id: string) =>
+        get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`),
+      upsert: (id: string, body: import('./types').PreviewSecretBundleUpsertRequest) =>
+        post<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`, body),
+      patch: (bundleId: string, body: import('./types').PreviewSecretBundlePatchRequest) =>
+        patch<import('./types').SingleResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/preview-secret-bundles/${bundleId}`, body),
+      test: (bundleId: string) =>
+        post<import('./types').SingleResponse<import('./types').PreviewSecretBundleTestResult>>(`/api/v1/preview-secret-bundles/${bundleId}/test`),
+      reveal: (bundleId: string) =>
+        post<import('./types').SingleResponse<import('./types').PreviewSecretBundleRevealResult>>(`/api/v1/preview-secret-bundles/${bundleId}/reveal`),
+      delete: (id: string, name: string) =>
+        del(`/api/v1/repositories/${id}/preview-secret-bundles/${encodeURIComponent(name)}`),
+    },
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
     fixTests: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`),
     resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
+    queueMergeWhenReady: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
+    cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
   },
   previews: {
     list: (params?: { repository_id?: string; branch?: string; status?: string }) => {
@@ -437,8 +454,8 @@ export const api = {
       ),
     endSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
-    retry: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`),
+    retry: (sessionId: string, body?: import('./types').RetrySessionRequest) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`, body ?? {}),
     cancelSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`),
     archive: (sessionId: string) =>
@@ -458,11 +475,12 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`, body),
     archiveThread: (sessionId: string, threadId: string) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/archive`, {}),
-    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
-      post<import('./types').SingleResponse<import('./types').SessionMessage>>(
+    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; clientMessageID?: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
+      post<import('./types').SingleResponse<import('./types').SendThreadMessageResponse>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,
         {
           message: body.message,
+          client_message_id: body.clientMessageID || undefined,
           images: body.images,
           references: body.references && body.references.length > 0 ? body.references : undefined,
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
@@ -497,6 +515,12 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs${qs ? `?${qs}` : ''}`);
     },
+    listRecoverableThreadInboxEntries: (sessionId: string, threadId: string) =>
+      get<import('./types').ListResponse<import('./types').ThreadInboxEntry>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/inbox/recoverable`),
+    retryThreadInboxEntry: (sessionId: string, threadId: string, entryId: string, opts: { replayUnknownDelivery?: boolean } = {}) =>
+      post<import('./types').SingleResponse<import('./types').ThreadInboxEntry>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/inbox/${entryId}/retry`, {
+        replay_unknown_delivery: opts.replayUnknownDelivery || undefined,
+      }),
     listThreadFileEvents: (sessionId: string, since?: string) => {
       const qs = since ? `?since=${encodeURIComponent(since)}` : '';
       return get<import('./types').ListResponse<import('./types').SessionThreadFileEvent>>(`/api/v1/sessions/${sessionId}/thread-file-events${qs}`);

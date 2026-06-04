@@ -16,6 +16,7 @@ func TestPullRequestMergeStateValidate(t *testing.T) {
 		{name: "clean", state: PullRequestMergeStateClean},
 		{name: "conflicted", state: PullRequestMergeStateConflicted},
 		{name: "behind", state: PullRequestMergeStateBehind},
+		{name: "mergeability pending", state: PullRequestMergeStateMergeabilityPending},
 		{name: "unknown", state: PullRequestMergeStateUnknown},
 		{name: "invalid", state: PullRequestMergeState("broken"), expectErr: true},
 	}
@@ -90,6 +91,37 @@ func TestPullRequestHealthEnrichmentStatusValidate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "Validate should accept supported enrichment statuses")
+		})
+	}
+}
+
+func TestPullRequestMergeWhenReadyStateValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		state     PullRequestMergeWhenReadyState
+		expectErr bool
+	}{
+		{name: "off", state: PullRequestMergeWhenReadyStateOff},
+		{name: "queued", state: PullRequestMergeWhenReadyStateQueued},
+		{name: "merging", state: PullRequestMergeWhenReadyStateMerging},
+		{name: "succeeded", state: PullRequestMergeWhenReadyStateSucceeded},
+		{name: "failed", state: PullRequestMergeWhenReadyStateFailed},
+		{name: "cancelled", state: PullRequestMergeWhenReadyStateCancelled},
+		{name: "invalid", state: PullRequestMergeWhenReadyState("oops"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.state.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported merge-when-ready states")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported merge-when-ready states")
 		})
 	}
 }

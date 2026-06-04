@@ -29,6 +29,8 @@ services:
     image: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
     environment:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
+      DATABASE_MAX_CONNS: ${API_DATABASE_MAX_CONNS:-20}
+      DATABASE_MAX_CONN_IDLE_TIME: ${API_DATABASE_MAX_CONN_IDLE_TIME:-5m}
       PORT: "8080"
       PREVIEW_GATEWAY_PORT: "9090"
       ENV: production

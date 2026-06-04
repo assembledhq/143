@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,10 +24,12 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
@@ -98,6 +101,8 @@ type DockerPreviewProvider struct {
 	// preview starts hitting an absent image at the same moment share a
 	// single pull instead of fanning out N redundant streams.
 	imagePulls singleflight.Group
+
+	dependencyCache preview.DependencyCache
 }
 
 type previewDialer func(ctx context.Context, addr string) (net.Conn, error)
@@ -184,6 +189,12 @@ func WithPreviewDialer(dialer previewDialer) DockerPreviewOption {
 	}
 }
 
+func WithDependencyCache(cache preview.DependencyCache) DockerPreviewOption {
+	return func(p *DockerPreviewProvider) {
+		p.dependencyCache = cache
+	}
+}
+
 // NewDockerPreviewProvider creates a new Docker-based preview provider.
 func NewDockerPreviewProvider(
 	client DockerPreviewClient,
@@ -209,7 +220,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -238,9 +249,6 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	infraCreds := make(map[string]preview.InfraCredential)
 	var svcEnvs map[string]map[string]string
 	if err := func() (phaseErr error) {
-		notifyPhaseStart(observer, "install_build")
-		defer func() { notifyPhaseEnd(observer, "install_build", phaseErr) }()
-
 		// Phase 1: Provision infrastructure containers.
 		for name, infraCfg := range cfg.Infrastructure {
 			tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
@@ -285,13 +293,20 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		}
 
 		// Phase 4: Run the platform-managed install phase before services start.
-		if err := d.runPreviewInstall(ctx, state, cfg.Install, observer); err != nil {
+		if err := d.runPreviewInstall(ctx, state, cfg.Install, opts, observer); err != nil {
 			phaseErr = fmt.Errorf("%w: %v", preview.ErrInstallFailed, err)
 			return phaseErr
 		}
 
-		// Phase 5: Build service environment with injected credentials.
-		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, extraEnv)
+		// Phase 5: Write generated runtime secret files after install so install
+		// hooks cannot read preview-runtime app secrets.
+		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
+			phaseErr = fmt.Errorf("write preview secret files: %w", err)
+			return phaseErr
+		}
+
+		// Phase 6: Build service environment with injected credentials.
+		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, opts.ExtraEnv)
 		return nil
 	}(); err != nil {
 		d.cleanupState(handle)
@@ -303,7 +318,11 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	primaryPort := 0
 	if err := func() (phaseErr error) {
 		notifyPhaseStart(observer, "start_services")
-		defer func() { notifyPhaseEnd(observer, "start_services", phaseErr) }()
+		phaseStarted := time.Now()
+		defer func() {
+			notifyPhaseEnd(observer, "start_services", phaseErr)
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "start_services", time.Since(phaseStarted))
+		}()
 		for name, svcCfg := range cfg.Services {
 			if name == cfg.Primary {
 				continue // primary starts last
@@ -338,7 +357,11 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	partiallyReady := false
 	if err := func() (phaseErr error) {
 		notifyPhaseStart(observer, "readiness")
-		defer func() { notifyPhaseEnd(observer, "readiness", phaseErr) }()
+		phaseStarted := time.Now()
+		defer func() {
+			notifyPhaseEnd(observer, "readiness", phaseErr)
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "readiness", time.Since(phaseStarted))
+		}()
 
 		if cfg.Progressive && len(cfg.Services) > 1 {
 			// Wait for primary first.
@@ -541,7 +564,25 @@ func buildTerminateServiceProcessCmd(pid, port int) string {
 
 	var portPIDs string
 	if port > 0 {
-		portPIDs = fmt.Sprintf("if command -v lsof >/dev/null 2>&1; then lsof -ti :%d 2>/dev/null || true; fi", port)
+		portPIDs = fmt.Sprintf(`{
+	if command -v lsof >/dev/null 2>&1; then lsof -ti :%d 2>/dev/null || true; fi
+	port_hex="$(printf '%%04X' %d)"
+	for table in /proc/net/tcp /proc/net/tcp6; do
+		[ -r "$table" ] || continue
+		awk -v p="$port_hex" '$2 ~ ":" p "$" { print $10 }' "$table"
+	done | while IFS= read -r inode; do
+		[ -n "$inode" ] || continue
+		for fd in /proc/[0-9]*/fd/*; do
+			[ -e "$fd" ] || continue
+			target="$(readlink "$fd" 2>/dev/null || true)"
+			if [ "$target" = "socket:[$inode]" ]; then
+				pid="${fd#/proc/}"
+				pid="${pid%%%%/*}"
+				printf '%%s\n' "$pid"
+			fi
+		done
+	done
+}`, port, port)
 	} else {
 		portPIDs = ":"
 	}
@@ -1011,7 +1052,7 @@ type previewInstallLockfileKey struct {
 	SHA256 string `json:"sha256"`
 }
 
-func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, observer preview.ServiceObserver) error {
+func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
 	if install == nil {
 		return nil
 	}
@@ -1020,6 +1061,65 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 		timeout = time.Duration(preview.DefaultInstallTimeoutSeconds) * time.Second
 	}
 
+	dependencyPaths, dependencyCacheEnabled := preview.ResolvePreviewInstallCachePaths(install)
+	var dependencyCacheKey string
+	var dependencyLockfiles []preview.PreviewInstallLockfileKey
+	var placementKey string
+	if d.dependencyCache != nil && dependencyCacheEnabled && opts.OrgID != uuid.Nil && opts.RepositoryID != uuid.Nil {
+		var keyErr error
+		dependencyCacheKey, dependencyLockfiles, keyErr = preview.ComputePreviewDependencyCacheKey(ctx, d.executor, state.sandbox, install, dependencyPaths)
+		if keyErr != nil {
+			notifyDependencyCacheRestore(observer, "restore_failed", "", 0, keyErr)
+			metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restore_failed", 0)
+			d.logger.Warn().Err(keyErr).Msg("preview dependency cache key unavailable; continuing cold")
+		} else {
+			restoreStarted := time.Now()
+			configDigest := opts.ConfigDigest
+			if configDigest == "" {
+				if digest, digestErr := preview.ComputePreviewConfigDigest(state.config); digestErr == nil {
+					configDigest = digest
+				}
+			}
+			computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, dependencyPaths)
+			if placementErr != nil {
+				d.logger.Warn().Err(placementErr).Str("cache_key", dependencyCacheKey).Msg("preview dependency cache placement key unavailable")
+			} else {
+				placementKey = computedPlacementKey
+			}
+			hit, findErr := d.dependencyCache.Find(ctx, opts.OrgID, opts.RepositoryID, dependencyCacheKey)
+			if findErr != nil {
+				notifyDependencyCacheRestore(observer, "restore_failed", dependencyCacheKey, 0, findErr)
+				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(restoreStarted))
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
+				d.logger.Warn().Err(findErr).Str("cache_key", dependencyCacheKey).Msg("preview dependency cache lookup failed; continuing cold")
+			} else if hit == nil {
+				notifyDependencyCacheRestore(observer, "miss", dependencyCacheKey, 0, nil)
+				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(restoreStarted))
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
+			} else if restoreErr := d.dependencyCache.Restore(ctx, state.sandbox, hit); restoreErr != nil {
+				notifyDependencyCacheRestore(observer, "restore_failed", dependencyCacheKey, hit.Entry.SizeBytes, restoreErr)
+				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(restoreStarted))
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
+				d.logger.Warn().Err(restoreErr).Str("cache_key", dependencyCacheKey).Msg("preview dependency cache restore failed; continuing cold")
+			} else {
+				notifyDependencyCacheRestore(observer, "restored", dependencyCacheKey, hit.Entry.SizeBytes, nil)
+				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restored", time.Since(restoreStarted))
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
+				d.logger.Info().Str("cache_key", dependencyCacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview dependency cache restored")
+			}
+		}
+	} else {
+		notifyDependencyCacheRestore(observer, "disabled", "", 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
+		}
+	}
+
+	// Restore runs before marker validation so returning sessions can satisfy
+	// verify_paths and skip preview.install entirely. On first-ever cold starts
+	// the marker is absent, so clean_paths may wipe restored files before the
+	// install command runs; that extra I/O is intentional for now because the
+	// high-value path is fast return-to-session startup.
 	cacheKey, err := d.computePreviewInstallCacheKey(ctx, state.sandbox, install)
 	if err != nil {
 		notifyInstallFailed(observer, err.Error(), nil)
@@ -1028,6 +1128,7 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	markerPath := fmt.Sprintf(".143/cache/preview-install/%s.done", cacheKey)
 	if d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
+		d.saveDependencyCacheAsync(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer)
 		return nil
 	}
 
@@ -1047,16 +1148,60 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	}
 	installCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	installStarted := time.Now()
 	stderrSplitter := &previewLineSplitter{onLine: appendTail}
+	notifyPhaseStart(observer, "install_build")
 	exitCode, err := d.executor.ExecStream(installCtx, state.sandbox, cmd, appendTail, stderrSplitter)
 	stderrSplitter.flush()
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_build", time.Since(installStarted))
 	if err != nil || exitCode != 0 {
 		errMsg := formatPreviewInstallError(exitCode, err, timeout, installCtx.Err())
+		notifyPhaseEnd(observer, "install_build", fmt.Errorf("%s", errMsg))
 		notifyInstallFailed(observer, errMsg, outputTail)
 		return fmt.Errorf("%s", errMsg)
 	}
+	notifyPhaseEnd(observer, "install_build", nil)
 	d.logger.Info().Str("marker", markerPath).Msg("preview install completed")
+	d.saveDependencyCacheAsync(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer)
 	return nil
+}
+
+func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver) {
+	if d.dependencyCache == nil || cacheKey == "" || len(paths) == 0 {
+		notifyDependencyCacheSave(observer, "skipped", cacheKey, 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionDependencyCacheSave(context.Background(), opts.OrgID.String(), "skipped", 0)
+		}
+		return
+	}
+	lockHashes := make(map[string]string, len(lockfiles))
+	for _, lockfile := range lockfiles {
+		lockHashes[lockfile.Path] = lockfile.SHA256
+	}
+	metadata := preview.DependencyCacheMetadata{
+		OrgID:          opts.OrgID,
+		RepoID:         opts.RepositoryID,
+		SessionID:      opts.SessionID,
+		PlacementKey:   placementKey,
+		InstallCommand: append([]string(nil), install.Command...),
+		EffectivePaths: append([]string(nil), paths...),
+		LockfileHashes: lockHashes,
+		Lockfiles:      lockfiles,
+	}
+	go func() {
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		defer cancel()
+		started := time.Now()
+		result, err := d.dependencyCache.Save(saveCtx, state.sandbox, cacheKey, paths, metadata)
+		if err != nil {
+			notifyDependencyCacheSave(observer, "save_failed", cacheKey, 0, err)
+			metrics.RecordSessionDependencyCacheSave(saveCtx, opts.OrgID.String(), "save_failed", time.Since(started))
+			d.logger.Warn().Err(err).Str("cache_key", cacheKey).Msg("preview dependency cache save failed")
+			return
+		}
+		notifyDependencyCacheSave(observer, "saved", cacheKey, result.SizeBytes, nil)
+		metrics.RecordSessionDependencyCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
+	}()
 }
 
 func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Context, sb *agent.Sandbox, install *models.PreviewInstallConfig) (string, error) {
@@ -1213,6 +1358,22 @@ func notifyInstallFailed(observer preview.ServiceObserver, errMsg string, tail [
 		return
 	}
 	observer.OnInstallFailed(errMsg, tail)
+}
+
+func notifyDependencyCacheRestore(observer preview.ServiceObserver, status string, cacheKey string, sizeBytes int64, err error) {
+	cacheObserver, ok := observer.(preview.CacheObserver)
+	if !ok || cacheObserver == nil {
+		return
+	}
+	cacheObserver.OnDependencyCacheRestore(status, cacheKey, sizeBytes, err)
+}
+
+func notifyDependencyCacheSave(observer preview.ServiceObserver, status string, cacheKey string, sizeBytes int64, err error) {
+	cacheObserver, ok := observer.(preview.CacheObserver)
+	if !ok || cacheObserver == nil {
+		return
+	}
+	cacheObserver.OnDependencyCacheSave(status, cacheKey, sizeBytes, err)
 }
 
 // =============================================================================
@@ -1667,6 +1828,20 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 		}
 	}
 
+	// Inject resolved preview secret env into scoped services. These values are
+	// applied after repo env and generated infrastructure credentials, but
+	// before platform env so PREVIEW_ORIGIN and similar worker-owned values
+	// remain authoritative.
+	for service, secretEnv := range cfg.RuntimeSecretEnv {
+		env, ok := envs[service]
+		if !ok {
+			continue
+		}
+		for key, value := range secretEnv {
+			env[key] = value
+		}
+	}
+
 	// Inject platform-level env vars (e.g. PREVIEW_ORIGIN) into every service,
 	// overriding any user-declared value. Applied last so it wins over both
 	// service.env and infrastructure.inject_env. Mutation in place is fine —
@@ -1678,6 +1853,62 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 	}
 
 	return envs
+}
+
+func (d *DockerPreviewProvider) writeRuntimeSecretFiles(ctx context.Context, sb *agent.Sandbox, files []models.PreviewRuntimeSecretFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	if d.executor == nil {
+		return fmt.Errorf("sandbox executor is not configured")
+	}
+	for _, file := range files {
+		cmd, err := buildWriteRuntimeSecretFileCmd(file)
+		if err != nil {
+			return err
+		}
+		var stderr bytes.Buffer
+		exitCode, err := d.executor.Exec(ctx, sb, cmd, io.Discard, &stderr)
+		if err != nil {
+			return fmt.Errorf("write %s: %w", file.Path, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("write %s exited with code %d: %s", file.Path, exitCode, strings.TrimSpace(stderr.String()))
+		}
+	}
+	return nil
+}
+
+func buildWriteRuntimeSecretFileCmd(file models.PreviewRuntimeSecretFile) (string, error) {
+	cleanPath := path.Clean(file.Path)
+	if file.Path == "" || path.IsAbs(file.Path) || strings.HasPrefix(cleanPath, "../") || cleanPath == ".." {
+		return "", fmt.Errorf("secret file path %q must stay inside the repo", file.Path)
+	}
+	for _, part := range strings.Split(cleanPath, "/") {
+		if part == ".git" {
+			return "", fmt.Errorf("secret file path %q must not target .git", file.Path)
+		}
+	}
+	mode := file.Mode
+	if mode == "" {
+		mode = "0600"
+	}
+	if _, err := strconv.ParseUint(mode, 8, 32); err != nil {
+		return "", fmt.Errorf("secret file mode %q is not octal", mode)
+	}
+	dir := path.Dir(cleanPath)
+	encoded := base64.StdEncoding.EncodeToString(file.Content)
+	return fmt.Sprintf(
+		`set -eu; mkdir -p %s; umask 077; base64 -d > %s <<'__143_SECRET_FILE__'
+%s
+__143_SECRET_FILE__
+chmod %s %s`,
+		shellEscape(dir),
+		shellEscape(cleanPath),
+		encoded,
+		shellEscape(mode),
+		shellEscape(cleanPath),
+	), nil
 }
 
 func resolveCredentialTemplate(template string, cred preview.InfraCredential) string {

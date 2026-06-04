@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/storage"
 )
@@ -37,6 +38,7 @@ type PreviewStopper interface {
 
 // SessionReaper periodically cleans up stale sessions and expired snapshots
 // in seven phases:
+//   - Phase 0a: Reclaim expired thread-runtime leases and reset in-flight inbox delivery
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
 //   - Phase 0.4: Fail sessions whose runtime controller missed an already
 //     expired soft deadline or left a stop request in-flight past its grace
@@ -59,6 +61,7 @@ type SessionReaper struct {
 	usageRoller      UsageRoller    // nil-safe — usage rollup disabled if nil
 	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
 	runtimeJobs      RuntimeJobTerminalizer
+	runtimeLeases    ThreadRuntimeLeaseReclaimer
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
 	runtimeStallAge  time.Duration
@@ -94,6 +97,12 @@ type StuckThreadLister interface {
 // the watchdog has already made the referenced session terminal.
 type RuntimeJobTerminalizer interface {
 	TerminalizeRunningSessionJobs(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, error)
+}
+
+type ThreadRuntimeLeaseReclaimResult = db.ThreadRuntimeReclaimResult
+
+type ThreadRuntimeLeaseReclaimer interface {
+	ReclaimExpiredLeases(ctx context.Context, expiredBefore time.Time, limit int) (ThreadRuntimeLeaseReclaimResult, error)
 }
 
 type runtimeStalledThreadFailer interface {
@@ -136,6 +145,10 @@ func WithRuntimeJobTerminalizer(t RuntimeJobTerminalizer) SessionReaperOption {
 	return func(r *SessionReaper) { r.runtimeJobs = t }
 }
 
+func WithThreadRuntimeLeaseReclaimer(t ThreadRuntimeLeaseReclaimer) SessionReaperOption {
+	return func(r *SessionReaper) { r.runtimeLeases = t }
+}
+
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
 // sessions idle for longer than maxIdleAge and snapshots older than maxSnapshotAge.
 // defaultMaxPendingAge is the maximum time a session can stay in "pending"
@@ -143,6 +156,8 @@ func WithRuntimeJobTerminalizer(t RuntimeJobTerminalizer) SessionReaperOption {
 const defaultMaxPendingAge = 10 * time.Minute
 
 const defaultRuntimeStallAge = 2 * time.Minute
+
+const defaultThreadRuntimeReclaimBatchSize = 100
 
 // reaperPreviewStopTimeout is the deadline the reaper gives
 // StopActivePreviewForSession before moving on to delete the snapshot blob.
@@ -220,6 +235,7 @@ func (r *SessionReaper) Run(ctx context.Context) {
 		Dur("max_idle", r.maxIdleAge).
 		Dur("max_snapshot_age", r.maxSnapshotAge).
 		Bool("stuck_thread_phase_enabled", r.threads != nil).
+		Bool("thread_runtime_lease_reclaim_enabled", r.runtimeLeases != nil).
 		Msg("session reaper started")
 
 	for {
@@ -258,6 +274,25 @@ const FailureCategoryRuntimeControlStalled = "runtime_control_stalled"
 const FailureCategoryStuckThread = "stuck_thread"
 
 func (r *SessionReaper) reap(ctx context.Context) {
+	// Phase 0a: reclaim expired per-thread runtime leases. This is the
+	// short-interval recovery path for worker crashes and deploy drains:
+	// live handles are process-local, so once the DB lease expires, any
+	// in-flight delivery written by that runtime but not acked must be
+	// moved back to pending for the next live runtime to replay.
+	if r.runtimeLeases != nil {
+		reclaimed, err := r.runtimeLeases.ReclaimExpiredLeases(ctx, time.Now(), defaultThreadRuntimeReclaimBatchSize)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("reaper: failed to reclaim expired thread runtime leases")
+		} else if reclaimed.LostRuntimes > 0 || reclaimed.ExpiredHolders > 0 || reclaimed.ResetInboxEntries > 0 || reclaimed.UnknownDeliveryEntries > 0 {
+			r.logger.Warn().
+				Int64("lost_runtimes", reclaimed.LostRuntimes).
+				Int64("expired_holders", reclaimed.ExpiredHolders).
+				Int64("reset_inbox_entries", reclaimed.ResetInboxEntries).
+				Int64("unknown_delivery_entries", reclaimed.UnknownDeliveryEntries).
+				Msg("reaper: reclaimed expired thread runtime leases")
+		}
+	}
+
 	// Phase 0: Fail sessions stuck in pending with no active job.
 	pendingCutoff := time.Now().Add(-r.maxPendingAge)
 	stalePending, err := r.sessions.ListStalePendingSessions(ctx, pendingCutoff)

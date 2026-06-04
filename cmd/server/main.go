@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -42,6 +43,7 @@ import (
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/ownerloss"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -62,6 +64,10 @@ const (
 	httpDrainPropagationDelay = 7 * time.Second
 	httpShutdownTimeout       = 100 * time.Second
 )
+
+func previewDependencyCacheEnabled(cfg config.Config) bool {
+	return strings.TrimSpace(cfg.PreviewDependencyCacheBucket) != ""
+}
 
 func main() {
 	if isSessionExecutorInvocation(os.Args) {
@@ -108,7 +114,10 @@ func main() {
 		cfg.NodeID = hostname
 	}
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
+		MaxConns:        cfg.DatabaseMaxConns,
+		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -255,7 +264,54 @@ func main() {
 				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
-			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			var dependencyCache preview.DependencyCache
+			if previewDependencyCacheEnabled(*cfg) {
+				dependencyS3Region := cfg.PreviewDependencyCacheS3Region
+				if dependencyS3Region == "" {
+					dependencyS3Region = cfg.SnapshotS3Region
+				}
+				dependencyS3Endpoint := cfg.PreviewDependencyCacheS3Endpoint
+				if dependencyS3Endpoint == "" {
+					dependencyS3Endpoint = cfg.SnapshotS3Endpoint
+				}
+				dependencyS3UsePathStyle := cfg.PreviewDependencyCacheS3UsePathStyle || cfg.SnapshotS3UsePathStyle
+				dependencyBlobStore, _, cacheStoreErr := storage.BuildSnapshotStore(ctx, storage.SnapshotStoreConfig{
+					S3Bucket:       cfg.PreviewDependencyCacheBucket,
+					S3Prefix:       cfg.PreviewDependencyCachePrefix,
+					S3Region:       dependencyS3Region,
+					S3Endpoint:     dependencyS3Endpoint,
+					S3UsePathStyle: dependencyS3UsePathStyle,
+				})
+				if cacheStoreErr != nil {
+					logger.Warn().Err(cacheStoreErr).Msg("failed to initialize preview dependency cache blob store — dependency caching disabled")
+				} else {
+					cache, cacheErr := preview.NewDependencyCache(preview.DependencyCacheConfig{
+						Store:         db.NewPreviewStore(pool),
+						Executor:      sandboxExec,
+						BlobStore:     dependencyBlobStore,
+						Logger:        logger,
+						WorkerNodeID:  cfg.NodeID,
+						Prefix:        cfg.PreviewDependencyCachePrefix,
+						LocalDir:      cfg.PreviewDependencyCacheLocalDir,
+						LocalMaxBytes: cfg.PreviewDependencyCacheLocalMaxBytes,
+					})
+					if cacheErr != nil {
+						logger.Warn().Err(cacheErr).Msg("failed to initialize preview dependency cache — dependency caching disabled")
+					} else {
+						dependencyCache = cache
+						cleaner := preview.NewDependencyCacheCleaner(preview.DependencyCacheCleanerConfig{
+							Store:             db.NewPreviewStore(pool),
+							BlobStore:         dependencyBlobStore,
+							Logger:            logger,
+							Retention:         time.Duration(cfg.PreviewDependencyCacheRetentionDays) * 24 * time.Hour,
+							Interval:          cfg.PreviewDependencyCacheCleanupInterval,
+							KeepNewestPerRepo: cfg.PreviewDependencyCacheKeepNewestPerRepo,
+						})
+						go cleaner.Run(ctx)
+					}
+				}
+			}
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger, previewproviders.WithDependencyCache(dependencyCache))
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
@@ -339,12 +395,15 @@ func main() {
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL)
+		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL, cfg.NodeRegion)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
 	}
 	go nodeManager.StartHeartbeat(ctx)
+	if cfg.Mode != "worker" {
+		go worker.RunControlPlaneHealthAlerts(ctx, db.NewJobStore(pool), db.NewNodeStore(pool), logger, time.Minute)
+	}
 
 	// Start worker if mode includes worker capability.
 	// sandboxAuthShutdown is hoisted to function scope so the graceful
@@ -375,6 +434,7 @@ func main() {
 		deployStore := db.NewDeployStore(pool)
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
+		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -395,10 +455,12 @@ func main() {
 		sessionLogStore := db.NewSessionLogStore(pool)
 		sessionStore.SetLogger(logger)
 		sessionLogStore.SetLogger(logger)
+		sessionThreadStore.SetLogger(logger)
 		jobStore.SetLogger(logger)
 		if sessionStreams != nil {
 			sessionStore.SetStreams(sessionStreams)
 			sessionLogStore.SetStreams(sessionStreams)
+			sessionThreadStore.SetStreams(sessionStreams)
 			sessionStreams.StartCleanup(ctx, sessionStore)
 		}
 		if jobNotifier != nil {
@@ -407,9 +469,11 @@ func main() {
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
+			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
+			Memberships:         db.NewOrganizationMembershipStore(pool),
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
 			PriorityScores:      priorityScoreStore,
 			ComplexityEstimates: complexityEstimateStore,
@@ -426,11 +490,21 @@ func main() {
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			HumanInputRequests:  sessionHumanInputStore,
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
+			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+			Previews:            previewStore,
+			PullRequests:        pullRequestStore,
+			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+			SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -443,10 +517,11 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, fileReader)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
+					services.PreviewController = previewManager
 					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
 						Manager:         previewManager,
 						Previews:        previewStore,
@@ -567,13 +642,21 @@ func main() {
 			nodeManager,
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
+			cfg.NodeRegion,
 			previewRoutingReady.Load,
 			sandboxCapacity,
 			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
 		)
+		if workerPreviewStore != nil && cfg.NodeID != "" {
+			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
+		}
+		if cfg.NodeID != "" {
+			go worker.RunNodeDrainWatcher(ctx, db.NewNodeStore(pool), processWorkers, cfg.NodeID, logger, 5*time.Second)
+		}
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		recoveryLoop.SetSessionExecutors(db.NewSessionExecutorStore(pool))
+		recoveryLoop.SetPreviewRuntimes(workerPreviewStore)
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
@@ -585,6 +668,7 @@ func main() {
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 			agent.WithRuntimeJobTerminalizer(jobStore),
+			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
 			// Phase 0.5b safety net: fails session_threads stuck in 'running'
 			// past maxRunningAge. Catches orphans the orchestrator/handler
 			// thread.status reset paths couldn't unwind themselves.
@@ -593,7 +677,10 @@ func main() {
 		if previewManager != nil {
 			previewStore := db.NewPreviewStore(pool)
 			nodeStore := db.NewNodeStore(pool)
-			selector := preview.NewWorkerSelector(nodeStore, previewStore)
+			selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+				PreferredRegion:      cfg.NodeRegion,
+			})
 			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
 			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
@@ -667,6 +754,11 @@ func main() {
 		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
+		if workerPreviewStore != nil && cfg.NodeID != "" {
+			if _, err := workerPreviewStore.MarkPreviewRuntimesDrainingByWorker(nodeDrainCtx, cfg.NodeID); err != nil {
+				logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes draining")
+			}
+		}
 		nodeDrainCancel()
 
 		// Mark /healthz unhealthy before closing the listener. Caddy probes
@@ -716,7 +808,11 @@ func main() {
 		}
 		drainCancel()
 		if !workerDrainTimedOut && workerPreviewStore != nil && cfg.NodeID != "" {
-			waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second)
+			if drained := waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second); !drained {
+				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorker(context.Background(), cfg.NodeID, "worker preview drain timeout"); err != nil {
+					logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes lost after drain timeout")
+				}
+			}
 		}
 
 		cancel() // stop worker
@@ -789,6 +885,7 @@ func startProcessWorkers(
 	nodeManager *cluster.NodeManager,
 	previewCapable bool,
 	previewInternalBaseURL string,
+	nodeRegion string,
 	previewRoutingReady func() bool,
 	sandboxCapacity *agent.SandboxCapacityGate,
 	staticEgress agent.StaticEgressRuntimeConfig,
@@ -808,7 +905,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady, sandboxCapacity, staticEgress))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity, staticEgress))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -832,9 +929,12 @@ func resolveWorkerMaxActiveSandboxes(workerProcessCount, configured int) int {
 // any provider installed later (e.g. by startProcessWorkers) must continue to
 // emit these fields or the next heartbeat will wipe preview_capable from the
 // node row and break preview routing.
-func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[string]any {
+func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeRegion string) map[string]any {
 	metadata := map[string]any{
 		"build_sha": version.BuildSHA,
+	}
+	if nodeRegion != "" {
+		metadata["region"] = nodeRegion
 	}
 	if previewCapable {
 		metadata["preview_capable"] = true
@@ -854,13 +954,13 @@ func buildStaticEgressMetadata(runtime agent.StaticEgressRuntimeConfig) map[stri
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig) func() map[string]any {
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
 			advertisePreview = advertisePreview && previewRoutingReady()
 		}
-		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
+		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL, nodeRegion)
 		for k, v := range buildStaticEgressMetadata(staticEgress) {
 			metadata[k] = v
 		}
@@ -1008,12 +1108,14 @@ func configureSessionExecutorDispatch(
 				"/var/run/docker.sock:/var/run/docker.sock",
 				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 			},
-			GroupAdd: sessionExecutorGroupAddFromEnv(),
-			Env:      os.Environ(),
+			GroupAdd:    sessionExecutorGroupAddFromEnv(),
+			Env:         os.Environ(),
+			StopTimeout: cfg.SessionExecutorStopTimeout,
 		}),
-		NodeID:   cfg.NodeID,
-		Image:    cfg.SessionExecutorImage,
-		BuildSHA: version.BuildSHA,
+		NodeID:                cfg.NodeID,
+		Image:                 cfg.SessionExecutorImage,
+		BuildSHA:              version.BuildSHA,
+		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
 	}
 }
 
@@ -1063,6 +1165,7 @@ func buildServices(
 	orgSettingsCache *agent.OrgSettingsCache,
 	sandboxCapacity *agent.SandboxCapacityGate,
 	redisClient *cache.Client,
+	sessionStreams *cache.SessionStreams,
 	fileReader sandbox.FileReader,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
@@ -1173,6 +1276,13 @@ func buildServices(
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
+	sessionThreadStore.SetLogger(logger)
+	if sessionStreams != nil {
+		sessionThreadStore.SetStreams(sessionStreams)
+	}
+	threadInboxStore := db.NewThreadInboxStore(pool)
+	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
+	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
@@ -1246,6 +1356,9 @@ func buildServices(
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
 		StaticEgress:       agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+		ThreadRuntimes:     threadRuntimeStore,
+		ThreadInbox:        threadInboxStore,
+		SandboxHolders:     sessionSandboxHolderStore,
 		Cancels:            cancelRegistry,
 		ThreadCancels:      threadCancelRegistry,
 		OrgSettingsCache:   orgSettingsCache,
@@ -1317,6 +1430,15 @@ func buildServices(
 		jobStore,
 		logger,
 	)
+	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
+		sessionStore,
+		db.NewSessionExecutorStore(pool),
+		jobStore,
+		jobStore,
+		logger,
+	))
+	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
+	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	reviewLoopSvc := reviewloopservice.NewService(
 		reviewLoopStore,
 		reviewloopservice.RuntimeAdapter{
@@ -1355,6 +1477,10 @@ func buildServices(
 	workerLinearAgentMetrics, mErr := metrics.NewLinearAgentMetrics()
 	if mErr != nil {
 		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
+	}
+	workerSlackbotMetrics, slackMetricsErr := metrics.NewSlackbotMetrics()
+	if slackMetricsErr != nil {
+		logger.Warn().Err(slackMetricsErr).Msg("failed to register slackbot metrics in worker; Slackbot emits will not record")
 	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
@@ -1429,6 +1555,8 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
+		SlackbotMetrics: workerSlackbotMetrics,
+		FrontendURL:     cfg.FrontendURL,
 		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,

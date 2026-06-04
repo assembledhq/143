@@ -2,9 +2,13 @@ import type {
   EvalBatchUpdatedEvent,
   EvalBootstrapUpdatedEvent,
   PullRequestUpdatedEvent,
-  Session,
+  SessionDetail,
   SessionLog,
+  SessionWorkspaceGenerationChangedEvent,
+  ThreadInboxEvent,
+  ThreadRuntimeEvent,
 } from "./types";
+import { normalizeAPIResponse } from "./api-normalize";
 import { captureError } from "./errors";
 
 // EventSource cannot send custom headers like X-Active-Org-ID. The backend
@@ -92,6 +96,14 @@ export const SSE_EVENT = {
   EVAL_BATCH_UPDATED: "eval_batch.updated",
   /** Sent when an eval bootstrap run changes state. */
   EVAL_BOOTSTRAP_UPDATED: "eval_bootstrap.updated",
+  /** Sent when a thread has queued inbox input waiting for runtime delivery. */
+  THREAD_INBOX_QUEUED: "thread.inbox.queued",
+  /** Sent when a thread drains queued inbox input. */
+  THREAD_INBOX_CLEARED: "thread.inbox.cleared",
+  /** Sent when a thread runtime-visible state changes. */
+  THREAD_RUNTIME_UPDATED: "thread.runtime.updated",
+  /** Sent when a session workspace generation advances. */
+  SESSION_WORKSPACE_GENERATION_CHANGED: "session.workspace.generation_changed",
 } as const;
 
 export type SSEEventType = (typeof SSE_EVENT)[keyof typeof SSE_EVENT];
@@ -99,13 +111,17 @@ export type SSEEventType = (typeof SSE_EVENT)[keyof typeof SSE_EVENT];
 /** Typed payloads for each SSE event type. */
 export interface SSEEventPayloads {
   [SSE_EVENT.LOG]: SessionLog;
-  [SSE_EVENT.STATUS]: Session;
-  [SSE_EVENT.DONE]: Session;
+  [SSE_EVENT.STATUS]: SessionDetail;
+  [SSE_EVENT.DONE]: SessionDetail;
   [SSE_EVENT.HUMAN_INPUT_CREATED]: SessionLog;
   [SSE_EVENT.HUMAN_INPUT_UPDATED]: SessionLog;
   [SSE_EVENT.PULL_REQUEST_UPDATED]: PullRequestUpdatedEvent;
   [SSE_EVENT.EVAL_BATCH_UPDATED]: EvalBatchUpdatedEvent;
   [SSE_EVENT.EVAL_BOOTSTRAP_UPDATED]: EvalBootstrapUpdatedEvent;
+  [SSE_EVENT.THREAD_INBOX_QUEUED]: ThreadInboxEvent;
+  [SSE_EVENT.THREAD_INBOX_CLEARED]: ThreadInboxEvent;
+  [SSE_EVENT.THREAD_RUNTIME_UPDATED]: ThreadRuntimeEvent;
+  [SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED]: SessionWorkspaceGenerationChangedEvent;
 }
 
 /** Type-safe event listener adder for session SSE streams. */
@@ -117,7 +133,7 @@ export function addSSEListener<K extends keyof SSEEventPayloads>(
   if (event === SSE_EVENT.LOG) {
     source.onmessage = (e: MessageEvent) => {
       try {
-        handler(JSON.parse(e.data));
+        handler(normalizeAPIResponse(JSON.parse(e.data)) as SSEEventPayloads[K]);
       } catch (err) {
         captureError(err, { feature: "sse" });
       }
@@ -125,7 +141,7 @@ export function addSSEListener<K extends keyof SSEEventPayloads>(
   } else {
     source.addEventListener(event, ((e: MessageEvent) => {
       try {
-        handler(JSON.parse(e.data));
+        handler(normalizeAPIResponse(JSON.parse(e.data)) as SSEEventPayloads[K]);
       } catch (err) {
         captureError(err, { feature: "sse" });
       }

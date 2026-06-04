@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
@@ -53,10 +55,506 @@ func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context,
 	return models.Integration{}, pgx.ErrNoRows
 }
 
+func TestSessionHandlersRetryActiveThreadRuntimeConflict(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("handlers.go")
+	require.NoError(t, err, "test should read worker handlers source")
+
+	body := string(src)
+	require.Contains(t, body, "errors.Is(err, agent.ErrThreadRuntimeAlreadyActive)", "session handlers should classify active thread runtime conflicts as retryable")
+	require.Contains(t, body, "thread runtime already active; retrying after lease recovery", "active-runtime retries should be logged distinctly from sandbox races")
+	require.Contains(t, body, "BypassMaxRetryDuration: true", "active-runtime retries should allow bounded lease recovery without consuming the normal retry window")
+}
+
+func TestSlackNotificationSubscriptionMatches(t *testing.T) {
+	t.Parallel()
+
+	automationID := uuid.New()
+	otherAutomationID := uuid.New()
+	tests := []struct {
+		name         string
+		raw          json.RawMessage
+		eventKind    string
+		automationID *uuid.UUID
+		expected     bool
+	}{
+		{
+			name:      "event list matches event",
+			raw:       json.RawMessage(`{"events":["session.completed"]}`),
+			eventKind: "session.completed",
+			expected:  true,
+		},
+		{
+			name:      "wildcard matches event",
+			raw:       json.RawMessage(`{"events":["*"]}`),
+			eventKind: "preview.ready",
+			expected:  true,
+		},
+		{
+			name:         "automation list matches automation event",
+			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, automationID)),
+			eventKind:    "automation.run.completed",
+			automationID: &automationID,
+			expected:     true,
+		},
+		{
+			name:         "automation list rejects different automation",
+			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, otherAutomationID)),
+			eventKind:    "automation.run.completed",
+			automationID: &automationID,
+			expected:     false,
+		},
+		{
+			name:      "empty settings do not subscribe",
+			raw:       json.RawMessage(`{}`),
+			eventKind: "session.failed",
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationSubscriptionMatches(tt.raw, tt.eventKind, tt.automationID)
+			require.Equal(t, tt.expected, got, "subscription matcher should return the expected decision")
+		})
+	}
+}
+
+func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
+	t.Parallel()
+
+	got := renderSlackPrompt(
+		"please inspect https://github.com/acme/repo/pull/42",
+		"https://slack.example/thread",
+		nil,
+		[]slackContextReference{
+			{Kind: slackReferenceKindSentry, Value: "https://sentry.io/issues/123"},
+			{Kind: slackReferenceKindFilePath, Value: "src/app.ts"},
+		},
+		[]slackContextFile{{Name: "trace.log", Title: "Trace", Mimetype: "text/plain", Permalink: "https://slack.example/file"}},
+	)
+
+	require.Contains(t, got, "Detected references:", "prompt should include detected references")
+	require.Contains(t, got, "- sentry: https://sentry.io/issues/123", "prompt should include typed external references")
+	require.Contains(t, got, "- file_path: src/app.ts", "prompt should include typed file path references")
+	require.Contains(t, got, "Attached files:", "prompt should include attached file metadata")
+	require.Contains(t, got, "trace.log", "prompt should include Slack file names")
+}
+
+func TestDetectSlackContextReferencesClassifiesProductContext(t *testing.T) {
+	t.Parallel()
+
+	refs := detectSlackContextReferences(
+		"@143 check https://github.com/acme/repo/pull/42 and ENG-123 on branch jsmith/navbar-redesign",
+		[]ingestion.SlackMessage{{Text: "Sentry is https://acme.sentry.io/issues/123 and stack mentions src/app.ts:44"}},
+	)
+
+	require.Equal(t, []slackContextReference{
+		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42"},
+		{Kind: slackReferenceKindIssue, Value: "ENG-123"},
+		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign"},
+		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123"},
+		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44"},
+	}, refs, "Slack context detection should preserve ordered typed references")
+}
+
+func TestSlackModalsUseInputLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		view ingestion.SlackHomeView
+	}{
+		{
+			name: "start session modal",
+			view: slackStartSessionModal(),
+		},
+		{
+			name: "configure channel modal",
+			view: slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}}),
+		},
+		{
+			name: "human input freeform modal",
+			view: slackHumanInputFreeformModal("{}"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NotEmpty(t, tt.view.Blocks, "modal should include input blocks")
+			for _, block := range tt.view.Blocks {
+				require.Equal(t, "input", block.Type, "test modal block should be an input block")
+				require.NotNil(t, block.Label, "Slack input blocks should serialize label")
+				require.Nil(t, block.Text, "Slack input blocks should not serialize unsupported text field")
+			}
+		})
+	}
+}
+
+func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	view := slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}})
+
+	require.Contains(t, slackBlockIDs(view.Blocks), "notification_events", "channel config modal should include Slack-native notification event selection")
+}
+
+func TestSlackTeamSessionLabel(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, slackTeamSessionLine(models.SlackSessionLink{TeamSession: true}), "team session", "team sessions should be clearly labeled")
+	require.Empty(t, slackTeamSessionLine(models.SlackSessionLink{}), "mapped user sessions should not include team-session copy")
+}
+
+func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	text, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+		Preview: &models.PreviewInstance{ID: previewID, Status: models.PreviewStatusReady},
+	})
+
+	require.Contains(t, text, "Session: https://143.test/sessions/"+sessionID.String(), "final text should include the session link")
+	require.True(t, slackBlocksContainAction(blocks, "slack_open_preview"), "final Slack blocks should include open-preview button when preview exists")
+	require.Contains(t, slackBlocksActionValue(blocks, "slack_open_preview"), orgID.String(), "open-preview action value must contain the correct org_id")
+}
+
+func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
+	ids := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.BlockID != "" {
+			ids = append(ids, block.BlockID)
+		}
+	}
+	return ids
+}
+
+func slackBlocksContainAction(blocks []ingestion.SlackBlock, actionID string) bool {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID {
+				return true
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID {
+			return true
+		}
+	}
+	return false
+}
+
+func slackBlocksActionValue(blocks []ingestion.SlackBlock, actionID string) string {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID {
+				if v, ok := element["value"].(string); ok {
+					return v
+				}
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID {
+			if v, ok := block.Accessory["value"].(string); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func TestSlackThreadRoutingBySource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		source              string
+		messageTS           string
+		threadTS            string
+		expectedReplyThread string
+		expectedLinkThread  string
+		expectedPermalink   bool
+	}{
+		{
+			name:                "message event replies in source thread",
+			source:              "app_mention",
+			messageTS:           "1700000000.000100",
+			expectedReplyThread: "1700000000.000100",
+			expectedLinkThread:  "1700000000.000100",
+			expectedPermalink:   true,
+		},
+		{
+			name:                "threaded message event keeps explicit thread",
+			source:              "message.im",
+			messageTS:           "1700000000.000200",
+			threadTS:            "1700000000.000100",
+			expectedReplyThread: "1700000000.000100",
+			expectedLinkThread:  "1700000000.000100",
+			expectedPermalink:   true,
+		},
+		{
+			name:               "slash command posts unthreaded with synthetic link",
+			source:             "slash_command",
+			messageTS:          "slash-trigger-123",
+			expectedLinkThread: "slash:slash-trigger-123",
+		},
+		{
+			name:               "app home modal posts unthreaded with synthetic link",
+			source:             "app_home",
+			messageTS:          "V12345",
+			expectedLinkThread: "app_home:V12345",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := models.SlackStartSessionJobPayload{
+				Source:    tt.source,
+				MessageTS: tt.messageTS,
+				ThreadTS:  tt.threadTS,
+			}
+			replyThread := slackStartSessionReplyThreadTS(payload)
+			linkThread := slackStartSessionLinkThreadTS(payload, replyThread)
+
+			require.Equal(t, tt.expectedReplyThread, replyThread, "start handler should choose the expected Slack reply thread")
+			require.Equal(t, tt.expectedLinkThread, linkThread, "start handler should choose the expected persisted link thread")
+			require.Equal(t, tt.expectedReplyThread, slackReplyThreadTS(linkThread), "outbound replies should use only real Slack thread timestamps")
+			require.Equal(t, tt.expectedPermalink, slackSourceHasMessagePermalink(tt.source), "permalink resolution should only run for real Slack messages")
+		})
+	}
+}
+
+func TestSlackDeliveryTargetFromVisibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		link            models.SlackSessionLink
+		replyThreadTS   string
+		responseVis     string
+		dmChannelID     string
+		expectedChannel string
+		expectedThread  string
+		expectedDM      bool
+	}{
+		{
+			name: "thread visibility keeps source channel and thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "thread",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+		{
+			name: "dm visibility uses opened dm channel without thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "dm",
+			dmChannelID:     "D123",
+			expectedChannel: "D123",
+			expectedDM:      true,
+		},
+		{
+			name: "dm visibility without a Slack user falls back to thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "dm",
+			dmChannelID:     "D123",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+		{
+			name: "unknown visibility is treated as thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "unexpected",
+			dmChannelID:     "D123",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			channelID, threadTS, usedDM := slackDeliveryTargetFromVisibility(tt.link, tt.replyThreadTS, tt.responseVis, tt.dmChannelID)
+
+			require.Equal(t, tt.expectedChannel, channelID, "Slack delivery target should choose the expected channel")
+			require.Equal(t, tt.expectedThread, threadTS, "Slack delivery target should choose the expected thread")
+			require.Equal(t, tt.expectedDM, usedDM, "Slack delivery target should report whether DM routing was used")
+		})
+	}
+}
+
+func TestAppendSlackSessionOutcomeIncludesConcreteLinksAndDiffStats(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	branchURL := "https://github.com/acme/repo/tree/143/session"
+	text := appendSlackSessionOutcomeDetails("Done.", slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:              sessionID,
+			BranchURL:       &branchURL,
+			DiffStats:       json.RawMessage(`{"files_changed":3,"added":42,"removed":7}`),
+			PRCreationState: models.PRCreationStateSucceeded,
+		},
+		PullRequest: &models.PullRequest{
+			GitHubPRURL:    "https://github.com/acme/repo/pull/42",
+			GitHubPRNumber: 42,
+			GitHubRepo:     "acme/repo",
+			Status:         models.PullRequestStatusOpen,
+			CIStatus:       models.PullRequestCIStatusPending,
+		},
+		Preview: &models.PreviewInstance{
+			ID:     previewID,
+			Name:   "web",
+			Status: models.PreviewStatusReady,
+		},
+		PreviewURL: "https://143.test/previews/" + previewID.String(),
+	})
+
+	require.Contains(t, text, "PR: https://github.com/acme/repo/pull/42", "Slack outcome should include concrete PR URL")
+	require.Contains(t, text, "Preview: ready - https://143.test/previews/"+previewID.String(), "Slack outcome should include preview status and URL")
+	require.Contains(t, text, "Branch: https://github.com/acme/repo/tree/143/session", "Slack outcome should include branch URL")
+	require.Contains(t, text, "Changes: 3 files, +42/-7", "Slack outcome should summarize diff stats")
+}
+
+func TestAppendSlackSessionOutcomeFallsBackForPRStateWithoutRow(t *testing.T) {
+	t.Parallel()
+
+	text := appendSlackSessionOutcomeDetails("Done.", slackSessionOutcomeDetails{
+		Session: models.Session{
+			PRCreationState: models.PRCreationStateSucceeded,
+		},
+	})
+
+	require.Contains(t, text, "PR: opened", "Slack outcome should preserve existing fallback when PR row is unavailable")
+}
+
+func TestSlackDiffStatsOutcomeLineSuppressesAllZeros(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", slackDiffStatsOutcomeLine(json.RawMessage(`{"files_changed":0,"added":0,"removed":0}`)), "zero diff stats should produce no output line")
+	require.Equal(t, "", slackDiffStatsOutcomeLine(json.RawMessage(`null`)), "null diff stats should produce no output line")
+	require.NotEmpty(t, slackDiffStatsOutcomeLine(json.RawMessage(`{"files_changed":1,"added":5,"removed":2}`)), "non-zero diff stats should produce an output line")
+}
+
+func TestSlackShouldContinueLinkedSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   models.SessionStatus
+		expected bool
+	}{
+		{name: "pending linked session continues", status: models.SessionStatusPending, expected: true},
+		{name: "running linked session continues", status: models.SessionStatusRunning, expected: true},
+		{name: "idle linked session continues", status: models.SessionStatusIdle, expected: true},
+		{name: "completed linked session is resumable", status: models.SessionStatusCompleted, expected: true},
+		{name: "failed linked session is resumable", status: models.SessionStatusFailed, expected: true},
+		{name: "cancelled linked session is resumable", status: models.SessionStatusCancelled, expected: true},
+		{name: "skipped linked session starts fresh", status: models.SessionStatusSkipped, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := slackShouldContinueLinkedSession(tt.status)
+
+			require.Equal(t, tt.expected, actual, "Slack thread reuse should follow session resumability")
+		})
+	}
+}
+
 type workerLinearCredentialReader struct{}
 
 func (workerLinearCredentialReader) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
 	return &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "linear-token"}}, nil
+}
+
+type workerLinearClient struct {
+	fetch map[string]*linearservice.FetchedIssue
+	err   error
+}
+
+func (c workerLinearClient) FetchIssue(_ context.Context, identifier string) (*linearservice.FetchedIssue, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.fetch[identifier], nil
+}
+
+func (c workerLinearClient) ListTeamKeys(context.Context) ([]linearservice.TeamKeyInfo, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) CreateOrUpdateAttachment(context.Context, linearservice.AttachmentWriteInput) (linearservice.AttachmentResult, error) {
+	return linearservice.AttachmentResult{}, c.err
+}
+
+func (c workerLinearClient) CreateComment(context.Context, string, string) (string, error) {
+	return "", c.err
+}
+
+func (c workerLinearClient) UpdateComment(context.Context, string, string) error {
+	return c.err
+}
+
+func (c workerLinearClient) FindRecentBotCommentByURL(context.Context, string, string) (string, error) {
+	return "", c.err
+}
+
+func (c workerLinearClient) WorkflowStateForType(context.Context, string, []string, string) (*linearservice.WorkflowState, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) UpdateIssueState(context.Context, string, string) error {
+	return c.err
+}
+
+func (c workerLinearClient) IssueRecentHumanEdits(context.Context, string, time.Time) (bool, error) {
+	return false, c.err
+}
+
+func (c workerLinearClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
+	return false, c.err
+}
+
+func (c workerLinearClient) AgentActivityCreate(context.Context, linearservice.AgentActivityInput) (linearservice.AgentActivityResult, error) {
+	return linearservice.AgentActivityResult{}, c.err
+}
+
+func (c workerLinearClient) AgentSessionUpdate(context.Context, linearservice.AgentSessionUpdateInput) error {
+	return c.err
+}
+
+func (c workerLinearClient) AgentSessionGet(context.Context, string) (*linearservice.FetchedAgentSession, error) {
+	return nil, c.err
+}
+
+func (c workerLinearClient) FetchComment(context.Context, string) (*linearservice.FetchedComment, error) {
+	return nil, c.err
 }
 
 // workerLinearIntegrationRecorder doubles as IntegrationReader and
@@ -94,13 +592,13 @@ var workerSessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
@@ -112,6 +610,7 @@ var workerSessionThreadColumns = []string{
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
 var workerProjectTaskColumns = []string{
@@ -130,6 +629,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		nil, nil, nil, nil,
 		nowPtr, nil, now,
 		nil, nil, float64(0), 0, nil,
+		"", nil, "", "", []byte("[]"),
 	}
 }
 
@@ -145,6 +645,7 @@ func workerProjectTaskRow(taskID, projectID, orgID uuid.UUID, status models.Proj
 const (
 	workerSessionWorkerNodeIndex      = 15
 	workerSessionReasoningIndex       = 35
+	workerSessionWorkspaceGenIndex    = 38
 	workerSessionBaseCommitSHAIndex   = 62
 	workerSessionDiffCollectedAtIndex = 72
 	workerSessionLatestDiffIndex      = 73
@@ -194,6 +695,18 @@ func workerSessionCurrentOptionalDefaults(values []any, includeReasoning bool, i
 		row = insertWorkerSessionValue(row, workerSessionLatestDiffIndex, nil)
 	}
 	return row
+}
+
+func padWorkerWorkspaceGeneration(row []any) []any {
+	if len(row) <= workerSessionWorkspaceGenIndex {
+		return row
+	}
+	switch row[workerSessionWorkspaceGenIndex].(type) {
+	case int64, int, int32:
+		return row
+	default:
+		return insertWorkerSessionValue(row, workerSessionWorkspaceGenIndex, int64(0))
+	}
 }
 
 func workerSessionLegacyOptionalDefaults(values []any, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []any {
@@ -274,11 +787,13 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 // current sessionColumns; we pad after dispatch so the shape matches.
 const (
 	preLinearWorkerSessionColumnsLen              = 76
-	workerSessionColumnsWithLegacyConfidenceCount = 90
+	workerSessionColumnsWithLegacyConfidenceCount = 92
 )
 
 func workerLinearSessionDefaults() []any {
 	return []any{
+		int64(0),       // workspace_revision
+		time.Time{},    // workspace_revision_updated_at
 		false,          // has_unpushed_changes
 		false,          // linear_private
 		false,          // linear_state_sync_disabled
@@ -319,9 +834,10 @@ func workerSessionTestRow(values ...any) []any {
 		row = padWorkerLinearFields(row)
 	}
 	row = padWorkerIdentityNils(row)
-	if len(row) == len(workerSessionColumns)+3 {
+	if len(row) == workerSessionColumnsWithLegacyConfidenceCount || len(row) == len(workerSessionColumns)+3 {
 		row = stripLegacyWorkerSessionResultConfidence(row)
 	}
+	row = padWorkerWorkspaceGeneration(row)
 	return row
 }
 
@@ -489,6 +1005,46 @@ func workerAnyArgs(n int) []interface{} {
 	return args
 }
 
+type capturingStringArg struct {
+	dest *string
+}
+
+func (c capturingStringArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	*c.dest = s
+	return true
+}
+
+func expectWorkerLoadSamples(mock pgxmock.PgxPoolIface) {
+	mock.ExpectQuery("(?s).*WITH worker_nodes.*").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"worker_node_id",
+			"node_status",
+			"running_sessions",
+			"turn_held_sessions",
+			"sandbox_containers",
+			"active_previews",
+			"preview_held_containers",
+			"running_jobs",
+			"running_session_jobs",
+		}).
+			AddRow("worker-a", "active", int64(2), int64(1), int64(2), int64(3), int64(1), int64(4), int64(2)).
+			AddRow("worker-b", "active", int64(1), int64(0), int64(1), int64(0), int64(0), int64(1), int64(1)))
+}
+
+func expectSandboxCapacityWorker(mock pgxmock.PgxPoolIface, workerNodeID string) {
+	rows := pgxmock.NewRows([]string{"id"})
+	if workerNodeID != "" {
+		rows.AddRow(workerNodeID)
+	}
+	mock.ExpectQuery("WITH candidates AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+}
+
 type orchestratorServiceStub struct {
 	runAgentCalls        int
 	continueSessionCalls int
@@ -496,6 +1052,19 @@ type orchestratorServiceStub struct {
 	cancelSessionCalls   int
 	cancelSessionID      uuid.UUID
 	cancelSessionResult  bool
+	stopSessionCalls     int
+	stopSessionID        uuid.UUID
+	stopReason           agent.StopReason
+	stopSessionResult    bool
+	stopSessionFn        func(sessionID uuid.UUID, reason agent.StopReason) bool
+	cancelThreadCalls    int
+	cancelThreadID       uuid.UUID
+	cancelThreadResult   bool
+	deliverThreadCalls   int
+	deliverThreadOrgID   uuid.UUID
+	deliverThreadSession uuid.UUID
+	deliverThreadID      uuid.UUID
+	deliverThreadFn      func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error
 	runAgentFn           func(ctx context.Context, run *models.Session) error
 	continueSessionFn    func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error
 	revertThreadFn       func(ctx context.Context, session *models.Session, thread *models.SessionThread) error
@@ -559,6 +1128,17 @@ func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *
 	return nil
 }
 
+func (s *orchestratorServiceStub) DeliverThreadInbox(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error {
+	s.deliverThreadCalls++
+	s.deliverThreadOrgID = orgID
+	s.deliverThreadSession = sessionID
+	s.deliverThreadID = threadID
+	if s.deliverThreadFn != nil {
+		return s.deliverThreadFn(ctx, orgID, sessionID, threadID)
+	}
+	return nil
+}
+
 func (s *orchestratorServiceStub) RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error {
 	if s.revertThreadFn != nil {
 		return s.revertThreadFn(ctx, session, thread)
@@ -578,6 +1158,22 @@ func (s *orchestratorServiceStub) CancelSessionByID(sessionID uuid.UUID) bool {
 	s.cancelSessionCalls++
 	s.cancelSessionID = sessionID
 	return s.cancelSessionResult
+}
+
+func (s *orchestratorServiceStub) RequestSessionStopByID(sessionID uuid.UUID, reason agent.StopReason) bool {
+	s.stopSessionCalls++
+	s.stopSessionID = sessionID
+	s.stopReason = reason
+	if s.stopSessionFn != nil {
+		return s.stopSessionFn(sessionID, reason)
+	}
+	return s.stopSessionResult
+}
+
+func (s *orchestratorServiceStub) CancelThreadByID(threadID uuid.UUID) bool {
+	s.cancelThreadCalls++
+	s.cancelThreadID = threadID
+	return s.cancelThreadResult
 }
 
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
@@ -634,6 +1230,76 @@ func TestCancelSessionHandler_ConsumesDeliveredCancelWithDetachedContext(t *test
 	require.NoError(t, err, "cancel_session should clear delivered cancel intent even after job context cancellation")
 	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should still call the orchestrator")
 	require.NoError(t, mock.ExpectationsWereMet(), "delivered cancel request should be consumed")
+}
+
+func TestDeliverThreadInboxHandler_CallsOrchestrator(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	orch := &orchestratorServiceStub{}
+	handler := newDeliverThreadInboxHandler(&Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"org_id":%q}`, sessionID.String(), threadID.String(), orgID.String()))
+
+	err := handler(context.Background(), "deliver_thread_inbox", payload)
+
+	require.NoError(t, err, "deliver_thread_inbox should succeed when the local orchestrator accepts delivery")
+	require.Equal(t, 1, orch.deliverThreadCalls, "deliver_thread_inbox should call the orchestrator once")
+	require.Equal(t, orgID, orch.deliverThreadOrgID, "deliver_thread_inbox should pass the org id")
+	require.Equal(t, sessionID, orch.deliverThreadSession, "deliver_thread_inbox should pass the session id")
+	require.Equal(t, threadID, orch.deliverThreadID, "deliver_thread_inbox should pass the thread id")
+}
+
+func TestDeliverThreadInboxHandler_RetargetsOwningWorker(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runtimeID := uuid.New()
+	ownerNodeID := "worker-b"
+	orch := &orchestratorServiceStub{
+		deliverThreadFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+			return &agent.ThreadRuntimeOwnedElsewhereError{
+				RuntimeID:   runtimeID,
+				ThreadID:    threadID,
+				OwnerNodeID: ownerNodeID,
+			}
+		},
+	}
+	handler := newDeliverThreadInboxHandler(&Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"org_id":%q}`, sessionID.String(), threadID.String(), orgID.String()))
+
+	err := handler(context.Background(), "deliver_thread_inbox", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "owner mismatch should requeue the delivery job")
+	require.NotNil(t, retryable.TargetNodeID, "owner mismatch should pin the retry to the runtime owner")
+	require.Equal(t, ownerNodeID, *retryable.TargetNodeID, "owner mismatch should retarget to the owning worker")
+}
+
+func TestDeliverThreadInboxHandler_RetriesLostRuntimeLease(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	orch := &orchestratorServiceStub{
+		deliverThreadFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+			return agent.ErrThreadRuntimeLeaseLost
+		},
+	}
+	handler := newDeliverThreadInboxHandler(&Services{Orchestrator: orch}, zerolog.Nop())
+	payload := []byte(fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"org_id":%q}`, sessionID.String(), threadID.String(), orgID.String()))
+
+	err := handler(context.Background(), "deliver_thread_inbox", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "lost runtime leases should retry after the reaper clears stale ownership")
+	require.Nil(t, retryable.TargetNodeID, "lease-loss retries should not pin to a potentially stale worker")
+	require.NotNil(t, retryable.RetryAfter, "lease-loss retries should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "lease-loss retries should use a short delay while lease recovery catches up")
 }
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status models.SessionStatus, currentTurn int, agentSessionID, snapshotKey *string) []any {
@@ -788,6 +1454,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		stores, mock := newTestStores(t)
 		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
 
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -818,6 +1485,7 @@ func TestLinearJobHandlers(t *testing.T) {
 
 		stores, mock := newTestStores(t)
 		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
 
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -845,6 +1513,84 @@ func TestLinearJobHandlers(t *testing.T) {
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		jobctx.RunDeadLetterHooks(handlerCtx, err)
 		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark prepare state failed after retries exhaust")
+	})
+
+	t.Run("prepare_linear_primary dead-letters fatally on invalid session issue link", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+		svc := linearservice.NewService(linearservice.Config{
+			Sessions:     stores.Sessions,
+			Integrations: workerLinearIntegrationReader{},
+			Credentials:  workerLinearCredentialReader{},
+			Issues:       stores.Issues,
+			Links:        stores.SessionIssueLinks,
+			ClientFactory: func(context.Context, string) (linearservice.Client, error) {
+				return workerLinearClient{fetch: map[string]*linearservice.FetchedIssue{
+					"ACS-123": {
+						ID:            "linear-ACS-123",
+						Identifier:    "ACS-123",
+						Title:         "Fix ACS-123",
+						Description:   "issue body",
+						URL:           "https://linear.app/acme/issue/ACS-123",
+						StateName:     "Todo",
+						StateType:     "unstarted",
+						TeamID:        "team-1",
+						TeamKey:       "ACS",
+						WorkspaceSlug: "acme",
+					},
+				}}, nil
+			},
+			Logger: zerolog.Nop(),
+		})
+
+		mock.ExpectQuery("INSERT INTO issues").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, time.Now(), time.Now()))
+		mock.ExpectQuery("INSERT INTO session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectQuery("SELECT id FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("(?s).*UPDATE sessions.*RETURNING.*").
+			WithArgs(workerAnyArgs(11)...).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID, models.SessionStatusFailed, "failed")...,
+			))
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":["ACS-123"]}`)
+
+		err := handler(handlerCtx, "prepare_linear_primary", payload)
+		require.Error(t, err, "invalid session issue links should surface as a handler error")
+		require.Contains(t, err.Error(), "Linear issue could not be linked", "invalid-link fatal error should explain the repository mismatch")
+		var fatal *FatalError
+		require.ErrorAs(t, err, &fatal, "invalid session issue links are permanent and must dead-letter immediately")
+		require.ErrorIs(t, err, db.ErrInvalidSessionIssueLink, "fatal wrapper should preserve the invalid-link sentinel")
+		var retryable *RetryableError
+		require.False(t, errors.As(err, &retryable), "invalid session issue links must not be classified as retryable")
+		require.NoError(t, mock.ExpectationsWereMet(), "fatal invalid-link handling should persist the specific message without retrying")
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		jobctx.RunDeadLetterHooks(handlerCtx, err)
+		require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should keep prepare state failed after the synchronous message write")
 	})
 
 	t.Run("prepare_linear_primary dead-letters fatally on missing integration", func(t *testing.T) {
@@ -1692,6 +2438,7 @@ type stubPRService struct {
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
+	processMergeWhenReadyFn   func(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -1732,6 +2479,13 @@ func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uui
 func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {
 	if s.enrichPullRequestHealthFn != nil {
 		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
+	}
+	return nil
+}
+
+func (s *stubPRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	if s.processMergeWhenReadyFn != nil {
+		return s.processMergeWhenReadyFn(ctx, orgID, pullRequestID)
 	}
 	return nil
 }
@@ -2165,6 +2919,21 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			},
 			expectErr: "parse pull request ID",
 		},
+		{
+			name:    "merge when ready passes parsed ids",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newMergePullRequestWhenReadyHandler(services, logger)
+			},
+		},
+		{
+			name:    "merge when ready rejects invalid payload",
+			payload: json.RawMessage(`oops`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newMergePullRequestWhenReadyHandler(services, logger)
+			},
+			expectErr: "unmarshal merge_pull_request_when_ready payload",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2194,6 +2963,12 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.version = gotVersion
 						return nil
 					},
+					processMergeWhenReadyFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) error {
+						called.mergeWhenReadyCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						return nil
+					},
 				},
 			}
 
@@ -2219,19 +2994,47 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 				require.Equal(t, orgID, called.orgID, "enrich handler should parse and pass the org ID")
 				require.Equal(t, prID, called.prID, "enrich handler should parse and pass the pull request ID")
 				require.Equal(t, int64(9), called.version, "enrich handler should parse and pass the version")
+			case "merge when ready passes parsed ids":
+				require.Equal(t, 1, called.mergeWhenReadyCalls, "merge-when-ready handler should invoke the PR service once")
+				require.Equal(t, orgID, called.orgID, "merge-when-ready handler should parse and pass the org ID")
+				require.Equal(t, prID, called.prID, "merge-when-ready handler should parse and pass the pull request ID")
 			}
 		})
 	}
 }
 
+func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return ghservice.ErrPullRequestMergeabilityPending
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "pending mergeability should defer the job instead of succeeding")
+	require.ErrorIs(t, retryable.Err, ghservice.ErrPullRequestMergeabilityPending, "deferred job should preserve the pending mergeability sentinel")
+	require.Nil(t, retryable.RetryAfter, "pending mergeability should use the worker's exponential backoff schedule")
+	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
+}
+
 type prHandlerCalls struct {
-	syncCalls      int
-	reconcileCalls int
-	enrichCalls    int
-	orgID          uuid.UUID
-	prID           uuid.UUID
-	limit          int
-	version        int64
+	syncCalls           int
+	reconcileCalls      int
+	enrichCalls         int
+	mergeWhenReadyCalls int
+	orgID               uuid.UUID
+	prID                uuid.UUID
+	limit               int
+	version             int64
 }
 
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
@@ -2883,7 +3686,7 @@ func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {
 
 	logger := zerolog.Nop()
 	starter := &mockPreviewStarter{}
-	handler := newStartBranchPreviewHandler(&Services{PreviewStarter: starter}, logger)
+	handler := newStartBranchPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
 
 	payload := previewsvc.StartBranchPreviewJobPayload{
 		OrgID:           uuid.New(),
@@ -2904,12 +3707,46 @@ func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {
 	require.Equal(t, payload, starter.branchPayload, "start_branch_preview handler should pass the decoded payload")
 }
 
+func TestStartBranchPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartBranchPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+	expectSandboxCapacityWorker(mock, "worker-with-space")
+
+	payload := previewsvc.StartBranchPreviewJobPayload{
+		OrgID:           uuid.New(),
+		UserID:          uuid.New(),
+		PreviewID:       uuid.New(),
+		PreviewTargetID: uuid.New(),
+		RepositoryID:    uuid.New(),
+		Branch:          "feature/previews",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_branch_preview payload should marshal")
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err = handler(handlerCtx, models.JobTypeStartBranchPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "branch preview capacity should requeue start_branch_preview instead of dead-lettering")
+	require.NotNil(t, retryable.TargetNodeID, "branch preview capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "branch preview capacity retry should avoid retrying the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "branch preview capacity retry should keep the selected replacement worker pin")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
 	t.Parallel()
 
 	logger := zerolog.Nop()
 	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
-	handler := newStartPreviewHandler(&Services{PreviewStarter: starter}, logger)
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
 
 	payload := previewsvc.StartPreviewJobPayload{
 		OrgID:     uuid.New(),
@@ -2929,6 +3766,216 @@ func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
 	require.Equal(t, 5*time.Second, *retryable.RetryAfter, "preview capacity retry should run again quickly")
 	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_StaleSandboxClearedRetries(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("cleared stale sandbox: %w", agent.ErrStaleSandboxIDCleared)}
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "stale sandbox cleanup should requeue start_preview instead of dead-lettering the preview")
+	require.ErrorIs(t, retryable.Err, agent.ErrStaleSandboxIDCleared, "retryable error should preserve the stale sandbox sentinel")
+	require.NotNil(t, retryable.RetryAfter, "stale sandbox retry should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "stale sandbox retry should run after the cleanup settles")
+	require.True(t, retryable.BypassMaxRetryDuration, "stale sandbox retry should bypass the generic retry window")
+	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_SandboxBusyRetries(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_BUSY: %w: another process attached first", previewsvc.ErrSandboxBusy)}
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox-busy preview starts should requeue instead of dead-lettering")
+	require.ErrorIs(t, retryable.Err, previewsvc.ErrSandboxBusy, "retryable error should preserve the sandbox-busy sentinel")
+	require.NotNil(t, retryable.RetryAfter, "sandbox-busy retry should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "sandbox-busy retry should run after the competing holder publishes or releases")
+	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_SandboxBusyTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	workerNodeID := "worker-recorded"
+	containerID := "container-on-recorded-worker"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_BUSY: %w: another process attached first", previewsvc.ErrSandboxBusy)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox-busy preview starts should requeue onto the session owner")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox-busy retry should pin to the worker that owns the live session sandbox")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "sandbox-busy retry should target the recorded session worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartPreviewHandler_SandboxWrongNodeTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	workerNodeID := "worker-recorded"
+	containerID := "container-on-recorded-worker"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_WRONG_NODE: %w", agent.ErrSandboxOnDifferentNode)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "wrong-node preview starts should requeue onto the session owner")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "wrong-node retry should pin to the worker that owns the live session sandbox")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node retry should target the recorded session worker")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node retry should bypass the generic retry window")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+	expectSandboxCapacityWorker(mock, "worker-with-space")
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err = handler(handlerCtx, models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "preview capacity should requeue start_preview instead of dead-lettering the preview")
+	require.NotNil(t, retryable.TargetNodeID, "preview capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "preview capacity retry should avoid retrying the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "preview capacity retry should keep the selected replacement worker pin")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartPreviewHandler_PreviewCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("%s: %w", previewsvc.PreviewCapacityCode, previewsvc.ErrPreviewCapacity)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+	expectSandboxCapacityWorker(mock, "")
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err = handler(handlerCtx, models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "preview capacity should requeue start_preview instead of dead-lettering the preview")
+	require.Nil(t, retryable.TargetNodeID, "preview capacity retries should not pin to a worker when none advertise available capacity")
+	require.True(t, retryable.ClearTargetNodeID, "preview capacity retries should clear a stale target pin when no replacement worker is available")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // automationRunRowColumns returns the column list used by scanAutomationRun in
@@ -4767,9 +5814,11 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 		},
 	}
 	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "worker-with-space")
 	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
 
-	err := handler(context.Background(), "run_agent", payload)
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "run_agent", payload)
 
 	require.Error(t, err, "run_agent should return a retryable error when local sandbox capacity is full")
 	var retryable *RetryableError
@@ -4777,6 +5826,92 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
 	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "sandbox capacity retries should avoid requeueing onto the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "sandbox capacity retries should not clear the target pin when a replacement worker is selected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "")
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "run_agent", payload)
+
+	require.Error(t, err, "run_agent should return a retryable error when local sandbox capacity is full")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.Nil(t, retryable.TargetNodeID, "sandbox capacity retries should not pin to a worker when none advertise available capacity")
+	require.True(t, retryable.ClearTargetNodeID, "sandbox capacity retries should clear any stale target pin when no replacement worker is selected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunAgentHandler_SandboxOnDifferentNodeTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	containerID := "container-on-recorded-worker"
+	workerNodeID := "worker-recorded"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	orch := &orchestratorServiceStub{
+		recoverSessionFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.WorkerNodeID, "run_agent recovery should preserve the recorded sandbox worker")
+			require.Equal(t, workerNodeID, *run.WorkerNodeID, "run_agent recovery should preserve the recorded sandbox worker")
+			return agent.ErrSandboxOnDifferentNode
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+
+	require.Error(t, err, "run_agent recovery should ask the worker to retry when the sandbox lives on another node")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "wrong-node run_agent recovery should be retryable")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node run_agent recovery should bypass the generic capacity retry window")
+	require.NotNil(t, retryable.TargetNodeID, "wrong-node run_agent recovery should persist the recorded worker target")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node run_agent recovery should target the worker that owns the recorded sandbox")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -4823,6 +5958,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 		AutomationRuns: automations.NewAutomationHooks(stores.AutomationRuns, zerolog.New(&logBuf)),
 	}, zerolog.New(&logBuf))
 	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	expectSandboxCapacityWorker(mock, "")
 	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
 
 	err := handler(handlerCtx, "run_agent", payload)
@@ -4837,6 +5973,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
+	expectWorkerLoadSamples(mock)
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -5313,13 +6450,15 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
-			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+			return fmt.Errorf("capacity full: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity)
 		},
 	}
 	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "worker-with-space")
 	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
 
-	err := handler(context.Background(), "continue_session", payload)
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "continue_session", payload)
 
 	require.Error(t, err, "continue_session should return a retryable error when local sandbox capacity is full")
 	var retryable *RetryableError
@@ -5327,6 +6466,48 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
 	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should wait briefly before checking the local host again")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox capacity retries should target a worker that advertises available sandbox capacity")
+	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "sandbox capacity retries should avoid requeueing onto the full worker when another worker has capacity")
+	require.False(t, retryable.ClearTargetNodeID, "sandbox capacity retries should not clear the target pin when a replacement worker is selected")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("capacity full: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	expectSandboxCapacityWorker(mock, "")
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	handlerCtx := jobctx.WithWorkerNodeID(context.Background(), "worker-full")
+	err := handler(handlerCtx, "continue_session", payload)
+
+	require.Error(t, err, "continue_session should return a retryable error when local sandbox capacity is full")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
+	require.Nil(t, retryable.TargetNodeID, "sandbox capacity retries should not pin to a worker when none advertise available capacity")
+	require.True(t, retryable.ClearTargetNodeID, "sandbox capacity retries should clear any stale target pin when no replacement worker is selected")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -5365,7 +6546,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
-			return fmt.Errorf("capacity full: %w", agent.ErrSandboxCapacity)
+			return fmt.Errorf("capacity full: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity)
 		},
 	}
 	projectHooks := &sessionCompleteRecorder{}
@@ -5376,6 +6557,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 		AutomationRuns: automationHooks,
 	}, zerolog.Nop())
 	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	expectSandboxCapacityWorker(mock, "")
 	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
 
 	err := handler(handlerCtx, "continue_session", payload)
@@ -5391,8 +6573,17 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
 			),
 		)
+	expectWorkerLoadSamples(mock)
+	var failureExplanation string
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
-		WithArgs(workerAnyArgs(6)...).
+		WithArgs(
+			capturingStringArg{dest: &failureExplanation},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE session_threads").
 		WithArgs(workerAnyArgs(7)...).
@@ -5409,7 +6600,110 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	}}
 	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
 	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
+	require.Equal(t, sandboxCapacityBaseExplanation, failureExplanation, "failure explanation should stay concise for users")
+	require.NotContains(t, failureExplanation, "2/2", "failure explanation should not expose local slot counts")
+	require.NotContains(t, failureExplanation, "Current worker load", "failure explanation should not expose fleet load details")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
+}
+
+func TestContinueSessionHandler_StaleSandboxClearDeadLetterFailsSessionAndThread(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+				workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("cleared stale container: %w", agent.ErrStaleSandboxIDCleared)
+		},
+	}
+	var logBuf bytes.Buffer
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.New(&logBuf))
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "continue_session", payload)
+	require.Error(t, err, "stale sandbox clear should ask the worker to retry")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "stale sandbox clear should remain retryable before queue exhaustion")
+	require.True(t, retryable.BypassMaxRetryDuration, "continue_session stale sandbox clear should retry even when the job was created before the generic retry window")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale-clear retry should not mark the session failed before dead-letter")
+
+	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(11)...).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, errors.New(errMsg))
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the session and active thread with a visible stale-sandbox explanation; logs: %s", logBuf.String())
+}
+
+func TestSandboxCapacityFailureExplanationIncludesCurrentLoad(t *testing.T) {
+	t.Parallel()
+
+	explanation := formatSandboxCapacityFailureExplanation(
+		fmt.Errorf("retryable job timed out after 8m0s: %w: 2/2 sandboxes active or reserved", agent.ErrSandboxCapacity),
+		[]db.WorkerLoadSample{
+			{
+				WorkerNodeID:          "worker-a",
+				NodeStatus:            "active",
+				RunningSessions:       2,
+				TurnHeldSessions:      1,
+				SandboxContainers:     2,
+				ActivePreviews:        3,
+				PreviewHeldContainers: 1,
+				RunningJobs:           4,
+				RunningSessionJobs:    2,
+			},
+			{
+				WorkerNodeID:       "worker-b",
+				NodeStatus:         "active",
+				RunningSessions:    1,
+				SandboxContainers:  1,
+				RunningJobs:        1,
+				RunningSessionJobs: 1,
+			},
+		},
+	)
+
+	require.Equal(t, sandboxCapacityBaseExplanation, explanation, "user-facing capacity explanation should stay concise and omit operational capacity internals")
+	require.NotContains(t, explanation, "2/2", "user-facing capacity explanation should not expose local slot counts")
+	require.NotContains(t, explanation, "Current worker load", "user-facing capacity explanation should not expose fleet load details")
+	require.NotContains(t, explanation, "preview-held", "user-facing capacity explanation should not expose internal sandbox accounting")
 }
 
 func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
@@ -5444,6 +6738,52 @@ func TestContinueSessionHandler_WrapsPreviewRaceAsRetryable(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSandboxPreviewRace must be wrapped as RetryableError so the worker retries against the preview container")
 	require.NotNil(t, retryable.RetryAfter, "preview race retries should use a short deliberate backoff")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxPreviewRace, "the wrapped error must preserve the ErrSandboxPreviewRace sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "thread sibling race should preserve thread execution options")
+			require.NotNil(t, opts.ThreadID, "thread sibling race should be scoped to the requested thread")
+			require.Equal(t, threadID, *opts.ThreadID, "thread sibling race should preserve the requested thread id")
+			return fmt.Errorf("sibling published first: %w", agent.ErrSandboxSiblingRace)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the sibling sandbox race signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxSiblingRace must be wrapped as RetryableError so the worker retries into the winning shared sandbox")
+	require.NotNil(t, retryable.RetryAfter, "sibling sandbox race retries should use a short deliberate backoff")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxSiblingRace, "the wrapped error must preserve the ErrSandboxSiblingRace sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

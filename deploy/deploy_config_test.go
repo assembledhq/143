@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,6 +24,21 @@ func TestFrontendContainerBindsAllInterfaces(t *testing.T) {
 	dockerfile, err := os.ReadFile("../Dockerfile.frontend")
 	require.NoError(t, err, "test should read the frontend Dockerfile")
 	require.Contains(t, string(dockerfile), "ENV HOSTNAME=0.0.0.0", "frontend image should default Next standalone to bind all interfaces")
+}
+
+func TestProductionComposeCapsDatabasePools(t *testing.T) {
+	t.Parallel()
+
+	appCompose, err := os.ReadFile("../docker-compose.app.yml")
+	require.NoError(t, err, "test should read the app compose file")
+	appText := string(appCompose)
+	require.Contains(t, appText, "DATABASE_MAX_CONNS: ${API_DATABASE_MAX_CONNS:-20}", "app compose should cap the API database pool below Postgres max_connections")
+	require.Contains(t, appText, "DATABASE_MAX_CONN_IDLE_TIME: ${API_DATABASE_MAX_CONN_IDLE_TIME:-5m}", "app compose should release idle API database connections after traffic bursts")
+
+	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	workerText := string(workerCompose)
+	require.Contains(t, workerText, "pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}", "worker compose should cap worker and inherited session-executor database pools")
 }
 
 func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
@@ -302,13 +319,199 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 
 	require.Contains(t, deploy, "deploy_worker_blue_green", "worker deploy should use a blue/green generation rollout")
 	require.Contains(t, deploy, "start_worker_generation", "worker deploy should start the new generation before draining old containers")
+	require.Contains(t, deploy, `preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"`, "worker deploy preflight should use the existing worker node id instead of the host's physical hostname")
+	require.Contains(t, deploy, `--node-id "$preflight_node_id"`, "worker deploy preflight should load status by node id")
+	require.Contains(t, deploy, `wait_worker_db_heartbeat "$node_id"`, "worker deploy should verify the green generation has registered a fresh DB heartbeat before draining blue")
+	require.Contains(t, deploy, "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure", "worker deploy should clean up green if DB heartbeat readiness fails")
 	require.Contains(t, deploy, "drain_old_worker_containers", "worker deploy should drain old worker containers after the new generation is healthy")
+	require.Contains(t, deploy, "run_ctl expire-budget", "worker deploy should mark over-budget blue executors for deploy-specific checkpoint/requeue")
+	require.Contains(t, deploy, "--reason \"$reason\"", "worker deploy should pass the deploy reason into budget-expiry audit events")
+	require.Contains(t, deploy, `run_worker_deployctl mark-draining`, "post-green drain control should run from a deploy-control helper instead of depending on the green worker container")
+	require.Contains(t, deploy, `run_ctl retire-ready --node-id "$node_id" --json`, "retire polling should use a stable deploy-control helper so later worker generations cannot orphan older drains")
+	require.NotContains(t, deploy, `docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl retire-ready`, "retire polling must not depend on a worker generation that future deploys may stop")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PORT_START", "worker deploy should allocate worker generation ports from a configurable range")
 	require.Contains(t, deploy, "WORKER_HOST_PORT", "worker deploy should pass the allocated host port into docker compose")
 	require.Contains(t, deploy, `local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"`, "worker deploy should default to the existing worker port only unless operators explicitly open a blue/green range")
 	require.Contains(t, deploy, "app-to-worker network must allow every configured worker blue/green port", "worker deploy should warn operators that app nodes must be able to reach every advertised worker generation port")
-	require.Contains(t, deploy, "drain_worker_containers_blocking", "worker deploy should fall back to a blocking drain when no extra blue/green port is configured")
-	require.Contains(t, deploy, "No free worker generation port and no explicit blue/green port range configured; falling back to blocking worker drain.", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
+	require.Contains(t, deploy, "worker_runtime_endpoint_in_use", "worker deploy should check preview runtime DB ownership before reusing a worker endpoint")
+	require.Contains(t, deploy, "FROM preview_runtimes WHERE endpoint_url", "worker deploy should query active preview runtime endpoints before selecting a generation port")
+	require.Contains(t, deploy, "status IN ('starting', 'ready', 'draining')", "worker deploy should treat starting, ready, and draining preview runtimes as endpoint owners")
+	require.Contains(t, deploy, `find_free_worker_port "$worker_private_ip"`, "worker deploy should pass the worker private IP into port selection so endpoint URLs match runtime routing")
+	require.Contains(t, deploy, "refusing to reuse it", "worker deploy should fail closed when runtime endpoint ownership cannot be verified")
+	require.NotContains(t, deploy, "falling back to blocking worker drain", "routine worker deploy should not interrupt old workers when no extra blue/green port is configured")
+	require.Contains(t, deploy, "routine blue/green deploy refuses blocking drain fallback", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
+}
+
+func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, "worker_host_capacity_preflight", "worker deploy should run a local CPU/memory capacity preflight before starting green")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB", "worker deploy should let operators set the minimum free memory needed for temporary worker overlap")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS", "worker deploy should let operators set the minimum idle CPU budget needed for temporary worker overlap")
+	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS", "worker deploy should retry transient capacity preflight failures before failing a routine rollout")
+	require.Contains(t, deploy, "worker_support_service_fingerprint", "worker deploy should fingerprint support-service config inputs during preflight")
+	require.Contains(t, deploy, "--support-services-fingerprint", "worker deploy preflight should pass support-service fingerprints into worker-deployctl")
+	require.Contains(t, deploy, "--expected-schema-version", "worker deploy preflight should pass the expected migration/schema version into worker-deployctl")
+	require.Contains(t, deploy, "impact --node-id", "worker deploy should emit a dry-run impact report for the old generation before routine drain")
+}
+
+func TestWorkerCapacityPreflightMeasuresIdleCPUMillicores(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	preflight := extractShellFunction(t, string(deployScript), "worker_host_capacity_preflight", "worker_support_service_fingerprint")
+
+	require.Contains(t, preflight, "cpu_count", "worker capacity preflight should detect the number of online CPUs")
+	require.Contains(t, preflight, "* 1000 * cpu_count", "worker capacity preflight should convert idle CPU fraction into host-level millicores")
+	require.NotContains(t, preflight, "* 1000) / delta", "worker capacity preflight should not treat idle CPU percent as millicores")
+}
+
+func TestWorkerComposeCapsDatabasePool(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read worker compose")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, "pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}", "worker generations should cap pgx pool size so blue/green overlap cannot exhaust Postgres connections")
+}
+
+func TestWorkerDeployProtectsActiveExecutorImages(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, "protect_active_executor_images", "worker deploy should record active executor image retention before pruning")
+	require.Contains(t, deploy, "worker-deployctl retain-images", "worker deploy should use DB-backed image retention before docker image prune")
+	require.Contains(t, deploy, "worker-deployctl release-retained-images", "worker deploy should release expired image retention records after pruning")
+}
+
+func TestWorkerSpinDownScriptDrainsBeforeClearingHost(t *testing.T) {
+	t.Parallel()
+
+	script, err := os.ReadFile("../deploy/scripts/spin-down-worker.sh")
+	require.NoError(t, err, "test should read the worker spin-down script")
+	text := string(script)
+
+	require.Contains(t, text, "docker kill --signal=TERM", "worker spin-down should request worker drain before stopping support services")
+	require.Contains(t, text, "wait_for_stopped \"worker\" \"$WORKER_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the worker drain with the drain timeout")
+	require.Contains(t, text, "docker stop -t \"$EXECUTOR_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the executor drain with Docker's stop timeout")
+	require.Contains(t, text, "label=com.143.role=session-executor", "worker spin-down should include durable session executor containers in cleanup")
+	require.Contains(t, text, "label=com.assembledhq.143.managed=true", "worker spin-down should include managed sandbox containers in cleanup")
+	require.Contains(t, text, "docker compose -f docker-compose.worker.yml down", "worker spin-down should stop worker compose services after worker drain")
+	require.Contains(t, text, "CLEAR_MACHINE=1", "destructive machine cleanup should require an explicit clear flag")
+	require.Contains(t, text, "docker volume prune -f", "explicit machine cleanup should reclaim unused Docker volumes")
+	require.Contains(t, text, "docker system prune -af", "explicit machine cleanup should reclaim unused Docker images and build cache")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read the Makefile")
+	require.Contains(t, string(makefile), "spin-down-worker", "Makefile should expose the worker spin-down script as an operator target")
+	require.Contains(t, string(makefile), "./deploy/scripts/spin-down-worker.sh", "Makefile target should invoke the worker spin-down script")
+	require.Contains(t, string(makefile), "--timeout $(TIMEOUT)", "Makefile target should expose the worker drain timeout")
+	require.Contains(t, string(makefile), "--executor-timeout $(EXECUTOR_TIMEOUT)", "Makefile target should expose the session executor drain timeout")
+}
+
+func TestWorkerRuntimeEndpointQueryUsesPsqlStdinVariables(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, `printf '%s\n' "$query" | docker run -i --rm`, "worker endpoint ownership query should be fed on stdin so psql variable interpolation is applied")
+	require.Contains(t, deploy, `-v endpoint="$endpoint"`, "worker endpoint ownership query should bind the generated endpoint as a psql variable")
+	require.Contains(t, deploy, `endpoint_url = :'endpoint'`, "worker endpoint ownership query should SQL-quote the bound endpoint variable")
+	require.NotContains(t, deploy, `-tAc "SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint'`, "worker endpoint ownership query must not use psql -c with psql variables because -c sends the colon syntax to Postgres")
+}
+
+func TestWorkerRuntimeEndpointQueryExecutesThroughPsqlStdin(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	functionBody := extractShellFunction(t, string(deployScript), "worker_runtime_endpoint_in_use", "worker_blue_green_extra_ports_configured")
+
+	tmpDir := t.TempDir()
+	fakeDocker := filepath.Join(tmpDir, "docker")
+	err = os.WriteFile(fakeDocker, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$DOCKER_ARGS_FILE"
+cat > "$PSQL_STDIN_FILE"
+printf '0\n'
+`), 0o755)
+	require.NoError(t, err, "test should write a fake docker executable")
+
+	argsFile := filepath.Join(tmpDir, "docker.args")
+	stdinFile := filepath.Join(tmpDir, "psql.stdin")
+	script := functionBody + `
+worker_runtime_endpoint_in_use "100.96.213.15" "8087"
+case "$?" in
+  1) exit 0 ;;
+  *) exit 1 ;;
+esac
+`
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"DB_HOST=db.example.internal",
+		"DB_PASSWORD=secret",
+		"DOCKER_ARGS_FILE="+argsFile,
+		"PSQL_STDIN_FILE="+stdinFile,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "worker endpoint ownership check should execute through the fake docker/psql path: %s", output)
+
+	args, err := os.ReadFile(argsFile)
+	require.NoError(t, err, "fake docker should record invocation arguments")
+	stdin, err := os.ReadFile(stdinFile)
+	require.NoError(t, err, "fake docker should record query from stdin")
+
+	require.Contains(t, string(args), "run -i --rm", "worker endpoint ownership query should keep stdin open for dockerized psql")
+	require.Contains(t, string(args), "-v endpoint=http://100.96.213.15:8087", "worker endpoint ownership query should pass the checked endpoint as a psql variable")
+	require.NotContains(t, string(args), "-c", "worker endpoint ownership query should not use psql -c with psql variables")
+	require.Contains(t, string(stdin), "SELECT COUNT(*) FROM preview_runtimes", "worker endpoint ownership query should be sent to psql on stdin")
+	require.Contains(t, string(stdin), "endpoint_url = :'endpoint'", "worker endpoint ownership query should use psql SQL-quoted variable interpolation")
+}
+
+func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, `endpoint_reuse_mode="${2:-strict}"`, "worker port selection should default to strict preview runtime endpoint ownership checks")
+	require.Contains(t, deploy, `[ "$endpoint_reuse_mode" = "after-blocking-drain" ]`, "worker port selection should retain explicit maintenance-only reuse after the old worker generation has fully drained")
+	require.NotContains(t, deploy, `host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"`, "routine worker deploy should not reuse the default endpoint through a blocking drain fallback")
+}
+
+func extractShellFunction(t *testing.T, script, startFunc, nextFunc string) string {
+	t.Helper()
+
+	start := strings.Index(script, "  "+startFunc+"() {")
+	require.NotEqual(t, -1, start, "deploy.sh should define %s", startFunc)
+	end := strings.Index(script[start:], "  "+nextFunc+"() {")
+	require.NotEqual(t, -1, end, "deploy.sh should define %s after %s", nextFunc, startFunc)
+	return script[start : start+end]
+}
+
+func TestCIDeployConfiguresWorkerBlueGreenPortRange(t *testing.T) {
+	t.Parallel()
+
+	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
+	require.NoError(t, err, "test should read deploy workflow")
+	workflowText := string(workflow)
+
+	require.Contains(t, workflowText, `WORKER_BLUE_GREEN_PORT_START: "8080"`, "CI worker deploy should explicitly enable a worker blue/green port range")
+	require.Contains(t, workflowText, `WORKER_BLUE_GREEN_PORT_END: "8087"`, "CI worker deploy should reserve enough ports for overlapping draining generations")
+	require.Contains(t, workflowText, "generation binds a free port while old worker generations keep serving", "workflow comment should document why the port range is required")
 }
 
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
@@ -366,6 +569,7 @@ func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deployText := string(deployScript)
+	require.Contains(t, deployText, `[ -z "${!key:-}" ]`, "deploy.sh should fill empty exported env vars from .env.production.enc like provision.sh")
 	require.Contains(t, deployText, `: "${DB_BIND_IP:?DB_BIND_IP is required for db role`, "db deploy should fail loudly until the operator chooses the primary private bind address")
 	require.Contains(t, deployText, "DB_BIND_IP=%s", "db deploy should preserve DB_BIND_IP in /opt/143/.env for compose interpolation")
 }
@@ -767,7 +971,8 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provision)
-	require.Contains(t, provisionText, "install-log-rotation.sh", "provision.sh should invoke install-log-rotation.sh after staging deploy/ so newly-provisioned hosts have rotation in place before services start (closes the provision-to-first-deploy unbounded-growth window)")
+	require.Contains(t, provisionText, "configure-docker-daemon.sh", "provision.sh should configure Docker daemon hardening through one helper so fresh hosts do not hit systemd start limits from sequential restarts")
+	require.NotContains(t, provisionText, `"/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"`, "provision.sh must not invoke the log-rotation helper directly because the DNS helper would perform a second Docker restart on fresh hosts")
 	require.GreaterOrEqual(t, strings.Count(provisionText, "/usr/bin/chown -R deploy\\:deploy /opt/143/deploy/scripts"), 3, "provision.sh inline bootstraps for db, logging, and redis must allow deploy to fix root-owned deploy/scripts before syncing helpers")
 	// db/logging/redis bootstraps don't run bootstrap.sh, so each must
 	// install its own /etc/sudoers.d/99-deploy or the deploy+sudo path
@@ -790,6 +995,28 @@ func TestDeployConfiguresDockerLogRotation(t *testing.T) {
 	require.Contains(t, string(makefile), "repair-deploy-sudoers:", "Makefile should expose the no-teardown sudoers repair as an operator target")
 }
 
+func TestProductionPostgresConnectionHeadroom(t *testing.T) {
+	t.Parallel()
+
+	conf, err := os.ReadFile("../deploy/postgres/postgresql.conf")
+	require.NoError(t, err, "test should read production PostgreSQL config")
+
+	require.Contains(t, string(conf), "max_connections = 200", "production Postgres should leave headroom for blue/green worker overlap and deploy-control clients")
+}
+
+func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `if [ "$ROLE" = "db" ]; then`, "db deploy should have role-specific sync for mounted Postgres config")
+	require.Contains(t, deployText, "$PROJECT_DIR/deploy/postgres/postgresql.conf", "db deploy should sync the mounted postgresql.conf")
+	require.Contains(t, deployText, "$PROJECT_DIR/deploy/postgres/pg_hba.conf", "db deploy should sync the mounted pg_hba.conf")
+	require.Contains(t, deployText, "mkdir -p /opt/143/deploy/postgres", "db deploy should ensure the mounted config directory exists")
+}
+
 func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	t.Parallel()
 
@@ -802,16 +1029,31 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.NotContains(t, deployText, `docker rm -f`, "deploy prune must not force-remove running executor containers")
 	require.Contains(t, deployText, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
 	require.Contains(t, deployText, `docker builder prune -af --filter "until=$prune_until"`, "deploy prune should remove unused build cache after a successful rollout")
-	require.Contains(t, deployText, `"DEPLOY_DOCKER_PRUNE=${DEPLOY_DOCKER_PRUNE:-1}"`, "deploy should pass the prune enable/disable knob through SSH to the remote host")
-	require.Contains(t, deployText, `"DOCKER_PRUNE_UNTIL=${DOCKER_PRUNE_UNTIL:-24h}"`, "deploy should pass the prune age window through SSH to the remote host")
-	require.Contains(t, deployText, `"SESSION_EXECUTOR_DOCKER_NETWORK=${SESSION_EXECUTOR_DOCKER_NETWORK:-}"`, "deploy should pass the executor network override through SSH to the remote host")
+	require.Contains(t, deployText, `$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")`, "deploy should pass the prune enable/disable knob through SSH to the remote host")
+	require.Contains(t, deployText, `$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")`, "deploy should pass the prune age window through SSH to the remote host")
+	require.Contains(t, deployText, `$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")`, "deploy should pass the executor network override through SSH to the remote host")
 	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
 	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
 	require.Contains(t, deployText, `deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)`, "detached worker rollovers should embed the blue/green and prune helpers in the host-side script")
+	require.NotContains(t, deployText, "run_worker_deployctl_in_container", "detached worker rollovers should not embed worker-container-bound deploy control helpers")
 	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
+	require.Contains(t, deployText, `flock -xo /tmp/143-deploy-worker.lock`, "detached worker rollovers should not let background drain watchers inherit the deploy lock")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
+}
+
+func TestDetachedWorkerDeployReadsDatabaseEnvFromRemoteEnvFile(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `DB_HOST=$(printf '%q' "$(read_worker_env_value DB_HOST)")`, "detached worker deploy should bake DB_HOST from the refreshed remote .env file")
+	require.Contains(t, deployText, `DB_PASSWORD=$(printf '%q' "$(read_worker_env_value DB_PASSWORD)")`, "detached worker deploy should bake DB_PASSWORD from the refreshed remote .env file")
+	require.NotContains(t, deployText, `DB_HOST='$DB_HOST'`, "detached worker deploy must not expand an unset parent-shell DB_HOST under set -u")
+	require.NotContains(t, deployText, `DB_PASSWORD='$DB_PASSWORD'`, "detached worker deploy must not expand an unset parent-shell DB_PASSWORD under set -u")
 }
 
 func TestWorkerComposeConfiguresSessionExecutorNetwork(t *testing.T) {
@@ -857,7 +1099,7 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 	require.Contains(t, deployText, "install-docker-dns.sh", "deploy.sh should sync and invoke install-docker-dns.sh for maintenance-capable deploys")
 	require.Contains(t, deployText, "DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)", "deploy.sh should pin three independent resolver operators (Cloudflare, Google, Quad9) so a single-provider outage doesn't take fleet DNS down")
 	require.Contains(t, deployText, "ALLOW_DEPLOY_DOCKER_DAEMON_RESTART", "deploy.sh should require an explicit maintenance flag before app deploys can restart Docker")
-	require.Contains(t, deployText, "Skipping docker daemon DNS check on app deploy", "routine app deploys should skip daemon-mutating DNS checks to keep Caddy bound on 80/443")
+	require.Contains(t, deployText, "Skipping docker daemon DNS check on $ROLE deploy", "routine app and worker deploys should skip daemon-mutating DNS checks")
 	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/install-docker-dns.sh", "deploy.sh should invoke install-docker-dns.sh via deploy+sudo so missing sudoers fails fast instead of hanging")
 	require.Contains(t, deployText, "Retrying docker daemon DNS pinning after sudoers repair", "deploy.sh should retry install-docker-dns.sh after repairing sudoers so the first deploy that introduces the helper succeeds on legacy hosts")
 	require.Contains(t, deployText, "warn_docker_dns_skipped", "deploy.sh should warn (not fail the deploy) when the DNS helper can't be installed — DNS hardening is operational, not a hard prerequisite for the rolling deploy")
@@ -870,13 +1112,82 @@ func TestDeployPinsDockerDaemonDNSResolvers(t *testing.T) {
 	provision, err := os.ReadFile("../deploy/scripts/provision.sh")
 	require.NoError(t, err, "test should read provision.sh")
 	provisionText := string(provision)
-	require.Contains(t, provisionText, "install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9", "provision.sh should pin DNS resolvers in /etc/docker/daemon.json before services start so newly-provisioned hosts don't inherit the host's single-upstream resolv.conf")
+	require.Contains(t, provisionText, "configure-docker-daemon.sh", "provision.sh should pin DNS resolvers as part of the single Docker daemon hardening pass before services start")
+	require.Contains(t, provisionText, "--dns 1.1.1.1 8.8.8.8 9.9.9.9", "provision.sh should pass three independent resolver operators into the daemon hardening helper")
+	require.NotContains(t, provisionText, `"/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"`, "provision.sh must not invoke the DNS helper directly because log rotation and DNS should share one Docker restart on fresh hosts")
 	require.GreaterOrEqual(t, strings.Count(provisionText, "/opt/143/deploy/scripts/install-docker-dns.sh *"), 3, "provision.sh inline bootstraps for db, logging, and redis must each grant deploy NOPASSWD sudo for install-docker-dns.sh")
 
 	repair, err := os.ReadFile("../deploy/scripts/repair-deploy-sudoers.sh")
 	require.NoError(t, err, "test should read repair-deploy-sudoers.sh")
 	repairText := string(repair)
 	require.Contains(t, repairText, "/opt/143/deploy/scripts/install-docker-dns.sh *", "repair-deploy-sudoers.sh should grant the install-docker-dns.sh sudoers entry — otherwise legacy-host repair via the no-teardown path leaves DNS pinning broken")
+}
+
+func TestConfigureDockerDaemonMergesHardeningInOnePass(t *testing.T) {
+	t.Parallel()
+
+	helper, err := os.ReadFile("../deploy/scripts/configure-docker-daemon.sh")
+	require.NoError(t, err, "test should read configure-docker-daemon.sh")
+	helperText := string(helper)
+	require.Contains(t, helperText, "systemctl reset-failed docker.service docker.socket", "configure-docker-daemon.sh should clear systemd start-rate limits before retrying Docker startup")
+	require.Contains(t, helperText, "systemctl restart docker", "configure-docker-daemon.sh should apply changed daemon config with a Docker restart")
+	require.Contains(t, helperText, "docker info", "configure-docker-daemon.sh should verify Docker is usable after restart")
+
+	tmp := t.TempDir()
+	daemonPath := filepath.Join(tmp, "daemon.json")
+	initial := `{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/bin/runsc",
+      "runtimeArgs": ["--ignore-cgroups", "--host-uds=open"]
+    }
+  },
+  "features": {
+    "containerd-snapshotter": true
+  }
+}`
+	require.NoError(t, os.WriteFile(daemonPath, []byte(initial), 0o640), "test should seed daemon.json with worker runtime and operator-owned keys")
+
+	cmd := exec.Command(
+		"bash",
+		"../deploy/scripts/configure-docker-daemon.sh",
+		"--log-max-size", "100m",
+		"--log-max-file", "5",
+		"--dns", "1.1.1.1", "8.8.8.8", "9.9.9.9",
+	)
+	cmd.Env = append(os.Environ(),
+		"DAEMON_JSON="+daemonPath,
+		"SKIP_DOCKER_RESTART=1",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "configure-docker-daemon.sh should merge Docker hardening settings without requiring a live daemon: %s", string(output))
+
+	raw, err := os.ReadFile(daemonPath)
+	require.NoError(t, err, "test should read the merged daemon.json")
+
+	var merged map[string]any
+	require.NoError(t, json.Unmarshal(raw, &merged), "merged daemon.json should remain valid JSON")
+	require.Equal(t, "json-file", merged["log-driver"], "merged daemon.json should set the json-file log driver")
+	require.Equal(t, []any{"1.1.1.1", "8.8.8.8", "9.9.9.9"}, merged["dns"], "merged daemon.json should set the complete resolver list")
+
+	logOpts, ok := merged["log-opts"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should include log-opts")
+	require.Equal(t, "100m", logOpts["max-size"], "merged daemon.json should set the requested max log size")
+	require.Equal(t, "5", logOpts["max-file"], "merged daemon.json should set the requested max log file count")
+
+	runtimes, ok := merged["runtimes"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should preserve existing runtimes")
+	runsc, ok := runtimes["runsc"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should preserve the runsc runtime block")
+	require.Equal(t, "/usr/bin/runsc", runsc["path"], "merged daemon.json should preserve runsc path")
+
+	features, ok := merged["features"].(map[string]any)
+	require.True(t, ok, "merged daemon.json should preserve unrelated operator-owned keys")
+	require.Equal(t, true, features["containerd-snapshotter"], "merged daemon.json should preserve unrelated nested values")
+
+	info, err := os.Stat(daemonPath)
+	require.NoError(t, err, "test should stat daemon.json after merge")
+	require.Equal(t, os.FileMode(0o640), info.Mode().Perm(), "configure-docker-daemon.sh should preserve daemon.json file permissions")
 }
 
 func TestProvisionWaitsForDockerDaemonBeforePullingImages(t *testing.T) {

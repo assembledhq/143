@@ -5,6 +5,14 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  ResponsiveModal,
+  ResponsiveModalBody,
+  ResponsiveModalDescription,
+  ResponsiveModalFooter,
+  ResponsiveModalHeader,
+  ResponsiveModalTitle,
+} from "@/components/ui/responsive-modal";
 import { ExternalLink } from "lucide-react";
 import type { ClaudeCodeInitiateResponse } from "@/lib/types";
 
@@ -73,15 +81,6 @@ export function ClaudeCodeAuthModal({
     };
   }, []);
 
-  // Close on Escape key.
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
   const submitCode = useCallback(async () => {
     const trimmed = code.trim();
     if (!trimmed) {
@@ -108,10 +107,20 @@ export function ClaudeCodeAuthModal({
   }, [code, stableLabel, stableScope, onConnected]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-lg border bg-background p-6 shadow-lg">
-        <h3 className="text-lg font-medium">Connect your Claude subscription</h3>
-
+    <ResponsiveModal
+      open
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+      desktopClassName="sm:max-w-md"
+    >
+      <ResponsiveModalHeader>
+        <ResponsiveModalTitle>Connect your Claude subscription</ResponsiveModalTitle>
+        <ResponsiveModalDescription>
+          Log in with Anthropic, then paste the authorization code shown after sign-in.
+        </ResponsiveModalDescription>
+      </ResponsiveModalHeader>
+      <ResponsiveModalBody>
         {status === "initiating" && (
           <p className="mt-4 text-sm text-muted-foreground">Starting authentication...</p>
         )}
@@ -169,28 +178,28 @@ export function ClaudeCodeAuthModal({
             <p className="text-sm text-destructive">{error}</p>
           </div>
         )}
+      </ResponsiveModalBody>
 
-        <div className="mt-6 flex items-center justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={onClose}>
-            {status === "completed" ? "Done" : "Cancel"}
+      <ResponsiveModalFooter>
+        <Button variant="outline" size="sm" onClick={onClose}>
+          {status === "completed" ? "Done" : "Cancel"}
+        </Button>
+        {status === "awaiting_paste" && (
+          <Button size="sm" onClick={submitCode} disabled={!code.trim()}>
+            Connect
           </Button>
-          {status === "awaiting_paste" && (
-            <Button size="sm" onClick={submitCode} disabled={!code.trim()}>
-              Connect
-            </Button>
-          )}
-          {status === "exchanging" && (
-            <Button size="sm" disabled>
-              Connecting...
-            </Button>
-          )}
-          {status === "error" && (
-            <Button size="sm" onClick={startAuth}>
-              Try again
-            </Button>
-          )}
-        </div>
-      </div>
-    </div>
+        )}
+        {status === "exchanging" && (
+          <Button size="sm" disabled>
+            Connecting...
+          </Button>
+        )}
+        {status === "error" && (
+          <Button size="sm" onClick={startAuth}>
+            Try again
+          </Button>
+        )}
+      </ResponsiveModalFooter>
+    </ResponsiveModal>
   );
 }

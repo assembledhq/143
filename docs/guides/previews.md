@@ -190,9 +190,29 @@ Use `preview.install` when a preview needs dependencies before services can boot
 | `lockfiles` | `string[]` | Repo-relative files included in the install cache key. Missing files fail the install phase. |
 | `clean_paths` | `string[]` | Repo-relative paths or simple globs to remove before reinstalling. Nothing is auto-deleted unless listed here. |
 | `verify_paths` | `string[]` | Repo-relative paths that must exist for a cached install to be reused. |
+| `cache.enabled` | `boolean` | Optional. Defaults to `true`; set to `false` to opt out of dependency artifact caching. |
+| `cache.paths` | `string[]` | Optional additive dependency/build cache paths to persist in addition to `clean_paths` and inferred paths. Requires `lockfiles`. |
 | `timeout_seconds` | `int` | Defaults to 420 seconds. Max 1800 seconds. |
 
 143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
+
+Session previews also use a dependency artifact cache when object storage is configured. The cached path set is:
+
+```text
+clean_paths + cache.paths + inferred paths from known dependency files
+```
+
+Initial inferred paths:
+
+| Dependency file | Inferred cache path |
+|---|---|
+| `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` | `node_modules` |
+| `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
+| `go.mod`, `go.sum` | `vendor` |
+
+Inference is relative to the lockfile directory, so `frontend/package-lock.json` infers `frontend/node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. `cache.paths` is additive and is useful for paths such as `.next/cache`, `.pnpm-store`, or `.turbo/cache`.
+
+Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. `requirements.txt` can be unsafe when it contains unpinned ranges such as `flask>=2.0`; pin dependencies, use a real lockfile, or set `cache.enabled: false`. Mutable preview image tags such as `latest` can also produce stale caches; prefer immutable digests or versioned tags.
 
 Npm workspace example:
 
@@ -224,7 +244,22 @@ Pnpm example:
 }
 ```
 
-Keep package-manager details explicit. 143 does not auto-detect npm, yarn, pnpm, bun, or delete `node_modules` unless you declare that path in `clean_paths`.
+Opt out when a repo cannot safely reuse dependency artifacts:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules"],
+      "cache": { "enabled": false }
+    }
+  }
+}
+```
+
+If dependencies look stale, change the lockfile so the cache key changes, or temporarily opt out with `cache.enabled: false`.
 
 ### Services
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,21 +15,33 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 type executorRuntimeExecutorStoreStub struct {
-	executor       models.SessionExecutor
-	getErr         error
-	markRunningOK  bool
-	terminalStatus models.SessionExecutorStatus
-	terminalToken  uuid.UUID
-	terminalCalls  int
-	drainingCalls  int
+	mu                        sync.Mutex
+	executor                  models.SessionExecutor
+	getSequence               []models.SessionExecutor
+	getErr                    error
+	heartbeatIntent           models.DrainIntent
+	markRunningOK             bool
+	terminalStatus            models.SessionExecutorStatus
+	terminalToken             uuid.UUID
+	terminalCalls             int
+	drainingCalls             int
+	humanInputCheckpointCalls int
 }
 
 func (s *executorRuntimeExecutorStoreStub) GetByID(context.Context, uuid.UUID) (models.SessionExecutor, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.getErr != nil {
 		return models.SessionExecutor{}, s.getErr
+	}
+	if len(s.getSequence) > 0 {
+		executor := s.getSequence[0]
+		s.getSequence = s.getSequence[1:]
+		return executor, nil
 	}
 	return s.executor, nil
 }
@@ -36,16 +50,30 @@ func (s *executorRuntimeExecutorStoreStub) MarkRunningWithLease(context.Context,
 	return s.markRunningOK, nil
 }
 
-func (s *executorRuntimeExecutorStoreStub) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
-	return true, nil
+func (s *executorRuntimeExecutorStoreStub) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, models.DrainIntent, error) {
+	if s.heartbeatIntent == "" {
+		return true, models.DrainIntentNone, nil
+	}
+	return true, s.heartbeatIntent, nil
 }
 
 func (s *executorRuntimeExecutorStoreStub) MarkDrainingWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.drainingCalls++
 	return true, nil
 }
 
+func (s *executorRuntimeExecutorStoreStub) MarkHumanInputCheckpointByJob(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.humanInputCheckpointCalls++
+	return false, nil
+}
+
 func (s *executorRuntimeExecutorStoreStub) MarkTerminalWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, lockToken uuid.UUID, status models.SessionExecutorStatus, _ *int, _ string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.terminalCalls++
 	s.terminalStatus = status
 	s.terminalToken = lockToken
@@ -53,17 +81,19 @@ func (s *executorRuntimeExecutorStoreStub) MarkTerminalWithLease(_ context.Conte
 }
 
 type executorRuntimeJobStoreStub struct {
-	job             *models.Job
-	active          bool
-	activeSequence  []bool
-	getErr          error
-	sawCanceledCtx  bool
-	succeededToken  uuid.UUID
-	succeededCalls  int
-	failedCalls     int
-	retryCalls      int
-	deadLetterCalls int
-	renewCalls      int
+	job               *models.Job
+	active            bool
+	activeSequence    []bool
+	getErr            error
+	sawCanceledCtx    bool
+	succeededToken    uuid.UUID
+	succeededCalls    int
+	failedCalls       int
+	retryCalls        int
+	targetRetryCalls  int
+	targetRetryNodeID *string
+	deadLetterCalls   int
+	renewCalls        int
 }
 
 func (s *executorRuntimeJobStoreStub) GetRunningForSessionExecutor(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (*models.Job, bool, error) {
@@ -106,6 +136,17 @@ func (s *executorRuntimeJobStoreStub) RetryWithLease(context.Context, uuid.UUID,
 
 func (s *executorRuntimeJobStoreStub) RetryWithoutConsumingAttemptWithLease(context.Context, uuid.UUID, uuid.UUID, string, time.Time) (bool, error) {
 	s.retryCalls++
+	return true, nil
+}
+
+func (s *executorRuntimeJobStoreStub) RetryWithLeaseAndTarget(context.Context, uuid.UUID, uuid.UUID, string, time.Time, *string) (bool, error) {
+	s.targetRetryCalls++
+	return true, nil
+}
+
+func (s *executorRuntimeJobStoreStub) RetryWithoutConsumingAttemptWithLeaseAndTarget(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string, _ time.Time, targetNodeID *string) (bool, error) {
+	s.targetRetryCalls++
+	s.targetRetryNodeID = targetNodeID
 	return true, nil
 }
 
@@ -243,6 +284,62 @@ func TestSessionExecutorRuntime_WaitsForDispatcherHandoffAtBoot(t *testing.T) {
 	require.Empty(t, jobs.activeSequence, "runtime should retry boot validation after the first missing ownership read")
 }
 
+func TestSessionExecutorRuntime_InjectsDeadTargetNodeContext(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	deadTargetNodeID := "worker-old-generation"
+	executorNodeID := "worker-new-generation"
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:           jobID,
+			OrgID:        orgID,
+			JobType:      "continue_session",
+			Payload:      json.RawMessage(`{}`),
+			Status:       "running",
+			Attempts:     1,
+			MaxAttempts:  3,
+			LockToken:    &lockToken,
+			TargetNodeID: &deadTargetNodeID,
+			CreatedAt:    time.Now(),
+		},
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors: &executorRuntimeExecutorStoreStub{
+			executor: models.SessionExecutor{
+				ID:         executorID,
+				OrgID:      orgID,
+				SessionID:  sessionID,
+				JobID:      jobID,
+				JobType:    "continue_session",
+				HostNodeID: executorNodeID,
+				LockToken:  lockToken,
+				Status:     models.SessionExecutorStatusStarting,
+			},
+			markRunningOK: true,
+		},
+		Jobs: jobs,
+		Handlers: map[string]JobHandler{
+			"continue_session": func(ctx context.Context, _ string, _ json.RawMessage) error {
+				nodeID, ok := jobctx.DeadTargetNodeFromContext(ctx)
+				require.True(t, ok, "executor runtime should tell handlers when the job's target node was bypassed as dead")
+				require.Equal(t, deadTargetNodeID, nodeID, "executor runtime should preserve the dead target node id")
+				return nil
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	err := runtime.Run(context.Background(), executorID)
+	require.NoError(t, err, "runtime should complete when the handler succeeds")
+	require.Equal(t, 1, jobs.succeededCalls, "runtime should mark the job succeeded")
+}
+
 func TestSessionExecutorRuntime_SuccessMarksJobAndExecutorTerminalWithLockToken(t *testing.T) {
 	t.Parallel()
 
@@ -361,6 +458,57 @@ func TestSessionExecutorRuntime_RetryableErrorRequeuesJob(t *testing.T) {
 	require.Equal(t, 0, jobs.succeededCalls, "runtime should not mark retryable jobs succeeded")
 }
 
+func TestSessionExecutorRuntime_RetryableErrorClearsTargetNode(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "continue_session",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    1,
+			MaxAttempts: 3,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now(),
+		},
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors: &executorRuntimeExecutorStoreStub{
+			executor: models.SessionExecutor{
+				ID:        executorID,
+				OrgID:     orgID,
+				SessionID: sessionID,
+				JobID:     jobID,
+				JobType:   "continue_session",
+				LockToken: lockToken,
+				Status:    models.SessionExecutorStatusStarting,
+			},
+			markRunningOK: true,
+		},
+		Jobs: jobs,
+		Handlers: map[string]JobHandler{
+			"continue_session": func(context.Context, string, json.RawMessage) error {
+				return &RetryableError{Err: errors.New("capacity full"), ClearTargetNodeID: true}
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	err := runtime.Run(context.Background(), executorID)
+	require.NoError(t, err, "runtime should treat successful retry scheduling as handled")
+	require.Equal(t, 1, jobs.targetRetryCalls, "runtime should use the targeted retry path so target_node_id is rewritten")
+	require.Nil(t, jobs.targetRetryNodeID, "runtime should pass nil through the targeted retry path to clear target_node_id")
+	require.Equal(t, 0, jobs.retryCalls, "runtime should not use the non-target retry path when clearing target_node_id")
+}
+
 func TestSessionExecutorRuntime_RetryableErrorMarksExecutorRequeued(t *testing.T) {
 	t.Parallel()
 
@@ -462,7 +610,7 @@ func TestSessionExecutorRuntime_UsesDetachedContextForTerminalJobWrites(t *testi
 	require.False(t, jobs.sawCanceledCtx, "runtime should detach final job writes from executor parent cancellation")
 }
 
-func TestSessionExecutorRuntime_DrainRequestsGracefulSessionCancel(t *testing.T) {
+func TestSessionExecutorRuntime_DeployBudgetExpiredRequestsTypedSystemStopAndRequeues(t *testing.T) {
 	t.Parallel()
 
 	executorID := uuid.New()
@@ -471,7 +619,84 @@ func TestSessionExecutorRuntime_DrainRequestsGracefulSessionCancel(t *testing.T)
 	jobID := uuid.New()
 	lockToken := uuid.New()
 	handlerStarted := make(chan struct{})
-	orch := &orchestratorServiceStub{cancelSessionResult: true}
+	stopRequested := make(chan struct{})
+	baseExecutor := models.SessionExecutor{
+		ID:          executorID,
+		OrgID:       orgID,
+		SessionID:   sessionID,
+		JobID:       jobID,
+		JobType:     "run_agent",
+		LockToken:   lockToken,
+		Status:      models.SessionExecutorStatusStarting,
+		DrainIntent: models.DrainIntentNone,
+	}
+	orch := &orchestratorServiceStub{
+		stopSessionResult: true,
+		stopSessionFn: func(uuid.UUID, agent.StopReason) bool {
+			close(stopRequested)
+			return true
+		},
+	}
+	executors := &executorRuntimeExecutorStoreStub{
+		executor:        baseExecutor,
+		heartbeatIntent: models.DrainIntentDeployBudgetExpired,
+		markRunningOK:   true,
+	}
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "run_agent",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    1,
+			MaxAttempts: 3,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now(),
+		},
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors:         executors,
+		Jobs:              jobs,
+		Services:          &Services{Orchestrator: orch},
+		HeartbeatInterval: time.Millisecond,
+		Handlers: map[string]JobHandler{
+			"run_agent": func(context.Context, string, json.RawMessage) error {
+				close(handlerStarted)
+				<-stopRequested
+				return context.Canceled
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Run(context.Background(), executorID)
+	}()
+	<-handlerStarted
+
+	err := <-done
+	require.NoError(t, err, "runtime should persist a deploy-budget-expired requeue")
+	require.Equal(t, 1, orch.stopSessionCalls, "deploy budget expiry should request a typed session stop")
+	require.Equal(t, sessionID, orch.stopSessionID, "deploy budget expiry should target the owned session")
+	require.Equal(t, agent.StopReasonDeployBudgetExpired, orch.stopReason, "deploy budget expiry should preserve its stop reason")
+	require.Equal(t, 1, jobs.retryCalls, "deploy budget expiry should retry the original turn")
+	require.Equal(t, 0, jobs.succeededCalls, "deploy budget expiry should not mark the job succeeded")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "deploy budget expiry should requeue the executor")
+}
+
+func TestSessionExecutorRuntime_DrainRequestsTypedSystemStopAndRequeues(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	handlerStarted := make(chan struct{})
+	orch := &orchestratorServiceStub{stopSessionResult: true}
 	executors := &executorRuntimeExecutorStoreStub{
 		executor: models.SessionExecutor{
 			ID:        executorID,
@@ -520,10 +745,80 @@ func TestSessionExecutorRuntime_DrainRequestsGracefulSessionCancel(t *testing.T)
 	cancel()
 
 	err := <-done
-	require.NoError(t, err, "runtime should treat graceful drain cancellation as a handled shutdown")
-	require.Equal(t, 1, orch.cancelSessionCalls, "drain watcher should request graceful session cancellation")
-	require.Equal(t, sessionID, orch.cancelSessionID, "drain watcher should cancel the executor session")
-	require.Equal(t, 0, jobs.retryCalls, "gracefully drained sessions should not retry the original turn")
-	require.Equal(t, 1, jobs.succeededCalls, "gracefully drained sessions should close the accepted job")
-	require.Equal(t, models.SessionExecutorStatusCompleted, executors.terminalStatus, "gracefully drained executors should finish terminally without requeue")
+	require.NoError(t, err, "runtime should persist the drain retry decision successfully")
+	require.Equal(t, 0, orch.cancelSessionCalls, "executor context cancellation must not route through the user-cancel API")
+	require.Equal(t, 0, orch.stopSessionCalls, "executor context cancellation should not synthesize a planned-rollout worker drain stop")
+	require.Equal(t, uuid.Nil, orch.stopSessionID, "executor context cancellation should not target a session stop")
+	require.Equal(t, agent.StopReasonNone, orch.stopReason, "executor context cancellation should not record worker-drain as the stop reason")
+	require.Equal(t, 1, jobs.retryCalls, "cancelled executor handlers should retry the original turn through the normal retry path")
+	require.Equal(t, 0, jobs.succeededCalls, "cancelled executor handlers should not close the accepted job as succeeded")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "cancelled executors should finish as requeued")
+}
+
+func TestSessionExecutorRuntime_DrainPreservesHandlerRetryableError(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	handlerStarted := make(chan struct{})
+	orch := &orchestratorServiceStub{stopSessionResult: true}
+	executors := &executorRuntimeExecutorStoreStub{
+		executor: models.SessionExecutor{
+			ID:        executorID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			JobID:     jobID,
+			JobType:   "run_agent",
+			LockToken: lockToken,
+			Status:    models.SessionExecutorStatusStarting,
+		},
+		markRunningOK: true,
+	}
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "run_agent",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    1,
+			MaxAttempts: 1,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now().Add(-24 * time.Hour),
+		},
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors: executors,
+		Jobs:      jobs,
+		Services:  &Services{Orchestrator: orch},
+		Handlers: map[string]JobHandler{
+			"run_agent": func(ctx context.Context, _ string, _ json.RawMessage) error {
+				close(handlerStarted)
+				<-ctx.Done()
+				return &RetryableError{
+					Err:                    fmt.Errorf("%w: %w", agent.ErrSessionInterrupted, ctx.Err()),
+					BypassMaxRetryDuration: true,
+				}
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.Run(ctx, executorID)
+	}()
+	<-handlerStarted
+	cancel()
+
+	err := <-done
+	require.NoError(t, err, "runtime should persist the preserved retryable drain decision")
+	require.Equal(t, 1, jobs.retryCalls, "existing retryable interruption should still requeue on the final attempt")
+	require.Equal(t, 0, jobs.deadLetterCalls, "existing retryable interruption should not be flattened into a final-attempt dead letter")
+	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "existing retryable interruption should preserve requeued executor status")
 }

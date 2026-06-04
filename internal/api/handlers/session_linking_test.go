@@ -210,9 +210,17 @@ func TestSessionHandler_EndSession_AddsIssueSnapshotIDToJobPayload(t *testing.T)
 			pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
 				AddRow(snapshotID, orgID, sessionID, 2, []byte(`[]`), now),
 		)
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			snapshotKey:     "snapshots/test.tar",
+			prCreationState: "queued",
+		}))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -288,7 +296,7 @@ func TestSessionHandler_RetrySession_EnrichesLinks(t *testing.T) {
 			),
 		)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"start_over"}`))
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", sessionID.String())
 	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)

@@ -45,6 +45,7 @@ export interface User {
 }
 
 export interface UserSettings {
+  coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
 }
 
@@ -53,7 +54,7 @@ export interface ThreadMessageWindowMeta {
   has_older: boolean;
   latest_assistant_message_id?: number;
   live_edge_message_id?: number;
-  thread_status: string;
+  thread_status: ThreadStatus;
 }
 
 export interface ThreadMessageWindowResponse {
@@ -90,6 +91,65 @@ export interface Repository {
   settings: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+export interface PreviewSecretBundleSource {
+  type: "managed";
+  values: Record<string, string>;
+}
+
+export interface PreviewSecretBundleOutput {
+  type: "env" | "file";
+  values?: Record<string, string>;
+  path?: string;
+  format?: "env" | "json" | "raw";
+  mode?: string;
+  content?: unknown;
+  value?: string;
+}
+
+export interface PreviewSecretOutputSummary {
+  type: string;
+  env?: string[];
+  path?: string;
+  format?: string;
+}
+
+export interface PreviewSecretBundleSummary {
+  id: string;
+  repository_id: string;
+  name: string;
+  source_type: string;
+  exposure_policy: string;
+  outputs: PreviewSecretOutputSummary[];
+  created_by_user_id: string;
+  created_at: string;
+}
+
+export interface PreviewSecretBundleUpsertRequest {
+  name: string;
+  source: PreviewSecretBundleSource;
+  outputs: PreviewSecretBundleOutput[];
+  exposure_policy?: "preview_runtime";
+}
+
+export interface PreviewSecretBundlePatchRequest {
+  name?: string;
+  source?: PreviewSecretBundleSource;
+  outputs?: PreviewSecretBundleOutput[];
+  exposure_policy?: "preview_runtime";
+}
+
+export interface PreviewSecretBundleTestResult {
+  status: "ready" | "failed";
+  bundle: PreviewSecretBundleSummary;
+  error?: string;
+}
+
+export interface PreviewSecretBundleRevealResult {
+  bundle: PreviewSecretBundleSummary;
+  source: PreviewSecretBundleSource;
+  outputs: PreviewSecretBundleOutput[];
 }
 
 export interface BranchPreviewCreateRequest {
@@ -130,6 +190,7 @@ export interface BranchPreviewResponse {
   stable_url: string;
   preview_url?: string;
   expires_at?: string;
+  stopped_at?: string;
   services?: import('./preview-types').PreviewService[];
   infrastructure?: import('./preview-types').PreviewInfrastructure[];
   logs?: import('./preview-types').PreviewLog[];
@@ -169,6 +230,9 @@ export interface Integration {
   github_account_login?: string;
   github_repo_selection_required?: boolean;
   github_active_repo_count?: number;
+  notion_workspace_id?: string;
+  notion_workspace_name?: string;
+  circleci_project_slug?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -272,6 +336,10 @@ export type AutopilotRunState =
   | 'failed'
   | 'skipped';
 
+export type PullRequestStatus = 'open' | 'closed' | 'merged';
+export type PullRequestReviewStatus = 'pending' | 'approved' | 'changes_requested';
+export type PullRequestCIStatus = '' | 'success' | 'failure' | 'pending';
+
 export type AutopilotQueueAction =
   | 'start_run'
   | 'view_run'
@@ -310,7 +378,7 @@ export interface AutopilotQueueRow {
     id: string;
     number: number;
     url: string;
-    status: string;
+    status: PullRequestStatus;
     merged_at?: string;
   };
   available_action: AutopilotQueueAction;
@@ -342,7 +410,7 @@ export interface Session {
   origin?: string;
   interaction_mode?: string;
   agent_type: string;
-  status: string;
+  status: SessionStatus;
   autonomy_level: string;
   token_mode: string;
   complexity_tier?: number;
@@ -367,6 +435,10 @@ export interface Session {
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
+  recovery_state?: '' | 'queued' | 'recovering' | 'unavailable';
+  recovery_queued_at?: string;
+  recovery_started_at?: string;
+  recovery_attempt_count?: number;
   pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_creation_error?: string;
   pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
@@ -409,11 +481,15 @@ export interface Session {
   linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;
+  runtime_stop_reason?: string;
+  runtime_graceful_stop_at?: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
   diff_collected_at?: string;
   latest_diff_snapshot_id?: string;
+  workspace_revision?: number;
+  workspace_revision_updated_at?: string;
   threads?: SessionThread[];
   archived_at?: string;
   archived_by_user_id?: string;
@@ -421,9 +497,15 @@ export interface Session {
   created_at: string;
 }
 
+export type SessionRetryMode = 'checkpoint' | 'start_over';
+
+export interface RetrySessionRequest {
+  mode?: SessionRetryMode;
+}
+
 export interface PRSummary {
-  status: string;
-  ci_status: string;
+  status: PullRequestStatus;
+  ci_status: PullRequestCIStatus;
   number: number;
   url: string;
 }
@@ -434,6 +516,59 @@ export interface SessionListItem extends Session {
 }
 
 export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
+
+export type ThreadInboxSummaryState = 'idle' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+
+export interface ThreadInboxDeliverySummary {
+  thread_id: string;
+  state: ThreadInboxSummaryState;
+  pending_count: number;
+  delivering_count: number;
+  delivered_count: number;
+  unknown_delivery_count: number;
+  acked_count: number;
+  dead_letter_count: number;
+  last_sequence_no: number;
+  last_accepted_at?: string;
+  last_delivered_at?: string;
+  last_acked_at?: string;
+  last_error?: string;
+}
+
+export type ThreadInboxEntryType = 'user_message' | 'human_input_answer' | 'control';
+// '' is emitted by the API when no inbox entry was created (deployment with the
+// inbox unwired), keeping the SendThreadMessageResponse delivery_state field
+// total without lying about confirmed delivery.
+export type ThreadInboxDeliveryState = '' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+
+export interface ThreadInboxEntry {
+  id: string;
+  org_id: string;
+  session_id: string;
+  thread_id: string;
+  sequence_no: number;
+  message_id?: number;
+  client_message_id?: string;
+  entry_type: ThreadInboxEntryType;
+  payload: unknown;
+  delivery_state: ThreadInboxDeliveryState;
+  delivery_attempts: number;
+  last_error?: string;
+  owner_node_id?: string;
+  runtime_id?: string;
+  accepted_at: string;
+  delivered_at?: string;
+  acked_at?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface SendThreadMessageResponse {
+  message: SessionMessage;
+  inbox_entry?: ThreadInboxEntry;
+  thread_status: ThreadStatus;
+  delivery_state: ThreadInboxDeliveryState;
+}
 
 export interface SessionThread {
   id: string;
@@ -460,6 +595,35 @@ export interface SessionThread {
   cost_cents: number;
   pending_message_count: number;
   cancel_requested_at?: string;
+  inbox_delivery?: ThreadInboxDeliverySummary;
+}
+
+export interface ThreadInboxEvent {
+  session_id: string;
+  thread_id: string;
+  org_id: string;
+  pending_message_count: number;
+}
+
+export interface ThreadRuntimeEvent {
+  session_id: string;
+  thread_id: string;
+  org_id: string;
+  status: ThreadStatus;
+  agent_session_id?: string;
+  current_turn: number;
+  pending_message_count: number;
+  last_activity_at?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface SessionWorkspaceGenerationChangedEvent {
+  session_id: string;
+  org_id: string;
+  workspace_revision: number;
+  workspace_revision_updated_at: string;
+  reason?: string;
 }
 
 export interface SessionThreadFileEvent {
@@ -690,10 +854,10 @@ export interface PullRequest {
   github_repo: string;
   title: string;
   body: string;
-  status: string;
+  status: PullRequestStatus;
   branch_name: string;
-  review_status: string | null;
-  ci_status: string;
+  review_status: PullRequestReviewStatus | null;
+  ci_status: PullRequestCIStatus;
   merged_at: string | null;
   closed_at: string | null;
   created_at: string;
@@ -712,8 +876,25 @@ export interface PullRequestCheckSummary {
 export interface PullRequestActiveRepair {
   action_type: "fix_tests" | "resolve_conflicts";
   session_id: string;
-  session_status: string;
+  session_status: SessionStatus;
   health_version: number;
+}
+
+export type PullRequestMergeWhenReadyState =
+  | "off"
+  | "queued"
+  | "merging"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface PullRequestMergeWhenReadyStatus {
+  state: PullRequestMergeWhenReadyState;
+  requested_by_user_id?: string;
+  requested_at?: string;
+  requested_head_sha?: string;
+  requested_health_version?: number;
+  last_error?: string;
 }
 
 export interface PullRequestHealthResponse {
@@ -721,11 +902,11 @@ export interface PullRequestHealthResponse {
   pull_request_number: number;
   repository: string;
   url: string;
-  status: string;
+  status: PullRequestStatus;
   head_sha: string;
   base_sha: string;
   health_version: number;
-  merge_state: "unknown" | "clean" | "conflicted" | "behind" | "blocked";
+  merge_state: "unknown" | "mergeability_pending" | "clean" | "conflicted" | "behind" | "blocked";
   has_conflicts: boolean;
   failing_test_count: number;
   needs_agent_action: boolean;
@@ -743,6 +924,7 @@ export interface PullRequestHealthResponse {
   conflict_detail_available: boolean;
   failing_test_detail_available: boolean;
   obsolete_active_repair_sessions?: boolean;
+  merge_when_ready: PullRequestMergeWhenReadyStatus;
 }
 
 export interface PullRequestRepairResponse {
@@ -1191,7 +1373,7 @@ export interface RepoSummary {
   repository_id: string;
   full_name: string;
   active_session_count: number;
-  latest_session_status: string | null;
+  latest_session_status: SessionStatus | null;
   active_project_count: number;
 }
 
@@ -1789,7 +1971,7 @@ export interface AutomationRunSession {
   // Mirrors models.SessionStatus values; the row UI keys off this
   // (notably "needs_human_guidance") to choose between failure and
   // attention treatments.
-  status: string;
+  status: SessionStatus;
   diff_stats?: { added: number; removed: number; files_changed?: number };
   failure_explanation?: string;
   failure_category?: string;

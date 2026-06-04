@@ -25,6 +25,7 @@ export const queryKeys = {
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
+    threadRecoverableInbox: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "recoverable-inbox"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
     reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
   },
@@ -32,6 +33,7 @@ export const queryKeys = {
     all: ["repositories"] as const,
     summary: ["repositories", "summary"] as const,
     branches: (id: string) => ["repositories", id, "branches"] as const,
+    previewSecretBundles: (id: string) => ["repositories", id, "preview-secret-bundles"] as const,
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,
@@ -95,5 +97,8 @@ export const queryKeys = {
     batch: (id: string) => ["evals", "batch", id] as const,
     bootstrapCandidates: ["evals", "bootstrap", "candidates"] as const,
     bootstrapRun: (id: string) => ["evals", "bootstrap", "run", id] as const,
+  },
+  previews: {
+    apiTokens: ["preview-api-tokens"] as const,
   },
 } as const;

@@ -29,7 +29,9 @@ var handlerPRColumns = []string{
 	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
 	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
-	"health_version", "merged_at", "created_at", "updated_at",
+	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 }
 
 // sessionColumns matches the SELECT columns from SessionStore queries
@@ -44,12 +46,12 @@ var sessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
 	"model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "workspace_generation", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "has_unpushed_changes",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
@@ -67,7 +69,9 @@ func handlerPRRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo st
 	return []any{
 		prID, sessionID, orgID, 42, "https://github.com/" + repo + "/pull/42", repo,
 		"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-		models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), (*time.Time)(nil), now, now,
+		models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
+		models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil),
+		(*time.Time)(nil), now, now,
 	}
 }
 
@@ -176,10 +180,10 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, nil, nil, false,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,
-					nil,                      // model_override
-					nil,                      // reasoning_effort
-					nil,                      // triggered_by_user_id
-					nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+					nil,                                // model_override
+					nil,                                // reasoning_effort
+					nil,                                // triggered_by_user_id
+					nil, 0, now, "none", int64(0), nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, workspace_generation, snapshot_key
 					nil,      // pending_snapshot_key
 					nil,      // pending_snapshot_set_at
 					nil,      // runtime_soft_deadline_at
@@ -218,6 +222,8 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					(*string)(nil),                // branch_url
 					nil,                           // diff_collected_at
 					nil,                           // latest_diff_snapshot_id
+					int64(0),                      // workspace_revision
+					now,                           // workspace_revision_updated_at
 					false,                         // has_unpushed_changes
 					false,                         // linear_private
 					false,                         // linear_state_sync_disabled
@@ -482,10 +488,12 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	now := time.Now()
 
 	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
 	prStore := db.NewPullRequestStore(prMock)
 
 	svc := &PRService{
 		pullRequests: prStore,
+		jobs:         db.NewJobStore(jobMock),
 		logger:       zerolog.Nop(),
 	}
 
@@ -501,6 +509,17 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "")
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	event := PullRequestEvent{
 		Action: "closed",
@@ -512,6 +531,7 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	err := svc.HandlePullRequestEvent(context.Background(), event)
 	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a closed-without-merge PR")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "closed pull request webhooks should enqueue a state sync with the generic dedupe key")
 }
 
 func TestHandlePullRequestEvent_ClosedWithoutMergeReturnsStatusUpdateError(t *testing.T) {
@@ -1609,6 +1629,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	t.Parallel()
 
 	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
 	prStore := db.NewPullRequestStore(prMock)
 
 	orgID := uuid.New()
@@ -1618,6 +1639,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 
 	svc := &PRService{
 		pullRequests: prStore,
+		jobs:         db.NewJobStore(jobMock),
 		logger:       zerolog.Nop(),
 	}
 
@@ -1633,7 +1655,17 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "check_suite_completed")
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	conclusion := "success"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
@@ -1645,6 +1677,7 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	err := svc.HandleCheckSuiteEvent(context.Background(), event)
 	require.NoError(t, err, "should process check suite event without error")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "check suite completion should enqueue a scoped health sync")
 }
 
 func TestHandleCheckSuiteEvent_Failure(t *testing.T) {
@@ -1675,7 +1708,6 @@ func TestHandleCheckSuiteEvent_Failure(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
 	conclusion := "failure"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
@@ -1699,7 +1731,6 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 
 	prMock := newMockPool(t)
 	jobMock := newMockPool(t)
-
 	svc := &PRService{
 		pullRequests: db.NewPullRequestStore(prMock),
 		jobs:         db.NewJobStore(jobMock),
@@ -1712,10 +1743,17 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
 		)
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "check_run_completed")
 	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-
 	event := CheckRunEvent{Action: "completed"}
 	event.Repository.FullName = "testorg/testrepo"
 	event.CheckRun.PullRequests = []struct {
@@ -1725,7 +1763,7 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 	err := svc.HandleCheckRunEvent(context.Background(), event)
 	require.NoError(t, err, "HandleCheckRunEvent should enqueue a health sync for completed check runs")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "check run completion should enqueue a scoped health sync")
 }
 
 func TestHandleCheckSuiteEvent_PRNotFound(t *testing.T) {

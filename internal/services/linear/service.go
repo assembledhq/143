@@ -885,6 +885,10 @@ type ResolvedIssue struct {
 	LocalID    uuid.UUID
 }
 
+type LinkOptions struct {
+	AllowRepositoryMismatch bool
+}
+
 // LinkResolved inserts (or upserts) the link row, applies the null-repo
 // carve-out, persists provider_state.team_id and link_audit_reason, and
 // returns the resulting link id.
@@ -896,13 +900,33 @@ func (s *Service) LinkResolved(
 	position int,
 	addedByUserID *uuid.UUID,
 ) (uuid.UUID, error) {
-	linkID, err := s.links.CreateAllowingNullRepo(ctx, orgID, sessionID, resolved.LocalID, role, position, addedByUserID)
+	return s.LinkResolvedWithOptions(ctx, orgID, sessionID, resolved, role, position, addedByUserID, LinkOptions{})
+}
+
+func (s *Service) LinkResolvedWithOptions(
+	ctx context.Context,
+	orgID, sessionID uuid.UUID,
+	resolved *ResolvedIssue,
+	role models.SessionIssueLinkRole,
+	position int,
+	addedByUserID *uuid.UUID,
+	opts LinkOptions,
+) (uuid.UUID, error) {
+	var linkID uuid.UUID
+	var err error
+	if opts.AllowRepositoryMismatch {
+		linkID, err = s.links.CreateAllowingRepositoryMismatch(ctx, orgID, sessionID, resolved.LocalID, role, position, addedByUserID)
+	} else {
+		linkID, err = s.links.CreateAllowingNullRepo(ctx, orgID, sessionID, resolved.LocalID, role, position, addedByUserID)
+	}
 	if err != nil {
 		return uuid.Nil, err
 	}
 	auditReason := ""
 	if resolved.Issue.RepositoryID == nil {
 		auditReason = "linear_null_repo_carveout"
+	} else if opts.AllowRepositoryMismatch {
+		auditReason = "manual_repository_override"
 	}
 	if err := s.providerState.Merge(ctx, orgID, linkID, db.LinearProviderState{
 		Identifier:         resolved.Identifier,

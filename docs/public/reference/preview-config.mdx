@@ -12,18 +12,72 @@ tags:
 llm_summary: Field-level reference for preview configuration including services, readiness, infrastructure, credentials, and network settings.
 ---
 
-# Preview config
+Use the `preview` section when reviewers need a live app alongside the transcript and diff. The shape can stay small for one service or expand to multiple services, infrastructure, secrets, and network policy.
 
-The `preview` section tells 143 how to start and expose an app inside a session.
+143 supports two shapes:
+
+- Single-service shorthand with top-level `command`, `cwd`, `port`, `env`, and `ready`.
+- Multi-service config with `primary` and `services`.
+
+Do not mix the two shapes in one config.
+
+Repos may also wrap preview configs in a named config map:
+
+```json
+{
+  "preview": {
+    "default": "web",
+    "configs": {
+      "web": { "name": "Web", "command": ["npm", "run", "dev"], "port": 3000, "credentials": { "mode": "none" }, "network": { "mode": "managed" } },
+      "docs": { "name": "Docs", "command": ["npm", "run", "dev"], "port": 3001, "credentials": { "mode": "none" }, "network": { "mode": "managed" } }
+    }
+  }
+}
+```
+
+Use `preview.default` to auto-select one config. If there are multiple configs and no default, callers must provide a preview config name.
 
 ## Top-level fields
 
+<ConfigField name="preview.default" type="string" description="Default named config to use when `preview.configs` contains multiple entries." />
+<ConfigField name="preview.configs" type="object" description="Map of preview config name to a complete single-service or multi-service preview config." />
+<ConfigField name="preview.version" type="string" description="Optional config version marker." />
 <ConfigField name="preview.name" type="string" description="Human label shown in the UI." />
-<ConfigField name="preview.primary" type="string" description="Service key that receives browser traffic in multi-service previews." />
+<ConfigField name="preview.primary" type="string" description="Service key that receives browser traffic in multi-service previews. Required for multi-service configs." />
+<ConfigField name="preview.install" type="object" description="Optional dependency install phase that runs before services start." />
 <ConfigField name="preview.services" type="object" description="Map of service name to service config." />
 <ConfigField name="preview.infrastructure" type="object" description="Optional managed sidecars such as Postgres or Redis." />
-<ConfigField name="preview.credentials" type="object" required description='Credential injection policy. Use { "mode": "none" } if no secrets are needed.' />
+<ConfigField name="preview.resources" type="object" description="Optional CPU, memory, and ephemeral-storage requests and limits." />
+<ConfigField name="preview.secrets" type="object | object[]" description="Admin-managed preview secret bundle reference. Use this for secret env vars and generated config files." />
+<ConfigField name="preview.credentials" type="object" description='Legacy env-only credential injection policy. Omit it or use { "mode": "none" } if no legacy credential set is needed.' />
 <ConfigField name="preview.network" type="object" required description='Network policy. Use { "mode": "managed" } for the default sandbox policy.' />
+<ConfigField name="preview.progressive" type="boolean" description="For multi-service previews, allow partial readiness once the primary service is ready." />
+<ConfigField name="preview.command" type="string[]" description="Single-service shorthand command." />
+<ConfigField name="preview.cwd" type="string" description="Single-service shorthand working directory." />
+<ConfigField name="preview.port" type="integer" description="Single-service shorthand port." />
+<ConfigField name="preview.env" type="object" description="Single-service shorthand non-secret env vars." />
+<ConfigField name="preview.ready" type="object" description="Single-service shorthand readiness probe." />
+
+## Install fields
+
+<ConfigField name="preview.install.command" type="string[]" required description="Dependency install argv executed before services start." />
+<ConfigField name="preview.install.cwd" type="string" defaultValue="." description="Working directory relative to the repo root." />
+<ConfigField name="preview.install.lockfiles" type="string[]" description="Repo-relative files included in the install cache key." />
+<ConfigField name="preview.install.clean_paths" type="string[]" description="Repo-relative paths or simple globs removed before reinstalling. 143 deletes only declared paths." />
+<ConfigField name="preview.install.verify_paths" type="string[]" description="Repo-relative paths that must exist before a cached install can be reused." />
+<ConfigField name="preview.install.cache.enabled" type="boolean" defaultValue="true" description="Set false to opt out of dependency artifact caching." />
+<ConfigField name="preview.install.cache.paths" type="string[]" description="Additive repo-relative dependency/build cache paths. Effective paths are clean_paths + cache.paths + inferred paths." />
+<ConfigField name="preview.install.timeout_seconds" type="integer" defaultValue="420" description="Maximum install duration. Max 1800." />
+
+Inferred dependency cache paths:
+
+| Dependency file | Inferred cache path |
+|---|---|
+| `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` | `node_modules` |
+| `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
+| `go.mod`, `go.sum` | `vendor` |
+
+Inference is relative to the dependency file directory. For example, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. For stale dependencies, change lockfiles, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
 
 ## Service fields
 
@@ -34,6 +88,13 @@ The `preview` section tells 143 how to start and expose an app inside a session.
 <ConfigField name="ready.http_path" type="string" description="Path used for readiness checks." />
 <ConfigField name="ready.timeout_seconds" type="integer" defaultValue="90" description="Maximum wait before readiness fails." />
 
+Constraints:
+
+- At most 4 services per preview config.
+- Ports must be unique.
+- `port` must be in the range `1024` to `65535`.
+- `ready.http_path` must start with `/` and use safe URL path characters.
+
 ## Infrastructure fields
 
 <ConfigField name="template" type="string" required description="Managed sidecar template such as `postgres-17` or `redis-7`." />
@@ -41,4 +102,85 @@ The `preview` section tells 143 how to start and expose an app inside a session.
 <ConfigField name="inject_env" type="object" description="Environment variables built from sidecar connection placeholders." />
 <ConfigField name="inject_into" type="string[]" description="Service names that receive injected environment variables." />
 
-For task-based examples, see [Preview environments](/docs/guides/previews).
+Supported templates:
+
+| Template | Default port |
+|---|---:|
+| `postgres-17` | 5432 |
+| `postgres-16` | 5432 |
+| `redis-7` | 6379 |
+| `mysql-8` | 3306 |
+
+Supported `inject_env` placeholders are `{{username}}`, `{{password}}`, `{{host}}`, `{{port}}`, and `{{database}}`.
+
+## Secret bundle fields
+
+New preview configs should prefer `preview.secrets`. The legacy `preview.credentials` shape remains supported for env-var-only credential sets.
+
+<ConfigField name="preview.secrets.bundle" type="string" required description="Name of the admin-managed preview secret bundle." />
+<ConfigField name="preview.secrets.services" type="string[]" required description="Service names that receive env outputs from the bundle. File outputs are workspace-wide and must list every preview service." />
+<ConfigField name="preview.secrets.env" type="string[]" description="Non-secret hint listing required env var names." />
+<ConfigField name="preview.secrets.files" type="string[]" description="Non-secret hint listing the generated secret file path, such as `development.conf.json`. V1 admin bundles support one file output." />
+
+`preview.secrets` may be a single object or an array of objects. The repo config never contains secret values. It only declares the bundle name, service scope, and expected output names. A bundle may deliver multiple environment variables and one generated file.
+
+Admin-managed bundle outputs support:
+
+| Output format | Use |
+|---|---|
+| `env` | Inject named env vars into scoped services. |
+| `json` | Generate a JSON file from structured content or from one managed secret value containing the whole JSON document. The resolved value must parse as JSON. |
+| `raw` | Generate a file from one complete secret value, useful for PEM blocks or other non-JSON blobs. |
+
+For a whole JSON file such as `development.conf.json`, store the raw JSON document as the managed secret value and configure the file output as:
+
+```json
+{
+  "type": "file",
+  "path": "development.conf.json",
+  "format": "json",
+  "value": "secret:development_conf_json"
+}
+```
+
+Do not base64-encode JSON just to preserve quotes or newlines. 143 writes generated files as bytes and handles runtime shell transport internally.
+
+## Credential fields
+
+<ConfigField name="preview.credentials.mode" type="string" description='Use "none" for no legacy credentials or "managed_env" for a legacy managed credential set.' />
+<ConfigField name="preview.credentials.credential_set" type="string" description="Name of the admin-managed credential set to use." />
+<ConfigField name="preview.credentials.env" type="string[]" description="Allowlist of environment variable names to inject from the credential set." />
+<ConfigField name="preview.credentials.inject_into" type="string[]" description="Service names that receive these credential env vars." />
+
+Secret values do not belong in `.143/config.json`. Put public, non-secret values in service `env`; reference secrets with `preview.secrets` or legacy `preview.credentials`.
+
+## Network fields
+
+<ConfigField name="preview.network.mode" type="string" required description='Use "managed" for the default sandbox egress policy.' />
+<ConfigField name="preview.network.destinations" type="string[]" description="Named managed destinations, such as staging databases or partner APIs, that the preview may reach." />
+
+## Resource fields
+
+<ConfigField name="preview.resources.requests.cpu" type="string" description='CPU request, such as "500m" or "1".' />
+<ConfigField name="preview.resources.requests.memory" type="string" description='Memory request, such as "512Mi" or "1Gi".' />
+<ConfigField name="preview.resources.requests.ephemeral-storage" type="string" description='Ephemeral storage request, such as "5Gi".' />
+<ConfigField name="preview.resources.limits.cpu" type="string" description="CPU limit. Hard cap is 2 cores." />
+<ConfigField name="preview.resources.limits.memory" type="string" description="Memory limit. Hard cap is 1Gi." />
+<ConfigField name="preview.resources.limits.ephemeral-storage" type="string" description="Ephemeral storage limit. Hard cap is 10Gi." />
+
+## Platform-injected environment
+
+Every service receives:
+
+| Variable | Use |
+|---|---|
+| `HOST` | Defaults to `0.0.0.0` so frameworks bind where the preview gateway can reach them. |
+| `PREVIEW_ORIGIN` | Public preview URL. Use this for external base URLs, redirects, callbacks, and absolute links. |
+
+## Trust rules
+
+Preview config is repository content. For fields that can expose secrets or network access, 143 reads from the base branch rather than an agent diff.
+
+For non-connected previews, service runtime fields can come from the session diff. For connected previews, launch behavior is pinned to the base branch. A preview is connected when `preview.secrets` is present, `preview.credentials.mode` is not `none`, or `preview.network.destinations` is non-empty.
+
+For task-based examples, see [Preview environments](/docs/guides/previews). For repo-wide setup, see [Repo config](/docs/guides/repo-config).

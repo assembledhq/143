@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -56,7 +57,13 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 const prSelectColumns = `id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
 		       title, body, status, review_status, authored_by, ci_status, head_sha, head_ref, base_sha,
 		       merge_state, has_conflicts, failing_test_count, needs_agent_action, github_state_synced_at,
-		       health_version, merged_at, created_at, updated_at`
+		       health_version, merge_when_ready_state, merge_when_ready_requested_by, merge_when_ready_requested_at,
+		       merge_when_ready_head_sha, merge_when_ready_health_version, merge_when_ready_error,
+		       merge_when_ready_updated_at, merged_at, created_at, updated_at`
+
+const prMergeWhenReadyStatusColumns = `merge_when_ready_state, merge_when_ready_requested_by,
+	merge_when_ready_requested_at, merge_when_ready_head_sha, merge_when_ready_health_version,
+	merge_when_ready_error`
 
 func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.PullRequest, error) {
 	query := `
@@ -282,4 +289,161 @@ func (s *PullRequestStore) UpdateCIStatus(ctx context.Context, orgID, id uuid.UU
 		"ci_status": ciStatus,
 	})
 	return err
+}
+
+func (s *PullRequestStore) QueueMergeWhenReady(ctx context.Context, orgID, id, userID uuid.UUID, headSHA string, healthVersion int64) (models.PullRequestMergeWhenReadyStatus, error) {
+	query := `
+		UPDATE pull_requests
+		SET merge_when_ready_state = @state,
+			merge_when_ready_requested_by = @requested_by,
+			merge_when_ready_requested_at = now(),
+			merge_when_ready_head_sha = @head_sha,
+			merge_when_ready_health_version = @health_version,
+			merge_when_ready_error = '',
+			merge_when_ready_updated_at = now(),
+			updated_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND merge_when_ready_state IN ('off', 'queued', 'failed', 'cancelled')
+		RETURNING ` + prMergeWhenReadyStatusColumns
+
+	return s.queryMergeWhenReadyStatus(ctx, query, pgx.NamedArgs{
+		"id":             id,
+		"org_id":         orgID,
+		"requested_by":   userID,
+		"head_sha":       headSHA,
+		"health_version": healthVersion,
+		"state":          models.PullRequestMergeWhenReadyStateQueued,
+	})
+}
+
+func (s *PullRequestStore) CancelMergeWhenReady(ctx context.Context, orgID, id uuid.UUID) (models.PullRequestMergeWhenReadyStatus, error) {
+	query := `
+		UPDATE pull_requests
+		SET merge_when_ready_state = @state,
+			merge_when_ready_error = '',
+			merge_when_ready_updated_at = now(),
+			updated_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND merge_when_ready_state IN ('queued', 'failed', 'cancelled')
+		RETURNING ` + prMergeWhenReadyStatusColumns
+
+	return s.queryMergeWhenReadyStatus(ctx, query, pgx.NamedArgs{
+		"id":     id,
+		"org_id": orgID,
+		"state":  models.PullRequestMergeWhenReadyStateCancelled,
+	})
+}
+
+func (s *PullRequestStore) ClaimMergeWhenReadyForProcessing(ctx context.Context, orgID, id uuid.UUID, staleBefore time.Time) (bool, error) {
+	query := `
+		UPDATE pull_requests
+		SET merge_when_ready_state = @state,
+			merge_when_ready_error = '',
+			merge_when_ready_updated_at = now(),
+			updated_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND (
+			merge_when_ready_state = 'queued'
+			OR (
+				merge_when_ready_state = 'merging'
+				AND merge_when_ready_updated_at < @stale_before
+			)
+		  )`
+
+	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":           id,
+		"org_id":       orgID,
+		"state":        models.PullRequestMergeWhenReadyStateMerging,
+		"stale_before": staleBefore,
+	})
+	if err != nil {
+		return false, err
+	}
+	return res.RowsAffected() > 0, nil
+}
+
+func (s *PullRequestStore) MarkMergeWhenReadySucceeded(ctx context.Context, orgID, id uuid.UUID) error {
+	return s.markMergeWhenReadyTerminal(ctx, orgID, id, models.PullRequestMergeWhenReadyStateSucceeded, "")
+}
+
+func (s *PullRequestStore) MarkMergeWhenReadyFailed(ctx context.Context, orgID, id uuid.UUID, reason string) error {
+	return s.markMergeWhenReadyTerminal(ctx, orgID, id, models.PullRequestMergeWhenReadyStateFailed, reason)
+}
+
+func (s *PullRequestStore) markMergeWhenReadyTerminal(ctx context.Context, orgID, id uuid.UUID, state models.PullRequestMergeWhenReadyState, reason string) error {
+	query := `
+		UPDATE pull_requests
+		SET merge_when_ready_state = @state,
+			merge_when_ready_error = @reason,
+			merge_when_ready_updated_at = now(),
+			updated_at = now()
+		WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     id,
+		"org_id": orgID,
+		"state":  state,
+		"reason": reason,
+	})
+	return err
+}
+
+func (s *PullRequestStore) ListMergeWhenReadyForProcessing(ctx context.Context, orgID uuid.UUID, staleBefore time.Time, limit int) ([]models.PullRequest, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	query := `
+		SELECT ` + prSelectColumns + `
+		FROM pull_requests
+		WHERE org_id = @org_id
+		  AND status = 'open'
+		  AND (
+			merge_when_ready_state = 'queued'
+			OR (
+				merge_when_ready_state = 'merging'
+				AND merge_when_ready_updated_at < @stale_before
+			)
+		  )
+		ORDER BY merge_when_ready_updated_at ASC NULLS FIRST, updated_at ASC
+		LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":       orgID,
+		"stale_before": staleBefore,
+		"limit":        limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list merge-when-ready pull requests for processing: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+}
+
+func (s *PullRequestStore) queryMergeWhenReadyStatus(ctx context.Context, query string, args pgx.NamedArgs) (models.PullRequestMergeWhenReadyStatus, error) {
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return models.PullRequestMergeWhenReadyStatus{}, err
+	}
+	type row struct {
+		State                  models.PullRequestMergeWhenReadyState `db:"merge_when_ready_state"`
+		RequestedByUserID      *uuid.UUID                            `db:"merge_when_ready_requested_by"`
+		RequestedAt            *time.Time                            `db:"merge_when_ready_requested_at"`
+		RequestedHeadSHA       string                                `db:"merge_when_ready_head_sha"`
+		RequestedHealthVersion *int64                                `db:"merge_when_ready_health_version"`
+		LastError              string                                `db:"merge_when_ready_error"`
+	}
+	statusRow, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[row])
+	if err != nil {
+		return models.PullRequestMergeWhenReadyStatus{}, err
+	}
+	return models.PullRequestMergeWhenReadyStatus{
+		State:                  statusRow.State,
+		RequestedByUserID:      statusRow.RequestedByUserID,
+		RequestedAt:            statusRow.RequestedAt,
+		RequestedHeadSHA:       statusRow.RequestedHeadSHA,
+		RequestedHealthVersion: statusRow.RequestedHealthVersion,
+		LastError:              statusRow.LastError,
+	}, nil
 }

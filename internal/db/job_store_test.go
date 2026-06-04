@@ -756,6 +756,42 @@ func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_ReclaimLostRunningSessionJobsForSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	staleBefore := time.Now().Add(-90 * time.Second)
+	mock.ExpectQuery("WITH dead_nodes AS").
+		WithArgs(orgID, sessionID, staleBefore, 100).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(1)))
+
+	reclaimed, err := store.ReclaimLostRunningSessionJobsForSession(context.Background(), orgID, sessionID, staleBefore, 100)
+	require.NoError(t, err, "targeted reclaim should not return an error")
+	require.Equal(t, int64(1), reclaimed, "targeted reclaim should return the number of reclaimed session jobs")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_ReclaimLostRunningSessionJobsForSession_ScopesToSessionAndRecoveryMetadata(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "func (s *JobStore) ReclaimLostRunningSessionJobsForSession", "targeted recovery helper should exist")
+	require.Contains(t, sql, "j.org_id = $1", "targeted recovery must filter by org id")
+	require.Contains(t, sql, "j.payload->>'session_id' = $2::text", "targeted recovery must filter by session payload")
+	require.Contains(t, sql, "runtime_stop_reason = 'worker_recovery'", "targeted recovery must persist worker-recovery stop reason")
+	require.Contains(t, sql, "recovery_state = 'queued'", "targeted recovery must queue session recovery")
+	require.Contains(t, sql, "j.lease_expires_at < now()", "targeted recovery must only reclaim stale running leases")
+}
+
 func TestJobStore_ReclaimLostRunningJobs_IncludesLegacyNullLeaseRows(t *testing.T) {
 	t.Parallel()
 
@@ -766,6 +802,17 @@ func TestJobStore_ReclaimLostRunningJobs_IncludesLegacyNullLeaseRows(t *testing.
 	require.Contains(t, sql, "j.lease_expires_at IS NULL", "recovery query should include legacy running jobs without a lease expiry")
 	require.Contains(t, sql, "OR (j.lease_expires_at IS NULL AND d.id IS NOT NULL)", "legacy null-lease recovery should only reclaim jobs owned by dead or stale nodes")
 	require.NotContains(t, sql, "j.lease_expires_at IS NULL AND j.locked_at < $1", "legacy null-lease recovery must not reclaim active live-node jobs using the node heartbeat cutoff")
+}
+
+func TestJobStore_ReclaimLostRunningJobs_RecoveryMetadataSessionJobsOnly(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("jobs.go")
+	require.NoError(t, err, "test should read jobs.go")
+
+	sql := string(body)
+	require.Contains(t, sql, "RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id, j.job_type", "global recovery should keep job type available when applying session recovery metadata")
+	require.Contains(t, sql, "AND uj.job_type IN ('run_agent', 'continue_session')", "global recovery should only mark sessions recovering for agent runtime jobs")
 }
 
 func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {
@@ -939,6 +986,43 @@ func TestJobStore_CountRunningOwnedByNode_ReturnsWrappedErrors(t *testing.T) {
 	count, err := store.CountRunningOwnedByNode(context.Background(), "worker-1")
 	require.Error(t, err, "CountRunningOwnedByNode should return wrapped query errors")
 	require.Equal(t, 0, count, "CountRunningOwnedByNode should return zero on error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_SelectWorkerWithSandboxCapacity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("(?s)WITH candidates AS.*live_sandbox_count_error").
+		WithArgs(pgxmock.AnyArg(), "worker-full").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
+
+	nodeID, err := store.SelectWorkerWithSandboxCapacity(context.Background(), "worker-full")
+	require.NoError(t, err, "SelectWorkerWithSandboxCapacity should not return an error")
+	require.NotNil(t, nodeID, "SelectWorkerWithSandboxCapacity should return an available worker")
+	require.Equal(t, "worker-with-space", *nodeID, "SelectWorkerWithSandboxCapacity should pick the advertised worker with capacity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_SelectWorkerWithSandboxCapacity_NoAvailableWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("WITH candidates AS").
+		WithArgs(pgxmock.AnyArg(), "worker-full").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+
+	nodeID, err := store.SelectWorkerWithSandboxCapacity(context.Background(), "worker-full")
+	require.NoError(t, err, "SelectWorkerWithSandboxCapacity should not treat no rows as an error")
+	require.Nil(t, nodeID, "SelectWorkerWithSandboxCapacity should return nil when no worker advertises capacity")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

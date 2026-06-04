@@ -49,6 +49,33 @@ func TestService_StartCreatesReviewThreadLoopPassAndMessage(t *testing.T) {
 	require.Equal(t, "review", threads.sent[0].Commands[0].Name, "structured command should be /review")
 }
 
+func TestService_StartUsesGenericReviewPromptForAgentsWithoutReviewCommand(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	messageID := int64(77)
+	snapshotKey := "snapshots/review-loop-amp-start.tar.zst"
+	store := &fakeReviewLoopStore{}
+	threads := &fakeThreadService{
+		session: models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeAmp, Status: models.SessionStatusIdle, SandboxState: models.SandboxStateSnapshotted, SnapshotKey: &snapshotKey},
+		thread:  models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, AgentType: models.AgentTypeAmp, Label: "Review"},
+		message: models.SessionMessage{ID: messageID, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID},
+	}
+	svc := NewService(store, threads)
+
+	loop, err := svc.Start(context.Background(), orgID, sessionID, StartReviewLoopRequest{
+		MaxPasses: 2,
+		Source:    models.ReviewLoopSourceManual,
+	})
+	require.NoError(t, err, "Start should create an Amp review loop")
+	require.Equal(t, models.AgentTypeAmp, loop.AgentType, "Start should run the review loop with Amp")
+	require.NotContains(t, threads.sent[0].Message, "/review", "agents without a native review command should receive a natural-language prompt")
+	require.Contains(t, threads.sent[0].Message, "Review the current workspace diff", "generic review prompt should preserve the review instruction")
+	require.Empty(t, threads.sent[0].Commands, "agents without a native review command should not persist a structured /review command")
+}
+
 func TestService_StartStoresRequestedFixMode(t *testing.T) {
 	t.Parallel()
 

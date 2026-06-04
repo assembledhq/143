@@ -76,6 +76,9 @@ type Integration struct {
 	GitHubAccountLogin          *string             `db:"-" json:"github_account_login,omitempty"`
 	GitHubRepoSelectionRequired *bool               `db:"-" json:"github_repo_selection_required,omitempty"`
 	GitHubActiveRepoCount       *int                `db:"-" json:"github_active_repo_count,omitempty"`
+	NotionWorkspaceID           *string             `db:"-" json:"notion_workspace_id,omitempty"`
+	NotionWorkspaceName         *string             `db:"-" json:"notion_workspace_name,omitempty"`
+	CircleCIProjectSlug         *string             `db:"-" json:"circleci_project_slug,omitempty"`
 	// AuthError is a derived view of the auth-failure markers stamped into
 	// config jsonb when a provider rejects our access token (currently only
 	// Linear). Populated by ListIntegrations / Get* paths via deriveIntegrationStatus
@@ -286,9 +289,10 @@ type Session struct {
 	// LastActivityAt is the timestamp of the last write to this session — used
 	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.
-	LastActivityAt time.Time    `db:"last_activity_at" json:"last_activity_at"`
-	SandboxState   SandboxState `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey    *string      `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	LastActivityAt      time.Time    `db:"last_activity_at" json:"last_activity_at"`
+	SandboxState        SandboxState `db:"sandbox_state" json:"sandbox_state"`
+	WorkspaceGeneration int64        `db:"workspace_generation" json:"workspace_generation"`
+	SnapshotKey         *string      `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	// PendingSnapshotKey, when non-nil, is the storage key for a post-PR
 	// snapshot whose upload is still in flight. Hydration paths
 	// (continue_session / Fix tests) must wait until this is NULL before
@@ -347,13 +351,15 @@ type Session struct {
 	// PRPushState drives the "Push changes" button's state machine for sessions
 	// that already have an open PR. Independent from PRCreationState so a single
 	// session can show "PR opened" while a follow-up push is mid-flight.
-	PRPushState          PRPushState         `db:"pr_push_state" json:"pr_push_state"`
-	PRPushError          *string             `db:"pr_push_error" json:"pr_push_error,omitempty"`
-	BranchCreationState  BranchCreationState `db:"branch_creation_state" json:"branch_creation_state"`
-	BranchCreationError  *string             `db:"branch_creation_error" json:"branch_creation_error,omitempty"`
-	BranchURL            *string             `db:"branch_url" json:"branch_url,omitempty"`
-	DiffCollectedAt      *time.Time          `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
-	LatestDiffSnapshotID *uuid.UUID          `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	PRPushState                PRPushState         `db:"pr_push_state" json:"pr_push_state"`
+	PRPushError                *string             `db:"pr_push_error" json:"pr_push_error,omitempty"`
+	BranchCreationState        BranchCreationState `db:"branch_creation_state" json:"branch_creation_state"`
+	BranchCreationError        *string             `db:"branch_creation_error" json:"branch_creation_error,omitempty"`
+	BranchURL                  *string             `db:"branch_url" json:"branch_url,omitempty"`
+	DiffCollectedAt            *time.Time          `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
+	LatestDiffSnapshotID       *uuid.UUID          `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	WorkspaceRevision          int64               `db:"workspace_revision" json:"workspace_revision"`
+	WorkspaceRevisionUpdatedAt time.Time           `db:"workspace_revision_updated_at" json:"workspace_revision_updated_at"`
 	// HasUnpushedChanges is a derived read-model field: true when the most
 	// recent persisted session HEAD differs from the open PR's tracked head
 	// commit, which means "Push changes" is actionable.
@@ -668,17 +674,24 @@ type PullRequest struct {
 	// into formatBranchName) change later. Nullable for PRs created before
 	// migration 107 added the column — the push code falls back to
 	// recomputing in that case.
-	HeadRef             *string               `db:"head_ref" json:"head_ref,omitempty"`
-	BaseSHA             *string               `db:"base_sha" json:"base_sha,omitempty"`
-	MergeState          PullRequestMergeState `db:"merge_state" json:"merge_state"`
-	HasConflicts        bool                  `db:"has_conflicts" json:"has_conflicts"`
-	FailingTestCount    int                   `db:"failing_test_count" json:"failing_test_count"`
-	NeedsAgentAction    bool                  `db:"needs_agent_action" json:"needs_agent_action"`
-	GitHubStateSyncedAt *time.Time            `db:"github_state_synced_at" json:"github_state_synced_at,omitempty"`
-	HealthVersion       int64                 `db:"health_version" json:"health_version"`
-	MergedAt            *time.Time            `db:"merged_at" json:"merged_at,omitempty"`
-	CreatedAt           time.Time             `db:"created_at" json:"created_at"`
-	UpdatedAt           time.Time             `db:"updated_at" json:"updated_at"`
+	HeadRef                     *string                        `db:"head_ref" json:"head_ref,omitempty"`
+	BaseSHA                     *string                        `db:"base_sha" json:"base_sha,omitempty"`
+	MergeState                  PullRequestMergeState          `db:"merge_state" json:"merge_state"`
+	HasConflicts                bool                           `db:"has_conflicts" json:"has_conflicts"`
+	FailingTestCount            int                            `db:"failing_test_count" json:"failing_test_count"`
+	NeedsAgentAction            bool                           `db:"needs_agent_action" json:"needs_agent_action"`
+	GitHubStateSyncedAt         *time.Time                     `db:"github_state_synced_at" json:"github_state_synced_at,omitempty"`
+	HealthVersion               int64                          `db:"health_version" json:"health_version"`
+	MergeWhenReadyState         PullRequestMergeWhenReadyState `db:"merge_when_ready_state" json:"merge_when_ready_state"`
+	MergeWhenReadyRequestedBy   *uuid.UUID                     `db:"merge_when_ready_requested_by" json:"merge_when_ready_requested_by,omitempty"`
+	MergeWhenReadyRequestedAt   *time.Time                     `db:"merge_when_ready_requested_at" json:"merge_when_ready_requested_at,omitempty"`
+	MergeWhenReadyHeadSHA       string                         `db:"merge_when_ready_head_sha" json:"merge_when_ready_head_sha,omitempty"`
+	MergeWhenReadyHealthVersion *int64                         `db:"merge_when_ready_health_version" json:"merge_when_ready_health_version,omitempty"`
+	MergeWhenReadyError         string                         `db:"merge_when_ready_error" json:"merge_when_ready_error,omitempty"`
+	MergeWhenReadyUpdatedAt     *time.Time                     `db:"merge_when_ready_updated_at" json:"merge_when_ready_updated_at,omitempty"`
+	MergedAt                    *time.Time                     `db:"merged_at" json:"merged_at,omitempty"`
+	CreatedAt                   time.Time                      `db:"created_at" json:"created_at"`
+	UpdatedAt                   time.Time                      `db:"updated_at" json:"updated_at"`
 }
 
 // PRSummary is a lightweight view of a PR for inclusion in session list responses.
@@ -740,36 +753,41 @@ type SessionMessage struct {
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
-	ID                  uuid.UUID    `db:"id" json:"id"`
-	SessionID           uuid.UUID    `db:"session_id" json:"session_id"`
-	OrgID               uuid.UUID    `db:"org_id" json:"org_id"`
-	AgentType           AgentType    `db:"agent_type" json:"agent_type"`
-	ModelOverride       *string      `db:"model_override" json:"model_override,omitempty"`
-	Label               string       `db:"label" json:"label"`
-	Instructions        *string      `db:"instructions" json:"instructions,omitempty"`
-	FileScope           []string     `db:"file_scope" json:"file_scope,omitempty"`
-	Status              ThreadStatus `db:"status" json:"status"`
-	AgentSessionID      *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn         int          `db:"current_turn" json:"current_turn"`
-	LastActivityAt      *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ResultSummary       *string      `db:"result_summary" json:"result_summary,omitempty"`
-	Diff                *string      `db:"diff" json:"diff,omitempty"`
-	FailureExplanation  *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory     *string      `db:"failure_category" json:"failure_category,omitempty"`
-	StartedAt           *time.Time   `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt         *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt           time.Time    `db:"created_at" json:"created_at"`
-	ArchivedAt          *time.Time   `db:"archived_at" json:"archived_at,omitempty"`
-	BaseSnapshotKey     *string      `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
-	CostCents           float64      `db:"cost_cents" json:"cost_cents"`
-	PendingMessageCount int          `db:"pending_message_count" json:"pending_message_count"`
-	CancelRequestedAt   *time.Time   `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+	ID                    uuid.UUID                   `db:"id" json:"id"`
+	SessionID             uuid.UUID                   `db:"session_id" json:"session_id"`
+	OrgID                 uuid.UUID                   `db:"org_id" json:"org_id"`
+	AgentType             AgentType                   `db:"agent_type" json:"agent_type"`
+	ModelOverride         *string                     `db:"model_override" json:"model_override,omitempty"`
+	Label                 string                      `db:"label" json:"label"`
+	Instructions          *string                     `db:"instructions" json:"instructions,omitempty"`
+	FileScope             []string                    `db:"file_scope" json:"file_scope,omitempty"`
+	Status                ThreadStatus                `db:"status" json:"status"`
+	AgentSessionID        *string                     `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn           int                         `db:"current_turn" json:"current_turn"`
+	LastActivityAt        *time.Time                  `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ResultSummary         *string                     `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                  *string                     `db:"diff" json:"diff,omitempty"`
+	FailureExplanation    *string                     `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory       *string                     `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt             *time.Time                  `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt           *time.Time                  `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt             time.Time                   `db:"created_at" json:"created_at"`
+	ArchivedAt            *time.Time                  `db:"archived_at" json:"archived_at,omitempty"`
+	BaseSnapshotKey       *string                     `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
+	CostCents             float64                     `db:"cost_cents" json:"cost_cents"`
+	PendingMessageCount   int                         `db:"pending_message_count" json:"pending_message_count"`
+	CancelRequestedAt     *time.Time                  `db:"cancel_requested_at" json:"cancel_requested_at,omitempty"`
+	RuntimeStopReason     RuntimeStopReason           `db:"runtime_stop_reason" json:"runtime_stop_reason,omitempty"`
+	RuntimeGracefulStopAt *time.Time                  `db:"runtime_graceful_stop_at" json:"runtime_graceful_stop_at,omitempty"`
+	RecoveryState         RecoveryState               `db:"recovery_state" json:"recovery_state,omitempty"`
+	RecoveryReason        string                      `db:"recovery_reason" json:"recovery_reason,omitempty"`
+	RecoveryEventHistory  json.RawMessage             `db:"recovery_event_history" json:"recovery_event_history,omitempty"`
+	InboxDelivery         *ThreadInboxDeliverySummary `db:"-" json:"inbox_delivery,omitempty"`
 }
 
 // SessionThreadFileEvent is operational write attribution: which thread
 // touched which path, with optional git blob hashes before/after. Used to
-// power overlap badges in the tab strip and the "Touched by tab" / "Overlap
-// with another tab" filters in the Changes view. Not security attribution.
+// power overlap badges in the tab strip. Not security attribution.
 type SessionThreadFileEvent struct {
 	ID         int64                      `db:"id" json:"id"`
 	OrgID      uuid.UUID                  `db:"org_id" json:"org_id"`

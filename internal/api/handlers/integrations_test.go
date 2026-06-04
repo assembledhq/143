@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
@@ -64,6 +67,38 @@ func (f fakeGitHubMembershipStore) Get(context.Context, uuid.UUID, uuid.UUID) (m
 		return models.OrganizationMembership{}, f.err
 	}
 	return f.membership, nil
+}
+
+type fakeIntegrationCredentialStore struct {
+	credentials map[models.ProviderName]*models.DecryptedCredential
+	err         error
+}
+
+func (f fakeIntegrationCredentialStore) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	credential, ok := f.credentials[provider]
+	if !ok {
+		return nil, nil
+	}
+	return credential, nil
+}
+
+func (f fakeIntegrationCredentialStore) Upsert(context.Context, uuid.UUID, models.ProviderConfig) error {
+	return nil
+}
+
+type fakeSlackUserInfoClient struct {
+	user ingestion.SlackUser
+	err  error
+}
+
+func (f fakeSlackUserInfoClient) FetchUserInfo(context.Context, string, string) (ingestion.SlackUser, error) {
+	if f.err != nil {
+		return ingestion.SlackUser{}, f.err
+	}
+	return f.user, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -199,6 +234,76 @@ func TestIntegrationHandler_ListIntegrations_SurfacesAuthErrorWhenNoActiveDuplic
 	require.Len(t, resp.Data, 1, "response should include the errored integration")
 	require.NotNil(t, resp.Data[0].AuthError, "auth_error should surface when there is no active Linear duplicate")
 	require.Equal(t, "Linear rejected the access token (HTTP 401). Reconnect to continue syncing.", resp.Data[0].AuthError.Reason, "auth_error reason should be preserved")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_ListIntegrations_DerivesSafeCredentialMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+	credentialStore := fakeIntegrationCredentialStore{
+		credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderNotion: {
+				OrgID:    orgID,
+				Provider: models.ProviderNotion,
+				Config: models.NotionConfig{
+					AccessToken:   "secret-notion-token",
+					WorkspaceName: "Acme HQ",
+				},
+			},
+			models.ProviderCircleCI: {
+				OrgID:    orgID,
+				Provider: models.ProviderCircleCI,
+				Config: models.CircleCIConfig{
+					AuthToken:   "secret-circle-token",
+					ProjectSlug: "gh/acme/api",
+				},
+			},
+		},
+	}
+	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(uuid.New(), orgID, "notion", json.RawMessage(`{}`), "active", nil, now).
+		AddRow(uuid.New(), orgID, "circleci", json.RawMessage(`{}`), "active", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListIntegrations(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "list integrations should succeed")
+	var resp models.ListResponse[models.Integration]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as integration list")
+	require.Len(t, resp.Data, 2, "response should include both integrations")
+
+	var notionIntegration, circleciIntegration *models.Integration
+	for i := range resp.Data {
+		switch resp.Data[i].Provider {
+		case models.IntegrationProviderNotion:
+			notionIntegration = &resp.Data[i]
+		case models.IntegrationProviderCircleCI:
+			circleciIntegration = &resp.Data[i]
+		}
+	}
+	require.NotNil(t, notionIntegration, "Notion integration should be present in response")
+	require.NotNil(t, notionIntegration.NotionWorkspaceName, "Notion workspace name should be derived from credential metadata")
+	require.Equal(t, "Acme HQ", *notionIntegration.NotionWorkspaceName, "Notion workspace name should be exposed without token data")
+	require.NotNil(t, circleciIntegration, "CircleCI integration should be present in response")
+	require.NotNil(t, circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be derived from credential metadata")
+	require.Equal(t, "gh/acme/api", *circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be exposed without token data")
+	require.NotContains(t, w.Body.String(), "secret-notion-token", "response should not expose Notion token")
+	require.NotContains(t, w.Body.String(), "secret-circle-token", "response should not expose CircleCI token")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1212,6 +1317,219 @@ func TestIntegrationHandler_ConnectLinear_ReturnsExistingIntegration(t *testing.
 	require.Equal(t, integrationID, resp.Data.ID, "ConnectLinear should return the existing integration ID")
 	require.Equal(t, models.IntegrationProviderLinear, resp.Data.Provider, "ConnectLinear should return a linear integration")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestIntegrationHandler_LinkSlackUserMeRejectsEmailMismatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {
+				OrgID:    orgID,
+				Provider: models.ProviderSlack,
+				Config:   models.SlackConfig{AccessToken: "xoxb-token", TeamID: "T123"},
+			},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackUserInfoClient(fakeSlackUserInfoClient{user: slackTestUser("U999", "other@example.com")}),
+	)
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+
+	body := strings.NewReader(`{"slack_user_id":"U999","slack_email":"other@example.com","slack_display_name":"Other"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/slack/user-links/me", body)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "user@example.com"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.LinkSlackUserMe(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "Slack self-link should reject Slack users whose email does not match the authenticated user")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack self-link should not upsert a mismatched Slack identity")
+}
+
+func TestIntegrationHandler_UpsertSlackUserLinkAdmin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	email := "eng@example.com"
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithIntegrationMembershipStore(fakeGitHubMembershipStore{membership: models.OrganizationMembership{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   models.RoleMember,
+		}}),
+	)
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+	mock.ExpectQuery(`ON CONFLICT \(org_id, slack_team_id, slack_user_id\)`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "user_id", "slack_team_id", "slack_user_id",
+			"slack_email", "slack_display_name", "source", "linked_at", "created_at", "updated_at",
+		}).AddRow(
+			linkID, orgID, installationID, &userID, "T123", "U123", &email, "Eng User",
+			models.SlackUserLinkSourceAdminLinked, &now, now, now,
+		))
+
+	body := strings.NewReader(fmt.Sprintf(`{"user_id":%q,"slack_user_id":"U123","slack_email":"eng@example.com","slack_display_name":"Eng User"}`, userID.String()))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/slack/user-links", body)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.UpsertSlackUserLinkAdmin(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "admin Slack user-link upsert should return OK")
+	var resp models.SingleResponse[models.SlackUserLink]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Slack user-link response should be valid JSON")
+	require.Equal(t, models.SlackUserLinkSourceAdminLinked, resp.Data.Source, "admin upsert should mark the link as admin linked")
+	require.Equal(t, &userID, resp.Data.UserID, "admin upsert should link the requested user")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link upsert should satisfy database expectations")
+}
+
+func TestIntegrationHandler_DeleteSlackUserLinkAdmin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+
+	mock.ExpectExec(`DELETE FROM slack_user_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/slack/user-links/"+linkID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", linkID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.DeleteSlackUserLinkAdmin(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "admin Slack user-link delete should return OK")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link delete should satisfy database expectations")
+}
+
+func TestIntegrationHandler_DeleteSlackUserLinkAdmin_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+
+	mock.ExpectExec(`DELETE FROM slack_user_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/slack/user-links/"+linkID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", linkID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.DeleteSlackUserLinkAdmin(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "admin Slack user-link delete should return 404 for non-existent link")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link delete not-found should satisfy database expectations")
+}
+
+func TestIntegrationHandler_PatchSlackChannelSettingsRejectsForeignRepository(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	foreignRepoID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackChannelStore = db.NewSlackChannelSettingsStore(mock)
+	handler.repoStore = db.NewRepositoryStore(mock)
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+	mock.ExpectQuery(`FROM repositories\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}))
+
+	body := strings.NewReader(fmt.Sprintf(`{"default_repository_id":"%s"}`, foreignRepoID))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/integrations/slack/channels/C123", body)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("slack_channel_id", "C123")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.PatchSlackChannelSettings(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "Slack channel settings should reject repository IDs outside the active org")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack channel settings should validate repository ownership before upsert")
+}
+
+func slackTestUser(id, email string) ingestion.SlackUser {
+	user := ingestion.SlackUser{ID: id}
+	user.Profile.Email = email
+	user.Profile.DisplayName = "Slack User"
+	return user
+}
+
+func expectSlackInstallationByOrg(mock pgxmock.PgxPoolIface, orgID, installationID, integrationID uuid.UUID) {
+	now := time.Now()
+	mock.ExpectQuery(`FROM slack_installations\s+WHERE org_id = @org_id AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", []string{"users:read.email"}, models.SlackInstallationStatusActive, nil, now,
+			nil, now, now,
+		))
 }
 
 func TestIntegrationHandler_ConnectLinear_ReactivatesErroredIntegration(t *testing.T) {

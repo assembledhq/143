@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, ClipboardList, ExternalLink, GitMerge, GitPullRequest, Loader2, Upload, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ClipboardList, ExternalLink, GitMerge, GitPullRequest, Loader2, Upload, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -8,9 +8,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { SyncTimeText } from "@/components/sync-time-text";
-import { deriveMergeActionState } from "@/lib/session-pr-action-state";
+import { deriveMergeActionState, deriveMergeWhenReadyActionState } from "@/lib/session-pr-action-state";
 
 // PRBannerAction names every action the banner can launch. The pending value
 // is shared across buttons so they can disable each other while one is in
@@ -45,9 +46,12 @@ type PRHealthBannerProps = {
   pendingAction: PRBannerAction;
   repairError?: string | null;
   mergeAuthRequired?: boolean;
+  mergeWhenReadyPending?: boolean;
   onFixTests: () => void;
   onResolveConflicts: () => void;
   onMerge: () => void;
+  onQueueMergeWhenReady?: () => void;
+  onCancelMergeWhenReady?: () => void;
   onOpenRepairSession?: (sessionId: string) => void;
   pushChanges?: PushChangesAction;
   reviewAction?: ReviewPRAction;
@@ -59,15 +63,18 @@ export function PRHealthBanner({
   pendingAction,
   repairError,
   mergeAuthRequired = false,
+  mergeWhenReadyPending = false,
   onFixTests,
   onResolveConflicts,
   onMerge,
+  onQueueMergeWhenReady,
+  onCancelMergeWhenReady,
   onOpenRepairSession,
   pushChanges,
   reviewAction,
 }: PRHealthBannerProps) {
   const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId);
-  const isHealthy = activeRepairState.label === null && !health.can_fix_tests && !health.can_resolve_conflicts;
+  const isHealthy = activeRepairState.label === null && health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
@@ -78,12 +85,20 @@ export function PRHealthBanner({
     hasActiveRepair: activeRepairState.suppressMerge,
     pendingAction,
   });
+  const mergeWhenReadyAction = deriveMergeWhenReadyActionState({
+    health: { ...health, checks: orderedChecks },
+    hasActiveRepair: activeRepairState.suppressMerge,
+    pendingAction,
+    pendingMergeWhenReady: mergeWhenReadyPending,
+  });
   const canShowMergeButton = mergeAction.visible;
+  const canShowMergeWhenReady = mergeWhenReadyAction.visible && Boolean(onQueueMergeWhenReady || onCancelMergeWhenReady);
   const hasActionableButton =
     !!activeRepairState.label ||
     canShowResolveConflictsButton ||
     canShowFixTestsButton ||
     canShowMergeButton ||
+    canShowMergeWhenReady ||
     !!reviewAction ||
     !!pushChanges ||
     !!activeRepairState.openSessionID;
@@ -198,22 +213,55 @@ export function PRHealthBanner({
                 )}
                 <div className="flex flex-wrap gap-2">
                   {canShowMergeButton && (
-                    <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        disabled={mergeAction.disabled}
-                        title={mergeAction.disabledReason ?? "Merge PR (p m)"}
-                        onClick={onMerge}
-                      >
-                        {mergeAction.spinning ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <GitMerge className="mr-1.5 h-3.5 w-3.5" />
-                        )}
-                        {mergeAction.label}
-                      </Button>
-                    </DisabledTooltip>
+                    <div className="inline-flex">
+                      <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
+                        <Button
+                          size="sm"
+                          variant="default"
+                          className={cn(canShowMergeWhenReady && "rounded-r-none border-r border-primary-foreground/20")}
+                          disabled={mergeAction.disabled}
+                          title={mergeAction.disabledReason ?? "Merge PR (p m)"}
+                          onClick={onMerge}
+                        >
+                          {mergeAction.spinning ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <GitMerge className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {mergeAction.label}
+                        </Button>
+                      </DisabledTooltip>
+                      {canShowMergeWhenReady && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              size="icon"
+                              variant="default"
+                              className="h-7 w-7 rounded-l-none"
+                              disabled={mergeWhenReadyAction.disabled}
+                              title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
+                              aria-label="More merge actions"
+                            >
+                              {mergeWhenReadyAction.spinning ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={health.merge_when_ready.state === "queued" ? onCancelMergeWhenReady : onQueueMergeWhenReady}
+                              disabled={mergeWhenReadyAction.disabled}
+                              title={mergeWhenReadyAction.disabledReason}
+                            >
+                              <GitMerge className="h-3.5 w-3.5" />
+                              {mergeWhenReadyAction.label}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                    </div>
                   )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
@@ -306,6 +354,21 @@ export function PRHealthBanner({
                   <p className="text-xs text-muted-foreground">
                     Connect your GitHub account to merge this pull request as yourself.
                   </p>
+                )}
+                {health.merge_when_ready.state === "queued" && (
+                  <p className="text-xs text-muted-foreground">
+                    Waiting for GitHub requirements.
+                  </p>
+                )}
+                {health.merge_when_ready.state === "failed" && health.merge_when_ready.last_error && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span>Merge when ready stopped: {health.merge_when_ready.last_error}</span>
+                    {onQueueMergeWhenReady && (
+                      <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={onQueueMergeWhenReady} disabled={mergeWhenReadyAction.disabled || mergeWhenReadyPending}>
+                        Retry
+                      </Button>
+                    )}
+                  </div>
                 )}
               </div>
             )}

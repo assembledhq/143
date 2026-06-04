@@ -130,6 +130,10 @@ func (s *runtimeTestSessionStore) UpdateSandboxState(context.Context, uuid.UUID,
 	return nil
 }
 
+func (s *runtimeTestSessionStore) MarkRunningWithSandboxState(context.Context, uuid.UUID, uuid.UUID, models.SandboxState) error {
+	return nil
+}
+
 func (s *runtimeTestSessionStore) UpdateWorkingBranch(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return nil
 }
@@ -369,6 +373,8 @@ func TestRuntimeHelpers_MapCheckpointCapabilitiesAndStopReasons(t *testing.T) {
 	require.Equal(t, models.RuntimeStopReasonSoftBudget, stopReasonToRuntime(StopReasonSoftBudget), "soft budget stops should map to the soft-budget runtime reason")
 	require.Equal(t, models.RuntimeStopReasonNoProgress, stopReasonToRuntime(StopReasonNoProgress), "no-progress stops should map to the no-progress runtime reason")
 	require.Equal(t, models.RuntimeStopReasonAbsoluteCeiling, stopReasonToRuntime(StopReasonAbsoluteCeiling), "absolute-ceiling stops should map to the absolute-ceiling runtime reason")
+	require.Equal(t, models.RuntimeStopReasonWorkerDrain, stopReasonToRuntime(StopReasonWorkerDrain), "worker-drain stops should map to the worker-drain runtime reason")
+	require.Equal(t, models.RuntimeStopReasonDeployBudgetExpired, stopReasonToRuntime(StopReasonDeployBudgetExpired), "deploy budget expiry stops should map to the deploy runtime reason")
 	require.Equal(t, models.RuntimeStopReasonNone, stopReasonToRuntime(StopReason("unknown")), "unknown stop reasons should map to the empty runtime reason")
 }
 
@@ -457,6 +463,37 @@ func TestRuntimeController_RequestStopCancelsBeforePersistingStopMarker(t *testi
 	require.Len(t, sessionStore.stopAfter, 1, "RequestStop should persist one stop-after deadline")
 	minStopAfter := requestedAt.Add(graceWindow + checkpointWindow + defaultRuntimeStallAge - time.Second)
 	require.True(t, sessionStore.stopAfter[0].After(minStopAfter), "stop-after deadline should include graceful shutdown, checkpoint finalization, and watchdog slack")
+}
+
+func TestRuntimeController_RequestStopCancelsFallbackWhenRegistryHasNoEntry(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	sessionStore := &runtimeTestSessionStore{}
+	cancelCtx, cancel := context.WithCancelCause(context.Background())
+	controller := newRuntimeController(
+		runtimeConfig{
+			GracefulShutdownWindow:   time.Second,
+			CheckpointFinalizeWindow: time.Second,
+		},
+		sessionStore,
+		&runtimeTestJobStore{},
+		NewCancelRegistry(zerolog.Nop()),
+		zerolog.Nop(),
+		orgID,
+		sessionID,
+		0,
+		nil,
+		newRuntimeProgressTracker(time.Now()),
+	)
+	controller.SetStopFallback(cancel)
+
+	controller.RequestStop(StopReasonNoProgress)
+
+	require.ErrorIs(t, cancelCtx.Err(), context.Canceled, "RequestStop should cancel the fallback context when no registry entry exists")
+	require.ErrorIs(t, context.Cause(cancelCtx), context.Canceled, "fallback cancellation should use the runtime stop cause")
+	require.Equal(t, []models.RuntimeStopReason{models.RuntimeStopReasonNoProgress}, sessionStore.stopRequests, "RequestStop should still persist the stop reason")
 }
 
 func TestRuntimeController_RequestStopLogsActiveToolSummaries(t *testing.T) {

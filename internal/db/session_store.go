@@ -139,12 +139,12 @@ const sessionSelectColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -166,12 +166,12 @@ const sessionListColumns = `id,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -189,12 +189,12 @@ const sessionAPIDetailColumns = `id,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, git_identity_source, git_identity_user_id, created_at`
@@ -242,6 +242,11 @@ type diffStatsPayload struct {
 	Added        int `json:"added"`
 	Removed      int `json:"removed"`
 	FilesChanged int `json:"files_changed"`
+}
+
+type workspaceRevisionUpdate struct {
+	Revision  int64
+	UpdatedAt time.Time
 }
 
 func parseDiffStatsPayload(raw json.RawMessage) diffStatsPayload {
@@ -976,6 +981,34 @@ func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, session
 	return tag.RowsAffected() == 1, nil
 }
 
+func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (int64, time.Time, error) {
+	updatedAt := time.Now().UTC()
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = @updated_at
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING workspace_revision, workspace_revision_updated_at`,
+		pgx.NamedArgs{
+			"id":         sessionID,
+			"org_id":     orgID,
+			"updated_at": updatedAt,
+		},
+	)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("bump workspace revision (%s): %w", reason, err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("collect workspace revision (%s): %w", reason, err)
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, reason)
+	return row.Revision, row.UpdatedAt, nil
+}
+
 func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
 	args := pgx.NamedArgs{
 		"id":                    sessionID,
@@ -1013,6 +1046,14 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		    runtime_graceful_stop_at = CASE
 		        WHEN @runtime_stop_reason = '' THEN runtime_graceful_stop_at
 		        ELSE @checkpointed_at
+		    END,
+		    workspace_revision = CASE
+		        WHEN @snapshot_key = '' THEN workspace_revision
+		        ELSE workspace_revision + 1
+		    END,
+		    workspace_revision_updated_at = CASE
+		        WHEN @snapshot_key = '' THEN workspace_revision_updated_at
+		        ELSE @checkpointed_at
 		    END
 		WHERE s.id = @id
 		  AND s.org_id = @org_id
@@ -1030,11 +1071,27 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		args["lock_token"] = lockToken
 	}
 
-	tag, err := s.db.Exec(ctx, query, args)
+	query += `
+		RETURNING workspace_revision, workspace_revision_updated_at`
+
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return false, fmt.Errorf("publish checkpoint: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("collect published checkpoint: %w", err)
+	}
+	if snapshotKey != "" {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, "checkpoint")
+	}
+	return true, nil
 }
 
 func (s *SessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error {
@@ -1076,7 +1133,7 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
-		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusCompleted || status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
@@ -1133,10 +1190,15 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats); err != nil {
 		return err
 	}
-	if err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats); err != nil {
+	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
+	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	return nil
 }
 
 func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult, diffStats json.RawMessage) error {
@@ -1203,6 +1265,27 @@ func (s *SessionStore) publishStatus(ctx context.Context, session *models.Sessio
 	}
 	if err := s.streams.PublishStatus(ctx, session); err != nil {
 		s.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to publish session status to Redis")
+	}
+}
+
+func (s *SessionStore) publishWorkspaceGenerationChanged(ctx context.Context, orgID, sessionID uuid.UUID, revision int64, updatedAt time.Time, reason string) {
+	if s.streams == nil {
+		return
+	}
+	event := models.SessionWorkspaceGenerationChangedEvent{
+		SessionID:                  sessionID,
+		OrgID:                      orgID,
+		WorkspaceRevision:          revision,
+		WorkspaceRevisionUpdatedAt: updatedAt.UTC(),
+		Reason:                     reason,
+	}
+	if err := s.streams.PublishEvent(ctx, models.SessionStreamEvent{
+		Type:      models.SessionStreamEventWorkspaceGenerationChanged,
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Data:      event,
+	}); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("reason", reason).Msg("failed to publish workspace generation event to Redis")
 	}
 }
 
@@ -1547,10 +1630,15 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
 		return err
 	}
-	if err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats); err != nil {
+	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
+	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	return nil
 }
 
 func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {
@@ -1563,9 +1651,16 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 	// than clobbering the Changes tab with a blank value.
 	query := `
 		UPDATE sessions
-		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
+		SET status = 'idle',
+		    -- Multiple sibling tabs can complete from the same in-memory
+		    -- session.CurrentTurn. Advance relative to the row so concurrent
+		    -- completions are counted instead of last-writer-wins collapsing
+		    -- them to the same value.
+		    current_turn = GREATEST(current_turn + 1, @current_turn),
+		    last_activity_at = now(),
 		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted',
+		    workspace_generation = workspace_generation + 1,
 		    pr_creation_state = 'idle', pr_creation_error = NULL,
 		    -- Only reset pr_push_state when no push is currently in flight.
 		    -- A concurrent turn-complete from the orchestrator must never
@@ -1587,7 +1682,7 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
-		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
+		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := db.Exec(ctx, query, pgx.NamedArgs{
@@ -1612,7 +1707,7 @@ func shouldPersistDiffSnapshot(result *models.SessionResult) bool {
 	return result != nil && result.Diff != nil && result.DiffBaseCommitSHA != nil && *result.DiffBaseCommitSHA != ""
 }
 
-func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) error {
+func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) (workspaceRevisionUpdate, error) {
 	stats := parseDiffStatsPayload(diffStats)
 	source := result.DiffSource
 	if source == "" {
@@ -1652,14 +1747,17 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		"lines_removed":   stats.Removed,
 		"captured_at":     capturedAt,
 	}).Scan(&snapshotID); err != nil {
-		return fmt.Errorf("insert session diff snapshot: %w", err)
+		return workspaceRevisionUpdate{}, fmt.Errorf("insert session diff snapshot: %w", err)
 	}
 
-	_, err := db.Exec(ctx, `
+	rows, err := db.Query(ctx, `
 		UPDATE sessions
 		SET latest_diff_snapshot_id = @snapshot_id,
-		    diff_collected_at = @captured_at
-		WHERE id = @session_id AND org_id = @org_id`,
+		    diff_collected_at = @captured_at,
+		    workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = @captured_at
+		WHERE id = @session_id AND org_id = @org_id
+		RETURNING workspace_revision, workspace_revision_updated_at`,
 		pgx.NamedArgs{
 			"snapshot_id": snapshotID,
 			"captured_at": capturedAt,
@@ -1668,9 +1766,16 @@ func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, se
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("update session latest diff snapshot: %w", err)
+		return workspaceRevisionUpdate{}, fmt.Errorf("update session latest diff snapshot: %w", err)
 	}
-	return nil
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if err != nil {
+		return workspaceRevisionUpdate{}, fmt.Errorf("collect session workspace revision: %w", err)
+	}
+	return workspaceRevisionUpdate{Revision: updated.Revision, UpdatedAt: updated.UpdatedAt}, nil
 }
 
 // MarkLatestDiffSnapshotPushed normalizes the latest persisted diff snapshot
@@ -1794,6 +1899,48 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 	return err
 }
 
+// MarkRunningWithSandboxState flips status and sandbox_state in a single
+// UPDATE so a caller can keep the session "running" while sibling thread
+// runtimes mutate the shared sandbox without ever leaving the row in a
+// half-updated state. Mirrors UpdateStatus's "clear failure fields and
+// refresh started_at when entering running" semantics so a session resumed
+// through the sibling-runtime keepalive path looks indistinguishable from
+// one resumed via UpdateStatus(SessionStatusRunning) followed by
+// UpdateSandboxState.
+func (s *SessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, sandboxState models.SandboxState) error {
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET status = @status,
+			sandbox_state = @sandbox_state,
+			started_at = now(),
+			completed_at = NULL,
+			error = NULL,
+			failure_explanation = NULL,
+			failure_category = NULL,
+			failure_next_steps = NULL,
+			failure_retry_advised = false,
+			last_activity_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		RETURNING `+sessionSelectColumns, pgx.NamedArgs{
+		"id":            sessionID,
+		"org_id":        orgID,
+		"status":        string(models.SessionStatusRunning),
+		"sandbox_state": string(sandboxState),
+	})
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
+}
+
 // UpdatePRCreationState transitions pr_creation_state and sets/clears
 // pr_creation_error atomically. The error is only preserved in the `failed`
 // state — any other transition clears it so a prior failure doesn't leak into
@@ -1845,6 +1992,34 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 	hydrateSessionPolicy(&session)
 	s.publishStatus(ctx, &session)
 	return nil
+}
+
+// TryMarkPRCreationQueued atomically starts PR creation from any non-in-flight,
+// non-terminal state. It rejects concurrent submitters and sessions that have
+// already created a PR.
+func (s *SessionStore) TryMarkPRCreationQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	query := `UPDATE sessions
+		SET pr_creation_state = 'queued', pr_creation_error = NULL
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND pr_creation_state NOT IN ('queued', 'pushing', 'succeeded')
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return false, err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return true, nil
 }
 
 // TryMarkPRPushQueued atomically transitions pr_push_state from any non-in-
@@ -2049,14 +2224,31 @@ func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessio
 		SET snapshot_key = pending_snapshot_key,
 		    pending_snapshot_key = NULL,
 		    pending_snapshot_set_at = NULL,
-		    sandbox_state = 'snapshotted'
-		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		    sandbox_state = 'snapshotted',
+		    workspace_revision = workspace_revision + 1,
+		    workspace_revision_updated_at = NOW()
+		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key
+		RETURNING workspace_revision, workspace_revision_updated_at`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,
 		"org_id":       orgID,
 		"expected_key": expectedKey,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "promote_pending_snapshot")
+	return nil
 }
 
 // ClearPendingSnapshot NULLs pending_snapshot_key (and pending_snapshot_set_at
@@ -2178,19 +2370,29 @@ func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uui
 				  AND org_id = @org_id
 				  AND preview_holding_container = TRUE
 				LIMIT 1
-			), FALSE) AS preview_holds
+			), FALSE) AS preview_holds,
+			COALESCE((
+				SELECT TRUE
+				FROM session_sandbox_holders h
+				WHERE h.session_id = released.id
+				  AND h.org_id = @org_id
+				  AND h.status IN ('active', 'draining')
+				  AND h.expires_at > now()
+				LIMIT 1
+			), FALSE) AS sandbox_holds
 		FROM released`
 
 	var cid string
 	var previewHolds bool
+	var sandboxHolds bool
 	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
-	}).Scan(&cid, &previewHolds)
+	}).Scan(&cid, &previewHolds, &sandboxHolds)
 	if err != nil {
 		return false, "", fmt.Errorf("release turn hold: %w", err)
 	}
-	return cid != "" && !previewHolds, cid, nil
+	return cid != "" && !previewHolds && !sandboxHolds, cid, nil
 }
 
 // PeekContainerID returns the session's current container_id (empty when
@@ -2217,6 +2419,26 @@ func (s *SessionStore) PeekContainerID(ctx context.Context, orgID, sessionID uui
 		return "", fmt.Errorf("peek container id: %w", err)
 	}
 	return containerID, nil
+}
+
+// PeekContainerOwnership returns the current container_id and worker_node_id
+// using a narrow lookup for sandbox race handling. Empty strings represent
+// NULL values or a missing row.
+func (s *SessionStore) PeekContainerOwnership(ctx context.Context, orgID, sessionID uuid.UUID) (containerID string, workerNodeID string, err error) {
+	query := `SELECT COALESCE(container_id, ''), COALESCE(worker_node_id, '')
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&containerID, &workerNodeID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("peek container ownership: %w", err)
+	}
+	return containerID, workerNodeID, nil
 }
 
 // PublishHydratedContainerID is the preview-hydrate CAS: a preview has just
@@ -2350,6 +2572,13 @@ func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uu
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id
+		      AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining')
+		      AND h.expires_at > now()
 		  )`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,
@@ -2394,6 +2623,13 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id
+		      AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining')
+		      AND h.expires_at > now()
 		  )`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,
@@ -2440,6 +2676,13 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id
+		      AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining')
+		      AND h.expires_at > now()
 		  )
 		ORDER BY id ASC
 		LIMIT 100`
