@@ -126,7 +126,7 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     [[ -z "$line" || "$line" == \#* ]] && continue
     key="${line%%=*}"
     value="${line#*=}"
-    if [ -z "${!key+x}" ]; then
+    if [ -z "${!key:-}" ]; then
       export "$key=$value"
     fi
   done <<< "$DECRYPTED"
