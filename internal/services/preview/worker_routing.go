@@ -28,6 +28,7 @@ type WorkerNodeMetadata struct {
 	PreviewCapable         bool   `json:"preview_capable,omitempty"`
 	PreviewInternalBaseURL string `json:"preview_internal_base_url,omitempty"`
 	StaticEgressCapable    bool   `json:"static_egress_capable,omitempty"`
+	StaticEgressPublicIP   string `json:"static_egress_public_ip,omitempty"`
 }
 
 // WorkerNode is a preview-routable worker node.
@@ -40,6 +41,7 @@ type WorkerNode struct {
 // WorkerSelectionRequirements constrains cold-start worker selection.
 type WorkerSelectionRequirements struct {
 	StaticEgressRequired bool
+	StaticEgressPublicIP string
 }
 
 // WorkerSelector resolves preview-owning workers and selects workers for cold starts.
@@ -53,13 +55,17 @@ func NewWorkerSelector(nodes *db.NodeStore, previews *db.PreviewStore) *WorkerSe
 	return &WorkerSelector{nodes: nodes, previews: previews}
 }
 
-func parseWorkerNode(node models.Node) (WorkerNode, error) {
+func parseWorkerNodeMetadata(node models.Node) (WorkerNodeMetadata, error) {
 	var metadata WorkerNodeMetadata
 	if len(node.Metadata) > 0 {
 		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
-			return WorkerNode{}, fmt.Errorf("parse node metadata: %w", err)
+			return WorkerNodeMetadata{}, fmt.Errorf("parse node metadata: %w", err)
 		}
 	}
+	return metadata, nil
+}
+
+func parseWorkerNodeFromMetadata(node models.Node, metadata WorkerNodeMetadata) (WorkerNode, error) {
 	if !metadata.PreviewCapable {
 		return WorkerNode{}, fmt.Errorf("node %s is not preview-capable", node.ID)
 	}
@@ -74,17 +80,28 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 	}, nil
 }
 
+func parseWorkerNode(node models.Node) (WorkerNode, error) {
+	metadata, err := parseWorkerNodeMetadata(node)
+	if err != nil {
+		return WorkerNode{}, err
+	}
+	return parseWorkerNodeFromMetadata(node, metadata)
+}
+
 func parseWorkerNodeWithRequirements(node models.Node, req WorkerSelectionRequirements) (WorkerNode, error) {
-	var metadata WorkerNodeMetadata
-	if len(node.Metadata) > 0 {
-		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
-			return WorkerNode{}, fmt.Errorf("parse node metadata: %w", err)
+	metadata, err := parseWorkerNodeMetadata(node)
+	if err != nil {
+		return WorkerNode{}, err
+	}
+	if req.StaticEgressRequired {
+		if req.StaticEgressPublicIP == "" {
+			return WorkerNode{}, fmt.Errorf("static egress public IP is required")
+		}
+		if !workerMetadataMatchesStaticEgress(metadata, req.StaticEgressPublicIP) {
+			return WorkerNode{}, fmt.Errorf("node %s is not static-egress capable", node.ID)
 		}
 	}
-	if req.StaticEgressRequired && !metadata.StaticEgressCapable {
-		return WorkerNode{}, fmt.Errorf("node %s is not static-egress capable", node.ID)
-	}
-	return parseWorkerNode(node)
+	return parseWorkerNodeFromMetadata(node, metadata)
 }
 
 func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
@@ -107,6 +124,15 @@ func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
 
 func isResolvableNodeStatus(status models.NodeStatus) bool {
 	return status == models.NodeStatusActive || status == models.NodeStatusDraining
+}
+
+func nodeCanClaimSessionJobs(node models.Node) bool {
+	mode := string(node.Mode)
+	return mode == "worker" || mode == "all"
+}
+
+func workerMetadataMatchesStaticEgress(metadata WorkerNodeMetadata, publicIP string) bool {
+	return publicIP != "" && metadata.StaticEgressCapable && metadata.StaticEgressPublicIP == publicIP
 }
 
 // ResolveNode returns a routable worker by ID. Existing previews and live
@@ -171,23 +197,30 @@ func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Conte
 	return s.selectLeastLoadedNode(ctx, nil, req)
 }
 
-// HasStaticEgressCapableWorker reports whether at least one active worker can
-// cold-start static-egress sandboxes.
-func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context) (bool, error) {
+// HasStaticEgressCapableWorker reports whether all active workers that can
+// claim session jobs are verified for static egress. Session jobs are claimed
+// from the generic jobs queue, so mixed-capability worker fleets cannot safely
+// expose the org setting as available.
+func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error) {
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {
 		return false, err
 	}
+	hasSessionWorker := false
 	for _, node := range nodes {
-		worker, err := parseWorkerNodeWithRequirements(node, WorkerSelectionRequirements{StaticEgressRequired: true})
-		if err != nil {
+		if !nodeCanClaimSessionJobs(node) {
 			continue
 		}
-		if worker.Mode == "worker" || worker.Mode == "all" {
-			return true, nil
+		hasSessionWorker = true
+		metadata, err := parseWorkerNodeMetadata(node)
+		if err != nil {
+			return false, nil
+		}
+		if !workerMetadataMatchesStaticEgress(metadata, publicIP) {
+			return false, nil
 		}
 	}
-	return false, nil
+	return hasSessionWorker, nil
 }
 
 func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, req WorkerSelectionRequirements) (WorkerNode, error) {
@@ -206,7 +239,7 @@ func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map
 		if err != nil {
 			continue
 		}
-		if worker.Mode != "worker" && worker.Mode != "all" {
+		if !nodeCanClaimSessionJobs(node) {
 			continue
 		}
 		eligible = append(eligible, worker)

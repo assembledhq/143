@@ -47,6 +47,7 @@ type BranchPreviewHandler struct {
 	selector              *preview.WorkerSelector
 	stopper               *preview.WorkerStopper
 	orgStore              agent.OrgSettingsReader
+	staticEgressPublicIP  string
 	baseURL               string
 	previewOriginTemplate string
 	// configContentCache caches raw .143/config.json content keyed by
@@ -75,8 +76,9 @@ func (h *BranchPreviewHandler) SetWorkerRuntime(jobs *db.JobStore, selector *pre
 	h.selector = selector
 }
 
-func (h *BranchPreviewHandler) SetStaticEgressSettings(orgStore agent.OrgSettingsReader) {
+func (h *BranchPreviewHandler) SetStaticEgressSettings(orgStore agent.OrgSettingsReader, publicIP string) {
 	h.orgStore = orgStore
+	h.staticEgressPublicIP = publicIP
 }
 
 func (h *BranchPreviewHandler) SetStopper(stopper *preview.WorkerStopper) {
@@ -1598,7 +1600,7 @@ func (h *BranchPreviewHandler) workerSelectionRequirements(ctx context.Context, 
 	if h == nil {
 		return preview.WorkerSelectionRequirements{}, nil
 	}
-	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID)
+	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgressPublicIP)
 }
 
 func (h *BranchPreviewHandler) previewURL(id uuid.UUID) string {

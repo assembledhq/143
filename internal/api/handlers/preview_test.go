@@ -2387,6 +2387,51 @@ func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetw
 	require.Error(t, result.Err, "network mismatch should surface an actionable error")
 }
 
+func TestClassifyAcquireSandboxErrorPreservesNetworkErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		result         acquireSandboxResult
+		expectedStatus int
+		expectedCode   string
+		expectedMsg    string
+	}{
+		{
+			name: "restart required",
+			result: acquireSandboxResult{
+				ErrCode: "NETWORK_SETTING_RESTART_REQUIRED",
+				Err:     errors.New("restart environment to apply network setting"),
+			},
+			expectedStatus: http.StatusConflict,
+			expectedCode:   "NETWORK_SETTING_RESTART_REQUIRED",
+			expectedMsg:    "restart environment to apply network setting",
+		},
+		{
+			name: "static egress unavailable",
+			result: acquireSandboxResult{
+				ErrCode: "STATIC_EGRESS_UNAVAILABLE",
+				Err:     errors.New("static egress is enabled for this org, but this worker is not static-egress capable"),
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedCode:   "STATIC_EGRESS_UNAVAILABLE",
+			expectedMsg:    "static egress is enabled for this org, but this worker is not static-egress capable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := classifyAcquireSandboxError(tt.result)
+
+			require.Equal(t, tt.expectedStatus, actual.status, "network acquisition errors should use actionable HTTP statuses")
+			require.Equal(t, tt.expectedCode, actual.code, "network acquisition errors should preserve their specific codes")
+			require.Equal(t, tt.expectedMsg, actual.message, "network acquisition errors should preserve the actionable message")
+		})
+	}
+}
+
 // TestClassifyLaunchError verifies the error-code mapping that turns
 // preview-launch failures into actionable HTTP responses. Before this
 // existed, every launch failure became a generic 422 PREVIEW_START_FAILED

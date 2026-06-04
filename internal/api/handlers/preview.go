@@ -562,6 +562,27 @@ func classifyLaunchError(err error) *previewHTTPError {
 	return newPreviewHTTPError(http.StatusUnprocessableEntity, classified.Code, classified.Message, err)
 }
 
+func classifyAcquireSandboxError(acq acquireSandboxResult) *previewHTTPError {
+	switch acq.ErrCode {
+	case "SNAPSHOT_EXPIRED":
+		return newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "SNAPSHOT_UNAVAILABLE":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "NO_SANDBOX":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "SANDBOX_BUSY":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "NETWORK_SETTING_RESTART_REQUIRED":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "STATIC_EGRESS_UNAVAILABLE":
+		return newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case preview.PreviewCapacityCode:
+		return newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, preview.PreviewCapacityMessage, acq.Err)
+	default:
+		return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
+	}
+}
+
 // =============================================================================
 // POST /api/v1/sessions/{id}/preview — Start a preview
 // =============================================================================
@@ -729,20 +750,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			abortReason = preview.PreviewCapacityMessage
 		}
 		h.manager.AbortReservation(ctx, reservation, "", abortReason)
-		switch acq.ErrCode {
-		case "SNAPSHOT_EXPIRED":
-			return nil, newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "SNAPSHOT_UNAVAILABLE":
-			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "NO_SANDBOX":
-			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "SANDBOX_BUSY":
-			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case preview.PreviewCapacityCode:
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, preview.PreviewCapacityMessage, acq.Err)
-		default:
-			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
-		}
+		return nil, classifyAcquireSandboxError(acq)
 	}
 	sb := acq.Sandbox
 
@@ -874,10 +882,10 @@ func (h *PreviewHandler) workerSelectionRequirements(ctx context.Context, orgID 
 	if h == nil {
 		return preview.WorkerSelectionRequirements{}, nil
 	}
-	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID)
+	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgress.PublicIP)
 }
 
-func previewWorkerSelectionRequirements(ctx context.Context, orgStore agent.OrgSettingsReader, orgID uuid.UUID) (preview.WorkerSelectionRequirements, error) {
+func previewWorkerSelectionRequirements(ctx context.Context, orgStore agent.OrgSettingsReader, orgID uuid.UUID, staticEgressPublicIP string) (preview.WorkerSelectionRequirements, error) {
 	if orgStore == nil {
 		return preview.WorkerSelectionRequirements{}, nil
 	}
@@ -889,7 +897,10 @@ func previewWorkerSelectionRequirements(ctx context.Context, orgStore agent.OrgS
 	if err != nil {
 		return preview.WorkerSelectionRequirements{}, err
 	}
-	return preview.WorkerSelectionRequirements{StaticEgressRequired: settings.SandboxNetwork.StaticEgressEnabled}, nil
+	return preview.WorkerSelectionRequirements{
+		StaticEgressRequired: settings.SandboxNetwork.StaticEgressEnabled,
+		StaticEgressPublicIP: staticEgressPublicIP,
+	}, nil
 }
 
 // =============================================================================

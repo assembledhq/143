@@ -26,7 +26,7 @@ type OrgSettingsInvalidator interface {
 }
 
 type StaticEgressWorkerChecker interface {
-	HasStaticEgressCapableWorker(ctx context.Context) (bool, error)
+	HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error)
 }
 
 type SettingsHandler struct {
@@ -133,14 +133,14 @@ func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Reques
 	status := h.staticEgress
 	reason := status.UnavailableReason
 	if status.Available && h.workers != nil {
-		hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(r.Context())
+		hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(r.Context(), status.PublicIP)
 		if workerErr != nil {
 			h.logger.Warn().Err(workerErr).Msg("failed to verify static egress worker availability")
 			status.Available = false
 			reason = "failed to verify static egress worker availability"
 		} else if !hasWorker {
 			status.Available = false
-			reason = "no active static-egress-capable workers are available"
+			reason = "not all active session workers are static-egress-capable for the configured public IP"
 		}
 	}
 	if !status.Available && reason == "" {

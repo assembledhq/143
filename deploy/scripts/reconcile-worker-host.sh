@@ -14,13 +14,15 @@ STATIC_EGRESS_DNS_IP="172.31.0.2"
 STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-}"
 STATIC_EGRESS_CAPABILITY_FILE="/etc/143/static-egress-capable"
 STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
+STATIC_EGRESS_SECRETS_FILE="${STATIC_EGRESS_SECRETS_FILE:-/opt/143/static-egress-worker.env}"
 DEFAULT_NETWORK="${2:-143_default}"
 
 load_static_egress_env_key() {
   local key="$1"
+  local file="$2"
   local value
 
-  value="$(grep -E "^${key}=" "$STATIC_EGRESS_ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  value="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
   if [ -n "$value" ]; then
     printf -v "$key" '%s' "$value"
     export "$key"
@@ -29,10 +31,6 @@ load_static_egress_env_key() {
 
 load_static_egress_env() {
   local key
-
-  if [ ! -f "$STATIC_EGRESS_ENV_FILE" ]; then
-    return 0
-  fi
 
   for key in \
     STATIC_EGRESS_ENABLED \
@@ -43,7 +41,10 @@ load_static_egress_env() {
     STATIC_EGRESS_WORKER_WG_ADDRESS \
     STATIC_EGRESS_PROBE_IMAGE; do
     if [ -z "${!key:-}" ]; then
-      load_static_egress_env_key "$key"
+      load_static_egress_env_key "$key" "$STATIC_EGRESS_ENV_FILE"
+    fi
+    if [ -z "${!key:-}" ]; then
+      load_static_egress_env_key "$key" "$STATIC_EGRESS_SECRETS_FILE"
     fi
   done
 }

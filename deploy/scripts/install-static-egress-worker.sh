@@ -14,6 +14,7 @@ WG_ENDPOINT="${STATIC_EGRESS_GATEWAY_PUBLIC_IP:?STATIC_EGRESS_GATEWAY_PUBLIC_IP 
 PUBLIC_IP="${STATIC_EGRESS_PUBLIC_IP:?STATIC_EGRESS_PUBLIC_IP is required}"
 STATIC_EGRESS_NETWORK="${STATIC_EGRESS_NETWORK:-143-sandbox-static-egress}"
 STATIC_EGRESS_SUBNET="${STATIC_EGRESS_SUBNET:-172.31.0.0/24}"
+STATIC_EGRESS_DNS_IP="${STATIC_EGRESS_DNS_IP:-172.31.0.2}"
 TABLE_ID="${STATIC_EGRESS_ROUTE_TABLE:-143}"
 FWMARK="${STATIC_EGRESS_FWMARK:-0x143}"
 CAPABILITY_FILE="/etc/143/static-egress-capable"
@@ -33,7 +34,7 @@ cat > "/etc/wireguard/${WG_INTERFACE}.conf" <<WGCONF
 PrivateKey = ${WG_PRIVATE_KEY}
 Address = ${WG_ADDRESS}
 Table = off
-PostUp = ip rule replace fwmark ${FWMARK} table ${TABLE_ID}; ip route replace default dev %i table ${TABLE_ID}
+PostUp = ip rule del fwmark ${FWMARK} table ${TABLE_ID} 2>/dev/null || true; ip rule add fwmark ${FWMARK} table ${TABLE_ID}; ip route replace default dev %i table ${TABLE_ID}
 PostDown = ip rule del fwmark ${FWMARK} table ${TABLE_ID} 2>/dev/null || true; ip route flush table ${TABLE_ID} 2>/dev/null || true
 
 [Peer]
@@ -73,11 +74,12 @@ if [ "${STATIC_EGRESS_SKIP_PROBES:-false}" != "true" ]; then
   fi
   if ! observed_ip="$(docker run --rm --network "$STATIC_EGRESS_NETWORK" \
     --name "143-static-egress-probe-$$" \
+    --dns "$STATIC_EGRESS_DNS_IP" \
     --pull never \
     --cap-drop ALL \
     --security-opt no-new-privileges \
     "$PROBE_IMAGE" \
-    /bin/sh -c 'curl -fsS --max-time "$1" "$2" | tr -d "[:space:]"' \
+    /bin/sh -c 'url="$2"; host="${url#*://}"; host="${host%%/*}"; host="${host%%:*}"; getent hosts "$host" >/dev/null; curl -fsS --max-time "$1" "$2" | tr -d "[:space:]"' \
     sh "$PROBE_TIMEOUT" "$PROBE_URL")"; then
     echo "ERROR: static egress probe container failed on network '$STATIC_EGRESS_NETWORK' using image '$PROBE_IMAGE'." >&2
     echo "       Ensure the probe image is present locally or set STATIC_EGRESS_PROBE_IMAGE." >&2

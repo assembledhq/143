@@ -37,7 +37,7 @@ type testStaticEgressWorkerChecker struct {
 	err       error
 }
 
-func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Context) (bool, error) {
+func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Context, string) (bool, error) {
 	return c.available, c.err
 }
 
@@ -178,7 +178,7 @@ func TestSettingsHandler_GetNetworkStatusRequiresCapableWorker(t *testing.T) {
 	handler.GetNetworkStatus(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "network status should return success")
 	require.Contains(t, w.Body.String(), `"static_egress_available":false`, "network status should be unavailable without capable workers")
-	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"no active static-egress-capable workers are available"`, "network status should explain worker availability")
+	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"not all active session workers are static-egress-capable for the configured public IP"`, "network status should explain worker availability")
 	require.Contains(t, w.Body.String(), `"static_egress_public_ip":"203.0.113.10"`, "network status should still expose the configured allowlist IP")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

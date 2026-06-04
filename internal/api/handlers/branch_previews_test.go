@@ -147,12 +147,13 @@ func TestBranchPreviewHandlerWorkerSelectionRequirementsRequireStaticEgress(t *t
 	handler := NewBranchPreviewHandler(nil, nil, nil, nil, "", "")
 	handler.SetStaticEgressSettings(previewStaticEgressOrgStore{
 		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
-	})
+	}, "203.0.113.10")
 
 	reqs, err := handler.workerSelectionRequirements(context.Background(), orgID)
 
 	require.NoError(t, err, "branch preview worker selection should read org network settings")
 	require.True(t, reqs.StaticEgressRequired, "branch preview worker selection should require static-egress-capable workers for opted-in orgs")
+	require.Equal(t, "203.0.113.10", reqs.StaticEgressPublicIP, "branch preview worker selection should require workers verified against the configured static egress public IP")
 }
 
 func TestBranchPreviewRuntimeMatchesWorkerRequirements(t *testing.T) {
