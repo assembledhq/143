@@ -3193,10 +3193,8 @@ func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessag
 	if len(selected) == 0 {
 		return json.RawMessage(`{}`)
 	}
-	events := make([]string, 0, len(selected)+1)
-	for _, value := range selected {
-		events = append(events, value)
-	}
+	events := make([]string, 0, len(selected))
+	events = append(events, selected...)
 	encoded, err := json.Marshal(slackNotificationSubscriptionConfig{Events: events})
 	if err != nil {
 		return json.RawMessage(`{}`)
