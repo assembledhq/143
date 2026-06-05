@@ -188,6 +188,30 @@ type SlackOutboundMessage struct {
 	UpdatedAt          time.Time                `db:"updated_at" json:"updated_at"`
 }
 
+type SessionAttributionSource string
+
+const (
+	SessionAttributionSourceSlack SessionAttributionSource = "slack"
+)
+
+func (s SessionAttributionSource) Validate() error {
+	switch s {
+	case SessionAttributionSourceSlack:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionAttributionSource: %q", s)
+	}
+}
+
+type SessionAttribution struct {
+	ID             uuid.UUID                `db:"id" json:"id"`
+	OrgID          uuid.UUID                `db:"org_id" json:"org_id"`
+	SessionID      uuid.UUID                `db:"session_id" json:"session_id"`
+	Source         SessionAttributionSource `db:"source" json:"source"`
+	SourceMetadata json.RawMessage          `db:"source_metadata" json:"source_metadata,omitempty"`
+	CreatedAt      time.Time                `db:"created_at" json:"created_at"`
+}
+
 type SlackStartSessionJobPayload struct {
 	OrgID               string   `json:"org_id"`
 	SlackInboundEventID string   `json:"slack_inbound_event_id"`

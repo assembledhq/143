@@ -75,15 +75,17 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Channel configuration from Slack can manage a compact initial notification event subscription set, persisted through the existing channel subscription JSON.
 - Slack-started team sessions are labeled in Slack acknowledgement and final messages when the triggering Slack user is not mapped to a 143 user.
 - Slack progress/final/human-input/notification messages are recorded in `slack_outbound_messages`.
+- Slack-started sessions write sanitized source metadata to `session_attributions` with `source = slack`, including team/channel/thread/permalink/user/team-session attribution without duplicating raw Slack message text.
 - Human-input requests can be delivered to the originating Slack thread and answered from Slack through choice buttons or a free-form modal by linked users.
 - Slack notifications can fan out to subscribed channels or configured Slack user DMs from channel setting subscription JSON.
-- Implemented notification event paths include session completion/failure, automation completion/failure through session completion hooks, PR opened, preview ready/failed, and human-input requested.
+- Implemented notification event paths include session completion/failure, automation completion/failure through session completion hooks, automation failure streaks, PR opened, preview ready/failed/stale, and human-input requested.
 - Preview actions are wired for open, refresh/restart, stop, and extend. Refresh/restart currently both recycle the preview.
 - Slack preview actions use a shared Slack authorization service for channel capability checks, mapped-user membership roles, and the narrow unmapped-user allowance for originating team sessions.
 - Slack channel invite setup posts a channel-visible setup message with configure/start actions.
 - Channel `response_visibility = dm` is honored for Slack-started session acks, progress updates, final replies, and human-input delivery. DM delivery opens a bot DM to the originating Slack user and falls back to the thread if a DM cannot be opened.
 - Stored Slack inbound payloads redact known transient/secret fields such as `response_url`, `trigger_id`, and `token`.
 - Slackbot metrics exist for inbound events, session starts, outbound messages, Slack API failures, interaction actions, Slack Events API rate-limit signals, and Slack message update latency.
+- Slack session ack messages are saved as the latest status message so terminal progress updates can edit the original ack where Slack delivery permits.
 
 ### Remaining Work
 
@@ -96,14 +98,12 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Channel `response_visibility = dm` is not yet applied to general notification delivery; notification destinations still come from subscription JSON.
 - Slack progress rendering is still coarse. Runtime/tool/test/command/preview milestones are not normalized into sparse Slack updates.
 - Slack progress updates are not debounced by a per-thread timing policy.
-- The initial ack message is not consistently updated into the terminal state; later progress/final messages may be separate.
+- Final Slack output updates the saved status/ack message into terminal state where Slack delivery permits; final responses remain separate messages.
 - Final Slack output has next-action buttons for session, preview, and PR outcomes; more specialized outcome-specific actions such as approve/deny, repair PR, merge, and claim team session still need dedicated buttons.
 - Human-input requests do not have assigned-user DM delivery because the durable request model has no assigned-user field.
 - Human-input routing does not distinguish sensitive/personal requests from team-thread requests.
 - Team sessions with no mapped user cannot yet be claimed and answered from Slack by any authorized 143 user.
 - Specialized Slack handling for approval/deny, tool or command approval, and continue/stop/resume decisions is still generic choice/freeform behavior.
-- `automation.run.failure_streak` is not emitted.
-- `preview.stale` is not emitted.
 - Automation notification content is still basic and does not consistently include run result, PR links, preview links, and next actions.
 - Notification subscription management now has a compact Slack-native channel modal path, but richer product management and per-automation subscription flows are still missing.
 - Preview actions that are not tied to a Slack-originating team session, such as App Home preview controls or standalone preview notifications without session identity, still require a mapped authorized 143 user.
@@ -122,7 +122,6 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Slash commands always enqueue a session; they do not open missing-context modals.
 - Interactions still pass `trigger_id` through queued job payloads for modal-opening actions. Inbound event payloads redact it, but jobs still store it until the interaction handling model is moved partly into the synchronous callback path.
 - Raw Slack message text is stored in inbound event payloads for audit/retry visibility; private-message minimization has not been designed.
-- Session attribution is represented by `origin = slack` and `slack_session_links`, but there is no `session_attribution` row or `source_metadata` field carrying sanitized Slack source metadata.
 - Slack context enters sessions as prompt text rather than structured attachments/references.
 
 ## Surfaces
