@@ -658,6 +658,34 @@ func (s *AutomationRunStore) GetByRunID(ctx context.Context, orgID, runID uuid.U
 	return scanAutomationRun(row)
 }
 
+func (s *AutomationRunStore) CountConsecutiveFailures(ctx context.Context, orgID, automationID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		WITH ordered AS (
+			SELECT status,
+			       row_number() OVER (ORDER BY triggered_at DESC, id DESC) AS rn
+			FROM automation_runs
+			WHERE org_id = @org_id
+			  AND automation_id = @automation_id
+			  AND status IN ('completed', 'completed_noop', 'failed', 'skipped')
+		),
+		boundary AS (
+			SELECT COALESCE(MIN(rn), 2147483647) AS first_non_failed
+			FROM ordered
+			WHERE status <> 'failed'
+		)
+		SELECT count(*)
+		FROM ordered, boundary
+		WHERE status = 'failed'
+		  AND rn < boundary.first_non_failed`,
+		pgx.NamedArgs{"org_id": orgID, "automation_id": automationID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count consecutive automation failures: %w", err)
+	}
+	return count, nil
+}
+
 type AutomationRunFilters struct {
 	Limit  int
 	Cursor string

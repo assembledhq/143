@@ -144,3 +144,71 @@ func TestSlackUserLinkStore_DeleteByID_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, pgx.ErrNoRows, "DeleteByID should return ErrNoRows when no link is found")
 	require.NoError(t, mock.ExpectationsWereMet(), "DeleteByID not-found should satisfy expected SQL")
 }
+
+func TestSessionAttributionStore_Create(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	attributionID := uuid.New()
+	now := time.Now()
+	metadata := json.RawMessage(`{"slack_team_id":"T123","slack_channel_id":"C123","team_session":true}`)
+	store := NewSessionAttributionStore(mock)
+
+	mock.ExpectQuery(`INSERT INTO session_attributions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "source", "source_metadata", "created_at",
+		}).AddRow(
+			attributionID, orgID, sessionID, models.SessionAttributionSourceSlack, metadata, now,
+		))
+
+	attribution := &models.SessionAttribution{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		Source:         models.SessionAttributionSourceSlack,
+		SourceMetadata: metadata,
+	}
+
+	err = store.Create(context.Background(), attribution)
+
+	require.NoError(t, err, "Create should persist an org-scoped session attribution")
+	require.Equal(t, attributionID, attribution.ID, "Create should scan the stored attribution")
+	require.Equal(t, metadata, attribution.SourceMetadata, "Create should preserve sanitized source metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "Create should satisfy expected SQL")
+}
+
+func TestSessionAttributionStore_Create_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	metadata := json.RawMessage(`{"slack_team_id":"T123"}`)
+	store := NewSessionAttributionStore(mock)
+
+	mock.ExpectQuery(`INSERT INTO session_attributions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "source", "source_metadata", "created_at",
+		}))
+
+	attribution := &models.SessionAttribution{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		Source:         models.SessionAttributionSourceSlack,
+		SourceMetadata: metadata,
+	}
+
+	err = store.Create(context.Background(), attribution)
+
+	require.NoError(t, err, "Create should be idempotent when attribution already exists for the session")
+	require.NoError(t, mock.ExpectationsWereMet(), "Create conflict path should satisfy expected SQL")
+}
