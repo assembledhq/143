@@ -3,7 +3,6 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -629,7 +628,7 @@ func TestLinearTaskManager_DoGraphQL_RateLimitReturnsTypedError(t *testing.T) {
 	_, err := tm.GetTask(context.Background(), "ENG-123")
 	require.Error(t, err, "GetTask should surface a 429 from Linear")
 	var rl *LinearRateLimitError
-	require.True(t, errors.As(err, &rl),
+	require.ErrorAs(t, err, &rl,
 		"429 from Linear should map to *LinearRateLimitError so retry orchestration can read Retry-After")
 	require.Equal(t, "30", rl.RetryAfter, "RateLimitError should preserve the Retry-After header")
 }
