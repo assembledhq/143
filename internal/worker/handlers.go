@@ -3522,7 +3522,7 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 		return enqueueSlackSessionContinuationPrompt(ctx, stores, orgID, sessionID, prompt)
 	case "slack_merge_pr":
 		if stores == nil || stores.PullRequests == nil || services == nil || services.PR == nil {
-			return fmt.Errorf("Slack PR merge dependencies are not configured")
+			return fmt.Errorf("slack PR merge dependencies are not configured")
 		}
 		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
 		if err != nil {
