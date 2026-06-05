@@ -212,3 +212,52 @@ func TestSessionAttributionStore_Create_Idempotent(t *testing.T) {
 	require.NoError(t, err, "Create should be idempotent when attribution already exists for the session")
 	require.NoError(t, mock.ExpectationsWereMet(), "Create conflict path should satisfy expected SQL")
 }
+
+func TestSlackSessionLinkStore_AppHomePreviewQueryIncludesLinkedSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+	store := NewSlackSessionLinkStore(mock)
+
+	mock.ExpectQuery(`LEFT JOIN slack_session_links sl`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"preview_id", "name", "status", "expires_at", "updated_at"}).
+			AddRow(previewID, "web", "ready", nil, now))
+
+	got, err := store.ListActivePreviewsForSlackUser(context.Background(), orgID, "T123", "U123", 5)
+
+	require.NoError(t, err, "App Home preview query should include linked-session previews")
+	require.Equal(t, []SlackHomePreviewSummary{{PreviewID: previewID, Name: "web", Status: "ready", UpdatedAt: now}}, got, "App Home preview query should scan summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "preview query should include Slack session links")
+}
+
+func TestSlackSessionLinkStore_AppHomeAutomationRunsIncludeSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	automationID := uuid.New()
+	now := time.Now()
+	store := NewSlackSessionLinkStore(mock)
+
+	mock.ExpectQuery(`jsonb_array_elements_text\(COALESCE\(scs.notification_subscriptions->'automations'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"run_id", "automation_id", "goal_snapshot", "status", "result_summary", "session_id", "updated_at"}).
+			AddRow(runID, automationID, "ship the thing", "completed", nil, nil, now))
+
+	got, err := store.ListRecentAutomationRunsForSlackUser(context.Background(), orgID, "T123", "U123", 5)
+
+	require.NoError(t, err, "App Home automation query should include subscribed automations")
+	require.Equal(t, []SlackHomeAutomationRunSummary{{RunID: runID, AutomationID: automationID, GoalSnapshot: "ship the thing", Status: "completed", UpdatedAt: now}}, got, "App Home automation query should scan summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation query should inspect channel automation subscriptions")
+}

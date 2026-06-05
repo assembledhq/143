@@ -135,6 +135,53 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 	}
 }
 
+func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) {
+	t.Parallel()
+
+	subscriber := "U999"
+	tests := []struct {
+		name          string
+		settings      models.SlackChannelSettings
+		expectedDests []slackNotificationDestination
+	}{
+		{
+			name: "thread visibility sends channel plus explicit DM subscribers",
+			settings: models.SlackChannelSettings{
+				SlackTeamID:               "T123",
+				SlackChannelID:            "C123",
+				ResponseVisibility:        "thread",
+				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
+			},
+			expectedDests: []slackNotificationDestination{
+				{TeamID: "T123", ChannelID: "C123"},
+				{TeamID: "T123", SlackUserID: subscriber},
+			},
+		},
+		{
+			name: "dm visibility suppresses general channel notification and sends configured DMs",
+			settings: models.SlackChannelSettings{
+				SlackTeamID:               "T123",
+				SlackChannelID:            "C123",
+				ResponseVisibility:        "dm",
+				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
+			},
+			expectedDests: []slackNotificationDestination{
+				{TeamID: "T123", SlackUserID: subscriber},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationDestinations(tt.settings, slackNotificationFanoutInput{EventKind: "session.completed"})
+
+			require.Equal(t, tt.expectedDests, got, "notification destinations should honor response visibility")
+		})
+	}
+}
+
 func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
 	t.Parallel()
 
@@ -219,6 +266,38 @@ func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.
 	blocksStr := string(blocksJSON)
 	require.Contains(t, blocksStr, "automation.run.failure_streak", "channel config modal should expose automation failure-streak notifications")
 	require.Contains(t, blocksStr, `"preview.*"`, "channel config modal should expose all-preview-events wildcard subscription")
+}
+
+func TestSlackHomeOrgSelectorBlockIsActionable(t *testing.T) {
+	t.Parallel()
+
+	activeOrgID := uuid.New()
+	otherOrgID := uuid.New()
+	block := slackHomeOrgSelectorBlock([]models.MembershipSummary{
+		{OrgID: activeOrgID, OrgName: "Active", Role: models.RoleAdmin},
+		{OrgID: otherOrgID, OrgName: "Other", Role: models.RoleMember},
+	}, activeOrgID)
+
+	require.Equal(t, "actions", block.Type, "multi-org Slack App Home should render an actionable organization selector")
+	require.NotEmpty(t, block.Elements, "organization selector should include select elements")
+	require.Equal(t, "slack_select_org", block.Elements[0]["action_id"], "organization selector should route to Slack org selection")
+}
+
+func TestRenderSlackFinalBlocksIncludesSpecializedOutcomeActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	_, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:              sessionID,
+			PRCreationState: models.PRCreationStateFailed,
+		},
+		PullRequest: &models.PullRequest{GitHubPRURL: "https://github.com/acme/repo/pull/42", Status: models.PullRequestStatusOpen},
+	})
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_repair_pr"), "failed PR outcome should include a repair action")
+	require.True(t, slackBlocksContainAction(blocks, "slack_merge_pr"), "open PR outcome should include a merge action")
 }
 
 func TestSlackTeamSessionLabel(t *testing.T) {
@@ -315,6 +394,37 @@ func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
 	require.Contains(t, slackBlocksActionValue(blocks, "slack_open_preview"), orgID.String(), "open-preview action value must contain the correct org_id")
 }
 
+func TestSlackHumanInputAuthorizationAllowsTeamSessionClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	requestID := uuid.New()
+	link := models.SlackSessionLink{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		SlackTeamID:    "T123",
+		SlackChannelID: "C123",
+		TeamSession:    true,
+	}
+	slackLink := models.SlackUserLink{UserID: &userID}
+	membership := models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: models.RoleMember}
+
+	decision, err := authorizeSlackHumanInputAnswer(context.Background(), workerSlackHumanInputAuthStores{
+		sessionLinks: workerSlackSessionLinkLookup{link: link},
+		userLinks:    workerSlackUserLinkLookup{link: slackLink},
+		memberships:  workerSlackMembershipLookup{membership: membership},
+	}, orgID, sessionID, requestID, models.SlackInteractionJobPayload{
+		TeamID:    "T123",
+		ChannelID: "C123",
+		UserID:    "U123",
+	})
+
+	require.NoError(t, err, "authorized mapped Slack users should be able to claim human input on originating team sessions")
+	require.Equal(t, userID, decision.AnsweredByUserID, "human input should be answered as the mapped 143 user")
+}
+
 func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
 	ids := make([]string, 0, len(blocks))
 	for _, block := range blocks {
@@ -355,6 +465,42 @@ func slackBlocksActionValue(blocks []ingestion.SlackBlock, actionID string) stri
 		}
 	}
 	return ""
+}
+
+type workerSlackSessionLinkLookup struct {
+	link models.SlackSessionLink
+	err  error
+}
+
+func (s workerSlackSessionLinkLookup) GetBySession(context.Context, uuid.UUID, uuid.UUID) (models.SlackSessionLink, error) {
+	if s.err != nil {
+		return models.SlackSessionLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerSlackUserLinkLookup struct {
+	link models.SlackUserLink
+	err  error
+}
+
+func (s workerSlackUserLinkLookup) GetBySlackUser(context.Context, uuid.UUID, string, string) (models.SlackUserLink, error) {
+	if s.err != nil {
+		return models.SlackUserLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerSlackMembershipLookup struct {
+	membership models.OrganizationMembership
+	err        error
+}
+
+func (s workerSlackMembershipLookup) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	if s.err != nil {
+		return models.OrganizationMembership{}, s.err
+	}
+	return s.membership, nil
 }
 
 func TestSlackThreadRoutingBySource(t *testing.T) {
