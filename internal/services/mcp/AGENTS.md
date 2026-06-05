@@ -37,5 +37,6 @@ When adding a new tool (e.g., a new Notion query):
 1. Add the integration interface method in `internal/services/integration/types.go`
 2. Implement it on the provider (e.g., `notion.go`)
 3. Add the tool definition and dispatch in `tools.go` — this automatically makes it available in **both** the CLI and MCP server since they share `ToolRegistry`
-4. The CLI skills doc auto-generates from the tool registry, so no manual doc update needed
-5. Update `registry_builder.go` if new environment variables are needed
+4. The CLI skills doc auto-generates from the tool registry for sandbox prompt injection
+5. Update the public API reference at `docs/public/reference/agent-tools.mdx` so the documented command names, flags, required fields, defaults, and coding-agent use cases match the tool registry
+6. Update `registry_builder.go` if new environment variables are needed
