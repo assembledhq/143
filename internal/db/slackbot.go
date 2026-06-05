@@ -781,3 +781,41 @@ func (s *SlackOutboundMessageStore) Upsert(ctx context.Context, msg *models.Slac
 	*msg = updated
 	return nil
 }
+
+type SessionAttributionStore struct {
+	db DBTX
+}
+
+func NewSessionAttributionStore(db DBTX) *SessionAttributionStore {
+	return &SessionAttributionStore{db: db}
+}
+
+func (s *SessionAttributionStore) Create(ctx context.Context, attribution *models.SessionAttribution) error {
+	rows, err := s.db.Query(ctx, `
+		INSERT INTO session_attributions (
+			org_id, session_id, source, source_metadata
+		)
+		VALUES (
+			@org_id, @session_id, @source, @source_metadata
+		)
+		ON CONFLICT (session_id) DO NOTHING
+		RETURNING id, org_id, session_id, source, source_metadata, created_at`,
+		pgx.NamedArgs{
+			"org_id":          attribution.OrgID,
+			"session_id":      attribution.SessionID,
+			"source":          attribution.Source,
+			"source_metadata": attribution.SourceMetadata,
+		})
+	if err != nil {
+		return fmt.Errorf("insert session attribution: %w", err)
+	}
+	created, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionAttribution])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("scan session attribution: %w", err)
+	}
+	*attribution = created
+	return nil
+}

@@ -584,6 +584,27 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationRunStore_CountConsecutiveFailures(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	store := NewAutomationRunStore(mock)
+
+	mock.ExpectQuery(`WITH ordered AS`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+	count, err := store.CountConsecutiveFailures(context.Background(), orgID, automationID)
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 	t.Parallel()
 
