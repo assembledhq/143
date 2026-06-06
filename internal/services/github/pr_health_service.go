@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -27,6 +28,8 @@ const (
 	prHealthReconcileJobType = "reconcile_pull_request_state"
 	prHealthEnrichJobType    = "enrich_pull_request_health"
 	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
+	requiredChecksCacheTTL   = 24 * time.Hour
+	noRequiredChecksCacheTTL = 6 * time.Hour
 )
 
 var (
@@ -63,6 +66,11 @@ type gitHubBranchResponse struct {
 			Contexts []string `json:"contexts"`
 		} `json:"required_status_checks"`
 	} `json:"protection"`
+}
+
+type requiredStatusChecksCacheEntry struct {
+	Required  bool      `json:"required"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 type gitHubCheckRun struct {
@@ -350,7 +358,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 
 	requiredChecksConfigured := false
 	if len(checkRuns) == 0 {
-		requiredChecksConfigured, err = s.branchRequiresStatusChecks(ctx, token, owner, repoName, details.Base.Ref)
+		requiredChecksConfigured, err = s.branchRequiresStatusChecksCached(ctx, orgID.String(), token, owner, repoName, details.Base.Ref)
 		if err != nil {
 			return err
 		}
@@ -896,6 +904,57 @@ func (s *PRService) branchRequiresStatusChecks(ctx context.Context, token, owner
 		return false, nil
 	}
 	return len(resp.Protection.RequiredStatusChecks.Contexts) > 0, nil
+}
+
+func (s *PRService) branchRequiresStatusChecksCached(ctx context.Context, orgKey, token, owner, repo, branch string) (bool, error) {
+	key := requiredStatusChecksCacheKey(orgKey, owner+"/"+repo, branch)
+	if s.redisClient != nil {
+		cached, err := s.redisClient.GetBytes(ctx, key)
+		switch {
+		case err == nil:
+			var entry requiredStatusChecksCacheEntry
+			unmarshalErr := json.Unmarshal(cached, &entry)
+			if unmarshalErr == nil {
+				return entry.Required, nil
+			}
+			s.logger.Warn().Err(unmarshalErr).Str("key", key).Msg("failed to decode required status checks cache entry")
+		case errors.Is(err, redis.Nil):
+		default:
+			s.logger.Debug().Err(err).Str("key", key).Msg("required status checks cache unavailable; falling back to GitHub")
+		}
+	}
+
+	required, err := s.branchRequiresStatusChecks(ctx, token, owner, repo, branch)
+	if err != nil {
+		return false, err
+	}
+	s.cacheRequiredStatusChecks(ctx, key, required)
+	return required, nil
+}
+
+func (s *PRService) cacheRequiredStatusChecks(ctx context.Context, key string, required bool) {
+	if s.redisClient == nil {
+		return
+	}
+	payload, err := json.Marshal(requiredStatusChecksCacheEntry{
+		Required:  required,
+		CheckedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		s.logger.Warn().Err(err).Str("key", key).Msg("failed to encode required status checks cache entry")
+		return
+	}
+	ttl := noRequiredChecksCacheTTL
+	if required {
+		ttl = requiredChecksCacheTTL
+	}
+	if err := s.redisClient.SetBytes(ctx, key, payload, ttl); err != nil {
+		s.logger.Debug().Err(err).Str("key", key).Msg("failed to cache required status checks result")
+	}
+}
+
+func requiredStatusChecksCacheKey(orgKey, repoFullName, branch string) string {
+	return fmt.Sprintf("github:required-checks:%s:%s:%s", orgKey, repoFullName, branch)
 }
 
 // dedupeCheckRunsByName collapses check runs that share a display name down to

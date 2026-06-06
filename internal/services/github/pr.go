@@ -74,6 +74,7 @@ type PRService struct {
 	prTemplates             *db.PRTemplateStore
 	previews                *db.PreviewStore
 	previewStopper          PreviewStopper
+	redisClient             *cache.Client
 	prHealthStreams         *cache.PullRequestStreams
 	llmClient               llm.Client
 	audit                   *db.AuditEmitter
@@ -258,6 +259,10 @@ func (s *PRService) SetSandboxAuth(server agent.SandboxAuthServer) {
 
 func (s *PRService) SetPullRequestStreams(streams *cache.PullRequestStreams) {
 	s.prHealthStreams = streams
+}
+
+func (s *PRService) SetRedisClient(client *cache.Client) {
+	s.redisClient = client
 }
 
 // SandboxProvider exposes the configured sandbox provider for wiring tests.
