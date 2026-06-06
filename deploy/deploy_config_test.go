@@ -550,6 +550,14 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	require.Contains(t, deployJob, "if: needs.predeploy-latest.outputs.should_deploy == 'true'", "deploy job should skip stale SHAs")
 	require.Contains(t, deployJob, "group: deploy-fleet", "deploy job should serialize fleet deploys")
 	require.Contains(t, deployJob, "cancel-in-progress: false", "deploy job should never cancel an active production deploy")
+	require.Contains(t, deployJob, "id: deploy_latest", "deploy job should re-check freshness after acquiring the deploy lock")
+	require.Contains(t, deployJob, `gh api "repos/$REPO/commits/main" --jq .sha`, "deploy job should compare the run SHA to latest main after acquiring the deploy lock")
+	deployFreshnessIndex := strings.Index(deployJob, "id: deploy_latest")
+	deployCheckoutIndex := strings.Index(deployJob, "uses: actions/checkout@v6")
+	require.NotEqual(t, -1, deployFreshnessIndex, "deploy job should define an in-lock freshness check")
+	require.NotEqual(t, -1, deployCheckoutIndex, "deploy job should checkout before deploying")
+	require.Less(t, deployFreshnessIndex, deployCheckoutIndex, "deploy job should re-check freshness before any deploy setup or SSH work")
+	require.GreaterOrEqual(t, strings.Count(deployJob, "if: steps.deploy_latest.outputs.should_deploy == 'true'"), 6, "all deploy setup, deploy, and verification steps should skip stale SHAs detected after acquiring the deploy lock")
 }
 
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {

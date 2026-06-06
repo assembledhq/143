@@ -100,15 +100,35 @@ jobs:
       group: deploy-fleet
       cancel-in-progress: false
     steps:
+      - name: Confirm this SHA is still latest main after deploy lock
+        id: deploy_latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          latest_sha="$(gh api "repos/$REPO/commits/main" --jq .sha)"
+          if [ "$latest_sha" = "$EXPECTED_SHA" ]; then
+            echo "This run is still latest main after acquiring deploy lock; continuing deploy for $EXPECTED_SHA."
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping stale deploy for $EXPECTED_SHA after acquiring deploy lock; latest main is $latest_sha."
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v6
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
 
       - name: Install sops and age
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
         run: |
           curl -fsSL https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64 -o /usr/local/bin/sops
           chmod +x /usr/local/bin/sops
           curl -fsSL https://dl.filippo.io/age/latest?for=linux/amd64 | tar xz -C /usr/local/bin --strip-components=1
 
       - name: Write SSH key and age key
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
         run: |
           mkdir -p ~/.ssh ~/.config/sops/age
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy-key
@@ -117,6 +137,7 @@ jobs:
           chmod 600 ~/.config/sops/age/keys.txt
 
       - name: Decrypt FLEET_HOSTS
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
         # Decrypt once and propagate to later steps via $GITHUB_ENV so both
         # `Deploy fleet` (deploy-fleet.sh accepts FLEET_HOSTS from env) and
         # `Verify worker rollover` skip the SOPS round-trip.
@@ -132,6 +153,7 @@ jobs:
           echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
 
       - name: Deploy fleet
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
         # WORKER_DEPLOY_DETACH=1 makes deploy.sh kick off the worker rollover
         # as a host-side background process and return immediately, so the
         # SSH session (= a billed CI minute) doesn't sit idle for the up-to-
@@ -150,6 +172,7 @@ jobs:
           ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"
 
       - name: Verify worker rollover
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
         # The detached rollover writes /var/log/143/deploy-worker-<sha>.status
         # with content "ok" on success or "fail: ..." on failure. Poll each
         # worker host until we see one of those, or until the budget expires.
