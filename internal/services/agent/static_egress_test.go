@@ -22,9 +22,9 @@ func (s staticEgressTestOrgStore) GetByID(context.Context, uuid.UUID) (models.Or
 func TestResolveStaticEgressRuntimeConfigRequiresCapabilityFile(t *testing.T) {
 	t.Parallel()
 
-	cfg := ResolveStaticEgressRuntimeConfig(false, "203.0.113.10")
-	require.False(t, cfg.Enabled, "disabled static egress should not enable the runtime")
-	require.False(t, cfg.Capable, "disabled static egress should not advertise capability")
+	cfg := ResolveStaticEgressRuntimeConfig("203.0.113.10")
+	require.True(t, cfg.Enabled, "configured static egress public IP should enable runtime verification")
+	require.False(t, cfg.Capable, "static egress should not advertise capability without a verified host marker")
 	require.Equal(t, DefaultStaticEgressNetwork, cfg.NetworkName, "static egress bridge should use the fixed internal network")
 	require.Equal(t, DefaultStaticEgressResolvConf, cfg.ResolvConfPath, "static egress resolver should use the fixed internal path")
 }

@@ -11,7 +11,6 @@ STATIC_EGRESS_NETWORK="143-sandbox-static-egress"
 STATIC_EGRESS_SUBNET="172.31.0.0/24"
 STATIC_EGRESS_RESOLV_CONF="/etc/143/sandbox-static-egress-resolv.conf"
 STATIC_EGRESS_DNS_IP="172.31.0.2"
-STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-}"
 STATIC_EGRESS_CAPABILITY_FILE="/etc/143/static-egress-capable"
 STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
 STATIC_EGRESS_SECRETS_FILE="${STATIC_EGRESS_SECRETS_FILE:-/opt/143/static-egress-worker.env}"
@@ -33,7 +32,6 @@ load_static_egress_env() {
   local key
 
   for key in \
-    STATIC_EGRESS_ENABLED \
     STATIC_EGRESS_PUBLIC_IP \
     STATIC_EGRESS_GATEWAY_PUBLIC_IP \
     STATIC_EGRESS_GATEWAY_PUBLIC_KEY \
@@ -88,7 +86,6 @@ ensure_bridge "$SANDBOX_NETWORK" "$SANDBOX_SUBNET"
 ensure_bridge "$STATIC_EGRESS_NETWORK" "$STATIC_EGRESS_SUBNET"
 
 load_static_egress_env
-STATIC_EGRESS_ENABLED="${STATIC_EGRESS_ENABLED:-false}"
 
 # Worker blue/green generations run as separate compose projects but must share
 # the same default bridge so the worker can resolve support services such as
@@ -119,16 +116,15 @@ else
   exit 1
 fi
 
-if [ "$STATIC_EGRESS_ENABLED" = "true" ]; then
+if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
   if [ ! -x /opt/143/deploy/scripts/install-static-egress-worker.sh ]; then
-    echo "ERROR: static egress is enabled but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing or not executable." >&2
+    echo "ERROR: static egress is configured but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing or not executable." >&2
     exit 1
   fi
-  : "${STATIC_EGRESS_PUBLIC_IP:?STATIC_EGRESS_PUBLIC_IP is required when STATIC_EGRESS_ENABLED=true}"
-  : "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:?STATIC_EGRESS_GATEWAY_PUBLIC_IP is required when STATIC_EGRESS_ENABLED=true}"
-  : "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:?STATIC_EGRESS_GATEWAY_PUBLIC_KEY is required when STATIC_EGRESS_ENABLED=true}"
-  : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:?STATIC_EGRESS_WORKER_PRIVATE_KEY is required when STATIC_EGRESS_ENABLED=true}"
-  : "${STATIC_EGRESS_WORKER_WG_ADDRESS:?STATIC_EGRESS_WORKER_WG_ADDRESS is required when STATIC_EGRESS_ENABLED=true}"
+  : "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:?STATIC_EGRESS_GATEWAY_PUBLIC_IP is required when STATIC_EGRESS_PUBLIC_IP is configured}"
+  : "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:?STATIC_EGRESS_GATEWAY_PUBLIC_KEY is required when STATIC_EGRESS_PUBLIC_IP is configured}"
+  : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:?STATIC_EGRESS_WORKER_PRIVATE_KEY is required when STATIC_EGRESS_PUBLIC_IP is configured}"
+  : "${STATIC_EGRESS_WORKER_WG_ADDRESS:?STATIC_EGRESS_WORKER_WG_ADDRESS is required when STATIC_EGRESS_PUBLIC_IP is configured}"
   /opt/143/deploy/scripts/install-static-egress-worker.sh
 else
   rm -f "$STATIC_EGRESS_CAPABILITY_FILE"

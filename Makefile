@@ -350,6 +350,14 @@ secrets-rotate:
 #   make tailscale-enroll ROLE=app HOST=<existing-app-public-ip>
 #   make tailscale-enroll ROLE=redis HOST=<existing-redis-public-ip>
 #
+# Static egress worker provisioning:
+#   When STATIC_EGRESS_PUBLIC_IP is configured, provision-worker derives
+#   WireGuard peer config from worker:<host> entries in FLEET_HOSTS, updates
+#   generated static egress fields in .env.production.enc, reloads the egress
+#   gateway from the egress:<host> FLEET_HOSTS entry, then provisions the
+#   worker. Add worker:<HOST> to FLEET_HOSTS before running make
+#   provision-worker HOST=<HOST>.
+#
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
 #
@@ -420,24 +428,13 @@ provision-app:
 provision-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
+	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
+	@deploy/scripts/provision-egress.sh "" "$(SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-egress:
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-egress HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
-	@test -n "$${STATIC_EGRESS_GATEWAY_PRIVATE_KEY:-}" || { echo "STATIC_EGRESS_GATEWAY_PRIVATE_KEY is required"; exit 1; }
-	@test -n "$${STATIC_EGRESS_WORKER_PEERS:-}" || { echo "STATIC_EGRESS_WORKER_PEERS is required as publicKey@allowedIP,..."; exit 1; }
 	$(check-ssh-key)
-	scp -i $(SSH_KEY) deploy/scripts/provision-egress-gateway.sh root@$(HOST):/tmp/provision-egress-gateway.sh
-	@{ \
-	  printf 'STATIC_EGRESS_GATEWAY_PRIVATE_KEY=%s\n' "$$STATIC_EGRESS_GATEWAY_PRIVATE_KEY"; \
-	  printf 'STATIC_EGRESS_WORKER_PEERS=%s\n' "$$STATIC_EGRESS_WORKER_PEERS"; \
-	  printf 'STATIC_EGRESS_WG_INTERFACE=%s\n' "$${STATIC_EGRESS_WG_INTERFACE:-}"; \
-	  printf 'STATIC_EGRESS_GATEWAY_WG_PORT=%s\n' "$${STATIC_EGRESS_GATEWAY_WG_PORT:-}"; \
-	  printf 'STATIC_EGRESS_GATEWAY_WG_ADDRESS=%s\n' "$${STATIC_EGRESS_GATEWAY_WG_ADDRESS:-}"; \
-	  printf 'STATIC_EGRESS_GATEWAY_WG_CIDR=%s\n' "$${STATIC_EGRESS_GATEWAY_WG_CIDR:-}"; \
-	  printf 'STATIC_EGRESS_PUBLIC_INTERFACE=%s\n' "$${STATIC_EGRESS_PUBLIC_INTERFACE:-}"; \
-	} | ssh -i $(SSH_KEY) root@$(HOST) 'install -d -m 700 /opt/143 && cat > /opt/143/static-egress-gateway.env && chmod 600 /opt/143/static-egress-gateway.env'
-	ssh -i $(SSH_KEY) root@$(HOST) 'install -m 755 /tmp/provision-egress-gateway.sh /opt/143/provision-egress-gateway.sh && set -a && . /opt/143/static-egress-gateway.env && set +a && /opt/143/provision-egress-gateway.sh'
+	@deploy/scripts/provision-egress.sh "$(HOST)" "$(SSH_KEY)"
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }

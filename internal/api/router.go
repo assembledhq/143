@@ -245,9 +245,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
 	settingsHandler.SetStaticEgressStatus(handlers.StaticEgressStatus{
-		Available:         cfg.StaticEgressEnabled && cfg.StaticEgressPublicIP != "",
+		Available:         cfg.StaticEgressPublicIP != "",
 		PublicIP:          cfg.StaticEgressPublicIP,
-		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
 	})
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
@@ -715,7 +715,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
-	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP))
+	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
 	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
 	branchPreviewHandler.SetStaticEgressSettings(orgStore, cfg.StaticEgressPublicIP)
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)

@@ -198,9 +198,6 @@ type Config struct {
 	// and typically contains "nameserver 1.1.1.1\nnameserver 8.8.8.8". Leaving
 	// this empty falls back to whatever resolv.conf Docker injects.
 	SandboxResolvConf string `env:"SANDBOX_RESOLV_CONF"`
-	// StaticEgressEnabled makes this worker/platform advertise and use the
-	// dedicated static egress sandbox bridge for orgs that opt into it.
-	StaticEgressEnabled bool `env:"STATIC_EGRESS_ENABLED" envDefault:"false"`
 	// StaticEgressPublicIP is the public IPv4 customers should allowlist.
 	StaticEgressPublicIP string `env:"STATIC_EGRESS_PUBLIC_IP"`
 	// SandboxAuthSocketDir is the on-host directory under which per-session

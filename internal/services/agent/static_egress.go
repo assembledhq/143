@@ -36,14 +36,14 @@ type StaticEgressRuntimeConfig struct {
 // ResolveStaticEgressRuntimeConfig converts platform config into the
 // worker-local runtime contract. Static egress uses fixed internal bridge and
 // resolver paths; only the customer-facing public IP is configurable.
-func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP string) StaticEgressRuntimeConfig {
+func ResolveStaticEgressRuntimeConfig(publicIP string) StaticEgressRuntimeConfig {
 	runtime := StaticEgressRuntimeConfig{
-		Enabled:        enabled && publicIP != "",
+		Enabled:        publicIP != "",
 		NetworkName:    DefaultStaticEgressNetwork,
 		ResolvConfPath: DefaultStaticEgressResolvConf,
 		PublicIP:       publicIP,
 	}
-	if reason := StaticEgressUnavailableReason(enabled, publicIP); reason != "" {
+	if reason := StaticEgressUnavailableReason(publicIP); reason != "" {
 		runtime.UnavailableReason = reason
 		return runtime
 	}
@@ -62,15 +62,11 @@ func ResolveStaticEgressRuntimeConfig(enabled bool, publicIP string) StaticEgres
 
 // StaticEgressUnavailableReason returns the platform-level reason static
 // egress is not configured before worker-local capability checks run.
-func StaticEgressUnavailableReason(enabled bool, publicIP string) string {
-	switch {
-	case enabled && publicIP == "":
+func StaticEgressUnavailableReason(publicIP string) string {
+	if publicIP == "" {
 		return "STATIC_EGRESS_PUBLIC_IP is not configured"
-	case !enabled:
-		return "STATIC_EGRESS_ENABLED is false"
-	default:
-		return ""
 	}
+	return ""
 }
 
 func readStaticEgressCapabilityPublicIP() (string, error) {

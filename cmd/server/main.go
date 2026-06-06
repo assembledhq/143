@@ -531,7 +531,7 @@ func main() {
 						FileReader:      fileReader,
 						SandboxProvider: apiSandboxProvider,
 						SandboxCapacity: sandboxCapacity,
-						StaticEgress:    agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+						StaticEgress:    agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 						Snapshots:       snapshotStore,
 						GitHub:          services.GitHub,
 						NodeID:          cfg.NodeID,
@@ -645,7 +645,7 @@ func main() {
 			cfg.NodeRegion,
 			previewRoutingReady.Load,
 			sandboxCapacity,
-			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
@@ -1355,7 +1355,7 @@ func buildServices(
 		MentionIndexes:     mentionIndexCache,
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
-		StaticEgress:       agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressEnabled, cfg.StaticEgressPublicIP),
+		StaticEgress:       agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		ThreadRuntimes:     threadRuntimeStore,
 		ThreadInbox:        threadInboxStore,
 		SandboxHolders:     sessionSandboxHolderStore,

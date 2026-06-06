@@ -120,6 +120,38 @@ apply_tailscale_worker_host_map() {
   done
 }
 
+apply_static_egress_worker_host_map() {
+  if [ "$ROLE" != "worker" ] || [ -z "${STATIC_EGRESS_WORKER_HOSTS:-}" ]; then
+    return
+  fi
+
+  # STATIC_EGRESS_WORKER_HOSTS is a comma-separated list of worker tunnel
+  # identities. Entries are "<host>@<wg-address>@<private-key>".
+  # Example:
+  # STATIC_EGRESS_WORKER_HOSTS="87.99.158.39@10.143.0.2/32@abc=,54.1.2.3@10.143.0.3/32@def="
+  IFS=',' read -ra mappings <<< "$STATIC_EGRESS_WORKER_HOSTS"
+  for mapping in "${mappings[@]}"; do
+    map_host="${mapping%%@*}"
+    rest="${mapping#*@}"
+    if [ "$map_host" != "$HOST" ]; then
+      continue
+    fi
+    if [ "$rest" = "$mapping" ] || [[ "$rest" != *@* ]]; then
+      echo "ERROR: invalid STATIC_EGRESS_WORKER_HOSTS entry for $HOST; expected host@wg-address@private-key" >&2
+      exit 1
+    fi
+    map_wg_address="${rest%%@*}"
+    map_private_key="${rest#*@}"
+    if [ -z "$map_wg_address" ] || [ -z "$map_private_key" ]; then
+      echo "ERROR: invalid STATIC_EGRESS_WORKER_HOSTS entry for $HOST; wg-address and private-key are required" >&2
+      exit 1
+    fi
+    : "${STATIC_EGRESS_WORKER_WG_ADDRESS:=$map_wg_address}"
+    : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:=$map_private_key}"
+    return
+  done
+}
+
 apply_tailscale_role_defaults() {
   apply_tailscale_worker_host_map
 
@@ -166,13 +198,13 @@ apply_tailscale_role_defaults() {
 
 apply_tailscale_role_defaults
 apply_worker_bucket_overrides "$ROLE" "$HOST"
+apply_static_egress_worker_host_map
 if [ "$ROLE" = "worker" ]; then
   : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"
   : "${SANDBOX_REQUIRE_DISK_QUOTA:=true}"
   : "${SANDBOX_GC_INTERVAL:=5m}"
   : "${SANDBOX_GC_GRACE:=30m}"
   : "${SANDBOX_GC_HARD_MAX:=24h}"
-  : "${STATIC_EGRESS_ENABLED:=false}"
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
@@ -539,11 +571,11 @@ elif [ "$ROLE" = "worker" ]; then
   # and docker-entrypoint.sh decrypts it at boot. Provision the file before the
   # first `docker compose up` — if the source path is missing, Docker creates a
   # directory at /opt/143/.env.production.enc and later deploy-time scp fails.
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_ENABLED=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' \
     "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
-    "$STATIC_EGRESS_ENABLED" "${STATIC_EGRESS_PUBLIC_IP:-}" \
+    "${STATIC_EGRESS_PUBLIC_IP:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 
   printf 'STATIC_EGRESS_GATEWAY_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_KEY=%s\nSTATIC_EGRESS_WORKER_PRIVATE_KEY=%s\nSTATIC_EGRESS_WORKER_WG_ADDRESS=%s\n' \
@@ -572,8 +604,7 @@ else
   : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required for app role (set it or add to .env.production.enc)}"
   : "${PREVIEW_ORIGIN_TEMPLATE:=https://{id}.preview.143.dev}"
   : "${NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:=$PREVIEW_ORIGIN_TEMPLATE}"
-  : "${STATIC_EGRESS_ENABLED:=false}"
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\nSTATIC_EGRESS_ENABLED=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" "$STATIC_EGRESS_ENABLED" "${STATIC_EGRESS_PUBLIC_IP:-}" \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" "${STATIC_EGRESS_PUBLIC_IP:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
   # Copy encrypted production env (baked into the Docker image too, but
   # having it on disk lets you re-decrypt without rebuilding)

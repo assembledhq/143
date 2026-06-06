@@ -9,7 +9,7 @@
 - Organizations opt in with `settings.sandbox_network.static_egress_enabled`.
 - When disabled, new and hydrated sandboxes use the default `143-sandbox` bridge.
 - When enabled, new and hydrated sandboxes use `143-sandbox-static-egress` plus the static-egress resolver file.
-- Workers advertise `static_egress_capable=true` only when platform config enables static egress, the customer-facing public IP is configured, and host reconciliation has written `/etc/143/static-egress-capable` after installing and probing the WireGuard policy route.
+- Workers advertise `static_egress_capable=true` only when the customer-facing public IP is configured and host reconciliation has written `/etc/143/static-egress-capable` after installing and probing the WireGuard policy route.
 - Preview worker selection requires `static_egress_capable=true` for opted-in organizations.
 - Preview infrastructure containers join the sandbox container's selected bridge, so static-egress previews keep same-network access to managed preview dependencies.
 - Live preview reuse checks the existing container network. If the current container does not match the requested egress mode, preview startup fails closed with a restart-required message instead of silently using the wrong route.
@@ -22,7 +22,11 @@
 - Firewall rule comments are network-specific, so reconciling one bridge cannot delete the other bridge's metadata/RFC1918 guardrails.
 - A single sandbox dnsmasq sidecar attaches to both sandbox bridges. Each bridge has its own fixed resolver IP and resolver file.
 - Worker-side static egress uses raw WireGuard plus policy routing for traffic sourced from the static egress bridge subnet.
-- `STATIC_EGRESS_ENABLED=true` fails closed during worker reconciliation if the WireGuard helper or required gateway/worker tunnel settings are missing.
+- A configured `STATIC_EGRESS_PUBLIC_IP` fails closed during worker reconciliation if the WireGuard helper or required gateway/worker tunnel settings are missing.
+- `FLEET_HOSTS` is the worker and gateway source of truth. Add `egress:<host>` for the gateway and `worker:<host>` for every worker.
+- `make provision-worker HOST=<worker-host>` runs `sync-static-egress-secrets.sh --apply`, verifies that `worker:<worker-host>` is present in `FLEET_HOSTS`, preserves existing worker tunnel keys, generates missing keys/addresses for every worker, reloads the egress gateway, then provisions the worker.
+- `STATIC_EGRESS_WORKER_HOSTS` and `STATIC_EGRESS_WORKER_PEERS` are generated values in encrypted production env, not hand-maintained operator inputs.
+- `make provision-egress` can also be run directly and reads gateway host/key/peer config from `.env.production.enc`.
 - The egress gateway SNATs accepted WireGuard traffic to its stable public IPv4 and independently blocks metadata and RFC1918 destinations.
 
 ## Non-goals
