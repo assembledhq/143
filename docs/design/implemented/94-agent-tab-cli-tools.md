@@ -92,7 +92,7 @@ across the org; v1 is current-session only.
 
 When off:
 
-- `143-tools session_tabs_*` commands are not exposed in the generated sandbox
+- `143-tools session-tabs <action>` commands are not exposed in the generated sandbox
   tool documentation for agents.
 - Direct calls to hidden tab-tool commands still return `403 TAB_TOOLS_DISABLED`
   so stale agents or cached tool lists fail closed.
@@ -179,7 +179,7 @@ sandbox-token-safe internal API layer for `143-tools` so sandbox tokens do not
 need broad browser-session privileges.
 
 All routes are under `/api/v1/internal/session-tabs`. They require the
-same short-lived sandbox API token used by `143-tools create_pr` and must resolve
+same short-lived sandbox API token used by `143-tools pr create` and must resolve
 `org_id`, `session_id`, `repository_id`, and current `thread_id` from token
 claims, not request body trust.
 
@@ -424,13 +424,14 @@ Redaction:
 
 ## CLI Interface Proposal
 
-Use explicit session-tab command names in the shared tool registry. They should
-be available to sandbox agents through `143-tools` alongside integrations.
+Use the `session-tabs` namespace for tab tools in the agent-facing CLI. Internal
+MCP tool names may remain flat for registry compatibility, but sandbox agents
+should see the same hierarchical command shape as other `143-tools` commands.
 
-### `session_tabs_list`
+### `session-tabs list`
 
 ```bash
-143-tools session_tabs_list [--include-archived]
+143-tools session-tabs list [--include-archived true]
 ```
 
 Output:
@@ -449,18 +450,18 @@ Output:
 ]
 ```
 
-### `session_tabs_get`
+### `session-tabs get`
 
 ```bash
-143-tools session_tabs_get --tab-id <uuid>
+143-tools session-tabs get --tab-id <uuid>
 ```
 
 Returns one tab plus recent touched files and delivery state.
 
-### `session_tabs_create`
+### `session-tabs create`
 
 ```bash
-143-tools session_tabs_create \
+143-tools session-tabs create \
   --label "Review" \
   --agent codex \
   --model gpt-5.3-codex \
@@ -476,10 +477,10 @@ Flags:
 
 Output is the created tab JSON. Creating a tab does not start a run.
 
-### `session_tabs_send`
+### `session-tabs send`
 
 ```bash
-143-tools session_tabs_send \
+143-tools session-tabs send \
   --tab-id <uuid> \
   --message "Run the backend thread tests and summarize failures."
 ```
@@ -493,10 +494,10 @@ Flags:
 
 Output includes the accepted message ID, target tab status, and delivery state.
 
-### `session_tabs_messages`
+### `session-tabs messages`
 
 ```bash
-143-tools session_tabs_messages --tab-id <uuid> --limit 30
+143-tools session-tabs messages --tab-id <uuid> --limit 30
 ```
 
 Flags:
@@ -574,7 +575,7 @@ audit details.
    and enforce sandbox token scope plus the org setting.
 4. Register `session_tabs_*` tools in the same `ToolRegistry` used by CLI and
    MCP, but expose them in generated sandbox skills only for coding-agent
-   sessions.
+   sessions as hierarchical `session-tabs` commands.
 5. Add CLI tests for argument parsing, JSON output, error output, and token
    omission.
 6. Add backend handler/service tests for org scoping, disabled setting,
@@ -584,7 +585,7 @@ audit details.
 
 ## Open Questions
 
-- Should the source tab be included in `session_tabs_list` by default? The
+- Should the source tab be included in `session-tabs list` by default? The
   simplest answer is yes, with an `is_current` field added to each row.
 - Should agent-created tabs inherit the source tab's model/reasoning by default
   or the current org/user default? The backend should prefer source tab values

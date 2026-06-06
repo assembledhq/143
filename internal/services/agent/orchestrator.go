@@ -1985,14 +1985,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		defer capacityReservation.Release()
 	}
 
-	// 2. Update status to "running" (sets started_at in DB). We also capture
-	// the start time locally so the timeout branch below can log a
-	// meaningful elapsed duration regardless of whether run.StartedAt was
-	// populated by the caller.
-	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusRunning); err != nil {
-		return fmt.Errorf("update run status to running: %w", err)
-	}
 	var primaryThreadID *uuid.UUID
+
+	// 2. Atomically mark the session running and initialize runtime control.
+	// runStartedAt is captured immediately before the atomic runtime start, so
+	// the elapsed reported on timeout includes everything after runtime
+	// control begins (sandbox create, credential inject, agent execute,
+	// snapshot).
+	runStartedAt := time.Now()
+	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
+	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
+	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	runtimeController.SetStopFallback(cancel)
+	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
+		return err
+	}
 	if run.PrimaryThreadID != nil && *run.PrimaryThreadID != uuid.Nil {
 		threadID := *run.PrimaryThreadID
 		primaryThreadID = &threadID
@@ -2015,20 +2022,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// makes a re-entry from a resumed/retried run a no-op, so this call is
 	// safe on every RunAgent invocation.
 	o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneStarted))
-	// runStartedAt is captured AFTER UpdateStatus, so the elapsed reported on
-	// a timeout excludes concurrency check + status write but includes
-	// everything from issue fetch onward (sandbox create, credential inject,
-	// agent execute, snapshot). An on-call reader seeing a sub-minute
-	// elapsed on a 25-minute timeout should suspect the deadline fired
-	// during sandbox creation, not the adapter.
-	runStartedAt := time.Now()
-	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
-	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
-	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
-	runtimeController.SetStopFallback(cancel)
-	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
-		return err
-	}
 
 	turnNumber := run.CurrentTurn + 1
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, run, turnNumber)
@@ -2918,17 +2911,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		defer capacityReservation.Release()
 	}
 
-	// 1. Update status to running. Capture wall-clock start locally so the
-	// timeout branch below can log a meaningful elapsed regardless of
-	// whether session.StartedAt is populated (it's set from the first
-	// turn; on a later turn this captures THIS turn's elapsed).
-	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusRunning); err != nil {
-		return fmt.Errorf("update session status to running: %w", err)
-	}
+	// 1. Capture wall-clock start locally; BeginRuntime persists the same
+	// instant while atomically transitioning the session row to running.
 	// turnStartedAt scopes elapsed to THIS turn only — it excludes any time
-	// the session spent idle between turns, and excludes the status write
-	// above. It includes snapshot restore, sandbox create, and agent
-	// execute. See runStartedAt in RunAgent for analogous semantics.
+	// the session spent idle between turns and includes snapshot restore,
+	// sandbox create, and agent execute. See runStartedAt in RunAgent for
+	// analogous semantics.
 	turnStartedAt := time.Now()
 	runtimeCfg := o.resolveRuntimeConfig(ctx, session.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
@@ -3085,6 +3073,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
+	snapshottedState := models.SandboxStateSnapshotted
 	resolvedRepoID := session.RepositoryID
 	if resolvedRepoID == nil && promptIssue != nil {
 		resolvedRepoID = promptIssue.RepositoryID
@@ -3136,15 +3125,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	slug, slugErr := o.sessionRepoSlug(ctx, session)
 	if slugErr != nil {
 		log.Error().Err(slugErr).Msg("sandbox workdir resolution failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after workdir resolution failure")
-		}
-		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
-		}
-		o.registerSandboxFailureMessage(
+		o.cleanupContinueSessionStartupFailure(
 			ctx,
 			session,
+			log,
+			models.SessionStatusIdle,
+			&snapshottedState,
+			"failed to revert session to idle after workdir resolution failure",
+			"failed to revert sandbox state after workdir resolution failure",
 			fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
 			"workdir resolution",
 		)
@@ -3315,15 +3303,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		repo, repoErr := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 		if repoErr != nil {
 			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring repo lookup failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring repo lookup failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after auth wiring repo lookup failure",
+				"failed to revert sandbox state after auth wiring repo lookup failure",
 				fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", repoErr),
 				"sandbox github auth",
 			)
@@ -3338,15 +3325,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			token, tokenErr := o.github.GetInstallationToken(ctx, repo.InstallationID)
 			if tokenErr != nil {
 				log.Error().Err(tokenErr).Msg("failed to get installation token for continue-session auth wiring")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-					log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring token failure")
-				}
-				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-					log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring token failure")
-				}
-				o.registerSandboxFailureMessage(
+				o.cleanupContinueSessionStartupFailure(
 					ctx,
 					session,
+					log,
+					models.SessionStatusIdle,
+					&snapshottedState,
+					"failed to revert session to idle after auth wiring token failure",
+					"failed to revert sandbox state after auth wiring token failure",
 					fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", tokenErr),
 					"sandbox github auth",
 				)
@@ -3358,15 +3344,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after auth wiring failure",
+				"failed to revert sandbox state after auth wiring failure",
 				fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", authErr),
 				"sandbox github auth",
 			)
@@ -3401,15 +3386,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after hydrate failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after hydrate failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after hydrate failure",
+				"failed to revert sandbox state after hydrate failure",
 				fmt.Sprintf("Failed to restore the sandbox environment: %s\n\nPlease try again in a moment.", err),
 				"sandbox hydrate",
 			)
@@ -3423,15 +3407,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after sandbox failure",
+				"failed to revert sandbox state after sandbox failure",
 				fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
 				"sandbox creation",
 			)
@@ -3487,12 +3470,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// turn's auth wiring, so it's our responsibility to release it.
 		// Server.Close is idempotent and a no-op when no listener exists.
 		o.closeSandboxAuth(session.ID, log)
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after turn hold DB error")
-		}
-		o.registerSandboxFailureMessage(
+		o.cleanupContinueSessionStartupFailure(
 			ctx,
 			session,
+			log,
+			models.SessionStatusIdle,
+			nil,
+			"failed to revert session to idle after turn hold DB error",
+			"",
 			fmt.Sprintf("Failed to acquire sandbox lease: %s\n\nPlease try again in a moment.", holdErr),
 			"turn hold",
 		)
@@ -4490,6 +4475,32 @@ func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, sessio
 				Msg("failed to create dead-letter error message")
 		}
 	})
+}
+
+func (o *Orchestrator) cleanupContinueSessionStartupFailure(
+	ctx context.Context,
+	session *models.Session,
+	log zerolog.Logger,
+	status models.SessionStatus,
+	sandboxState *models.SandboxState,
+	statusLogMessage string,
+	sandboxStateLogMessage string,
+	failureMessage string,
+	stage string,
+) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, status); revertErr != nil {
+		log.Error().Err(revertErr).Msg(statusLogMessage)
+	}
+	if sandboxState != nil {
+		if revertErr := o.sessions.UpdateSandboxState(cleanupCtx, session.OrgID, session.ID, *sandboxState); revertErr != nil {
+			log.Warn().Err(revertErr).Msg(sandboxStateLogMessage)
+		}
+	}
+	if failureMessage != "" {
+		o.registerSandboxFailureMessage(cleanupCtx, session, failureMessage, stage)
+	}
 }
 
 // registerSandboxInfraFailure is the deferred companion to

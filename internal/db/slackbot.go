@@ -644,15 +644,28 @@ func (s *SlackSessionLinkStore) ListActivePreviewsForSlackUser(ctx context.Conte
 		limit = 5
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT p.id AS preview_id, p.name, p.status, p.expires_at, p.updated_at
-		FROM slack_user_links l
-		JOIN preview_instances p
-		  ON p.org_id = l.org_id AND p.user_id = l.user_id
-		WHERE l.org_id = @org_id
-		  AND l.slack_team_id = @team_id
-		  AND l.slack_user_id = @slack_user_id
-		  AND p.status IN ('starting', 'ready', 'partially_ready', 'unhealthy')
-		ORDER BY p.updated_at DESC
+		WITH matched AS (
+			SELECT DISTINCT ON (p.id) p.id AS preview_id, p.name, p.status, p.expires_at, p.updated_at
+			FROM slack_user_links l
+			LEFT JOIN slack_session_links sl
+			  ON sl.org_id = l.org_id
+			 AND sl.slack_team_id = l.slack_team_id
+			 AND sl.slack_user_id = l.slack_user_id
+			JOIN preview_instances p
+			  ON p.org_id = l.org_id
+			 AND (
+			   p.user_id = l.user_id
+			   OR (sl.session_id IS NOT NULL AND p.session_id = sl.session_id)
+			 )
+			WHERE l.org_id = @org_id
+			  AND l.slack_team_id = @team_id
+			  AND l.slack_user_id = @slack_user_id
+			  AND p.status IN ('starting', 'ready', 'partially_ready', 'unhealthy')
+			ORDER BY p.id, p.updated_at DESC
+		)
+		SELECT preview_id, name, status, expires_at, updated_at
+		FROM matched
+		ORDER BY updated_at DESC
 		LIMIT @limit`,
 		pgx.NamedArgs{"org_id": orgID, "team_id": teamID, "slack_user_id": slackUserID, "limit": limit})
 	if err != nil {
@@ -666,24 +679,44 @@ func (s *SlackSessionLinkStore) ListRecentAutomationRunsForSlackUser(ctx context
 		limit = 5
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT ar.id AS run_id, ar.automation_id, ar.goal_snapshot, ar.status, ar.result_summary,
-		       session_match.session_id, ar.updated_at
-		FROM slack_user_links l
-		JOIN automations a
-		  ON a.org_id = l.org_id AND a.created_by = l.user_id
-		JOIN automation_runs ar
-		  ON ar.org_id = a.org_id AND ar.automation_id = a.id
-		LEFT JOIN LATERAL (
-			SELECT s.id AS session_id
-			FROM sessions s
-			WHERE s.org_id = ar.org_id AND s.automation_run_id = ar.id
-			ORDER BY s.updated_at DESC
-			LIMIT 1
-		) session_match ON true
-		WHERE l.org_id = @org_id
-		  AND l.slack_team_id = @team_id
-		  AND l.slack_user_id = @slack_user_id
-		ORDER BY ar.updated_at DESC
+		WITH matched AS (
+			SELECT DISTINCT ON (ar.id) ar.id AS run_id, ar.automation_id, ar.goal_snapshot, ar.status, ar.result_summary,
+			       session_match.session_id, ar.updated_at
+			FROM slack_user_links l
+			JOIN automations a
+			  ON a.org_id = l.org_id
+			 AND (
+			   a.created_by = l.user_id
+			   OR EXISTS (
+			     SELECT 1
+			     FROM slack_channel_settings scs
+			     WHERE scs.org_id = l.org_id
+			       AND scs.slack_team_id = l.slack_team_id
+			       AND scs.active = true
+			       AND EXISTS (
+			         SELECT 1
+			         FROM jsonb_array_elements_text(COALESCE(scs.notification_subscriptions->'automations', '[]'::jsonb)) subscribed_automation(id)
+			         WHERE subscribed_automation.id = a.id::text
+			       )
+			   )
+			 )
+			JOIN automation_runs ar
+			  ON ar.org_id = a.org_id AND ar.automation_id = a.id
+			LEFT JOIN LATERAL (
+				SELECT s.id AS session_id
+				FROM sessions s
+				WHERE s.org_id = ar.org_id AND s.automation_run_id = ar.id
+				ORDER BY s.updated_at DESC
+				LIMIT 1
+			) session_match ON true
+			WHERE l.org_id = @org_id
+			  AND l.slack_team_id = @team_id
+			  AND l.slack_user_id = @slack_user_id
+			ORDER BY ar.id, ar.updated_at DESC
+		)
+		SELECT run_id, automation_id, goal_snapshot, status, result_summary, session_id, updated_at
+		FROM matched
+		ORDER BY updated_at DESC
 		LIMIT @limit`,
 		pgx.NamedArgs{"org_id": orgID, "team_id": teamID, "slack_user_id": slackUserID, "limit": limit})
 	if err != nil {
