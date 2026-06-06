@@ -113,7 +113,7 @@ func TestSessionStore_ListRuntimeControlStalledSessions(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectQuery(`runtime_graceful_stop_at < @stop_after_before`).
+	mock.ExpectQuery(`runtime_graceful_stop_at >= started_at[\s\S]+runtime_graceful_stop_at < @stop_after_before`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 
@@ -124,6 +124,28 @@ func TestSessionStore_ListRuntimeControlStalledSessions(t *testing.T) {
 	)
 	require.NoError(t, err, "ListRuntimeControlStalledSessions should query stalled runtime rows")
 	require.Empty(t, sessions, "empty result set should return no sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_ListRuntimeControlStalledSessionsIgnoresDeadlinesBeforeCurrentStart(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`runtime_soft_deadline_at >= started_at`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListRuntimeControlStalledSessions(
+		context.Background(),
+		time.Now().UTC().Add(-2*time.Minute),
+		time.Now().UTC().Add(-2*time.Minute),
+	)
+	require.NoError(t, err, "ListRuntimeControlStalledSessions should query stalled runtime rows")
+	require.Empty(t, sessions, "stale deadlines from prior starts should not be treated as stalled runtime rows")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
