@@ -1,6 +1,6 @@
 # Design: Hierarchical Agent Tools CLI
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-05
+> **Status:** Implemented | **Last reviewed:** 2026-06-05
 
 ## Summary
 

@@ -17,51 +17,65 @@ import (
 //
 // Usage:
 //
-//	143-tools <tool_name> [--flag value ...]
-//	143-tools sentry_list_errors --severity high --limit 10
-//	143-tools linear_create_task --title "Fix bug" --team_key ENG
+//	143-tools <namespace> <action> [--flag value ...]
+//	143-tools sentry list_errors --severity high --limit 10
+//	143-tools linear create_task --title "Fix bug" --team_key ENG
 //	143-tools --help
-//	143-tools <tool_name> --help
+//	143-tools <namespace> --help
+//	143-tools <namespace> <action> --help
 func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr io.Writer) int {
+	commands := buildCLICommands(tr.ListTools())
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		printCLIUsage(tr, stdout)
+		printCLIUsage(commands, stdout)
 		return 0
 	}
 
-	toolName := args[0]
-	flagArgs := args[1:]
+	namespace := args[0]
+	if replacement, ok := replacementForOldFlatCommand(namespace, commands); ok {
+		fmt.Fprintf(stderr, "error: %q is no longer supported. Use '%s [flags]'.\n\nRun '%s --help' for detailed usage.\n", namespace, replacement, replacement)
+		return 1
+	}
 
-	// Per-tool help.
+	if !hasNamespace(commands, namespace) {
+		fmt.Fprintf(stderr, "error: unknown namespace %q.\n\nUsage: 143-tools <namespace> <action> [--flag value ...]\nRun '143-tools --help' to list available namespaces.\n", namespace)
+		return 1
+	}
+
+	if len(args) == 2 && isHelpArg(args[1]) {
+		printNamespaceHelp(commands, namespace, stdout)
+		return 0
+	}
+
+	if len(args) < 2 {
+		fmt.Fprintf(stderr, "error: missing action for namespace %q.\n\nUsage: 143-tools %s <action> [--flag value ...]\nRun '143-tools %s --help' to list available actions.\n", namespace, namespace, namespace)
+		return 1
+	}
+
+	action := args[1]
+	cmd, ok := findCLICommand(commands, namespace, action)
+	if !ok {
+		fmt.Fprintf(stderr, "error: unknown action %q for namespace %q.\n\nUsage: 143-tools %s <action> [--flag value ...]\nRun '143-tools %s --help' to list available actions.\n", action, namespace, namespace, namespace)
+		return 1
+	}
+
+	flagArgs := args[2:]
 	for _, a := range flagArgs {
-		if a == "--help" || a == "-h" {
-			printToolHelp(tr, toolName, stdout)
+		if isHelpArg(a) {
+			printActionHelp(cmd, stdout)
 			return 0
 		}
 	}
 
-	// Find the tool definition for validation.
-	var tool *Tool
-	for _, t := range tr.ListTools() {
-		if t.Name == toolName {
-			tool = &t
-			break
-		}
-	}
-	if tool == nil {
-		fmt.Fprintf(stderr, "error: unknown tool %q\n\nRun '143-tools --help' for available tools.\n", toolName)
-		return 1
-	}
-
 	// Parse flags into a JSON object.
-	argsJSON, err := parseFlagsToJSON(flagArgs, tool.InputSchema)
+	argsJSON, err := parseFlagsToJSON(flagArgs, cmd.Tool.InputSchema)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %s\n\nRun '143-tools %s --help' for usage.\n", err, toolName)
+		fmt.Fprintf(stderr, "error: %s\n\nUsage: %s [flags]\nRun '%s --help' for detailed usage.\n", err, cmd.Usage(), cmd.Usage())
 		return 1
 	}
 
 	// Check required fields.
-	if err := checkRequired(argsJSON, tool.InputSchema.Required); err != nil {
-		fmt.Fprintf(stderr, "error: %s\n\nRun '143-tools %s --help' for usage.\n", err, toolName)
+	if err := checkRequired(argsJSON, cmd.Tool.InputSchema.Required); err != nil {
+		fmt.Fprintf(stderr, "error: %s\n\nUsage: %s [flags]\nRun '%s --help' for detailed usage.\n", err, cmd.Usage(), cmd.Usage())
 		return 1
 	}
 
@@ -71,7 +85,7 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 		fmt.Fprintf(stderr, "error: failed to marshal arguments: %s\n", err)
 		return 1
 	}
-	result := tr.CallTool(ctx, toolName, rawJSON)
+	result := tr.CallTool(ctx, cmd.ToolName, rawJSON)
 
 	// Print output.
 	for _, c := range result.Content {
@@ -82,6 +96,123 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 		return 1
 	}
 	return 0
+}
+
+type CLICommand struct {
+	Namespace   string
+	Action      string
+	ToolName    string
+	Category    string
+	Description string
+	Tool        Tool
+}
+
+func (c CLICommand) Usage() string {
+	return fmt.Sprintf("143-tools %s %s", c.Namespace, c.Action)
+}
+
+func buildCLICommands(tools []Tool) []CLICommand {
+	commands := make([]CLICommand, 0, len(tools))
+	for _, tool := range tools {
+		namespace, action, ok := cliPathForTool(tool.Name)
+		if !ok {
+			continue
+		}
+		commands = append(commands, CLICommand{
+			Namespace:   namespace,
+			Action:      action,
+			ToolName:    tool.Name,
+			Category:    cliCategory(namespace, action),
+			Description: tool.Description,
+			Tool:        tool,
+		})
+	}
+	sort.Slice(commands, func(i, j int) bool {
+		if commands[i].Namespace == commands[j].Namespace {
+			return commands[i].Action < commands[j].Action
+		}
+		return commands[i].Namespace < commands[j].Namespace
+	})
+	return commands
+}
+
+func cliPathForTool(name string) (string, string, bool) {
+	switch {
+	case name == "create_pr":
+		return "pr", "create", true
+	case name == "issue_create":
+		return "issue", "create", true
+	case name == "project_propose":
+		return "project", "propose", true
+	case strings.HasPrefix(name, "log_"):
+		return "logs", strings.TrimPrefix(name, "log_"), true
+	default:
+		parts := strings.SplitN(name, "_", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", false
+		}
+		return parts[0], parts[1], true
+	}
+}
+
+func cliCategory(namespace, action string) string {
+	switch namespace {
+	case "logs":
+		return "Logs"
+	case "issue":
+		return "143 issues"
+	case "pr":
+		return "143 pull requests"
+	case "project":
+		return "143 projects"
+	}
+	switch {
+	case strings.Contains(action, "error"):
+		return "Error tracking"
+	case strings.Contains(action, "task"):
+		return "Tasks"
+	case strings.Contains(action, "document"):
+		return "Documents"
+	case strings.Contains(action, "pr_review") || strings.Contains(action, "recent_pr"):
+		return "Code review"
+	case strings.Contains(action, "flaky") || strings.Contains(action, "test"):
+		return "CI test insights"
+	case strings.Contains(action, "message") || strings.Contains(action, "thread"):
+		return "Messages"
+	default:
+		return "Tools"
+	}
+}
+
+func isHelpArg(arg string) bool {
+	return arg == "--help" || arg == "-h"
+}
+
+func hasNamespace(commands []CLICommand, namespace string) bool {
+	for _, cmd := range commands {
+		if cmd.Namespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func findCLICommand(commands []CLICommand, namespace, action string) (CLICommand, bool) {
+	for _, cmd := range commands {
+		if cmd.Namespace == namespace && cmd.Action == action {
+			return cmd, true
+		}
+	}
+	return CLICommand{}, false
+}
+
+func replacementForOldFlatCommand(input string, commands []CLICommand) (string, bool) {
+	for _, cmd := range commands {
+		if cmd.ToolName == input {
+			return cmd.Usage(), true
+		}
+	}
+	return "", false
 }
 
 // parseFlagsToJSON converts --key value pairs into a map, coercing types
@@ -146,92 +277,115 @@ func checkRequired(args map[string]any, required []string) error {
 	return nil
 }
 
-// printCLIUsage prints the top-level help listing all available tools.
-func printCLIUsage(tr *ToolRegistry, w io.Writer) {
-	tools := tr.ListTools()
-	if len(tools) == 0 {
+// printCLIUsage prints compact top-level help listing namespaces.
+func printCLIUsage(commands []CLICommand, w io.Writer) {
+	if len(commands) == 0 {
 		fmt.Fprintln(w, "143-tools: no integrations configured")
 		fmt.Fprintln(w, "Set environment variables (SENTRY_AUTH_TOKEN, LINEAR_ACCESS_TOKEN, etc.) to enable tools.")
 		return
 	}
 
-	fmt.Fprintln(w, "Usage: 143-tools <tool> [--flag value ...]")
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  143-tools <namespace> <action> [--flag value ...]")
+	fmt.Fprintln(w, "  143-tools <namespace> --help")
+	fmt.Fprintln(w, "  143-tools <namespace> <action> --help")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Available tools:")
-	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Namespaces:")
 
-	// Group by provider prefix.
-	groups := groupToolsByProvider(tools)
-	providerNames := make([]string, 0, len(groups))
-	for name := range groups {
-		providerNames = append(providerNames, name)
-	}
-	sort.Strings(providerNames)
-
-	for _, provider := range providerNames {
-		fmt.Fprintf(w, "  %s:\n", provider)
-		for _, tool := range groups[provider] {
-			fmt.Fprintf(w, "    %-40s %s\n", tool.Name, tool.Description)
+	for _, namespace := range cliNamespaceOrder(commands) {
+		nsCommands := commandsForNamespace(commands, namespace)
+		actions := make([]string, 0, len(nsCommands))
+		for _, cmd := range nsCommands {
+			actions = append(actions, cmd.Action)
 		}
-		fmt.Fprintln(w)
+		category := nsCommands[0].Category
+		fmt.Fprintf(w, "  %-10s %s: %s\n", namespace, category, strings.Join(actions, ", "))
 	}
 
-	fmt.Fprintln(w, "Run '143-tools <tool> --help' for detailed usage of a specific tool.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Run '143-tools <namespace> --help' for namespace-specific commands.")
 }
 
-// printToolHelp prints detailed help for a single tool.
-func printToolHelp(tr *ToolRegistry, name string, w io.Writer) {
-	for _, tool := range tr.ListTools() {
-		if tool.Name == name {
-			fmt.Fprintf(w, "Usage: 143-tools %s [flags]\n\n", tool.Name)
-			fmt.Fprintf(w, "%s\n\n", tool.Description)
-
-			if len(tool.InputSchema.Properties) > 0 {
-				fmt.Fprintln(w, "Flags:")
-
-				// Sort properties for stable output.
-				propNames := make([]string, 0, len(tool.InputSchema.Properties))
-				for name := range tool.InputSchema.Properties {
-					propNames = append(propNames, name)
-				}
-				sort.Strings(propNames)
-
-				requiredSet := make(map[string]bool)
-				for _, r := range tool.InputSchema.Required {
-					requiredSet[r] = true
-				}
-
-				for _, pName := range propNames {
-					prop := tool.InputSchema.Properties[pName]
-					req := ""
-					if requiredSet[pName] {
-						req = " (required)"
-					}
-					typeHint := prop.Type
-					if len(prop.Enum) > 0 {
-						typeHint = strings.Join(prop.Enum, "|")
-					}
-					if prop.Type == "array" {
-						typeHint = "comma-separated"
-					}
-					fmt.Fprintf(w, "  --%-20s %-20s %s%s\n", pName, typeHint, prop.Description, req)
-				}
-			}
-			return
-		}
+func printNamespaceHelp(commands []CLICommand, namespace string, w io.Writer) {
+	nsCommands := commandsForNamespace(commands, namespace)
+	if len(nsCommands) == 0 {
+		fmt.Fprintf(w, "unknown namespace: %s\n", namespace)
+		return
 	}
-	fmt.Fprintf(w, "unknown tool: %s\n", name)
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintf(w, "  143-tools %s <action> [--flag value ...]\n", namespace)
+	fmt.Fprintf(w, "  143-tools %s <action> --help\n", namespace)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Actions:")
+	for _, cmd := range nsCommands {
+		fmt.Fprintf(w, "  %-28s %s\n", cmd.Action, cmd.Description)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Run '143-tools %s <action> --help' for detailed usage.\n", namespace)
 }
 
-// groupToolsByProvider groups tools by their provider prefix (e.g. "sentry", "linear").
-func groupToolsByProvider(tools []Tool) map[string][]Tool {
-	groups := make(map[string][]Tool)
-	for _, tool := range tools {
-		parts := strings.SplitN(tool.Name, "_", 2)
-		provider := parts[0]
-		groups[provider] = append(groups[provider], tool)
+func printActionHelp(cmd CLICommand, w io.Writer) {
+	fmt.Fprintf(w, "Usage: %s [flags]\n\n", cmd.Usage())
+	fmt.Fprintf(w, "%s\n\n", cmd.Description)
+
+	if len(cmd.Tool.InputSchema.Properties) == 0 {
+		return
 	}
-	return groups
+	fmt.Fprintln(w, "Flags:")
+
+	propNames := make([]string, 0, len(cmd.Tool.InputSchema.Properties))
+	for name := range cmd.Tool.InputSchema.Properties {
+		propNames = append(propNames, name)
+	}
+	sort.Strings(propNames)
+
+	requiredSet := make(map[string]bool)
+	for _, r := range cmd.Tool.InputSchema.Required {
+		requiredSet[r] = true
+	}
+
+	for _, pName := range propNames {
+		prop := cmd.Tool.InputSchema.Properties[pName]
+		req := ""
+		if requiredSet[pName] {
+			req = " (required)"
+		}
+		typeHint := prop.Type
+		if len(prop.Enum) > 0 {
+			typeHint = strings.Join(prop.Enum, "|")
+		}
+		if prop.Type == "array" {
+			typeHint = "comma-separated"
+		}
+		fmt.Fprintf(w, "  --%-20s %-20s %s%s\n", pName, typeHint, prop.Description, req)
+	}
+}
+
+func cliNamespaceOrder(commands []CLICommand) []string {
+	seen := make(map[string]bool)
+	namespaces := make([]string, 0)
+	for _, cmd := range commands {
+		if seen[cmd.Namespace] {
+			continue
+		}
+		seen[cmd.Namespace] = true
+		namespaces = append(namespaces, cmd.Namespace)
+	}
+	sort.Strings(namespaces)
+	return namespaces
+}
+
+func commandsForNamespace(commands []CLICommand, namespace string) []CLICommand {
+	var result []CLICommand
+	for _, cmd := range commands {
+		if cmd.Namespace == namespace {
+			result = append(result, cmd)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Action < result[j].Action
+	})
+	return result
 }
 
 // MainCLI is the entry point for the 143-tools binary. It builds the
