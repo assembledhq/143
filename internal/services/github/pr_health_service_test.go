@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -18,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -1633,6 +1635,131 @@ func TestPRServiceBranchRequiresStatusChecks(t *testing.T) {
 			require.Equal(t, tt.expected, required, "branchRequiresStatusChecks should classify required status checks correctly")
 		})
 	}
+}
+
+func TestPRServiceBranchRequiresStatusChecksCached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		cachedValue   string
+		branchBody    string
+		expected      bool
+		expectGitHub  bool
+		expectCached  bool
+		expectedTTLAt time.Duration
+	}{
+		{
+			name:         "uses cached required checks result",
+			cachedValue:  `{"required":true,"checked_at":"2026-06-06T00:00:00Z"}`,
+			expected:     true,
+			expectCached: true,
+		},
+		{
+			name:          "caches branch protection miss with shorter permissive ttl",
+			branchBody:    `{"protected":false}`,
+			expected:      false,
+			expectGitHub:  true,
+			expectCached:  true,
+			expectedTTLAt: 6 * time.Hour,
+		},
+		{
+			name:          "caches branch protection required checks with longer ttl",
+			branchBody:    `{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`,
+			expected:      true,
+			expectGitHub:  true,
+			expectCached:  true,
+			expectedTTLAt: 24 * time.Hour,
+		},
+		{
+			name:          "falls back to GitHub on corrupted cache entry",
+			cachedValue:   `not-valid-json`,
+			branchBody:    `{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`,
+			expected:      true,
+			expectGitHub:  true,
+			expectCached:  true,
+			expectedTTLAt: 24 * time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			redisClient, mr := newPRHealthRedisClient(t)
+			key := requiredStatusChecksCacheKey("org-1", "assembledhq/143", "main")
+			if tt.cachedValue != "" {
+				mr.Set(key, tt.cachedValue)
+			}
+
+			githubCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				githubCalls++
+				require.Equal(t, "/repos/assembledhq/143/branches/main", r.URL.Path, "cache miss should query GitHub branch protection")
+				_, _ = w.Write([]byte(tt.branchBody))
+			}))
+			defer server.Close()
+
+			service := &PRService{
+				redisClient: redisClient,
+				logger:      zerolog.New(io.Discard),
+				baseURL:     server.URL,
+				httpClient:  server.Client(),
+			}
+
+			required, err := service.branchRequiresStatusChecksCached(context.Background(), "org-1", "token", "assembledhq", "143", "main")
+			require.NoError(t, err, "cached branch protection lookup should succeed")
+			require.Equal(t, tt.expected, required, "cached branch protection lookup should return expected required-checks result")
+			if tt.expectGitHub {
+				require.Equal(t, 1, githubCalls, "cache miss should query GitHub exactly once")
+			} else {
+				require.Equal(t, 0, githubCalls, "cache hit should not query GitHub")
+			}
+			if tt.expectCached {
+				raw, err := mr.Get(key)
+				require.NoError(t, err, "branch protection result should be cached in Redis")
+				require.Contains(t, raw, `"required":`, "cached payload should include the required flag")
+			}
+			if tt.expectedTTLAt > 0 {
+				ttl := mr.TTL(key)
+				require.True(t, ttl > tt.expectedTTLAt-time.Minute && ttl <= tt.expectedTTLAt, "cached result should use the expected TTL")
+			}
+		})
+	}
+}
+
+func TestPRServiceBranchRequiresStatusChecksCachedFallsBackWhenRedisUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/143/branches/main", r.URL.Path, "Redis outage should fall back to GitHub branch protection")
+		_, _ = w.Write([]byte(`{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		redisClient: &cache.Client{},
+		logger:      zerolog.New(io.Discard),
+		baseURL:     server.URL,
+		httpClient:  server.Client(),
+	}
+
+	required, err := service.branchRequiresStatusChecksCached(context.Background(), "org-1", "token", "assembledhq", "143", "main")
+	require.NoError(t, err, "Redis outage should not prevent a live GitHub lookup")
+	require.True(t, required, "live GitHub lookup should still report required checks")
+}
+
+func newPRHealthRedisClient(t *testing.T) (*cache.Client, *miniredis.Miniredis) {
+	t.Helper()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize for PR health cache tests")
+	t.Cleanup(func() {
+		require.NoError(t, client.Close(), "Redis client should close cleanly")
+	})
+	return client, mr
 }
 
 func TestPRServiceBuildRepairRevisionContextIncludesFailingChecks(t *testing.T) {

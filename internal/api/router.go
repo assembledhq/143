@@ -529,6 +529,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		prService.SetLLMClient(llmClient)
 		prService.SetPRTemplateStore(prTemplateStore)
 		prService.SetAuditEmitter(auditEmitter)
+		prService.SetRedisClient(redisClient)
 		prService.SetPullRequestStreams(prHealthStreams)
 	}
 
