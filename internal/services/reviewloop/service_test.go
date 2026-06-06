@@ -274,6 +274,44 @@ func TestService_OnThreadTurnCompleteCleanAutomationLoopEnqueuesOpenPR(t *testin
 	require.Equal(t, []string{"clean_open_pr"}, store.events, "clean automation review should durably queue PR creation with the terminal state")
 }
 
+func TestService_OnThreadTurnCompleteReviewOutputWithCleanSentinelStopsLoop(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	loopID := uuid.New()
+	passID := uuid.New()
+	store := &fakeReviewLoopStore{
+		runningLoop: models.SessionReviewLoop{
+			ID:        loopID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			ThreadID:  &threadID,
+			Status:    models.ReviewLoopStatusRunning,
+			AgentType: models.AgentTypeCodex,
+			MaxPasses: 2,
+		},
+		latestPass: models.SessionReviewLoopPass{
+			ID:        passID,
+			OrgID:     orgID,
+			LoopID:    loopID,
+			SessionID: sessionID,
+			PassIndex: 1,
+			Status:    models.ReviewLoopPassStatusReviewing,
+		},
+	}
+	threads := &fakeThreadService{message: models.SessionMessage{ID: 10, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID}}
+	svc := NewService(store, threads)
+
+	err := svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "No remaining correctness bugs.\n\nREVIEW_CLEAN")
+
+	require.NoError(t, err, "review output containing the clean sentinel should complete the loop")
+	require.Equal(t, models.ReviewLoopDecisionClean, store.cleanDecision, "review output clean sentinel should be persisted")
+	require.Equal(t, loopID, store.cleanLoopID, "review output clean sentinel should mark the loop clean")
+	require.Empty(t, threads.sent, "review output clean sentinel should not enqueue a redundant decision prompt")
+}
+
 func TestService_OnThreadTurnCompleteCleanAutomationLoopIsAtomicWithOpenPR(t *testing.T) {
 	t.Parallel()
 
@@ -351,7 +389,7 @@ func TestService_OnThreadTurnCompleteAutomationPassLimitEnqueuesOpenPRGate(t *te
 	require.Equal(t, []string{"needs_human_open_pr"}, store.events, "pass-limit automation review should durably queue the PR gate with the terminal state")
 }
 
-func TestService_OnThreadTurnCompleteAutomationDecisionFailureEnqueuesOpenPRGate(t *testing.T) {
+func TestService_OnThreadTurnCompleteAutomationDecisionTextWithCleanSentinelEnqueuesOpenPR(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -384,9 +422,10 @@ func TestService_OnThreadTurnCompleteAutomationDecisionFailureEnqueuesOpenPRGate
 
 	err := svc.OnThreadTurnComplete(context.Background(), orgID, threadID, "REVIEW_CLEAN with commentary")
 
-	require.ErrorIs(t, err, ErrUnrecognizedDecision, "invalid automation review decision should still return the decision error")
-	require.Equal(t, loopID, store.failedLoopID, "invalid automation review decision should mark the loop failed")
-	require.Equal(t, []string{"failed_open_pr"}, store.events, "invalid automation review decision should durably queue the PR gate")
+	require.NoError(t, err, "automation review decision containing the clean sentinel should complete without error")
+	require.Equal(t, models.ReviewLoopDecisionClean, store.cleanDecision, "clean decision should be persisted from explanatory text")
+	require.Equal(t, loopID, store.cleanLoopID, "clean decision should mark the loop clean")
+	require.Equal(t, []string{"clean_open_pr"}, store.events, "clean automation review should durably queue PR creation with the terminal state")
 }
 
 func TestService_OnThreadTurnCompleteEmptyDecisionFailsLoop(t *testing.T) {
@@ -483,7 +522,7 @@ func TestService_OnThreadTurnFailedAutomationEnqueuesOpenPRGate(t *testing.T) {
 	require.Equal(t, []string{"failed_open_pr"}, store.events, "automation review-loop failure should requeue the PR gate")
 }
 
-func TestParseDecisionRequiresExactSentinel(t *testing.T) {
+func TestParseDecisionFindsUnambiguousSentinel(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -494,8 +533,10 @@ func TestParseDecisionRequiresExactSentinel(t *testing.T) {
 	}{
 		{name: "clean", summary: " REVIEW_CLEAN\n", expected: models.ReviewLoopDecisionClean},
 		{name: "needs fix", summary: "\nNEEDS_FIX_PASS ", expected: models.ReviewLoopDecisionNeedsFix},
+		{name: "clean with explanatory text", summary: "No remaining issues.\n\nREVIEW_CLEAN", expected: models.ReviewLoopDecisionClean},
+		{name: "needs fix first line directive", summary: "NEEDS_FIX_PASS: fixed the regression.", expected: models.ReviewLoopDecisionNeedsFix},
 		{name: "ambiguous", summary: "NEEDS_FIX_PASS, not REVIEW_CLEAN", expectErr: true},
-		{name: "explanatory", summary: "REVIEW_CLEAN because all checks passed", expectErr: true},
+		{name: "negated clean mention", summary: "I cannot mark this REVIEW_CLEAN because issue X remains.", expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -504,10 +545,10 @@ func TestParseDecisionRequiresExactSentinel(t *testing.T) {
 
 			got, err := parseDecision(tt.summary)
 			if tt.expectErr {
-				require.ErrorIs(t, err, ErrUnrecognizedDecision, "parseDecision should reject non-exact or ambiguous decision text")
+				require.ErrorIs(t, err, ErrUnrecognizedDecision, "parseDecision should reject ambiguous decision text")
 				return
 			}
-			require.NoError(t, err, "parseDecision should accept exact sentinel text")
+			require.NoError(t, err, "parseDecision should accept unambiguous sentinel text")
 			require.Equal(t, tt.expected, got, "parseDecision should return the expected sentinel")
 		})
 	}
