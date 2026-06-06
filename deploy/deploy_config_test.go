@@ -514,6 +514,44 @@ func TestCIDeployConfiguresWorkerBlueGreenPortRange(t *testing.T) {
 	require.Contains(t, workflowText, "generation binds a free port while old worker generations keep serving", "workflow comment should document why the port range is required")
 }
 
+func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
+	t.Parallel()
+
+	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
+	require.NoError(t, err, "test should read deploy workflow")
+	workflowText := string(workflow)
+
+	jobsIndex := strings.Index(workflowText, "\njobs:")
+	require.NotEqual(t, -1, jobsIndex, "deploy workflow should define jobs")
+	workflowHeader := workflowText[:jobsIndex]
+	require.NotContains(t, workflowHeader, "\nconcurrency:", "deploy workflow should not use workflow-level concurrency because stale build cancellation must not cancel active deploys")
+
+	buildIndex := strings.Index(workflowText, "\n  build:")
+	predeployIndex := strings.Index(workflowText, "\n  predeploy-latest:")
+	deployIndex := strings.Index(workflowText, "\n  deploy:")
+	require.NotEqual(t, -1, buildIndex, "deploy workflow should define the build job")
+	require.NotEqual(t, -1, predeployIndex, "deploy workflow should define the predeploy freshness gate")
+	require.NotEqual(t, -1, deployIndex, "deploy workflow should define the deploy job")
+	require.Less(t, buildIndex, predeployIndex, "predeploy freshness gate should run after build")
+	require.Less(t, predeployIndex, deployIndex, "deploy should run after the freshness gate")
+
+	buildJob := workflowText[buildIndex:predeployIndex]
+	require.Contains(t, buildJob, `group: deploy-build-${{ github.ref }}-${{ matrix.name }}`, "build job should cancel stale builds independently per image")
+	require.Contains(t, buildJob, "cancel-in-progress: true", "build job should cancel in-progress stale image builds")
+
+	predeployJob := workflowText[predeployIndex:deployIndex]
+	require.Contains(t, predeployJob, "should_deploy", "predeploy freshness gate should expose a should_deploy output")
+	require.Contains(t, predeployJob, `gh api "repos/$REPO/commits/main" --jq .sha`, "predeploy freshness gate should compare the run SHA to latest main")
+	require.Contains(t, predeployJob, `echo "should_deploy=true" >> "$GITHUB_OUTPUT"`, "predeploy freshness gate should allow latest main to deploy")
+	require.Contains(t, predeployJob, `echo "should_deploy=false" >> "$GITHUB_OUTPUT"`, "predeploy freshness gate should skip stale deploys")
+
+	deployJob := workflowText[deployIndex:]
+	require.Contains(t, deployJob, "needs: [build, predeploy-latest]", "deploy job should wait for both image builds and freshness gate")
+	require.Contains(t, deployJob, "if: needs.predeploy-latest.outputs.should_deploy == 'true'", "deploy job should skip stale SHAs")
+	require.Contains(t, deployJob, "group: deploy-fleet", "deploy job should serialize fleet deploys")
+	require.Contains(t, deployJob, "cancel-in-progress: false", "deploy job should never cancel an active production deploy")
+}
+
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 

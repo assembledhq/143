@@ -4,16 +4,6 @@ on:
   push:
     branches: [main]
 
-# A worker drain can hold a deploy job for up to ~45 minutes while in-flight
-# coding turns finish. Queue overlapping deploys instead of running them in
-# parallel — two concurrent deploys would race on `docker compose up
-# --force-recreate` against the same fleet hosts. cancel-in-progress is false
-# because deploy.sh isn't safe to interrupt mid-flight (it would leave a
-# half-rolled host).
-concurrency:
-  group: deploy-fleet
-  cancel-in-progress: false
-
 env:
   REGISTRY: ghcr.io
 
@@ -23,6 +13,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    concurrency:
+      group: deploy-build-${{ github.ref }}-${{ matrix.name }}
+      cancel-in-progress: true
     strategy:
       matrix:
         include:
@@ -70,9 +63,42 @@ jobs:
           cache-from: type=registry,ref=${{ matrix.image }}:buildcache
           cache-to: type=registry,ref=${{ matrix.image }}:buildcache,mode=max
 
-  deploy:
+  predeploy-latest:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_deploy: ${{ steps.latest.outputs.should_deploy }}
+    steps:
+      - name: Confirm this SHA is still latest main
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          latest_sha="$(gh api "repos/$REPO/commits/main" --jq .sha)"
+          if [ "$latest_sha" = "$EXPECTED_SHA" ]; then
+            echo "This run is latest main; continuing deploy for $EXPECTED_SHA."
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping stale deploy for $EXPECTED_SHA; latest main is $latest_sha."
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: [build, predeploy-latest]
+    if: needs.predeploy-latest.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    # A worker drain can hold a deploy job for up to ~45 minutes while
+    # in-flight coding turns finish. Queue overlapping deploys instead of
+    # running them in parallel. cancel-in-progress is false because deploy.sh
+    # isn't safe to interrupt mid-flight.
+    concurrency:
+      group: deploy-fleet
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
 
