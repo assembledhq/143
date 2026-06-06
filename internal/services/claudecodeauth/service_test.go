@@ -557,6 +557,128 @@ func TestRefreshTokenByID_HappyPath(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenByID_LogsSuccessfulRefreshAtInfo(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+	}))
+	defer ts.Close()
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs).Level(zerolog.InfoLevel)
+	svc := NewService(store, logger)
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.NoError(t, err, "RefreshTokenByID should refresh the expired subscription")
+	require.Contains(t, logs.String(), "Claude Code OAuth token refreshed", "successful refresh should be logged at info level")
+	require.Contains(t, logs.String(), credID.String(), "successful refresh log should include credential id")
+}
+
+func TestStoreTokenByID_PersistsHarvestedSubscription(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	profileTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer harvested-access", r.Header.Get("Authorization"), "StoreTokenByID should validate the harvested token")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}`))
+	}))
+	defer profileTS.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetProfileURL(profileTS.URL)
+	orgID := uuid.New()
+	userID := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+	credID, err := store.UpsertWithLabel(context.Background(), scope, &userID, "personal-claude", models.AnthropicConfig{
+		Subscription: &models.AnthropicSubscription{
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	})
+	require.NoError(t, err, "seed subscription should be stored")
+
+	expiresAt := time.Now().Add(2 * time.Hour).Truncate(time.Millisecond)
+	sub := models.AnthropicSubscription{
+		AccessToken:   "harvested-access",
+		RefreshToken:  "harvested-refresh",
+		ExpiresAt:     expiresAt,
+		AccountType:   "claude_max",
+		RateLimitTier: "default_claude_max_20x",
+		Scopes:        []string{"user:profile", "user:inference"},
+	}
+
+	stored, err := svc.StoreTokenByID(context.Background(), scope, *credID, sub)
+
+	require.NoError(t, err, "StoreTokenByID should persist harvested Claude credentials")
+	require.True(t, stored, "StoreTokenByID should report when harvested credentials were persisted")
+	cred := store.creds[*credID]
+	require.NotNil(t, cred, "stored credential should still exist")
+	cfg, ok := cred.Config.(models.AnthropicConfig)
+	require.True(t, ok, "stored credential config should remain AnthropicConfig")
+	require.NotNil(t, cfg.Subscription, "stored credential should contain a subscription")
+	require.Equal(t, sub, *cfg.Subscription, "stored credential should contain the harvested subscription")
+}
+
+func TestStoreTokenByID_RejectsInvalidHarvestedAccessToken(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	profileTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer harvested-access", r.Header.Get("Authorization"), "StoreTokenByID should validate the harvested token")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer profileTS.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetProfileURL(profileTS.URL)
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(time.Hour))
+
+	stored, err := svc.StoreTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID, models.AnthropicSubscription{
+		AccessToken:  "harvested-access",
+		RefreshToken: "harvested-refresh",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+	})
+
+	require.Error(t, err, "StoreTokenByID should reject a harvested token that Anthropic does not accept")
+	require.False(t, stored, "StoreTokenByID should report no write for rejected harvested credentials")
+	cfg := store.creds[credID].Config.(models.AnthropicConfig)
+	require.Equal(t, "old-access", cfg.Subscription.AccessToken, "StoreTokenByID should not overwrite with an invalid harvested token")
+	require.Equal(t, "old-refresh", cfg.Subscription.RefreshToken, "StoreTokenByID should preserve the existing refresh token after validation failure")
+}
+
+func TestStoreTokenByID_DoesNotOverwriteNewerStoredToken(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetProfileURL("")
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "newer-access", "newer-refresh", time.Now().Add(3*time.Hour))
+
+	stored, err := svc.StoreTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID, models.AnthropicSubscription{
+		AccessToken:  "older-harvested-access",
+		RefreshToken: "older-harvested-refresh",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+	})
+
+	require.NoError(t, err, "StoreTokenByID should no-op when the DB already has a newer token")
+	require.False(t, stored, "StoreTokenByID should report no write for stale harvested credentials")
+	cfg := store.creds[credID].Config.(models.AnthropicConfig)
+	require.Equal(t, "newer-access", cfg.Subscription.AccessToken, "StoreTokenByID should preserve the newer stored access token")
+	require.Equal(t, "newer-refresh", cfg.Subscription.RefreshToken, "StoreTokenByID should preserve the newer stored refresh token")
+}
+
 func TestRefreshTokenByID_PreservesRefreshTokenWhenEmpty(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
