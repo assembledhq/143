@@ -10,11 +10,12 @@ const (
 	AuditActorAgent   AuditActorType = "agent"
 	AuditActorSystem  AuditActorType = "system"
 	AuditActorWebhook AuditActorType = "webhook"
+	AuditActorAPI     AuditActorType = "api_client"
 )
 
 func (t AuditActorType) Validate() error {
 	switch t {
-	case AuditActorUser, AuditActorAgent, AuditActorSystem, AuditActorWebhook:
+	case AuditActorUser, AuditActorAgent, AuditActorSystem, AuditActorWebhook, AuditActorAPI:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditActorType: %q", t)
@@ -130,6 +131,14 @@ const (
 	AuditActionEvalRunStarted   AuditAction = "eval_run.started"
 	AuditActionEvalRunCompleted AuditAction = "eval_run.completed"
 	AuditActionEvalBatchStarted AuditAction = "eval_batch.started"
+
+	// API client and token actions
+	AuditActionAPIClientCreated  AuditAction = "api_client.created"
+	AuditActionAPIClientUpdated  AuditAction = "api_client.updated"
+	AuditActionAPIClientDisabled AuditAction = "api_client.disabled"
+	AuditActionAPITokenCreated   AuditAction = "api_token.created" // #nosec G101 -- audit action name
+	AuditActionAPITokenRevoked   AuditAction = "api_token.revoked" // #nosec G101 -- audit action name
+	AuditActionAPITokenUsed      AuditAction = "api_token.used"    // #nosec G101 -- audit action name
 )
 
 // Validate checks that the action is a known value.
@@ -164,7 +173,9 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
-		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted:
+		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted,
+		AuditActionAPIClientCreated, AuditActionAPIClientUpdated, AuditActionAPIClientDisabled,
+		AuditActionAPITokenCreated, AuditActionAPITokenRevoked, AuditActionAPITokenUsed:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditAction: %q", a)
@@ -196,6 +207,8 @@ const (
 	AuditResourceAutomation           AuditResourceType = "automation"
 	AuditResourceOrganization         AuditResourceType = "organization"
 	AuditResourcePreviewSecretBundle  AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
+	AuditResourceAPIClient            AuditResourceType = "api_client"
+	AuditResourceAPIToken             AuditResourceType = "api_token" // #nosec G101 -- audit resource type
 )
 
 func (t AuditResourceType) Validate() error {
@@ -206,7 +219,8 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
-		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle:
+		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle,
+		AuditResourceAPIClient, AuditResourceAPIToken:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

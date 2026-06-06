@@ -1,0 +1,101 @@
+---
+title: External API
+description: Service-account API authentication, idempotency, rate limits, and examples.
+section: Reference
+order: 55
+status: stable
+audience: engineer
+tags:
+  - api
+  - automation
+llm_summary: Use 143 external API clients with Bearer service tokens, scoped permissions, Idempotency-Key on POST requests, and 143-Version for client version logging.
+---
+
+The external API uses the same `/api/v1` resource paths as the application API, with service-account Bearer tokens.
+
+## Authentication
+
+Send API tokens in the `Authorization` header:
+
+```bash
+curl https://your-143.example.com/api/v1/sessions \
+  -H "Authorization: Bearer 143_sk_..." \
+  -H "143-Version: 2026-06-01"
+```
+
+Tokens are scoped. Missing scopes return `403` with `error.details.required_scope`.
+
+## Idempotency
+
+Send `Idempotency-Key` on mutating `POST` requests. Keys are scoped to the API client, method, and path, and are retained for 24 hours.
+
+```bash
+curl https://your-143.example.com/api/v1/sessions \
+  -X POST \
+  -H "Authorization: Bearer 143_sk_..." \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: deploy-2026-06-01-001" \
+  -d '{
+    "message": "Fix the failing deployment check",
+    "repository_id": "00000000-0000-0000-0000-000000000000",
+    "metadata": {"caller": "deploy-bot", "deployment_id": "dep_123"}
+  }'
+```
+
+Reusing a key with different request content returns `409 IDEMPOTENCY_KEY_REUSED`.
+
+## Rate Limits
+
+External API tokens have per-token read and mutation budgets. Responses include:
+
+- `X-RateLimit-Limit`
+- `X-RateLimit-Remaining`
+- `X-RateLimit-Reset`
+- `Retry-After` on `429 RATE_LIMITED`
+
+## Sessions
+
+Create a session:
+
+```json
+{
+  "message": "Investigate the checkout error",
+  "repository_id": "00000000-0000-0000-0000-000000000000",
+  "target_branch": "main",
+  "agent_type": "codex",
+  "metadata": {
+    "caller": "support-workflow",
+    "ticket_id": "SUP-123"
+  }
+}
+```
+
+Required scope: `sessions:create`.
+
+## Automations
+
+Create an automation:
+
+```json
+{
+  "name": "Nightly dependency review",
+  "goal": "Review dependency updates and open pull requests for safe upgrades.",
+  "repository_id": "00000000-0000-0000-0000-000000000000",
+  "schedule": {
+    "type": "cron",
+    "cron": "0 2 * * *",
+    "timezone": "UTC"
+  },
+  "identity": {"scope": "org"},
+  "metadata": {
+    "caller": "platform",
+    "workflow_id": "deps-nightly"
+  }
+}
+```
+
+Required scope: `automations:create`.
+
+## Previews
+
+General external API tokens can create, read, stop, and restart previews with `previews:*` scopes. Repository-scoped tokens must include `repository_id` where a list request could otherwise span repositories.

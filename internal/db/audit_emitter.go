@@ -102,6 +102,45 @@ type UserActionParams struct {
 	ProjectID    *uuid.UUID
 }
 
+// EmitAPIAction logs an action performed by an external API client.
+func (e *AuditEmitter) EmitAPIAction(ctx context.Context, params APIActionParams) {
+	entry := &models.AuditLog{
+		OrgID:        params.OrgID,
+		ActorType:    models.AuditActorAPI,
+		ActorID:      params.APIClientID.String(),
+		Action:       params.Action,
+		ResourceType: params.ResourceType,
+		ResourceID:   params.ResourceID,
+		Details:      params.Details,
+		RequestID:    params.RequestID,
+		IPAddress:    params.IPAddress,
+		UserAgent:    params.UserAgent,
+		SessionID:    params.SessionID,
+		ProjectID:    params.ProjectID,
+	}
+	if err := e.store.Create(ctx, entry); err != nil {
+		e.logger.Warn().Err(err).
+			Str("action", string(params.Action)).
+			Str("actor_id", params.APIClientID.String()).
+			Msg("failed to emit audit log")
+	}
+}
+
+type APIActionParams struct {
+	OrgID        uuid.UUID
+	APIClientID  uuid.UUID
+	APITokenID   *uuid.UUID
+	Action       models.AuditAction
+	ResourceType models.AuditResourceType
+	ResourceID   *string
+	Details      json.RawMessage
+	RequestID    *string
+	IPAddress    *netip.Prefix
+	UserAgent    *string
+	SessionID    *uuid.UUID
+	ProjectID    *uuid.UUID
+}
+
 // EmitSystemAction logs an action performed by a system process.
 func (e *AuditEmitter) EmitSystemAction(ctx context.Context, params SystemActionParams) {
 	entry := &models.AuditLog{

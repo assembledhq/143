@@ -72,6 +72,8 @@ type SessionFilters struct {
 	Search             string // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
 	IncludeArchived    bool   // When true, include archived sessions in the results.
 	OnlyArchived       bool   // When true, return only archived sessions.
+	CreatedAfter       *time.Time
+	CreatedBefore      *time.Time
 }
 
 // SessionCountsFilters scopes CountsByOrg to a subset of sessions.
@@ -338,6 +340,14 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 	}
 	if filters.AdHocOnly {
 		query += ` AND pm_plan_id IS NULL`
+	}
+	if filters.CreatedAfter != nil {
+		query += ` AND created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += ` AND created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
 	}
 	if filters.CursorTime != nil && filters.CursorID != nil {
 		query += ` AND (last_activity_at, id) < (@cursor_time, @cursor_id)`

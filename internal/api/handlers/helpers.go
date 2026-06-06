@@ -113,6 +113,27 @@ func parseUUIDList(raw string) ([]uuid.UUID, error) {
 
 func strPtr(s string) *string { return &s }
 
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func apiTokenAllowsRepository(token *models.APIToken, repoID uuid.UUID) bool {
+	if token == nil || len(token.RepositoryIDs) == 0 {
+		return true
+	}
+	for _, allowed := range token.RepositoryIDs {
+		if allowed == repoID {
+			return true
+		}
+	}
+	return false
+}
+
 // clearWriteDeadline disables the global http.Server WriteTimeout for a
 // single in-flight request. Use it at the top of handlers whose work can
 // legitimately exceed the server-wide WriteTimeout — preview start in
@@ -179,6 +200,29 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func trimOptionalString(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*s)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+func parseOptionalRFC3339(w http.ResponseWriter, r *http.Request, raw *string) (*time.Time, bool) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, true
+	}
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*raw))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TIMESTAMP", "timestamp must be RFC3339")
+		return nil, false
+	}
+	return &parsed, true
 }
 
 // derefStrPtr dereferences a nullable string pointer, returning "" for nil.
