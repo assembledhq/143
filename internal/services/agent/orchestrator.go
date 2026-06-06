@@ -39,6 +39,11 @@ const (
 	defaultMaxConcurrent    = 10
 	mentionIndexWarmTimeout = 2 * time.Second
 	planModePrefix          = "[PLAN_MODE]\n"
+
+	// Claude Code access tokens are short-lived. A sandbox credential with an
+	// expiration far beyond this bound is more likely corrupted or synthetic
+	// than a valid CLI refresh result.
+	maxClaudeCodeHarvestedTokenLifetime = 24 * time.Hour
 )
 
 // ErrConcurrencyLimit is returned when an org has reached its maximum
@@ -281,6 +286,12 @@ type ClaudeCodeAuthProvider interface {
 // to the org fallback after their first 8h of token life.
 type ClaudeCodeAuthRefresher interface {
 	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error)
+}
+
+// ClaudeCodeAuthTokenStore persists Claude Code OAuth tokens that were
+// refreshed by the Claude Code CLI inside the sandbox.
+type ClaudeCodeAuthTokenStore interface {
+	StoreTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error)
 }
 
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
@@ -2583,6 +2594,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, primaryThreadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
+		log.Warn().
+			Err(harvestErr).
+			Str("session_id", run.ID.String()).
+			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
+	}
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 	}
@@ -3980,6 +3997,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, messageTurnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
+		log.Warn().
+			Err(harvestErr).
+			Str("session_id", session.ID.String()).
+			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
+	}
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 	}
@@ -5506,17 +5529,26 @@ func cloneStringMap(in map[string]string) map[string]string {
 // uses; we translate from the space-separated `scope` response string when
 // the tokens are issued. If Anthropic ever changes this format, update this
 // marshal block and the AnthropicSubscription struct together.
-func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, string, error) {
+func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
 	if o.claudeCodeAuth == nil {
 		return false, "", nil
 	}
 
-	sub, _, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
+	sub, credID, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
 	if err != nil {
 		return false, "", fmt.Errorf("get claude code subscription token: %w", err)
 	}
 	if sub == nil {
 		return false, "", nil
+	}
+	if credID != nil && o.env != nil {
+		o.env.recordCredentialPick(orgID, userID, models.ProviderAnthropic, models.DecryptedCodingCredential{
+			ID:       *credID,
+			OrgID:    orgID,
+			Provider: models.ProviderAnthropicSubscription,
+			Status:   models.CodingCredentialStatusActive,
+			Config:   models.FromAnthropicSubscription(*sub),
+		})
 	}
 
 	injected, err := o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
@@ -5579,6 +5611,159 @@ func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID,
 		Msg("injected claude subscription credentials into sandbox")
 
 	return true, nil
+}
+
+func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session *models.Session, sandbox *Sandbox, billingMode TokenBillingMode, log zerolog.Logger) (bool, error) {
+	if o == nil || session == nil || sandbox == nil {
+		return false, nil
+	}
+	if session.AgentType != models.AgentTypeClaudeCode || billingMode != TokenBillingModeSubscription {
+		return false, nil
+	}
+	if o.env == nil || o.provider == nil || o.claudeCodeAuth == nil {
+		return false, nil
+	}
+	store, ok := o.claudeCodeAuth.(ClaudeCodeAuthTokenStore)
+	if !ok {
+		return false, nil
+	}
+
+	rec, ok := o.env.lookupRecentPickRecord(session.OrgID, session.TriggeredByUserID, models.ProviderAnthropic)
+	if !ok || rec.credID == uuid.Nil {
+		return false, nil
+	}
+
+	scope := models.Scope{OrgID: session.OrgID}
+	var existing *models.AnthropicSubscription
+	if rec.credential != nil {
+		if rec.credential.Provider != models.ProviderAnthropicSubscription {
+			return false, nil
+		}
+		scope = rec.credential.Scope()
+		if cfg, ok := rec.credential.Config.(models.AnthropicSubscriptionConfig); ok {
+			existing = &models.AnthropicSubscription{
+				AccessToken:   cfg.AccessToken,
+				RefreshToken:  cfg.RefreshToken,
+				ExpiresAt:     cfg.ExpiresAt,
+				AccountType:   cfg.AccountType,
+				RateLimitTier: cfg.RateLimitTier,
+				Scopes:        cfg.Scopes,
+			}
+		}
+	}
+
+	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
+	raw, err := o.provider.ReadFile(ctx, sandbox, credsPath)
+	if err != nil {
+		if isSandboxFileMissing(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read claude credentials: %w", err)
+	}
+
+	sub, err := parseClaudeCodeCredentialsFile(raw, existing)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil && !anthropicSubscriptionChanged(*existing, sub) {
+		return false, nil
+	}
+	stored, err := store.StoreTokenByID(ctx, scope, rec.credID, sub)
+	if err != nil {
+		return false, fmt.Errorf("store harvested claude credentials: %w", err)
+	}
+	if !stored {
+		return false, nil
+	}
+
+	scopeKind := "org"
+	if scope.IsPersonal() {
+		scopeKind = "personal"
+	}
+	log.Info().
+		Str("cred_id", rec.credID.String()).
+		Str("scope", scopeKind).
+		Msg("harvested refreshed Claude Code OAuth token from sandbox")
+	return true, nil
+}
+
+func parseClaudeCodeCredentialsFile(raw []byte, existing *models.AnthropicSubscription) (models.AnthropicSubscription, error) {
+	var payload struct {
+		ClaudeAiOAuth struct {
+			AccessToken      string   `json:"accessToken"`
+			RefreshToken     string   `json:"refreshToken"`
+			ExpiresAt        int64    `json:"expiresAt"`
+			Scopes           []string `json:"scopes"`
+			SubscriptionType string   `json:"subscriptionType"`
+			RateLimitTier    string   `json:"rateLimitTier"`
+		} `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return models.AnthropicSubscription{}, fmt.Errorf("parse claude credentials: %w", err)
+	}
+
+	oauth := payload.ClaudeAiOAuth
+	if oauth.AccessToken == "" {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials missing access token")
+	}
+	if oauth.RefreshToken == "" {
+		if existing == nil || existing.RefreshToken == "" {
+			return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials missing refresh token")
+		}
+		oauth.RefreshToken = existing.RefreshToken
+	}
+	if oauth.ExpiresAt <= 0 {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials missing expiration")
+	}
+
+	sub := models.AnthropicSubscription{
+		AccessToken:   oauth.AccessToken,
+		RefreshToken:  oauth.RefreshToken,
+		ExpiresAt:     time.UnixMilli(oauth.ExpiresAt),
+		AccountType:   oauth.SubscriptionType,
+		RateLimitTier: oauth.RateLimitTier,
+		Scopes:        oauth.Scopes,
+	}
+	if existing != nil {
+		if sub.AccountType == "" {
+			sub.AccountType = existing.AccountType
+		}
+		if sub.RateLimitTier == "" {
+			sub.RateLimitTier = existing.RateLimitTier
+		}
+		if len(sub.Scopes) == 0 {
+			sub.Scopes = existing.Scopes
+		}
+	}
+	if sub.IsExpired() {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials are expired")
+	}
+	if time.Until(sub.ExpiresAt) > maxClaudeCodeHarvestedTokenLifetime {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials expiration is implausibly far in the future")
+	}
+	if existing != nil && anthropicSubscriptionChanged(*existing, sub) && !sub.ExpiresAt.After(existing.ExpiresAt) {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials changed without a later expiration")
+	}
+	return sub, nil
+}
+
+func anthropicSubscriptionChanged(existing, next models.AnthropicSubscription) bool {
+	if existing.AccessToken != next.AccessToken ||
+		existing.RefreshToken != next.RefreshToken ||
+		existing.ExpiresAt.UnixMilli() != next.ExpiresAt.UnixMilli() ||
+		existing.AccountType != next.AccountType ||
+		existing.RateLimitTier != next.RateLimitTier {
+		return true
+	}
+	if len(existing.Scopes) != len(next.Scopes) {
+		return true
+	}
+	for i := range existing.Scopes {
+		if existing.Scopes[i] != next.Scopes[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
@@ -5682,7 +5867,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeSubscription, nil
 	}
 
-	injected, accountType, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	injected, accountType, err = o.injectClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().

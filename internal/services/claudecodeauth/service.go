@@ -106,6 +106,10 @@ const (
 	// the flow (or the row was resurrected by a replay attempt), so we
 	// force them to re-initiate and get a fresh verifier + state.
 	pendingAuthTTL = 10 * time.Minute
+
+	// harvestedTokenMaxLifetime bounds sandbox-originated Claude Code tokens
+	// before they are persisted back to the credential store.
+	harvestedTokenMaxLifetime = 24 * time.Hour
 )
 
 // defaultScopes is the minimum set of OAuth scopes the Claude Code CLI
@@ -723,11 +727,96 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		return nil, fmt.Errorf("store refreshed credential: %w", err)
 	}
 
-	s.logger.Debug().
+	s.logger.Info().
 		Str("cred_id", credID.String()).
 		Msg("Claude Code OAuth token refreshed")
 
 	return newSub, nil
+}
+
+// StoreTokenByID persists a Claude Code OAuth token that was refreshed by an
+// external Claude Code CLI process. Scope must match the credential owner.
+func (s *Service) StoreTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error) {
+	if s.credentials == nil {
+		return false, errors.New("credential store is not configured")
+	}
+	if sub.AccessToken == "" {
+		return false, errors.New("access_token is required")
+	}
+	if sub.RefreshToken == "" {
+		return false, errors.New("refresh_token is required")
+	}
+	if sub.ExpiresAt.IsZero() {
+		return false, errors.New("expires_at is required")
+	}
+	if sub.IsExpired() {
+		return false, errors.New("expires_at must be in the future")
+	}
+	if time.Until(sub.ExpiresAt) > harvestedTokenMaxLifetime {
+		return false, errors.New("expires_at is implausibly far in the future")
+	}
+
+	mu := s.credRefreshMu(credID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	cred, err := s.credentials.GetByID(ctx, scope, credID)
+	if err != nil {
+		return false, fmt.Errorf("get credential: %w", err)
+	}
+	cfg, ok := cred.Config.(models.AnthropicConfig)
+	if !ok || cfg.Subscription == nil {
+		return false, fmt.Errorf("credential is not an Anthropic subscription")
+	}
+	current := cfg.Subscription
+	if !harvestedSubscriptionIsNewer(*current, sub) {
+		return false, nil
+	}
+
+	if s.profileURL == "" {
+		return false, errors.New("profile URL is required to validate harvested Claude token")
+	}
+	profile, err := s.fetchProfile(ctx, sub.AccessToken)
+	if err != nil {
+		return false, fmt.Errorf("validate harvested Claude token: %w", err)
+	}
+	if profile != nil {
+		if profile.Organization.OrganizationType != "" {
+			sub.AccountType = profile.Organization.OrganizationType
+		}
+		if profile.Organization.RateLimitTier != "" {
+			sub.RateLimitTier = profile.Organization.RateLimitTier
+		}
+	}
+
+	if err := s.credentials.UpsertByID(ctx, scope, credID, models.AnthropicConfig{Subscription: &sub}); err != nil {
+		return false, fmt.Errorf("store claude subscription credential: %w", err)
+	}
+	return true, nil
+}
+
+func harvestedSubscriptionIsNewer(current, harvested models.AnthropicSubscription) bool {
+	if !harvested.ExpiresAt.After(current.ExpiresAt) {
+		return false
+	}
+	return current.AccessToken != harvested.AccessToken ||
+		current.RefreshToken != harvested.RefreshToken ||
+		current.ExpiresAt.UnixMilli() != harvested.ExpiresAt.UnixMilli() ||
+		current.AccountType != harvested.AccountType ||
+		current.RateLimitTier != harvested.RateLimitTier ||
+		!stringSlicesEqual(current.Scopes, harvested.Scopes)
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isClaudeRefreshTokenReused(body []byte) bool {
