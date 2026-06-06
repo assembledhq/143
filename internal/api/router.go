@@ -72,6 +72,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	slackInstallationStore := db.NewSlackInstallationStore(pool)
 	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
+	sessionAttributionStore := db.NewSessionAttributionStore(pool)
 	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
@@ -109,6 +110,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	previewStore := db.NewPreviewStore(pool)
 	previewAPITokenStore := db.NewPreviewAPITokenStore(pool)
+	apiClientStore := db.NewAPIClientStore(pool)
+	apiTokenStore := db.NewAPITokenStore(pool)
+	apiIdempotencyStore := db.NewAPIIdempotencyStore(pool)
+	externalAPIRateLimiter := middleware.NewExternalAPIRateLimiter(middleware.DefaultExternalAPIRateLimitConfig())
 	nodeStore := db.NewNodeStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
@@ -479,6 +484,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 	teamHandler.SetRepositoryStore(repoStore)
+	apiClientHandler := handlers.NewAPIClientHandler(apiClientStore, apiTokenStore)
+	apiClientHandler.SetLogger(logger)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
@@ -532,10 +539,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	authHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
+	sessionHandler.SetAttributionStore(sessionAttributionStore)
 	if canceller != nil {
 		sessionHandler.SetCanceller(canceller)
 	}
 	teamHandler.SetAuditEmitter(auditEmitter)
+	apiClientHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetLogger(logger)
 	if orgSettingsInvalidator != nil {
@@ -830,8 +839,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				Users:            userStore,
 				Memberships:      membershipStore,
 				PreviewAPITokens: previewAPITokenStore,
+				APITokens:        apiTokenStore,
+				Audit:            auditEmitter,
 			}, []byte(cfg.CSRFSigningKey), logger))
 			r.Use(middleware.LogContext(logger))
+			r.Use(externalAPIRateLimiter.Middleware())
+			r.Use(middleware.ExternalAPIIdempotency(apiIdempotencyStore, logger))
 			r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
 
 			// Zero-membership-safe endpoints: a user whose only membership was
@@ -1058,6 +1071,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post(uploadAPIPath, uploadHandler.Upload)
 
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
+				r.Post("/api/v1/sessions", sessionHandler.CreateExternal)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 				r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
@@ -1151,7 +1165,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/pull-requests/{id}/merge-when-ready", pullRequestHandler.CancelMergeWhenReady)
 
 				// Automations (write)
-				r.Post("/api/v1/automations", automationHandler.Create)
+				r.Post("/api/v1/automations", automationHandler.CreatePublic)
 				r.Patch("/api/v1/automations/{id}", automationHandler.Update)
 				r.Delete("/api/v1/automations/{id}", automationHandler.Delete)
 				r.Post("/api/v1/automations/{id}/run", automationHandler.RunNow)
@@ -1243,6 +1257,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Audit logs
 				r.Get("/api/v1/audit-logs", auditLogHandler.List)
 				r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
+				r.Get("/api/v1/api-clients", apiClientHandler.List)
+				r.Post("/api/v1/api-clients", apiClientHandler.Create)
+				r.Get("/api/v1/api-clients/{id}", apiClientHandler.Get)
+				r.Patch("/api/v1/api-clients/{id}", apiClientHandler.Update)
+				r.Delete("/api/v1/api-clients/{id}", apiClientHandler.Delete)
+				r.Get("/api/v1/api-clients/{id}/tokens", apiClientHandler.ListTokens)
+				r.Post("/api/v1/api-clients/{id}/tokens", apiClientHandler.CreateToken)
+				r.Delete("/api/v1/api-clients/{id}/tokens/{token_id}", apiClientHandler.RevokeToken)
 
 				// Team management. The roster read (GET /team/members) is registered
 				// in the admin+member group above; mutations and invite flows stay
