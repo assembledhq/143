@@ -354,9 +354,88 @@ func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testi
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS", "worker deploy should let operators set the minimum idle CPU budget needed for temporary worker overlap")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS", "worker deploy should retry transient capacity preflight failures before failing a routine rollout")
 	require.Contains(t, deploy, "worker_support_service_fingerprint", "worker deploy should fingerprint support-service config inputs during preflight")
+	require.Contains(t, deploy, "worker_process_config_fingerprint", "worker deploy should separately fingerprint worker-process config inputs during preflight")
+	require.Contains(t, deploy, "worker_host_runtime_fingerprint", "worker deploy should separately fingerprint host runtime inputs during preflight")
+	require.Contains(t, deploy, "worker_docker_daemon_fingerprint", "worker deploy should separately fingerprint docker daemon inputs during preflight")
 	require.Contains(t, deploy, "--support-services-fingerprint", "worker deploy preflight should pass support-service fingerprints into worker-deployctl")
+	require.Contains(t, deploy, "--worker-process-fingerprint", "worker deploy preflight should pass worker-process fingerprints into worker-deployctl")
+	require.Contains(t, deploy, "--host-runtime-fingerprint", "worker deploy preflight should pass host-runtime fingerprints into worker-deployctl")
+	require.Contains(t, deploy, "--docker-daemon-fingerprint", "worker deploy preflight should pass docker-daemon fingerprints into worker-deployctl")
 	require.Contains(t, deploy, "--expected-schema-version", "worker deploy preflight should pass the expected migration/schema version into worker-deployctl")
 	require.Contains(t, deploy, "impact --node-id", "worker deploy should emit a dry-run impact report for the old generation before routine drain")
+}
+
+func TestWorkerDeployFingerprintsAreSeparatedByBlastRadius(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	workerProcess := extractShellFunction(t, deploy, "worker_process_config_fingerprint", "worker_support_service_fingerprint")
+	supportServices := extractShellFunction(t, deploy, "worker_support_service_fingerprint", "worker_host_runtime_fingerprint")
+	hostRuntime := extractShellFunction(t, deploy, "worker_host_runtime_fingerprint", "worker_docker_daemon_fingerprint")
+	dockerDaemon := extractShellFunction(t, deploy, "worker_docker_daemon_fingerprint", "ensure_routine_worker_fingerprints_compatible")
+
+	require.Contains(t, workerProcess, "compose_service_fingerprint", "worker process fingerprint should be based on the worker service block")
+	require.Contains(t, workerProcess, "docker-compose.worker.yml", "worker process fingerprint should include the worker compose source")
+	require.Contains(t, workerProcess, "worker", "worker process fingerprint should target the worker service")
+
+	require.NotContains(t, supportServices, "fingerprint_files \\\n        /opt/143/docker-compose.worker.yml", "support-service fingerprint should not hash the entire worker compose file")
+	require.Contains(t, supportServices, "chrome", "support-service fingerprint should include the chrome service block")
+	require.Contains(t, supportServices, "gvisor-check", "support-service fingerprint should include the gVisor check service block")
+	require.Contains(t, supportServices, "sandbox-dns", "support-service fingerprint should include the sandbox DNS service block")
+	require.Contains(t, supportServices, "docker-compose.dns-probe.yml", "support-service fingerprint should include the DNS probe compose file")
+
+	require.Contains(t, hostRuntime, "reconcile-worker-host.sh", "host-runtime fingerprint should include worker host reconciliation")
+	require.Contains(t, hostRuntime, "sandbox-firewall.sh", "host-runtime fingerprint should include sandbox firewall rules")
+	require.Contains(t, hostRuntime, "sandbox-resolv-conf.sh", "host-runtime fingerprint should include sandbox resolv.conf generation")
+
+	require.Contains(t, dockerDaemon, "install-docker-dns.sh", "docker-daemon fingerprint should include Docker DNS installation")
+	require.Contains(t, dockerDaemon, "install-log-rotation.sh", "docker-daemon fingerprint should include Docker log rotation installation")
+}
+
+func TestRoutineWorkerDeployBlocksOnlyRuntimeFingerprints(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	compatibility := extractShellFunction(t, deploy, "ensure_routine_worker_fingerprints_compatible", "worker_expected_schema_version")
+
+	require.Contains(t, compatibility, `.worker-support-services.v2.fingerprint`, "routine compatibility should persist semantic support-service fingerprints separately")
+	require.Contains(t, compatibility, `.worker-host-runtime.fingerprint`, "routine compatibility should persist host-runtime fingerprints separately")
+	require.Contains(t, compatibility, `.worker-docker-daemon.fingerprint`, "routine compatibility should persist docker-daemon fingerprints separately")
+	require.Contains(t, compatibility, `.worker-process.fingerprint`, "routine compatibility should persist worker-process fingerprints for preflight reporting")
+	require.Contains(t, compatibility, `support-service config changed during routine deploy`, "routine deploy should block support-service changes")
+	require.Contains(t, compatibility, `worker host-runtime config changed during routine deploy`, "routine deploy should block host-runtime changes")
+	require.Contains(t, compatibility, `worker docker-daemon config changed during routine deploy`, "routine deploy should block docker-daemon changes")
+	require.NotContains(t, compatibility, `"worker process config changed during routine deploy"`, "routine deploy should allow worker-process config changes through blue-green")
+}
+
+func TestWorkerDeployGatesStagedRuntimeFilesBeforeApplying(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	gateIndex := strings.Index(deploy, "run_worker_staged_fingerprint_gate\n  ssh \"${SSH_OPTS[@]}\" deploy@\"$HOST\" \\\n    \"mv /opt/143/deploy/scripts/sandbox-firewall.sh.new")
+	promoteFirewallIndex := strings.Index(deploy, "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new")
+	promoteResolvIndex := strings.Index(deploy, "mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new")
+	promoteReconcileIndex := strings.Index(deploy, "mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new")
+	reconcileIndex := strings.Index(deploy, "Reconciling worker host invariants")
+
+	require.NotEqual(t, -1, gateIndex, "worker deploy should gate staged host/runtime files before applying them")
+	require.NotEqual(t, -1, promoteFirewallIndex, "worker deploy should promote sandbox-firewall after the staged gate")
+	require.NotEqual(t, -1, promoteResolvIndex, "worker deploy should promote sandbox-resolv-conf after the staged gate")
+	require.NotEqual(t, -1, promoteReconcileIndex, "worker deploy should promote reconcile-worker-host after the staged gate")
+	require.NotEqual(t, -1, reconcileIndex, "worker deploy should reconcile host invariants after the staged gate")
+	require.Less(t, gateIndex, promoteFirewallIndex, "staged fingerprint gate should run before promoting sandbox-firewall")
+	require.Less(t, gateIndex, promoteResolvIndex, "staged fingerprint gate should run before promoting sandbox-resolv-conf")
+	require.Less(t, gateIndex, promoteReconcileIndex, "staged fingerprint gate should run before promoting reconcile-worker-host")
+	require.Less(t, gateIndex, reconcileIndex, "staged fingerprint gate should run before executing worker host reconciliation")
 }
 
 func TestWorkerCapacityPreflightMeasuresIdleCPUMillicores(t *testing.T) {
@@ -364,7 +443,7 @@ func TestWorkerCapacityPreflightMeasuresIdleCPUMillicores(t *testing.T) {
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
-	preflight := extractShellFunction(t, string(deployScript), "worker_host_capacity_preflight", "worker_support_service_fingerprint")
+	preflight := extractShellFunction(t, string(deployScript), "worker_host_capacity_preflight", "fingerprint_files")
 
 	require.Contains(t, preflight, "cpu_count", "worker capacity preflight should detect the number of online CPUs")
 	require.Contains(t, preflight, "* 1000 * cpu_count", "worker capacity preflight should convert idle CPU fraction into host-level millicores")
