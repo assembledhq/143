@@ -786,7 +786,15 @@ func (s *SessionStore) SetLinearIdentifierHint(ctx context.Context, orgID, sessi
 func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error {
 	query := `
 		UPDATE sessions
-		SET runtime_soft_deadline_at = @runtime_soft_deadline_at,
+		SET status = @status,
+		    started_at = @runtime_started_at,
+		    completed_at = NULL,
+		    error = NULL,
+		    failure_explanation = NULL,
+		    failure_category = NULL,
+		    failure_next_steps = NULL,
+		    failure_retry_advised = false,
+		    runtime_soft_deadline_at = @runtime_soft_deadline_at,
 		    runtime_hard_deadline_at = @runtime_hard_deadline_at,
 		    runtime_last_progress_at = @runtime_last_progress_at,
 		    runtime_last_progress_type = @runtime_last_progress_type,
@@ -805,12 +813,16 @@ func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.U
 		    recovery_started_at = CASE
 		        WHEN recovery_state = 'recovering' THEN recovery_started_at
 		        ELSE NULL
-		    END
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		    END,
+		    last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING ` + sessionSelectColumns
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":                             sessionID,
 		"org_id":                         orgID,
+		"status":                         string(models.SessionStatusRunning),
+		"runtime_started_at":             observedAt.UTC(),
 		"runtime_soft_deadline_at":       softDeadline.UTC(),
 		"runtime_hard_deadline_at":       hardDeadline.UTC(),
 		"runtime_last_progress_at":       observedAt.UTC(),
@@ -818,7 +830,16 @@ func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.U
 		"runtime_last_progress_strength": string(models.RuntimeProgressStrengthWeak),
 		"checkpoint_capability":          string(capability),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 func (s *SessionStore) RequestCancel(ctx context.Context, orgID, sessionID uuid.UUID) error {
@@ -915,11 +936,13 @@ func (s *SessionStore) ListRuntimeControlStalledSessions(ctx context.Context, de
 		    (
 		      runtime_stop_reason <> ''
 		      AND runtime_graceful_stop_at IS NOT NULL
+		      AND (started_at IS NULL OR runtime_graceful_stop_at >= started_at)
 		      AND runtime_graceful_stop_at < @stop_after_before
 		    )
 		    OR (
 		      runtime_stop_reason = ''
 		      AND runtime_soft_deadline_at IS NOT NULL
+		      AND (started_at IS NULL OR runtime_soft_deadline_at >= started_at)
 		      AND runtime_soft_deadline_at < @deadline_before
 		    )
 		  )
@@ -1134,7 +1157,9 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
 		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	} else if status == models.SessionStatusCompleted || status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
+	} else if status == models.SessionStatusCompleted || status == models.SessionStatusPRCreated || status == models.SessionStatusSkipped {
+		query = `UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	} else if status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	rows, err := s.db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
@@ -1919,6 +1944,13 @@ func (s *SessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, s
 			failure_category = NULL,
 			failure_next_steps = NULL,
 			failure_retry_advised = false,
+			runtime_soft_deadline_at = NULL,
+			runtime_hard_deadline_at = NULL,
+			runtime_last_progress_at = NULL,
+			runtime_last_progress_type = '',
+			runtime_last_progress_strength = '',
+			runtime_stop_reason = '',
+			runtime_graceful_stop_at = NULL,
 			last_activity_at = now()
 		WHERE id = @id
 		  AND org_id = @org_id
