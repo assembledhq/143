@@ -649,7 +649,7 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    const apiSection = await screen.findByRole("region", { name: "Preview API" });
+    const apiSection = await screen.findByRole("region", { name: "Preview API tokens" });
     expect((await within(apiSection).findAllByText("CI previews"))[0]).toBeInTheDocument();
     const repositoryAccess = within(apiSection).getAllByText("All repositories")[0];
     expect(repositoryAccess.closest('[data-slot="badge"]')).not.toBeNull();

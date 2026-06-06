@@ -79,6 +79,7 @@ type SessionHandler struct {
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
 	threadInboxStore   *db.ThreadInboxStore
+	attributionStore   *db.SessionAttributionStore
 	sandboxHolders     *db.SessionSandboxHolderStore
 	viewStore          *db.SessionViewStore
 	memberships        sessionMembershipStore
@@ -383,6 +384,10 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
+func (h *SessionHandler) SetAttributionStore(store *db.SessionAttributionStore) {
+	h.attributionStore = store
+}
+
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
@@ -646,6 +651,20 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if search := r.URL.Query().Get("search"); search != "" {
 		filters.Search = search
+	}
+	if raw := r.URL.Query().Get("created_after"); raw != "" {
+		parsed, ok := parseOptionalRFC3339(w, r, &raw)
+		if !ok {
+			return
+		}
+		filters.CreatedAfter = parsed
+	}
+	if raw := r.URL.Query().Get("created_before"); raw != "" {
+		parsed, ok := parseOptionalRFC3339(w, r, &raw)
+		if !ok {
+			return
+		}
+		filters.CreatedBefore = parsed
 	}
 
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
@@ -3272,10 +3291,20 @@ func isTerminalStatus(status models.SessionStatus) bool {
 
 // CreateManual creates a new manual session from a user-provided message.
 func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
+	h.createManual(w, r, models.SessionOriginManual, false)
+}
+
+// CreateExternal creates a session through the service-account API.
+func (h *SessionHandler) CreateExternal(w http.ResponseWriter, r *http.Request) {
+	h.createManual(w, r, models.SessionOriginExternalAPI, true)
+}
+
+func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, origin models.SessionOrigin, requireRepository bool) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	var body struct {
 		Message         string                         `json:"message"`
+		Attachments     []string                       `json:"attachments"`
 		Images          []string                       `json:"images"`
 		References      []models.SessionInputReference `json:"references"`
 		Commands        []models.SessionInputCommand   `json:"commands"`
@@ -3286,6 +3315,8 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode       string                         `json:"token_mode"`
 		RepositoryID    string                         `json:"repository_id"`
 		Branch          string                         `json:"branch"`
+		TargetBranch    string                         `json:"target_branch"`
+		Metadata        json.RawMessage                `json:"metadata"`
 		// LinearPrivate suppresses every Linear write; the agent still gets
 		// linked-issue context locally. Frozen at session create.
 		LinearPrivate bool `json:"linear_private,omitempty"`
@@ -3302,6 +3333,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
+	if len(body.Images) == 0 && len(body.Attachments) > 0 {
+		body.Images = body.Attachments
+	}
 	// Empty message is allowed when the user attached images or is starting
 	// from a linked Linear issue. Mobile screenshot/photo-first flows rely on
 	// this: the UI explicitly advertises image-only session starts, and the
@@ -3314,6 +3348,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// inside the linker.
 	if body.Message == "" && len(body.Images) == 0 && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or a linked Linear issue are required")
+		return
+	}
+	if requireRepository && strings.TrimSpace(body.RepositoryID) == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_REPOSITORY_ID", "repository_id is required")
 		return
 	}
 	for _, reference := range body.References {
@@ -3349,12 +3387,17 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		if token := middleware.APITokenFromContext(r.Context()); token != nil && !apiTokenAllowsRepository(token, parsed) {
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "API token is not allowed to access this repository")
+			return
+		}
 		repoID = &parsed
 	}
 
 	var targetBranch *string
-	if body.Branch != "" {
-		b := strings.TrimSpace(body.Branch)
+	branchName := firstNonEmptyString(body.TargetBranch, body.Branch)
+	if branchName != "" {
+		b := strings.TrimSpace(branchName)
 		if !isValidGitRef(b) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_BRANCH", "branch contains invalid characters")
 			return
@@ -3463,7 +3506,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	session := &models.Session{
 		OrgID:                   orgID,
-		Origin:                  models.SessionOriginManual,
+		Origin:                  origin,
 		InteractionMode:         models.SessionInteractionModeInteractive,
 		ValidationPolicy:        models.SessionValidationPolicyOnSessionEnd,
 		AgentType:               agentType,
@@ -3483,6 +3526,17 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
 		return
+	}
+	if origin == models.SessionOriginExternalAPI && h.attributionStore != nil && len(body.Metadata) > 0 && string(body.Metadata) != "null" {
+		attribution := &models.SessionAttribution{
+			OrgID:          orgID,
+			SessionID:      session.ID,
+			Source:         models.SessionAttributionSourceExternalAPI,
+			SourceMetadata: body.Metadata,
+		}
+		if err := h.attributionStore.Create(r.Context(), attribution); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to create external api session attribution")
+		}
 	}
 
 	// Persist the initial user message as a turn-0 record so that attachments
@@ -3645,19 +3699,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	manualSessionIDStr := session.ID.String()
 	h.enrichSessionLinks(r.Context(), orgID, session)
-	emitUserAuditWithSession(
-		h.audit,
-		r,
-		models.AuditActionSessionCreated,
-		models.AuditResourceSession,
-		&manualSessionIDStr,
-		&session.ID,
-		nil,
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionCreated, models.AuditResourceSession, &manualSessionIDStr, &session.ID, nil,
 		sessionCreateAuditDetails(h.logger, session, nil, map[string]any{
-			"manual_session": true,
+			"manual_session": origin == models.SessionOriginManual,
+			"external_api":   origin == models.SessionOriginExternalAPI,
 			"image_count":    len(body.Images),
-		}),
-	)
+		}))
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
 }
 

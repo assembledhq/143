@@ -960,8 +960,8 @@ function PreviewAPISection() {
     <section className="space-y-4" aria-labelledby="preview-api-heading">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1">
-          <h2 id="preview-api-heading" className="text-sm font-semibold text-foreground">Preview API</h2>
-          <p className="text-xs text-muted-foreground">Scoped tokens for branch and pull request preview automation.</p>
+          <h2 id="preview-api-heading" className="text-sm font-semibold text-foreground">Preview API tokens</h2>
+          <p className="text-xs text-muted-foreground">Legacy preview-only tokens. Prefer external API clients for new session, automation, and preview integrations.</p>
         </div>
         <Button type="button" variant="outline" onClick={() => resetTokenDialog(true)}>
           <Plus className="h-4 w-4" />
@@ -1072,7 +1072,7 @@ function TokenInventory({
         <EmptyState
           icon={KeyRound}
           title="No preview API tokens"
-          description="Create a token when external automation needs preview access."
+          description="Use external API clients for new integrations; create preview-only tokens for older preview workflows."
           variant="inline"
         />
       </div>

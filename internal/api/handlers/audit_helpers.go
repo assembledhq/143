@@ -22,6 +22,7 @@ func emitUserAudit(emitter *db.AuditEmitter, r *http.Request, action models.Audi
 	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
+		emitAPIAudit(emitter, r, action, resourceType, resourceID, nil, nil, details)
 		return
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
@@ -55,6 +56,7 @@ func emitUserAuditWithSession(emitter *db.AuditEmitter, r *http.Request, action 
 	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
+		emitAPIAudit(emitter, r, action, resourceType, resourceID, sessionID, projectID, details)
 		return
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
@@ -106,6 +108,18 @@ func emitUserAuditsWithSession(emitter *db.AuditEmitter, r *http.Request, entrie
 	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
+		entriesForAPI := make([]apiAuditEntry, 0, len(entries))
+		for _, e := range entries {
+			entriesForAPI = append(entriesForAPI, apiAuditEntry{
+				Action:       e.Action,
+				ResourceType: e.ResourceType,
+				ResourceID:   e.ResourceID,
+				SessionID:    e.SessionID,
+				ProjectID:    e.ProjectID,
+				Details:      e.Details,
+			})
+		}
+		emitAPIAudits(emitter, r, entriesForAPI)
 		return
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
@@ -137,6 +151,67 @@ func emitUserAuditsWithSession(emitter *db.AuditEmitter, r *http.Request, entrie
 		})
 	}
 	emitter.EmitUserActions(r.Context(), paramsList)
+}
+
+type apiAuditEntry struct {
+	Action       models.AuditAction
+	ResourceType models.AuditResourceType
+	ResourceID   *string
+	SessionID    *uuid.UUID
+	ProjectID    *uuid.UUID
+	Details      json.RawMessage
+}
+
+func emitAPIAudit(emitter *db.AuditEmitter, r *http.Request, action models.AuditAction, resourceType models.AuditResourceType, resourceID *string, sessionID *uuid.UUID, projectID *uuid.UUID, details json.RawMessage) {
+	emitAPIAudits(emitter, r, []apiAuditEntry{{
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		SessionID:    sessionID,
+		ProjectID:    projectID,
+		Details:      details,
+	}})
+}
+
+func emitAPIAudits(emitter *db.AuditEmitter, r *http.Request, entries []apiAuditEntry) {
+	if emitter == nil || len(entries) == 0 {
+		return
+	}
+	client := middleware.APIClientFromContext(r.Context())
+	token := middleware.APITokenFromContext(r.Context())
+	if client == nil {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var tokenID *uuid.UUID
+	if token != nil {
+		tokenID = &token.ID
+	}
+	var requestID *string
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		requestID = &reqID
+	}
+	ipAddress := parseClientIP(r)
+	var userAgent *string
+	if ua := r.UserAgent(); ua != "" {
+		userAgent = &ua
+	}
+	for _, e := range entries {
+		emitter.EmitAPIAction(r.Context(), db.APIActionParams{
+			OrgID:        orgID,
+			APIClientID:  client.ID,
+			APITokenID:   tokenID,
+			Action:       e.Action,
+			ResourceType: e.ResourceType,
+			ResourceID:   e.ResourceID,
+			Details:      e.Details,
+			RequestID:    requestID,
+			IPAddress:    ipAddress,
+			UserAgent:    userAgent,
+			SessionID:    e.SessionID,
+			ProjectID:    e.ProjectID,
+		})
+	}
 }
 
 // parseClientIP extracts the client IP from the request as a netip.Prefix
