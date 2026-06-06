@@ -26,6 +26,14 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 	b.WriteString("143-tools <namespace> <action> --help # detailed usage\n")
 	b.WriteString("143-tools --help                     # list namespaces\n")
 	b.WriteString("```\n\n")
+	if hasCommand(commands, NamespaceTabs, ActionList) {
+		b.WriteString("When using session tab tools:\n")
+		b.WriteString("- Use a new tab for parallel review/testing/investigation in the same branch.\n")
+		b.WriteString("- Use a new session only when work needs an independent branch or PR.\n")
+		b.WriteString("- Summarize why a tab was created in the message sent to it.\n")
+		b.WriteString("- Inspect sibling output before assuming the other tab has finished.\n\n")
+		b.WriteString("Example: `143-tools session-tabs send --tab-id <uuid> --message \"Run focused tests and summarize failures.\"`\n\n")
+	}
 
 	b.WriteString("## Configured Namespaces\n\n")
 	for _, namespace := range cliNamespaceOrder(commands) {
@@ -76,6 +84,8 @@ func skillsExamples(commands []CLICommand) []string {
 		{"circleci", "list_flaky_tests", "143-tools circleci list_flaky_tests --limit 25"},
 		{"slack", "search_messages", "143-tools slack search_messages --query \"checkout timeout\" --limit 10"},
 		{NamespacePR, ActionCreate, "143-tools pr create --draft false"},
+		{NamespaceTabs, ActionList, "143-tools session-tabs list"},
+		{NamespaceTabs, ActionSend, "143-tools session-tabs send --tab-id <uuid> --message \"Run focused tests and summarize failures.\""},
 	}
 
 	examples := make([]string, 0, 5)

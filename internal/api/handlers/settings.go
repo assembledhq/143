@@ -101,7 +101,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Settings != nil {
 		var parsedSettings models.OrgSettings
 		if err := json.Unmarshal(*req.Settings, &parsedSettings); err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid settings JSON")
+			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", "invalid settings JSON", err)
 			return
 		}
 		if err := models.ValidateSettingsModels(parsedSettings); err != nil {
@@ -147,6 +147,10 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		merged, mergeErr := mergeSettingsJSON(org.Settings, *req.Settings)
 		if mergeErr != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to merge settings")
+			return
+		}
+		if _, parseErr := models.ParseOrgSettings(merged); parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", "invalid organization settings", parseErr)
 			return
 		}
 		org.Settings = merged
