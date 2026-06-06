@@ -4233,7 +4233,7 @@ func automationRowColumns() []string {
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
 }
 
@@ -4320,7 +4320,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// 3. Atomically claim pending → running BEFORE creating the session, so
@@ -4412,7 +4412,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// 3. The conditional transition finds the row already non-pending (the
@@ -4548,7 +4548,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, false, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// Run gets marked skipped via the conditional pending → skipped transition.
@@ -4602,7 +4602,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4675,7 +4675,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &clickerID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4754,7 +4754,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4825,7 +4825,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).

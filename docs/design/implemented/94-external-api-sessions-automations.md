@@ -1,7 +1,7 @@
 # 94 - External API for Sessions and Automations
 
-> **Status:** Future design
-> **Last reviewed:** 2026-06-05
+> **Status:** Implemented
+> **Last reviewed:** 2026-06-06
 >
 > **Depends on:** organization membership auth, audit logs, session creation APIs, automation APIs, job queue idempotency, and public docs/API reference.
 
