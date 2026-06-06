@@ -48,39 +48,50 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 		}
 	}
 	if tool == nil {
-		fmt.Fprintf(stderr, "error: unknown tool %q\n\nRun '143-tools --help' for available tools.\n", toolName)
+		writeCLIError(stderr, "UNKNOWN_TOOL", fmt.Sprintf("unknown tool %q", toolName))
 		return 1
 	}
 
 	// Parse flags into a JSON object.
 	argsJSON, err := parseFlagsToJSON(flagArgs, tool.InputSchema)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %s\n\nRun '143-tools %s --help' for usage.\n", err, toolName)
+		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("%s. Run '143-tools %s --help' for usage.", err, toolName))
 		return 1
 	}
 
 	// Check required fields.
 	if err := checkRequired(argsJSON, tool.InputSchema.Required); err != nil {
-		fmt.Fprintf(stderr, "error: %s\n\nRun '143-tools %s --help' for usage.\n", err, toolName)
+		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("%s. Run '143-tools %s --help' for usage.", err, toolName))
 		return 1
 	}
 
 	// Dispatch to the integration layer.
 	rawJSON, err := json.Marshal(argsJSON)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: failed to marshal arguments: %s\n", err)
+		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("failed to marshal arguments: %s", err))
 		return 1
 	}
 	result := tr.CallTool(ctx, toolName, rawJSON)
+
+	if result.IsError {
+		message := ""
+		if len(result.Content) > 0 {
+			message = result.Content[0].Text
+		}
+		code := "TOOL_ERROR"
+		if apiCode, apiMessage, ok := extractAPIError(message); ok {
+			code = apiCode
+			message = apiMessage
+		}
+		writeCLIError(stderr, code, message)
+		return 1
+	}
 
 	// Print output.
 	for _, c := range result.Content {
 		fmt.Fprintln(stdout, c.Text)
 	}
 
-	if result.IsError {
-		return 1
-	}
 	return 0
 }
 
@@ -94,8 +105,13 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 		if !strings.HasPrefix(arg, "--") {
 			return nil, fmt.Errorf("unexpected argument %q (flags must start with --)", arg)
 		}
-		key := strings.TrimPrefix(arg, "--")
+		key := normalizeCLIFlagName(strings.TrimPrefix(arg, "--"))
+		prop, hasProp := schema.Properties[key]
 
+		if hasProp && prop.Type == "boolean" && (i+1 >= len(args) || strings.HasPrefix(args[i+1], "--")) {
+			result[key] = true
+			continue
+		}
 		if i+1 >= len(args) {
 			return nil, fmt.Errorf("flag --%s requires a value", key)
 		}
@@ -103,7 +119,6 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 		value := args[i]
 
 		// Coerce based on schema type.
-		prop, hasProp := schema.Properties[key]
 		if hasProp {
 			switch prop.Type {
 			case "number":
@@ -140,10 +155,56 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 func checkRequired(args map[string]any, required []string) error {
 	for _, r := range required {
 		if _, ok := args[r]; !ok {
-			return fmt.Errorf("missing required flag: --%s", r)
+			return fmt.Errorf("missing required flag: --%s", displayCLIFlagName(r))
 		}
 	}
 	return nil
+}
+
+func normalizeCLIFlagName(key string) string {
+	return strings.ReplaceAll(key, "-", "_")
+}
+
+func displayCLIFlagName(key string) string {
+	return strings.ReplaceAll(key, "_", "-")
+}
+
+func writeCLIError(w io.Writer, code, message string) {
+	payload := map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":{"code":"%s","message":"%s"}}`+"\n", code, strings.ReplaceAll(message, `"`, `'`))
+		return
+	}
+	fmt.Fprintln(w, string(raw))
+}
+
+func extractAPIError(message string) (string, string, bool) {
+	idx := strings.Index(message, `{"error":`)
+	if idx < 0 {
+		return "", "", false
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(message[idx:]), &payload); err != nil {
+		return "", "", false
+	}
+	if payload.Error.Code == "" {
+		return "", "", false
+	}
+	if payload.Error.Message == "" {
+		payload.Error.Message = message
+	}
+	return payload.Error.Code, payload.Error.Message, true
 }
 
 // printCLIUsage prints the top-level help listing all available tools.
@@ -214,7 +275,7 @@ func printToolHelp(tr *ToolRegistry, name string, w io.Writer) {
 					if prop.Type == "array" {
 						typeHint = "comma-separated"
 					}
-					fmt.Fprintf(w, "  --%-20s %-20s %s%s\n", pName, typeHint, prop.Description, req)
+					fmt.Fprintf(w, "  --%-20s %-20s %s%s\n", displayCLIFlagName(pName), typeHint, prop.Description, req)
 				}
 			}
 			return

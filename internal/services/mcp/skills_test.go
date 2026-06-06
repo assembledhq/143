@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/assembledhq/143/internal/services/integration"
 )
 
@@ -91,12 +93,24 @@ func TestGenerateSkillsDoc_ExamplesIncludeFlags(t *testing.T) {
 	if !strings.Contains(doc, "--severity") {
 		t.Error("examples missing --severity flag")
 	}
-	if !strings.Contains(doc, "--error_id") {
-		t.Error("examples missing --error_id flag")
+	if !strings.Contains(doc, "--error-id") {
+		t.Error("examples missing --error-id flag")
 	}
-	if !strings.Contains(doc, "--team_key") {
-		t.Error("examples missing --team_key flag for create_task")
+	if !strings.Contains(doc, "--team-key") {
+		t.Error("examples missing --team-key flag for create_task")
 	}
+}
+
+func TestGenerateSkillsDoc_SessionTabsIncludeCoordinationGuidanceAndKebabFlags(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	doc := GenerateSkillsDoc(tr)
+
+	require.Contains(t, doc, "Use a new tab for parallel review/testing/investigation in the same branch.", "session tab tools should teach when to create sibling tabs")
+	require.Contains(t, doc, "Use a new session only when work needs an independent branch or PR.", "session tab tools should distinguish tabs from sessions")
+	require.Contains(t, doc, "--tab-id", "session tab examples should prefer kebab-case flags")
+	require.NotContains(t, doc, "--tab_id", "session tab examples should not expose snake_case flags")
 }
 
 func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {

@@ -733,6 +733,21 @@ type SessionLog struct {
 }
 
 // SessionMessage represents a chat message in a multi-turn session.
+type SessionMessageSource string
+
+const (
+	SessionMessageSourceAgentTool SessionMessageSource = "agent_tool"
+)
+
+func (s SessionMessageSource) Validate() error {
+	switch s {
+	case "", SessionMessageSourceAgentTool:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionMessageSource: %q", s)
+	}
+}
+
 type SessionMessage struct {
 	ID          int64                  `db:"id" json:"id"`
 	SessionID   uuid.UUID              `db:"session_id" json:"session_id"`
@@ -746,10 +761,28 @@ type SessionMessage struct {
 	References  SessionInputReferences `db:"references" json:"references,omitempty"`
 	Commands    SessionInputCommands   `db:"commands" json:"commands,omitempty"`
 	TokenUsage  json.RawMessage        `db:"token_usage" json:"token_usage,omitempty"`
+	Source      SessionMessageSource   `db:"source" json:"source,omitempty"`
 	CreatedAt   time.Time              `db:"created_at" json:"created_at"`
 }
 
 // SessionThread represents an agent thread within a multi-agent session.
+type ThreadCreatedBySource string
+
+const (
+	ThreadCreatedBySourceUser      ThreadCreatedBySource = "user"
+	ThreadCreatedBySourceAgentTool ThreadCreatedBySource = "agent_tool"
+	ThreadCreatedBySourceSystem    ThreadCreatedBySource = "system"
+)
+
+func (s ThreadCreatedBySource) Validate() error {
+	switch s {
+	case "", ThreadCreatedBySourceUser, ThreadCreatedBySourceAgentTool, ThreadCreatedBySourceSystem:
+		return nil
+	default:
+		return fmt.Errorf("invalid ThreadCreatedBySource: %q", s)
+	}
+}
+
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
@@ -772,6 +805,8 @@ type SessionThread struct {
 	StartedAt             *time.Time                  `db:"started_at" json:"started_at,omitempty"`
 	CompletedAt           *time.Time                  `db:"completed_at" json:"completed_at,omitempty"`
 	CreatedAt             time.Time                   `db:"created_at" json:"created_at"`
+	CreatedBySource       ThreadCreatedBySource       `db:"created_by_source" json:"created_by_source,omitempty"`
+	CreatedByThreadID     *uuid.UUID                  `db:"created_by_thread_id" json:"created_by_thread_id,omitempty"`
 	ArchivedAt            *time.Time                  `db:"archived_at" json:"archived_at,omitempty"`
 	BaseSnapshotKey       *string                     `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
 	CostCents             float64                     `db:"cost_cents" json:"cost_cents"`

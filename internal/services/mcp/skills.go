@@ -29,6 +29,13 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 	b.WriteString("143-tools <tool_name> --help        # detailed usage\n")
 	b.WriteString("143-tools --help                     # list all tools\n")
 	b.WriteString("```\n\n")
+	if hasToolPrefix(tools, "session_tabs_") {
+		b.WriteString("When using session tab tools:\n")
+		b.WriteString("- Use a new tab for parallel review/testing/investigation in the same branch.\n")
+		b.WriteString("- Use a new session only when work needs an independent branch or PR.\n")
+		b.WriteString("- Summarize why a tab was created in the message sent to it.\n")
+		b.WriteString("- Inspect sibling output before assuming the other tab has finished.\n\n")
+	}
 
 	// Group by provider and generate examples.
 	groups := groupToolsByProvider(tools)
@@ -95,10 +102,10 @@ func generateExample(tool Tool) string {
 		prop := tool.InputSchema.Properties[name]
 
 		if requiredSet[name] {
-			parts = append(parts, "--"+name, exampleValue(name, prop))
+			parts = append(parts, "--"+displayCLIFlagName(name), exampleValue(name, prop))
 		} else if isHighValueFlag(name) {
 			// Include commonly useful optional flags in examples.
-			parts = append(parts, "--"+name, exampleValue(name, prop))
+			parts = append(parts, "--"+displayCLIFlagName(name), exampleValue(name, prop))
 		}
 	}
 
@@ -146,7 +153,7 @@ func exampleValue(name string, prop SchemaProperty) string {
 // isHighValueFlag returns true for optional flags worth including in examples.
 func isHighValueFlag(name string) bool {
 	switch name {
-	case "severity", "limit", "priority", "team":
+	case "severity", "limit", "priority", "team", "message_file":
 		return true
 	}
 	return false
@@ -159,4 +166,13 @@ func exampleJQTip(tools []Tool) string {
 		}
 	}
 	return "143-tools <tool_name> | jq '.'"
+}
+
+func hasToolPrefix(tools []Tool, prefix string) bool {
+	for _, tool := range tools {
+		if strings.HasPrefix(tool.Name, prefix) {
+			return true
+		}
+	}
+	return false
 }

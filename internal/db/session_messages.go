@@ -19,7 +19,7 @@ func NewSessionMessageStore(db DBTX) *SessionMessageStore {
 	return &SessionMessageStore{db: db}
 }
 
-const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, created_at`
+const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, source, created_at`
 
 const DefaultSessionMessageWindowLimit = 60
 const MaxSessionMessageWindowLimit = 200
@@ -61,6 +61,31 @@ func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMes
 	return row.Scan(&msg.ID, &msg.CreatedAt)
 }
 
+func (s *SessionMessageStore) CreateWithSource(ctx context.Context, msg *models.SessionMessage) error {
+	query := `
+		INSERT INTO session_messages (session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, source)
+		VALUES (@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @references_data, @commands, @token_usage, @source)
+		RETURNING id, created_at`
+
+	args := pgx.NamedArgs{
+		"session_id":      msg.SessionID,
+		"org_id":          msg.OrgID,
+		"thread_id":       msg.ThreadID,
+		"user_id":         msg.UserID,
+		"turn_number":     msg.TurnNumber,
+		"role":            msg.Role,
+		"content":         msg.Content,
+		"attachments":     msg.Attachments,
+		"references_data": msg.References,
+		"commands":        msg.Commands,
+		"token_usage":     msg.TokenUsage,
+		"source":          msg.Source,
+	}
+
+	row := s.db.QueryRow(ctx, query, args)
+	return row.Scan(&msg.ID, &msg.CreatedAt)
+}
+
 func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error) {
 	query := `
 		SELECT ` + sessionMessageSelectColumns + `
@@ -75,7 +100,7 @@ func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionI
 	if err != nil {
 		return nil, fmt.Errorf("query session messages: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionMessage])
 }
 
 // Delete removes a session message by ID. Used to clean up orphaned messages
@@ -97,7 +122,7 @@ func (s *SessionMessageStore) GetByID(ctx context.Context, orgID uuid.UUID, id i
 	if err != nil {
 		return models.SessionMessage{}, fmt.Errorf("query session message: %w", err)
 	}
-	msg, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionMessage])
+	msg, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionMessage])
 	if err != nil {
 		return models.SessionMessage{}, err
 	}
@@ -118,7 +143,7 @@ func (s *SessionMessageStore) ListByThread(ctx context.Context, orgID, threadID 
 	if err != nil {
 		return nil, fmt.Errorf("query thread messages: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionMessage])
 }
 
 func (s *SessionMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts SessionMessageWindowOptions) (SessionMessageWindow, error) {
@@ -128,7 +153,7 @@ func (s *SessionMessageStore) ListWindowByThread(ctx context.Context, orgID, thr
 		FROM session_messages
 		WHERE org_id = @org_id AND thread_id = @thread_id
 		  AND (@before_id::bigint = 0 OR id < @before_id)
-		ORDER BY id DESC
+			ORDER BY created_at DESC, id DESC
 		LIMIT @limit`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -140,7 +165,7 @@ func (s *SessionMessageStore) ListWindowByThread(ctx context.Context, orgID, thr
 	if err != nil {
 		return SessionMessageWindow{}, fmt.Errorf("query thread message window: %w", err)
 	}
-	descMessages, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionMessage])
+	descMessages, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionMessage])
 	if err != nil {
 		return SessionMessageWindow{}, fmt.Errorf("collect thread message window: %w", err)
 	}

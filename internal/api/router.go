@@ -790,10 +790,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
+		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
+		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
 			r.Post("/projects/propose", internalProjectHandler.Propose)
+			r.Get("/session-tabs", internalSessionTabsHandler.List)
+			r.Post("/session-tabs", internalSessionTabsHandler.Create)
+			r.Get("/session-tabs/{thread_id}", internalSessionTabsHandler.Get)
+			r.Get("/session-tabs/{thread_id}/messages", internalSessionTabsHandler.Messages)
+			r.Post("/session-tabs/{thread_id}/messages", internalSessionTabsHandler.SendMessage)
 		})
 
 		// Public team routes (token-based, no auth). AcceptInvitation looks the

@@ -1268,6 +1268,10 @@ func strPtr(s string) *string {
 	return &s
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 type testDeps struct {
 	provider         *testutil.MockSandboxProvider
 	adapter          *mockAgentAdapter
@@ -9300,6 +9304,62 @@ func TestRunAgent_PiModelOverrideReachesSandbox(t *testing.T) {
 	require.NoError(t, orch.RunAgent(context.Background(), run))
 	require.Equal(t, "pi-key", capturedCfg.Env["PI_API_KEY"], "Pi should keep using the dedicated Pi credential")
 	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "per-run model override should reach the sandbox env")
+}
+
+func TestBuildIntegrationSkills_SessionTabsRespectOrgSetting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		settings     models.OrgSettings
+		settingsErr  error
+		wantTabTools bool
+	}{
+		{
+			name:         "default exposes session tab tools",
+			settings:     models.OrgSettings{},
+			wantTabTools: true,
+		},
+		{
+			name: "disabled hides session tab tools",
+			settings: models.OrgSettings{
+				CodingAgentTabToolsEnabled: boolPtr(false),
+			},
+			wantTabTools: false,
+		},
+		{
+			name:         "settings lookup failure hides session tab tools",
+			settingsErr:  errors.New("settings unavailable"),
+			wantTabTools: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			settingsJSON, err := json.Marshal(tt.settings)
+			require.NoError(t, err, "org settings fixture should marshal")
+
+			orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+				Provider:          testutil.NewMockSandboxProvider(),
+				Orgs:              &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}, err: tt.settingsErr},
+				Credentials:       &mockCredentialProvider{},
+				InternalAPIURL:    "http://internal-api",
+				InternalAPISecret: "secret",
+				Logger:            zerolog.Nop(),
+			})
+
+			doc := orch.BuildIntegrationSkills(context.Background(), orgID)
+			require.Contains(t, doc, "create_pr", "PR creation should remain available when internal API credentials are configured")
+			if tt.wantTabTools {
+				require.Contains(t, doc, "session_tabs_list", "default-enabled orgs should expose session tab tools in sandbox docs")
+				return
+			}
+			require.NotContains(t, doc, "session_tabs_list", "disabled orgs should hide session tab tools from sandbox docs")
+		})
+	}
 }
 
 // TestRunAgent_PiMissingCredentialFailsFast asserts that a Pi run fails fast

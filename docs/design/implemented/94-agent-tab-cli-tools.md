@@ -1,6 +1,6 @@
 # Design: Agent Tab CLI Tools
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-05
+> **Status:** Implemented | **Last reviewed:** 2026-06-05
 
 ## Summary
 
@@ -178,7 +178,7 @@ The frontend-facing thread APIs mostly exist. The new work is a narrower,
 sandbox-token-safe internal API layer for `143-tools` so sandbox tokens do not
 need broad browser-session privileges.
 
-All routes are under `/api/v1/internal/sandbox/session-tabs`. They require the
+All routes are under `/api/v1/internal/session-tabs`. They require the
 same short-lived sandbox API token used by `143-tools create_pr` and must resolve
 `org_id`, `session_id`, `repository_id`, and current `thread_id` from token
 claims, not request body trust.
@@ -193,7 +193,7 @@ RBAC:
 ### List Tabs
 
 ```http
-GET /api/v1/internal/sandbox/session-tabs
+GET /api/v1/internal/session-tabs
 ```
 
 Query params:
@@ -237,7 +237,7 @@ Errors:
 ### Get Tab
 
 ```http
-GET /api/v1/internal/sandbox/session-tabs/{thread_id}
+GET /api/v1/internal/session-tabs/{thread_id}
 ```
 
 Response:
@@ -265,7 +265,7 @@ Errors:
 ### Create Tab
 
 ```http
-POST /api/v1/internal/sandbox/session-tabs
+POST /api/v1/internal/session-tabs
 ```
 
 Request:
@@ -321,7 +321,7 @@ Errors:
 ### Send Message To Tab
 
 ```http
-POST /api/v1/internal/sandbox/session-tabs/{thread_id}/messages
+POST /api/v1/internal/session-tabs/{thread_id}/messages
 ```
 
 Request:
@@ -373,7 +373,7 @@ Errors:
 ### Read Tab Messages
 
 ```http
-GET /api/v1/internal/sandbox/session-tabs/{thread_id}/messages
+GET /api/v1/internal/session-tabs/{thread_id}/messages
 ```
 
 Query params:

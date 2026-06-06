@@ -1086,7 +1086,7 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	return authState, nil
 }
 
-func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
+func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, threadID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
 	if o.internalAPIURL == "" || o.internalAPISecret == "" || session == nil || repoID == nil || sandboxCfg == nil {
 		return
 	}
@@ -1094,7 +1094,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		sandboxCfg.Env = make(map[string]string)
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
-	internalToken, err := auth.GenerateSessionToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, tokenTTL)
+	internalToken, err := auth.GenerateSessionThreadToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, tokenTTL)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
 		return
@@ -2217,7 +2217,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
-	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, &sandboxCfg, log)
+	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, primaryThreadID, &sandboxCfg, log)
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -3089,7 +3089,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if resolvedRepoID == nil && promptIssue != nil {
 		resolvedRepoID = promptIssue.RepositoryID
 	}
-	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, &sandboxCfg, log)
+	var internalAPIThreadID *uuid.UUID
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+		threadIDCopy := *opts.ThreadID
+		internalAPIThreadID = &threadIDCopy
+	}
+	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, internalAPIThreadID, &sandboxCfg, log)
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		authLog := log.Error().Err(authErr).
 			Str("session_id", session.ID.String()).
@@ -5873,6 +5878,12 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	}
 	if o.internalAPIURL != "" && o.internalAPISecret != "" {
 		reg.RegisterPullRequestCreator(&integration.StubPullRequestCreator{ProviderName: "session"})
+		settings, err := o.sandboxAuthOrgSettings(ctx, orgID)
+		if err != nil {
+			o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load org settings for session tab tools; hiding tools from skills doc")
+		} else if settings.EffectiveCodingAgentTabToolsEnabled() {
+			reg.RegisterSessionTabManager(&integration.StubSessionTabManager{ProviderName: "session_tabs"})
+		}
 	}
 
 	if !reg.HasAny() {
