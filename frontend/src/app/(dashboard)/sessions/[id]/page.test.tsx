@@ -150,9 +150,10 @@ vi.mock('next/image', () => ({
 }));
 
 describe('SessionDetailPage', () => {
-  it('shows loading state initially', () => {
+  it('shows the session details skeleton initially', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    expect(screen.getByText('Loading session...')).toBeInTheDocument();
+    expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('Loading session...')).not.toBeInTheDocument();
   });
 
   it('renders session with result summary as title', async () => {
@@ -2272,10 +2273,10 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
-    expect(await screen.findByTestId('session-timeline-skeleton')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+    expect(screen.getByTestId('session-timeline-skeleton')).toBeInTheDocument();
     expect(screen.queryByText('No activity yet')).not.toBeInTheDocument();
     expect(screen.queryByText(/files? changed/)).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
   });
 
   it('shows loading skeleton for a running session before any timeline entries arrive', async () => {
@@ -2308,7 +2309,8 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
-    expect(await screen.findByTestId('session-timeline-skeleton')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+    expect(screen.getByTestId('session-timeline-skeleton')).toBeInTheDocument();
     expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
     expect(screen.queryByText(/files? changed/)).not.toBeInTheDocument();
   });
