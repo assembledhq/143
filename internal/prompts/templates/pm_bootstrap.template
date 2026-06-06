@@ -36,16 +36,16 @@ Run `143-tools --help` for the full list. Key tools:
 {{.SkillsDoc}}
 {{if .HasNotion}}
 For Notion: Search for documents using these queries (at minimum):
-  143-tools notion_search_documents --query "roadmap"
-  143-tools notion_search_documents --query "strategy"
-  143-tools notion_search_documents --query "OKR"
-  143-tools notion_search_documents --query "quarterly plan"
-  143-tools notion_search_documents --query "product requirements"
-  143-tools notion_search_documents --query "architecture"
-  143-tools notion_search_documents --query "post-mortem"
-  143-tools notion_search_documents --query "RFC"
+  143-tools notion search_documents --query "roadmap"
+  143-tools notion search_documents --query "strategy"
+  143-tools notion search_documents --query "OKR"
+  143-tools notion search_documents --query "quarterly plan"
+  143-tools notion search_documents --query "product requirements"
+  143-tools notion search_documents --query "architecture"
+  143-tools notion search_documents --query "post-mortem"
+  143-tools notion search_documents --query "RFC"
 For each result that looks relevant, fetch the full document:
-  143-tools notion_get_document --doc_id <id_from_search_result>
+  143-tools notion get_document --doc_id <id_from_search_result>
 Focus on documents that describe lasting product context. Skip meeting notes,
 standups, and other temporal documents.
 Include Notion document IDs in your output so the PM agent can drill deeper.
@@ -53,23 +53,23 @@ Include Notion document IDs in your output so the PM agent can drill deeper.
 {{if .HasLinear}}
 For Linear: Explore projects and initiatives (the strategic layer), not
 individual ticket status:
-  143-tools linear_list_tasks --limit 50
-  143-tools linear_list_tasks --priority urgent
+  143-tools linear list_tasks --limit 50
+  143-tools linear list_tasks --priority urgent
 For each project/initiative, understand the goal and constraints:
-  143-tools linear_get_task --task_id ENG-123
+  143-tools linear get_task --task_id ENG-123
 Focus on what these projects tell you about the company's priorities.
 {{end}}
 {{if .HasSentry}}
 For Sentry: Look at error patterns to understand reliability landscape:
-  143-tools sentry_list_errors --severity critical --limit 20
-  143-tools sentry_list_errors --severity high --limit 20
+  143-tools sentry list_errors --severity critical --limit 20
+  143-tools sentry list_errors --severity high --limit 20
 Focus on durable patterns (which areas are error-prone), not individual errors.
 {{end}}
 {{if .HasGitHub}}
 For GitHub PRs: Read review comments on recent merged PRs to identify quality
 patterns, recurring feedback themes, and architectural discussions:
-  143-tools github_list_recent_prs --limit 20
-  143-tools github_get_pr_reviews --pr_number <number>
+  143-tools github list_recent_prs --limit 20
+  143-tools github get_pr_reviews --pr_number <number>
 Look for what reviewers consistently flag — these reveal the team's implicit
 quality standards and areas where bugs tend to emerge.
 {{end}}

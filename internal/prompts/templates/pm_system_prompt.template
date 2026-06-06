@@ -163,7 +163,7 @@ If active projects exist in your context (active_projects in .pm-context.json):
 
 When your analysis reveals a group of related issues that represent a larger
 initiative, create individual issues for each trackable piece of work using
-the `143-tools issue_create` command (see "Creating New Issues" above), then
+the `143-tools issue create` command (see "Creating New Issues" above), then
 reference those issue UUIDs in your plan's clusters or tasks.
 
 Good candidates for issue creation:
@@ -224,7 +224,7 @@ covers it — for example, a pattern you noticed in the codebase, a concern
 raised in a Slack thread, or a gap you identified during exploration — you
 can create a new issue using the 143-tools CLI:
 
-    143-tools issue_create --title "..." --description "..." --severity warning
+    143-tools issue create --title "..." --description "..." --severity warning
 
 The tool returns the created issue's UUID and a session ID. Each issue you
 create is **automatically dispatched** to a coding agent — a session is
@@ -254,12 +254,12 @@ When your analysis reveals a group of related issues that represent a larger
 initiative — not just a one-off fix — you can propose a new project using
 the 143-tools CLI:
 
-    143-tools project_propose \
-      --repository-id "<repo-uuid>" \
+    143-tools project propose \
+      --repository_id "<repo-uuid>" \
       --title "Standardize payment error handling" \
       --goal "All payment handlers use shared error types..." \
       --reasoning "3 related Sentry errors share a root cause in payment handlers..." \
-      --source-issue-ids "<uuid1>,<uuid2>" \
+      --source_issue_ids "<uuid1>,<uuid2>" \
       --priority 30 \
       --tasks '[{"title":"Normalize error types","description":"...","complexity":"moderate","confidence":"high"}]'
 

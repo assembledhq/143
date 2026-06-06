@@ -1,6 +1,6 @@
 # Design: Agent Log Provider Tools
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-30
+> **Status:** Implemented | **Last reviewed:** 2026-06-05
 
 ## Summary
 
@@ -9,9 +9,9 @@ Coding agents should query production logs through `143-tools`, using a provider
 - `victorialogs`, backed by the existing self-hosted VictoriaLogs deployment.
 - `mezmo`, backed by Mezmo's log analysis APIs.
 
-The agent-facing tool shape should stay the same across providers, while the `query` field remains the provider's native query language. The CLI should expose one small command set (`log_query`, `log_context`, `log_fields`, and `log_stats`) with an optional `--provider` flag instead of provider-prefixed commands. This keeps the agent's prompt small and predictable without flattening LogsQL, Mezmo search syntax, or future provider-specific query features into a lowest-common-denominator language.
+The agent-facing tool shape should stay the same across providers, while the `query` field remains the provider's native query language. The CLI should expose one small command namespace (`logs query`, `logs context`, `logs fields`, and `logs stats`) with an optional `--provider` flag instead of provider-prefixed commands. This keeps the agent's prompt small and predictable without flattening LogsQL, Mezmo search syntax, or future provider-specific query features into a lowest-common-denominator language.
 
-Unlike other integration tool categories in `143-tools` that use provider-prefixed names (e.g., `sentry_list_errors`, `linear_list_tasks`), log tools share a fixed command set and route by `--provider` flag. This is a deliberate divergence: the log tool set is small and stable, provider selection benefits from being an explicit argument rather than a name prefix, and agent prompts stay compact as additional providers are added. See [Registry And Tooling Changes](#registry-and-tooling-changes) for the dispatch model.
+Unlike provider integration namespaces in `143-tools` such as `sentry list_errors` or `linear list_tasks`, log tools share a fixed `logs` namespace and route by `--provider` flag. This is a deliberate divergence: the log tool set is small and stable, provider selection benefits from being an explicit argument rather than a provider namespace, and agent prompts stay compact as additional providers are added. See [Registry And Tooling Changes](#registry-and-tooling-changes) for the dispatch model.
 
 ## Goals
 
@@ -37,14 +37,14 @@ Unlike other integration tool categories in `143-tools` that use provider-prefix
 Use one fixed logging command set in the generated `143-tools` skills doc. Provider selection is a flag, not part of the command name:
 
 ```bash
-143-tools log_query --provider victorialogs --query 'service:api AND level:error AND _time:[now-1h,now]' --since 1h --limit 100
-143-tools log_context --provider victorialogs --query 'service:api AND level:error' --timestamp 2026-05-22T12:34:56Z --since 10m --before 25 --after 25
+143-tools logs query --provider victorialogs --query 'service:api AND level:error AND _time:[now-1h,now]' --since 1h --limit 100
+143-tools logs context --provider victorialogs --query 'service:api AND level:error' --timestamp 2026-05-22T12:34:56Z --since 10m --before 25 --after 25
 
-143-tools log_query --provider mezmo --query 'level:error service:api' --since 1h --limit 100
-143-tools log_context --provider mezmo --query 'level:error service:api' --timestamp 2026-05-22T12:34:56Z --since 10m --before 25 --after 25
+143-tools logs query --provider mezmo --query 'level:error service:api' --since 1h --limit 100
+143-tools logs context --provider mezmo --query 'level:error service:api' --timestamp 2026-05-22T12:34:56Z --since 10m --before 25 --after 25
 ```
 
-`log_context` should prefer the strongest anchor available from a prior `log_query` result:
+`logs context` should prefer the strongest anchor available from a prior `logs query` result:
 
 1. `--cursor` when the provider returned an opaque event cursor.
 2. `--id` when the provider returned a stable event/log ID.
@@ -52,12 +52,12 @@ Use one fixed logging command set in the generated `143-tools` skills doc. Provi
 
 Required interface commands:
 
-- `log_query`: run a native provider query over a bounded time range.
-- `log_context`: fetch neighboring logs around a cursor, stable event ID, or timestamp + query anchor.
-- `log_fields`: list common indexed/queryable fields for the provider or configured dataset.
-- `log_stats`: run lightweight aggregate queries for counts over time or grouped counts.
+- `logs query`: run a native provider query over a bounded time range.
+- `logs context`: fetch neighboring logs around a cursor, stable event ID, or timestamp + query anchor.
+- `logs fields`: list common indexed/queryable fields for the provider or configured dataset.
+- `logs stats`: run lightweight aggregate queries for counts over time or grouped counts.
 
-The initial implementation should prioritize all four commands. `log_stats` is included in v1 for VictoriaLogs, which has native LogsQL stats support. For Mezmo, `log_stats` is deferred until the provider aggregation API surface is confirmed. Recent-log use cases should use `log_query --since <short-window> --limit <n>` instead of adding a separate tail command in v1.
+The initial implementation should prioritize all four commands. `logs stats` is included in v1 for VictoriaLogs, which has native LogsQL stats support. For Mezmo, `logs stats` is deferred until the provider aggregation API surface is confirmed. Recent-log use cases should use `logs query --since <short-window> --limit <n>` instead of adding a separate tail command in v1.
 
 ### Provider Context Research
 
@@ -66,7 +66,7 @@ The context interface should not assume every provider has a stable per-log ID:
 - VictoriaLogs is stream-oriented. LogsQL has `_stream_id` for selecting a log stream, a `stream_context before N after M` pipe for surrounding logs, and query endpoints for stream IDs, stream fields, field names, and field values over explicit time ranges. That means VictoriaLogs context can be strong when the target query identifies a specific stream/log, but the portable anchor is still `timestamp + query + bounded time range`.
 - Mezmo's public Log Analysis API documentation emphasizes views, export/search query parameters, time ranges, and pagination-style retrieval. The search docs describe field and whole-log query syntax, but the docs do not establish a provider-agnostic stable log-line ID plus "surrounding lines" endpoint. That means Mezmo context should be implemented as a bounded query around a timestamp, optionally using any opaque cursor or event ID returned by the API when available.
 
-The design consequence: `log_context` accepts `id`, `cursor`, or `timestamp + query`, but examples and agent instructions should teach the portable timestamp + query path first.
+The design consequence: `logs context` accepts `id`, `cursor`, or `timestamp + query`, but examples and agent instructions should teach the portable timestamp + query path first.
 
 ### Provider Selection
 
@@ -81,7 +81,7 @@ The design consequence: `log_context` accepts `id`, `cursor`, or `timestamp + qu
 This keeps the common case as terse as possible while still allowing side-by-side Mezmo and VictoriaLogs access:
 
 ```bash
-143-tools log_query --query 'service:api AND level:error' --since 1h
+143-tools logs query --query 'service:api AND level:error' --since 1h
 ```
 
 ## Go Interface
@@ -274,7 +274,7 @@ The normalized fields are conveniences for agents. The original provider record 
 
 ## CLI Semantics
 
-### `log_query`
+### `logs query`
 
 Flags:
 
@@ -316,7 +316,7 @@ Output:
 - Include `truncated: true` when the provider returns more data than the command emitted.
 - Return `next_cursor` only when the provider can continue the exact same query safely and the cursor has been HMAC-signed by the proxy.
 
-### `log_context`
+### `logs context`
 
 Flags:
 
@@ -337,17 +337,17 @@ Validation:
 
 - Require one anchor: `--id`, `--cursor`, or `--timestamp`.
 - When using `--timestamp`, require `--query` plus `--since` or `--start_time`/`--end_time` so the provider has a bounded neighborhood to search.
-- If a provider cannot use the supplied anchor, return `ErrLogAnchorInsufficient` with a message naming the missing anchor shape, such as `log_context requires --timestamp and --query for victorialogs`.
+- If a provider cannot use the supplied anchor, return `ErrLogAnchorInsufficient` with a message naming the missing anchor shape, such as `logs context requires --timestamp and --query for victorialogs`.
 - When the timestamp anchor matches multiple log entries (e.g., entries with identical millisecond timestamps), the provider should return the entry whose other fields best match `--query`. If disambiguation is not possible, return all matching candidates in the `target` position and document the ambiguity in the response.
 
 Response size limits:
 
-- Same per-entry limits as `log_query`.
+- Same per-entry limits as `logs query`.
 - Total response: capped at 400KB. If the before/after window exceeds this, truncate the most distant entries first and populate `prev_cursor` or `next_cursor` for continuation.
 
 For VictoriaLogs, context may need to use `_time` plus available stable fields because raw event IDs are not always present in the stored record. The provider should prefer a log `_stream_id`/offset/cursor if available; otherwise use the portable `timestamp + query + bounded time range` fallback.
 
-### `log_fields`
+### `logs fields`
 
 Flags:
 
@@ -360,7 +360,7 @@ Response size limit: 50KB total.
 
 This helps agents discover whether fields like `request_id`, `trace_id`, `org_id`, `agent_run_id`, `service`, or `level` are present before writing narrower queries.
 
-### `log_stats`
+### `logs stats`
 
 Flags:
 
@@ -418,7 +418,7 @@ Some customer VictoriaLogs deployments will sit behind a firewall or private net
 
 Supported access patterns for v1, in order of recommendation:
 
-1. **Customer-managed HTTPS read-only gateway.** The customer exposes a narrow HTTPS endpoint in front of VictoriaLogs that allows only the read/query endpoints needed by `log_query`, `log_context`, `log_fields`, and `log_stats`. `vmauth` is the VictoriaMetrics-native option here and is the recommended lightweight secure setup. Caddy, Nginx, Traefik, Envoy, HAProxy, or an existing cloud/API gateway are also acceptable. Require TLS, provider auth, request limits, and ideally mTLS.
+1. **Customer-managed HTTPS read-only gateway.** The customer exposes a narrow HTTPS endpoint in front of VictoriaLogs that allows only the read/query endpoints needed by `logs query`, `logs context`, `logs fields`, and `logs stats`. `vmauth` is the VictoriaMetrics-native option here and is the recommended lightweight secure setup. Caddy, Nginx, Traefik, Envoy, HAProxy, or an existing cloud/API gateway are also acceptable. Require TLS, provider auth, request limits, and ideally mTLS.
 2. **Direct VictoriaLogs with built-in auth.** For simpler deployments, customers can point 143 at VictoriaLogs directly if TLS and strong auth are enabled and the endpoint is appropriately firewalled. This is the lowest-friction setup, but it is less precise than a read-only proxy because direct VictoriaLogs exposes the broader VictoriaLogs HTTP surface unless the deployment is otherwise restricted.
 3. **Static 143 egress allowlist.** For customers that prefer IP allowlisting, 143 can publish a small stable egress IP/CIDR set per region for the server-side log proxy. The customer firewall allows only those egress addresses to reach the query endpoint. This should still use TLS and application-layer auth; IP allowlisting alone is not sufficient. Treat this as a documented enterprise networking option with explicit region selection and change-management notice, not as the only supported private-logging pattern.
 
@@ -452,9 +452,9 @@ Query behavior:
 - The provider should require explicit time bounds even though LogsQL can embed `_time`.
 - If the query does not contain `_time`, the adapter adds an API-level time range or wraps the query in the VictoriaLogs request parameters when supported.
 - Existing docs already emphasize `_time` filters for `make logs-query`; this tool should enforce that safety property instead of relying on prompt instructions.
-- `log_context` should use VictoriaLogs-native anchors when available: `_stream_id` narrows to a specific stream, and the LogsQL `stream_context before N after M` pipe can retrieve surrounding logs for matching records. When the target cannot be uniquely identified, fall back to `timestamp + query + bounded time range` and return the nearest matching records around the timestamp.
-- `log_fields` maps to VictoriaLogs field/stream field discovery endpoints over the same bounded query range.
-- `log_stats` maps to LogsQL `stats` queries and is a v1 deliverable.
+- `logs context` should use VictoriaLogs-native anchors when available: `_stream_id` narrows to a specific stream, and the LogsQL `stream_context before N after M` pipe can retrieve surrounding logs for matching records. When the target cannot be uniquely identified, fall back to `timestamp + query + bounded time range` and return the nearest matching records around the timestamp.
+- `logs fields` maps to VictoriaLogs field/stream field discovery endpoints over the same bounded query range.
+- `logs stats` maps to LogsQL `stats` queries and is a v1 deliverable.
 
 Multi-tenant query isolation:
 
@@ -478,8 +478,8 @@ Query behavior:
 - Normalize returned records into `LogEntry`.
 - Preserve provider fields in `raw`, after redacting known secret-like keys, only when `IncludeRaw` is authorized and true.
 - If Mezmo supports saved views or datasets, keep them as optional flags later rather than baking them into the base interface.
-- Do not assume Mezmo has a stable per-line ID suitable for context lookup. If the API response includes an opaque ID or cursor, preserve it and allow `log_context --id` or `--cursor`; otherwise implement context through `timestamp + query + bounded time range`.
-- `log_stats`: return `ErrLogStatsUnsupported` initially. Implement once the Mezmo API aggregation surface is confirmed.
+- Do not assume Mezmo has a stable per-line ID suitable for context lookup. If the API response includes an opaque ID or cursor, preserve it and allow `logs context --id` or `--cursor`; otherwise implement context through `timestamp + query + bounded time range`.
+- `logs stats`: return `ErrLogStatsUnsupported` initially. Implement once the Mezmo API aggregation surface is confirmed.
 
 MCP stance:
 
@@ -498,7 +498,7 @@ Integration package:
 
 MCP/CLI registry:
 
-Unlike other integration tool categories that use provider-prefixed names, log tools share a fixed command set routed by `--provider`. `ToolRegistry.ListTools()` emits the fixed set (`log_query`, `log_context`, `log_fields`, `log_stats`) exactly once, regardless of how many log providers are configured.
+Unlike provider integration categories, log tools share a fixed CLI namespace routed by `--provider`. Internally, `ToolRegistry.ListTools()` still emits the MCP-compatible flat tool names (`log_query`, `log_context`, `log_fields`, `log_stats`) exactly once, regardless of how many log providers are configured.
 
 `ToolRegistry.CallTool()` cannot use prefix-matching for log tools. Add an explicit check before the provider-prefix loop:
 
@@ -512,7 +512,7 @@ case "log_query", "log_context", "log_fields", "log_stats":
 
 `callLogTool` parses a `LogToolSelector` from args, calls `resolveLogProvider(selector)` to select the concrete `LogProvider`, then constructs and dispatches the appropriate request type. Provider resolution errors (`ErrLogProviderUnconfigured`, `ErrLogProviderAmbiguous`, etc.) are returned directly without reaching the provider.
 
-The generated CLI skills doc should show the small fixed command set plus the configured provider names. Include `log_stats` in the skills doc only if at least one configured provider's `SupportsStats()` returns true; if the selected provider returns `ErrLogStatsUnsupported`, surface a clear provider-specific unsupported message.
+The generated CLI skills doc should show the small fixed command set plus the configured provider names. Include `logs stats` in the skills doc only if at least one configured provider's `SupportsStats()` returns true; if the selected provider returns `ErrLogStatsUnsupported`, surface a clear provider-specific unsupported message.
 
 Environment builder:
 
@@ -589,7 +589,7 @@ Mezmo-specific: because Mezmo charges per query and per GB processed, apply tigh
 - Add `LogContextResult` pagination tests: verify `PrevCursor` and `NextCursor` are populated when the before/after window exceeds the 400KB cap.
 - Add `LogFieldsResult` shape tests: verify field names, types, and sample values are populated correctly per provider.
 - Add VictoriaLogs query construction tests to ensure time bounds are always applied.
-- Add `log_stats` tests for VictoriaLogs using mocked LogsQL stats responses.
+- Add `logs stats` tests for VictoriaLogs using mocked LogsQL stats responses.
 - Add `ErrLogStatsUnsupported` path test for Mezmo.
 - Add Mezmo response normalization tests using representative API payloads.
 - Add integration tests behind explicit env flags for real provider calls; do not run them in normal CI.
@@ -601,15 +601,15 @@ Mezmo-specific: because Mezmo charges per query and per GB processed, apply tigh
 3. Add VictoriaLogs endpoint-type support in settings: direct, `vmauth`, generic reverse proxy, Grafana datasource proxy. Present `vmauth` or another read-only proxy as the recommended secure path. Connector support is explicitly deferred; do not include it in the settings UX at this step.
 4. Add the server-side log proxy with org/session/role authorization, proxy token issuance and validation (JWT, 1h TTL), HMAC cursor signing, audit logging with truncated query storage, time-bound enforcement, field-name redaction, response size truncation, and rate limiting.
 5. Register the sandbox-side 143 log proxy provider through short-lived proxy tokens, not raw provider credentials.
-6. Implement `log_query --provider victorialogs` against the proxy-backed VictoriaLogs adapter, including multi-tenant filter injection for shared deployments.
-7. Implement `log_fields --provider victorialogs`, `log_context --provider victorialogs` with ID/cursor support where available plus timestamp + query fallback, and `log_stats --provider victorialogs` using LogsQL stats queries.
-8. Implement `log_query --provider mezmo` and `log_fields --provider mezmo`.
-9. Add `log_context --provider mezmo` once the stable event ID/cursor shape is confirmed, with timestamp + query fallback if provider IDs are unavailable.
-10. Add `log_stats --provider mezmo` once the Mezmo API aggregation surface is confirmed; otherwise leave `ErrLogStatsUnsupported` in place.
+6. Implement `logs query --provider victorialogs` against the proxy-backed VictoriaLogs adapter, including multi-tenant filter injection for shared deployments.
+7. Implement `logs fields --provider victorialogs`, `logs context --provider victorialogs` with ID/cursor support where available plus timestamp + query fallback, and `logs stats --provider victorialogs` using LogsQL stats queries.
+8. Implement `logs query --provider mezmo` and `logs fields --provider mezmo`.
+9. Add `logs context --provider mezmo` once the stable event ID/cursor shape is confirmed, with timestamp + query fallback if provider IDs are unavailable.
+10. Add `logs stats --provider mezmo` once the Mezmo API aggregation surface is confirmed; otherwise leave `ErrLogStatsUnsupported` in place.
 11. Update agent prompt examples and production debugging docs.
 12. File follow-on design doc for customer-side outbound connector (firewalled VictoriaLogs deployments).
 
 ## Provider Optimizations
 
-- If Mezmo exposes a stable event identifier or opaque event cursor in the API response, preserve it in `LogEntry.ID` or cursor metadata and use it as the preferred `log_context` anchor. This is an optimization, not a v1 blocker, because `timestamp + query + bounded time range` is the portable fallback.
+- If Mezmo exposes a stable event identifier or opaque event cursor in the API response, preserve it in `LogEntry.ID` or cursor metadata and use it as the preferred `logs context` anchor. This is an optimization, not a v1 blocker, because `timestamp + query + bounded time range` is the portable fallback.
 - If VictoriaLogs exposes per-entry stable identifiers in a future API version, adopt them as the preferred anchor over `_stream_id` + timestamp.

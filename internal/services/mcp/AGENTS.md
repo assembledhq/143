@@ -8,7 +8,7 @@ When exposing integration tools (Sentry, Linear, Notion, Slack) to agents runnin
 
 1. **Lower token overhead.** The CLI skills doc (`GenerateSkillsDoc()`) is 200-800 tokens. An MCP server's tool definitions, protocol handshake, and JSON-RPC framing consume significantly more context. Every token spent on tool infrastructure is a token not available for reasoning.
 
-2. **LLMs already know how to use CLIs.** Shell commands are heavily represented in training data. Agents reliably produce `143-tools linear_list_tasks --team ENG --limit 10`. MCP tool calls require the agent to understand JSON-RPC framing, which adds a failure mode.
+2. **LLMs already know how to use CLIs.** Shell commands are heavily represented in training data. Agents reliably produce `143-tools linear list_tasks --team ENG --limit 10`. MCP tool calls require the agent to understand JSON-RPC framing, which adds a failure mode.
 
 3. **Simpler debugging.** A CLI call is a single line in the session log. An MCP interaction is a multi-message protocol exchange that's harder to trace.
 
@@ -37,6 +37,7 @@ When adding a new tool (e.g., a new Notion query):
 1. Add the integration interface method in `internal/services/integration/types.go`
 2. Implement it on the provider (e.g., `notion.go`)
 3. Add the tool definition and dispatch in `tools.go` — this automatically makes it available in **both** the CLI and MCP server since they share `ToolRegistry`
-4. The CLI skills doc auto-generates from the tool registry for sandbox prompt injection
-5. Update the public API reference at `docs/public/reference/agent-tools.mdx` so the documented command names, flags, required fields, defaults, and coding-agent use cases match the tool registry
-6. Update `registry_builder.go` if new environment variables are needed
+4. If the tool name uses a new pattern, update the CLI command-path mapping in `cli.go` so the agent-facing command has a clear `<namespace> <action>` path
+5. The CLI skills doc auto-generates compact namespace guidance from the tool registry for sandbox prompt injection
+6. Update the public API reference at `docs/public/reference/agent-tools.mdx` so the documented command names, flags, required fields, defaults, and coding-agent use cases match the CLI
+7. Update `registry_builder.go` if new environment variables are needed

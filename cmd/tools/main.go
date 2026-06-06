@@ -5,8 +5,8 @@
 //
 // Usage (integration tools):
 //
-//	SENTRY_AUTH_TOKEN=... LINEAR_ACCESS_TOKEN=... 143-tools <tool> [--flag value ...]
-//	143-tools sentry_list_errors --severity high --limit 10
+//	SENTRY_AUTH_TOKEN=... LINEAR_ACCESS_TOKEN=... 143-tools <namespace> <action> [--flag value ...]
+//	143-tools sentry list_errors --severity high --limit 10
 //	143-tools --help
 //
 // Usage (sandbox infrastructure — invoked by git/gh/orchestrator, not the agent):
@@ -26,8 +26,8 @@ import (
 func main() {
 	// Sandbox-side subcommands are dispatched first so they don't get
 	// confused with integration tool names. They have no overlap with the
-	// tool registry (tool names are snake_case like `sentry_list_errors`),
-	// but explicit dispatch is clearer than relying on naming convention.
+	// agent-facing namespaces, but explicit dispatch is clearer than relying
+	// on naming convention.
 	if handled, code := sandboxauth.HandleSubcommand(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
