@@ -153,11 +153,11 @@ describe("public docs source", () => {
     const raw = getRawPublicDocBySlug(["reference", "agent-tools"]);
 
     expect(raw.content).toContain("## CLI contract");
-    expect(raw.content).toContain("### `linear_list_tasks`");
+    expect(raw.content).toContain("### `linear list_tasks`");
     expect(raw.content).toContain("`--team`");
-    expect(raw.content).toContain("### `create_pr`");
-    expect(raw.content).toContain("### `circleci_get_recent_test_failures`");
-    expect(raw.content).toContain("### `log_query`");
+    expect(raw.content).toContain("### `pr create`");
+    expect(raw.content).toContain("### `circleci get_recent_test_failures`");
+    expect(raw.content).toContain("### `logs query`");
   });
 
   it("generates llms.txt from the public docs index", () => {

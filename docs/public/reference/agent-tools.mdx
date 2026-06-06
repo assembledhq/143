@@ -16,27 +16,47 @@ Coding agents call `143-tools` from inside the sandbox to query connected integr
 
 ## CLI contract
 
-All commands use the same shape:
+Agent-facing commands use a hierarchical shape:
 
 ```bash
-143-tools <tool_name> [--flag value ...]
-143-tools <tool_name> --help
+143-tools <namespace> <action> [--flag value ...]
+143-tools <namespace> --help
+143-tools <namespace> <action> --help
 143-tools --help
 ```
 
 Results are printed to stdout, usually as JSON. Flags map directly to the tool input schema. Array flags use comma-separated values, for example `--states triage,in_progress`. Boolean flags accept `true` or `false`.
 
+Flat command names such as `sentry_list_errors`, `linear_get_task`, `log_query`, and `create_pr` are no longer supported. Error messages include the new command shape and the help command the agent should run next.
+
 Use `jq` when scanning result sets:
 
 ```bash
-143-tools linear_list_tasks --team ENG --limit 25 | jq '.[].identifier'
+143-tools linear list_tasks --team ENG --limit 25 | jq '.[].identifier'
 ```
+
+## Namespaces
+
+Only configured namespaces appear in `143-tools --help`.
+
+| Namespace | Commands |
+|---|---|
+| `sentry` | `list_errors`, `get_error`, `get_error_trend`, `find_related_errors` |
+| `linear` | `list_tasks`, `get_task`, `find_related_tasks`, `update_task`, `create_task` |
+| `notion` | `search_documents`, `get_document` |
+| `github` | `list_recent_prs`, `get_pr_reviews` |
+| `circleci` | `list_flaky_tests`, `get_job_test_results`, `get_recent_test_failures` |
+| `logs` | `query`, `context`, `fields`, `stats` |
+| `slack` | `search_messages`, `get_thread` |
+| `issue` | `create` |
+| `pr` | `create` |
+| `project` | `propose` |
 
 ## Error tracking
 
-These commands are exposed for configured error trackers such as Sentry. Provider-prefixed names use the provider name, for example `sentry_list_errors`.
+These commands are exposed for configured error trackers such as Sentry. The namespace uses the provider name.
 
-### `sentry_list_errors`
+### `sentry list_errors`
 
 List unresolved errors with severity, occurrence count, and affected-user summaries.
 
@@ -50,10 +70,10 @@ List unresolved errors with severity, occurrence count, and affected-user summar
 Common use: start a production bug investigation with high-impact unresolved errors.
 
 ```bash
-143-tools sentry_list_errors --severity critical --limit 20
+143-tools sentry list_errors --severity critical --limit 20
 ```
 
-### `sentry_get_error`
+### `sentry get_error`
 
 Get full details for one error, including stack trace, tags, and error type.
 
@@ -64,10 +84,10 @@ Get full details for one error, including stack trace, tags, and error type.
 Common use: inspect the stack and tags before searching the codebase.
 
 ```bash
-143-tools sentry_get_error --error_id 12345
+143-tools sentry get_error --error_id 12345
 ```
 
-### `sentry_get_error_trend`
+### `sentry get_error_trend`
 
 Get occurrence trend data over a time window.
 
@@ -79,10 +99,10 @@ Get occurrence trend data over a time window.
 Common use: decide whether a suspected fix should be urgent because the error is spiking.
 
 ```bash
-143-tools sentry_get_error_trend --error_id 12345 --period 24h
+143-tools sentry get_error_trend --error_id 12345 --period 24h
 ```
 
-### `sentry_find_related_errors`
+### `sentry find_related_errors`
 
 Find errors that likely share a root cause, such as a matching stack prefix or culprit.
 
@@ -93,14 +113,14 @@ Find errors that likely share a root cause, such as a matching stack prefix or c
 Common use: avoid fixing one symptom while missing duplicate production failures.
 
 ```bash
-143-tools sentry_find_related_errors --error_id 12345
+143-tools sentry find_related_errors --error_id 12345
 ```
 
 ## Tasks
 
-These commands are exposed for configured task managers such as Linear. Provider-prefixed names use the provider name, for example `linear_get_task`.
+These commands are exposed for configured task managers such as Linear. The namespace uses the provider name.
 
-### `linear_list_tasks`
+### `linear list_tasks`
 
 List tasks matching filters with state, priority, and assignee summaries.
 
@@ -114,10 +134,10 @@ List tasks matching filters with state, priority, and assignee summaries.
 Common use: find the highest-priority engineering work related to the current repo.
 
 ```bash
-143-tools linear_list_tasks --team ENG --priority urgent --limit 25
+143-tools linear list_tasks --team ENG --priority urgent --limit 25
 ```
 
-### `linear_get_task`
+### `linear get_task`
 
 Get full task details, including description, comments, and linked issues.
 
@@ -128,10 +148,10 @@ Get full task details, including description, comments, and linked issues.
 Common use: read the complete ticket before implementing a fix.
 
 ```bash
-143-tools linear_get_task --task_id ENG-123
+143-tools linear get_task --task_id ENG-123
 ```
 
-### `linear_find_related_tasks`
+### `linear find_related_tasks`
 
 Find linked tasks, sub-issues, or tasks in the same project.
 
@@ -142,10 +162,10 @@ Find linked tasks, sub-issues, or tasks in the same project.
 Common use: check whether another task already covers the same root cause.
 
 ```bash
-143-tools linear_find_related_tasks --task_id ENG-123
+143-tools linear find_related_tasks --task_id ENG-123
 ```
 
-### `linear_update_task`
+### `linear update_task`
 
 Update task metadata or add a comment.
 
@@ -159,10 +179,10 @@ Update task metadata or add a comment.
 Common use: leave an implementation note or move a task after completing work.
 
 ```bash
-143-tools linear_update_task --task_id ENG-123 --comment "Opened a PR with the fix."
+143-tools linear update_task --task_id ENG-123 --comment "Opened a PR with the fix."
 ```
 
-### `linear_create_task`
+### `linear create_task`
 
 Create a new task.
 
@@ -177,14 +197,14 @@ Create a new task.
 Common use: create follow-up work discovered during a code change.
 
 ```bash
-143-tools linear_create_task --team_key ENG --title "Add regression coverage for webhook retries" --priority high
+143-tools linear create_task --team_key ENG --title "Add regression coverage for webhook retries" --priority high
 ```
 
 ## Documents
 
 These commands are exposed for configured document stores such as Notion.
 
-### `notion_search_documents`
+### `notion search_documents`
 
 Search documents by text query.
 
@@ -197,10 +217,10 @@ Search documents by text query.
 Common use: find design docs, RFCs, postmortems, or launch plans before changing behavior.
 
 ```bash
-143-tools notion_search_documents --query "webhook retry policy" --limit 10
+143-tools notion search_documents --query "webhook retry policy" --limit 10
 ```
 
-### `notion_get_document`
+### `notion get_document`
 
 Fetch a document's full content.
 
@@ -211,14 +231,14 @@ Fetch a document's full content.
 Common use: read the authoritative product or architecture context for a change.
 
 ```bash
-143-tools notion_get_document --doc_id abc-123
+143-tools notion get_document --doc_id abc-123
 ```
 
 ## Code review
 
 These commands are exposed for configured code review sources such as GitHub.
 
-### `github_list_recent_prs`
+### `github list_recent_prs`
 
 List recent pull requests with titles, authors, review status, and change size.
 
@@ -230,10 +250,10 @@ List recent pull requests with titles, authors, review status, and change size.
 Common use: learn recent local patterns before editing the same area.
 
 ```bash
-143-tools github_list_recent_prs --state merged --limit 20
+143-tools github list_recent_prs --state merged --limit 20
 ```
 
-### `github_get_pr_reviews`
+### `github get_pr_reviews`
 
 Get reviews and inline review comments for a PR.
 
@@ -244,14 +264,14 @@ Get reviews and inline review comments for a PR.
 Common use: inspect prior reviewer feedback so a new change follows accepted conventions.
 
 ```bash
-143-tools github_get_pr_reviews --pr_number 1234
+143-tools github get_pr_reviews --pr_number 1234
 ```
 
 ## CI test insights
 
 These commands are exposed for configured CI providers such as CircleCI.
 
-### `circleci_list_flaky_tests`
+### `circleci list_flaky_tests`
 
 List flaky tests detected by CircleCI.
 
@@ -264,10 +284,10 @@ List flaky tests detected by CircleCI.
 Common use: choose a flaky test to investigate when CI is unstable.
 
 ```bash
-143-tools circleci_list_flaky_tests --limit 25
+143-tools circleci list_flaky_tests --limit 25
 ```
 
-### `circleci_get_job_test_results`
+### `circleci get_job_test_results`
 
 Fetch individual test results and failure messages for one CI job.
 
@@ -278,10 +298,10 @@ Fetch individual test results and failure messages for one CI job.
 Common use: read the exact failure output for a flaky occurrence.
 
 ```bash
-143-tools circleci_get_job_test_results --job_number 123456
+143-tools circleci get_job_test_results --job_number 123456
 ```
 
-### `circleci_get_recent_test_failures`
+### `circleci get_recent_test_failures`
 
 Get recent failure occurrences for a test, including failure messages.
 
@@ -294,14 +314,14 @@ Get recent failure occurrences for a test, including failure messages.
 Common use: compare failure messages across runs before changing a test.
 
 ```bash
-143-tools circleci_get_recent_test_failures --test_name "TestWebhookRetries" --limit 5
+143-tools circleci get_recent_test_failures --test_name "TestWebhookRetries" --limit 5
 ```
 
 ## Logs
 
-Log commands use fixed names with a `--provider` flag instead of provider-prefixed command names. Configured providers can include `victorialogs` and `mezmo`.
+Log commands use a shared `logs` namespace with a `--provider` flag. Configured providers can include `victorialogs` and `mezmo`.
 
-### `log_query`
+### `logs query`
 
 Run a read-only provider-native log query over a bounded time range.
 
@@ -320,10 +340,10 @@ Run a read-only provider-native log query over a bounded time range.
 Common use: investigate recent API errors with a bounded production log search.
 
 ```bash
-143-tools log_query --provider victorialogs --query 'service:api AND level:error' --since 1h --limit 100
+143-tools logs query --provider victorialogs --query 'service:api AND level:error' --since 1h --limit 100
 ```
 
-### `log_context`
+### `logs context`
 
 Fetch neighboring logs around an event anchor. At least one of `--id`, `--cursor`, or `--timestamp` is required. Using `--timestamp` also requires `--query`.
 
@@ -345,10 +365,10 @@ Fetch neighboring logs around an event anchor. At least one of `--id`, `--cursor
 Common use: expand from one failed request to the surrounding request lifecycle.
 
 ```bash
-143-tools log_context --provider victorialogs --query 'request_id:"req_123"' --timestamp 2026-06-05T12:00:00Z --since 15m --before 25 --after 25
+143-tools logs context --provider victorialogs --query 'request_id:"req_123"' --timestamp 2026-06-05T12:00:00Z --since 15m --before 25 --after 25
 ```
 
-### `log_fields`
+### `logs fields`
 
 List common indexed or queryable fields for a provider.
 
@@ -362,10 +382,10 @@ List common indexed or queryable fields for a provider.
 Common use: discover available fields before composing a precise log query.
 
 ```bash
-143-tools log_fields --provider victorialogs --since 24h --limit 100
+143-tools logs fields --provider victorialogs --since 24h --limit 100
 ```
 
-### `log_stats`
+### `logs stats`
 
 Run lightweight provider-native aggregate log stats. This command appears only for providers that support stats.
 
@@ -383,14 +403,14 @@ Run lightweight provider-native aggregate log stats. This command appears only f
 Common use: group errors by service, org, or endpoint before drilling into raw logs.
 
 ```bash
-143-tools log_stats --provider victorialogs --query 'level:error' --since 1h --group_by service --limit 20
+143-tools logs stats --provider victorialogs --query 'level:error' --since 1h --group_by service --limit 20
 ```
 
 ## Messaging
 
 These commands are exposed for configured message sources such as Slack.
 
-### `slack_search_messages`
+### `slack search_messages`
 
 Search messages by text query.
 
@@ -403,10 +423,10 @@ Search messages by text query.
 Common use: find user reports, incident discussion, or rollout context.
 
 ```bash
-143-tools slack_search_messages --query "checkout timeout" --limit 10
+143-tools slack search_messages --query "checkout timeout" --limit 10
 ```
 
-### `slack_get_thread`
+### `slack get_thread`
 
 Get a full conversation thread.
 
@@ -417,14 +437,14 @@ Get a full conversation thread.
 Common use: read the full discussion around a bug report before coding.
 
 ```bash
-143-tools slack_get_thread --message_id msg-456
+143-tools slack get_thread --message_id msg-456
 ```
 
 ## 143 workflow tools
 
 These commands are exposed by 143 itself when the session has the matching capability.
 
-### `issue_create`
+### `issue create`
 
 Create a new engineering issue and return its UUID.
 
@@ -438,10 +458,10 @@ Create a new engineering issue and return its UUID.
 Common use: file follow-up work from an agent investigation.
 
 ```bash
-143-tools issue_create --title "Webhook retries drop idempotency key" --description "Observed while fixing ENG-123." --severity warning
+143-tools issue create --title "Webhook retries drop idempotency key" --description "Observed while fixing ENG-123." --severity warning
 ```
 
-### `create_pr`
+### `pr create`
 
 Queue first-class 143 pull request creation for the current session.
 
@@ -454,10 +474,10 @@ Queue first-class 143 pull request creation for the current session.
 Common use: open a PR through the same workflow as the app after tests pass.
 
 ```bash
-143-tools create_pr --draft false
+143-tools pr create --draft false
 ```
 
-### `project_propose`
+### `project propose`
 
 Propose a repo-scoped project for human review.
 
@@ -471,11 +491,11 @@ Propose a repo-scoped project for human review.
 | `--completion_criteria` | string | No | How to know when done. |
 | `--source_issue_ids` | string | No | Comma-separated motivating issue UUIDs. |
 | `--priority` | number | No | Priority from `0` to `100`. Defaults to `50`. |
-| `--tasks` | string | No | JSON array of seed task specs: `[{"title":"…","description":"…","approach":"…","complexity":"…","confidence":"…"}]`. |
+| `--tasks` | string | No | JSON array of seed task specs: `[{"title":"...","description":"...","approach":"...","complexity":"...","confidence":"..."}]`. |
 | `--similar_project_ids` | string | No | Comma-separated same-repo project UUIDs considered non-duplicate. |
 
 Common use: turn repeated findings across issues into a reviewed project proposal.
 
 ```bash
-143-tools project_propose --repository_id 00000000-0000-0000-0000-000000000000 --title "Harden webhook delivery" --goal "Retries preserve idempotency and surface permanent failures" --reasoning "Recent production errors share the same delivery path."
+143-tools project propose --repository_id 00000000-0000-0000-0000-000000000000 --title "Harden webhook delivery" --goal "Retries preserve idempotency and surface permanent failures" --reasoning "Recent production errors share the same delivery path."
 ```
