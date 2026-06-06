@@ -73,6 +73,33 @@ describe("PRHealthBanner", () => {
     expect(button).toHaveAttribute("title", "GitHub is not allowing this PR to merge yet.");
   });
 
+  it("shows Fix tests for failed checks even when the legacy failing test count is zero", async () => {
+    const onFixTests = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          checks_confirmed: true,
+          can_fix_tests: false,
+          failing_test_count: 0,
+          checks: [{ name: "backend", category: "unknown", status: "failed" }],
+          summary: "PR #42 has a failing CI check.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={onFixTests}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Fix tests" });
+    expect(button).not.toBeDisabled();
+    await userEvent.setup().click(button);
+    expect(onFixTests).toHaveBeenCalledTimes(1);
+  });
+
   it("shows pending mergeability as a disabled Merge button state", () => {
     renderWithProviders(
       <PRHealthBanner

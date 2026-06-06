@@ -268,7 +268,7 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
-	resp.CanFixTests = resp.FailingTestCount > 0
+	resp.CanFixTests = resp.FailingTestCount > 0 || checkSummariesHaveFailedCheck(resp.Checks)
 	// CanMerge is the green-light counterpart to the repair flags: GitHub has
 	// confirmed the branch is mergeable and the check state is authoritative.
 	// Once GitHub health has been loaded, zero checks means "no CI rules
@@ -289,6 +289,22 @@ func checksAllowMerge(checksConfirmed bool, checks []models.PullRequestCheckSumm
 		}
 	}
 	return true
+}
+
+func healthSummaryHasRepairableFailedChecks(summary models.PullRequestHealthSummary) bool {
+	if summary.FailingTestCount > 0 {
+		return true
+	}
+	return checkSummariesHaveFailedCheck(summary.Checks)
+}
+
+func checkSummariesHaveFailedCheck(checks []models.PullRequestCheckSummary) bool {
+	for _, check := range checks {
+		if classifyStoredCheckStatus(check) == models.PullRequestCheckStatusFailed {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -482,9 +498,6 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	payloadChecks := make([]failingCheckPayload, 0)
 	for _, check := range checkRuns {
 		category := classifyCheckRunCategory(check.Name)
-		if category != models.PullRequestCheckCategoryTest {
-			continue
-		}
 		if normalizeCheckRunStatus(check) != models.PullRequestCheckStatusFailed {
 			continue
 		}
@@ -546,7 +559,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 			return nil, fmt.Errorf("pull request does not currently require conflict resolution")
 		}
 	case models.PullRequestRepairActionTypeFixTests:
-		if summary.FailingTestCount == 0 {
+		if !healthSummaryHasRepairableFailedChecks(summary) {
 			return nil, fmt.Errorf("pull request does not currently have failing tests")
 		}
 		if snapshot.EnrichmentStatus != models.PullRequestHealthEnrichmentStatusReady {
