@@ -136,6 +136,27 @@ func TestListToolsCodeReviewDescriptionsUseCapitalizedPullRequest(t *testing.T) 
 	require.NotContains(t, descriptions["github_get_pr_reviews"], "pull request", "github_get_pr_reviews should not describe pull request in lowercase")
 }
 
+func TestListToolsIncludesSessionTabTools(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	tools := tr.ListTools()
+	names := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+
+	for _, name := range []string{
+		"session_tabs_list",
+		"session_tabs_get",
+		"session_tabs_create",
+		"session_tabs_send",
+		"session_tabs_messages",
+	} {
+		require.True(t, names[name], "ListTools should expose %s when session tab manager is registered", name)
+	}
+}
+
 func TestCallToolErrorTrackerListErrors(t *testing.T) {
 	t.Parallel()
 	tr := NewToolRegistry(buildTestRegistry())

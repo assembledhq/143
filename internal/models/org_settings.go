@@ -251,6 +251,10 @@ type OrgSettings struct {
 	PRDraftDefault             bool               `json:"pr_draft_default,omitempty"`
 	AutoArchiveOnPRClose       bool               `json:"auto_archive_on_pr_close,omitempty"`
 	BuilderPermissions         BuilderPermissions `json:"builder_permissions,omitempty"`
+	// CodingAgentTabToolsEnabled controls whether sandbox agents may use
+	// 143-tools to view/create/message tabs in their current session. Pointer
+	// typed so absent settings default on without losing explicit false.
+	CodingAgentTabToolsEnabled *bool `json:"coding_agent_tab_tools_enabled,omitempty"`
 
 	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
 	// as the soft runtime budget for run_agent and continue_session jobs.
@@ -275,6 +279,13 @@ type OrgSettings struct {
 	// LinearAutomation, which is purely outbound. The feature is opt-in;
 	// nothing happens to a Linear-connected org until an admin enables it.
 	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
+}
+
+func (s OrgSettings) EffectiveCodingAgentTabToolsEnabled() bool {
+	if s.CodingAgentTabToolsEnabled == nil {
+		return true
+	}
+	return *s.CodingAgentTabToolsEnabled
 }
 
 // BuilderPermissions controls the narrower builder role's access to

@@ -27,6 +27,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import { useAutosave } from "@/hooks/useAutosave";
@@ -156,6 +157,7 @@ export default function AgentPage() {
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const maxConcurrentServer = settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
   const sessionMinutesServer = Math.round((settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60);
+  const tabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
 
   const autosave = useAutosave<SettingsPatch>({
     queryKey: queryKeys.settings.all,
@@ -301,6 +303,7 @@ export default function AgentPage() {
       (settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
     );
     const maxConcurrent = settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+    const readOnlyTabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
     const defaultAgentLabel = settings.default_agent_type
       ? (AGENTS_BY_KEY[settings.default_agent_type as keyof typeof AGENTS_BY_KEY]?.label ?? settings.default_agent_type)
       : "Not set";
@@ -374,6 +377,10 @@ export default function AgentPage() {
                 <div className="flex items-baseline justify-between gap-3">
                   <span className="text-muted-foreground">Max session duration</span>
                   <span className="font-medium">{sessionMinutes} min</span>
+                </div>
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-muted-foreground">Agent tab tools</span>
+                  <span className="font-medium">{readOnlyTabToolsEnabled ? "On" : "Off"}</span>
                 </div>
               </CardContent>
             </Card>
@@ -460,6 +467,21 @@ export default function AgentPage() {
               <p className="text-xs text-muted-foreground">
                 Stop runaway sessions automatically after the selected wall-clock limit.
               </p>
+            </div>
+            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3 md:col-span-2">
+              <div className="space-y-1">
+                <Label htmlFor="agent-tab-tools">Agent tab tools</Label>
+                <p className="text-xs text-muted-foreground">
+                  Allow coding agents to view, create, and message tabs in their current session.
+                </p>
+              </div>
+              <Switch
+                id="agent-tab-tools"
+                checked={tabToolsEnabled}
+                onCheckedChange={(checked) => {
+                  autosave.save({ settings: { coding_agent_tab_tools_enabled: checked } });
+                }}
+              />
             </div>
           </CardContent>
         </Card>
