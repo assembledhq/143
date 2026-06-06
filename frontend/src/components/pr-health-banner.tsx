@@ -11,7 +11,7 @@ import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { SyncTimeText } from "@/components/sync-time-text";
-import { deriveMergeActionState, deriveMergeWhenReadyActionState } from "@/lib/session-pr-action-state";
+import { deriveMergeActionState, deriveMergeWhenReadyActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 
 // PRBannerAction names every action the banner can launch. The pending value
 // is shared across buttons so they can disable each other while one is in
@@ -79,7 +79,7 @@ export function PRHealthBanner({
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
   const canShowResolveConflictsButton = health.can_resolve_conflicts && !activeRepairState.suppressResolveConflicts;
-  const canShowFixTestsButton = health.can_fix_tests && !activeRepairState.suppressFixTests;
+  const canShowFixTestsButton = hasRepairableFailedChecks({ ...health, checks: orderedChecks }) && !activeRepairState.suppressFixTests;
   const mergeAction = deriveMergeActionState({
     health: { ...health, checks: orderedChecks },
     hasActiveRepair: activeRepairState.suppressMerge,
