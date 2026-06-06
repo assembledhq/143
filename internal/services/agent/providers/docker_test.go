@@ -803,7 +803,7 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 
 	mock := &mockDockerClient{}
 	mock.containerListFn = func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
-		require.Contains(t, options.Filters.Get("network"), "143-sandbox", "CountLiveSandboxes should scope counting to the local sandbox network")
+		require.Empty(t, options.Filters.Get("network"), "CountLiveSandboxes should include managed sandboxes on both default and static-egress networks")
 		return []container.Summary{
 			{
 				ID:     "labeled-sandbox",
@@ -814,6 +814,24 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 				ID:     "legacy-sandbox",
 				Image:  "ghcr.io/assembledhq/143-sandbox:latest",
 				Labels: map[string]string{},
+				NetworkSettings: &container.NetworkSettingsSummary{
+					Networks: map[string]*network.EndpointSettings{
+						"143-sandbox": {},
+					},
+				},
+			},
+			{
+				ID:    "static-egress-sandbox",
+				Image: "busybox:1.36.1",
+				Labels: map[string]string{
+					SandboxLabelManaged: "true",
+					SandboxLabelType:    "sandbox",
+				},
+				NetworkSettings: &container.NetworkSettingsSummary{
+					Networks: map[string]*network.EndpointSettings{
+						"143-sandbox-static-egress": {},
+					},
+				},
 			},
 			{
 				ID:     "dns-sidecar",
@@ -825,6 +843,16 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 				Image:  "ghcr.io/assembledhq/143:latest",
 				Labels: map[string]string{},
 			},
+			{
+				ID:     "unrelated-legacy-looking-container",
+				Image:  "ghcr.io/assembledhq/143-sandbox:latest",
+				Labels: map[string]string{},
+				NetworkSettings: &container.NetworkSettingsSummary{
+					Networks: map[string]*network.EndpointSettings{
+						"some-other-network": {},
+					},
+				},
+			},
 		}, nil
 	}
 	p := NewDockerProvider(mock, newTestLogger())
@@ -832,7 +860,7 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 	count, err := p.CountLiveSandboxes(context.Background())
 
 	require.NoError(t, err, "CountLiveSandboxes should return the Docker count without error")
-	require.Equal(t, 2, count, "CountLiveSandboxes should include labeled and legacy sandbox containers but skip sidecars")
+	require.Equal(t, 3, count, "CountLiveSandboxes should include default, static-egress, and legacy sandbox containers but skip sidecars")
 }
 
 func TestDockerProvider_CountLiveSandboxesListError(t *testing.T) {

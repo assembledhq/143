@@ -22,7 +22,6 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
@@ -822,32 +821,28 @@ func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[st
 	return labels
 }
 
-// CountLiveSandboxes counts running local sandbox containers attached to the
-// configured sandbox network. Labels are preferred for newly-created
-// containers; image-name matching keeps existing unlabeled sandboxes visible.
+// CountLiveSandboxes counts running local sandbox containers across all
+// sandbox bridges. Labels are preferred for newly-created containers; image-name
+// matching keeps existing unlabeled sandboxes visible on the default bridge.
 func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
-	args := filters.NewArgs()
-	if d.network != "" {
-		args.Add("network", d.network)
-	}
-	containers, err := d.client.ContainerList(ctx, container.ListOptions{Filters: args})
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("list live sandbox containers: %w", err)
 	}
 	count := 0
 	for _, summary := range containers {
-		if isLiveSandboxContainer(summary) {
+		if isLiveSandboxContainer(summary, d.network) {
 			count++
 		}
 	}
 	return count, nil
 }
 
-func isLiveSandboxContainer(summary container.Summary) bool {
+func isLiveSandboxContainer(summary container.Summary, sandboxNetwork string) bool {
 	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
 		return true
 	}
-	return isLegacySandboxImage(summary)
+	return isLegacySandboxImage(summary) && isContainerAttachedToNetwork(summary, sandboxNetwork)
 }
 
 func isLegacySandboxImage(summary container.Summary) bool {
