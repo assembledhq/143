@@ -41,17 +41,18 @@ type Automation struct {
 	// Migration 93 dropped the chk_automations_timezone_interval DB CHECK so
 	// interval rows can now carry non-UTC zones; writers must still set
 	// timezone='UTC' only when meaningful.
-	Timezone  string     `db:"timezone"        json:"timezone"`
-	NextRunAt *time.Time `db:"next_run_at"     json:"next_run_at,omitempty"`
-	LastRunAt *time.Time `db:"last_run_at"     json:"last_run_at,omitempty"`
-	Enabled   bool       `db:"enabled"         json:"enabled"`
-	CreatedBy *uuid.UUID `db:"created_by"      json:"created_by,omitempty"`
-	PausedBy  *uuid.UUID `db:"paused_by"       json:"paused_by,omitempty"`
-	PausedAt  *time.Time `db:"paused_at"       json:"paused_at,omitempty"`
-	Priority  int        `db:"priority"        json:"priority"`
-	CreatedAt time.Time  `db:"created_at"      json:"created_at"`
-	UpdatedAt time.Time  `db:"updated_at"      json:"updated_at"`
-	DeletedAt *time.Time `db:"deleted_at"      json:"-"`
+	Timezone         string          `db:"timezone"        json:"timezone"`
+	NextRunAt        *time.Time      `db:"next_run_at"     json:"next_run_at,omitempty"`
+	LastRunAt        *time.Time      `db:"last_run_at"     json:"last_run_at,omitempty"`
+	Enabled          bool            `db:"enabled"         json:"enabled"`
+	CreatedBy        *uuid.UUID      `db:"created_by"      json:"created_by,omitempty"`
+	PausedBy         *uuid.UUID      `db:"paused_by"       json:"paused_by,omitempty"`
+	PausedAt         *time.Time      `db:"paused_at"       json:"paused_at,omitempty"`
+	Priority         int             `db:"priority"        json:"priority"`
+	ExternalMetadata json.RawMessage `db:"external_metadata" json:"metadata,omitempty"`
+	CreatedAt        time.Time       `db:"created_at"      json:"created_at"`
+	UpdatedAt        time.Time       `db:"updated_at"      json:"updated_at"`
+	DeletedAt        *time.Time      `db:"deleted_at"      json:"-"`
 }
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
