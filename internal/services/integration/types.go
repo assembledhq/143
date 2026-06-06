@@ -450,7 +450,7 @@ type StubPullRequestCreator struct {
 
 func (s *StubPullRequestCreator) Name() string { return s.ProviderName }
 func (s *StubPullRequestCreator) CreatePullRequest(_ context.Context, _ CreatePullRequestParams) (*CreatePullRequestResult, error) {
-	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools create_pr) instead of direct API calls")
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools pr create) instead of direct API calls")
 }
 
 // --------------------------------------------------------------------------

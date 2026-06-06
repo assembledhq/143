@@ -5,52 +5,28 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGenerateSkillsDoc_WithIntegrations(t *testing.T) {
 	t.Parallel()
 
-	tr := NewToolRegistry(buildTestRegistry())
+	tr := NewToolRegistry(buildFullCLIRegistry())
 	doc := GenerateSkillsDoc(tr)
 
-	if doc == "" {
-		t.Fatal("expected non-empty skills doc")
-	}
-
-	// Check structure.
-	if !strings.Contains(doc, "# Integration Tools") {
-		t.Error("missing header")
-	}
-	if !strings.Contains(doc, "143-tools") {
-		t.Error("missing CLI name")
-	}
-	if !strings.Contains(doc, "## Quick Reference") {
-		t.Error("missing quick reference section")
-	}
-
-	// Check that tools are listed.
-	if !strings.Contains(doc, "sentry_list_errors") {
-		t.Error("missing sentry tool")
-	}
-	if !strings.Contains(doc, "linear_create_task") {
-		t.Error("missing linear tool")
-	}
-
-	// Check examples include provider sections.
-	if !strings.Contains(doc, "## Sentry") {
-		t.Error("missing Sentry section header")
-	}
-	if !strings.Contains(doc, "## Linear") {
-		t.Error("missing Linear section header")
-	}
-
-	// Check tips section.
-	if !strings.Contains(doc, "## Tips") {
-		t.Error("missing tips section")
-	}
-	if !strings.Contains(doc, "jq") {
-		t.Error("missing jq tip")
-	}
+	require.NotEmpty(t, doc, "skills doc should be generated when integrations exist")
+	require.Contains(t, doc, "# Integration Tools", "skills doc should include the section header")
+	require.Contains(t, doc, "143-tools <namespace> <action>", "skills doc should teach hierarchical command shape")
+	require.Contains(t, doc, "`sentry`", "skills doc should include configured Sentry namespace")
+	require.Contains(t, doc, "`linear`", "skills doc should include configured Linear namespace")
+	require.Contains(t, doc, "`logs`", "skills doc should include configured logs namespace")
+	require.Contains(t, doc, "143-tools sentry list_errors", "skills doc should include high-value hierarchical examples")
+	require.Contains(t, doc, "143-tools linear get_task", "skills doc should include high-value hierarchical examples")
+	require.Contains(t, doc, "143-tools logs query", "skills doc should include high-value hierarchical examples")
+	require.NotContains(t, doc, "sentry_list_errors", "skills doc should not mention old flat command names")
+	require.NotContains(t, doc, "linear_create_task", "skills doc should not mention old flat command names")
+	require.NotContains(t, doc, "143-tools <tool_name>", "skills doc should not teach old flat command shape")
+	require.Contains(t, doc, "Run `143-tools <namespace> --help`", "skills doc should guide agents toward lazy discovery")
 }
 
 func TestGenerateSkillsDoc_Empty(t *testing.T) {
@@ -59,44 +35,18 @@ func TestGenerateSkillsDoc_Empty(t *testing.T) {
 	tr := NewToolRegistry(integration.NewRegistry())
 	doc := GenerateSkillsDoc(tr)
 
-	if doc != "" {
-		t.Errorf("expected empty string for no integrations, got: %s", doc)
-	}
+	require.Empty(t, doc, "skills doc should be empty when no integrations are configured")
 }
 
 func TestGenerateSkillsDoc_TokenEfficiency(t *testing.T) {
 	t.Parallel()
 
-	tr := NewToolRegistry(buildTestRegistry())
+	tr := NewToolRegistry(buildFullCLIRegistry())
 	doc := GenerateSkillsDoc(tr)
 
-	// The skills doc should be compact. With 2 integrations (9 tools),
-	// we expect roughly 400-1000 words (~500-1200 tokens).
 	words := len(strings.Fields(doc))
-	if words > 1200 {
-		t.Errorf("skills doc is too verbose: %d words (keep under 1200 for token efficiency)", words)
-	}
-	if words < 50 {
-		t.Errorf("skills doc is suspiciously short: %d words", words)
-	}
-}
-
-func TestGenerateSkillsDoc_ExamplesIncludeFlags(t *testing.T) {
-	t.Parallel()
-
-	tr := NewToolRegistry(buildTestRegistry())
-	doc := GenerateSkillsDoc(tr)
-
-	// Examples should include common flags.
-	if !strings.Contains(doc, "--severity") {
-		t.Error("examples missing --severity flag")
-	}
-	if !strings.Contains(doc, "--error_id") {
-		t.Error("examples missing --error_id flag")
-	}
-	if !strings.Contains(doc, "--team_key") {
-		t.Error("examples missing --team_key flag for create_task")
-	}
+	require.LessOrEqual(t, words, 500, "skills doc should stay compact by summarizing namespaces instead of listing every tool")
+	require.Greater(t, words, 50, "skills doc should contain enough discovery guidance to be useful")
 }
 
 func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {
@@ -107,21 +57,12 @@ func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {
 	tr := NewToolRegistry(reg)
 	doc := GenerateSkillsDoc(tr)
 
-	if doc == "" {
-		t.Fatal("expected non-empty skills doc with sentry only")
-	}
-	if !strings.Contains(doc, "## Sentry") {
-		t.Error("missing Sentry section")
-	}
-	if strings.Contains(doc, "## Linear") {
-		t.Error("Linear section should not appear when only Sentry is configured")
-	}
-	if !strings.Contains(doc, "sentry_list_errors") {
-		t.Error("missing sentry tools")
-	}
-	if strings.Contains(doc, "linear_") {
-		t.Error("linear tools should not appear when only Sentry is configured")
-	}
+	require.NotEmpty(t, doc, "skills doc should be generated for Sentry")
+	require.Contains(t, doc, "`sentry`", "skills doc should include Sentry namespace")
+	require.Contains(t, doc, "143-tools sentry list_errors", "skills doc should include Sentry example")
+	require.NotContains(t, doc, "`linear`", "skills doc should omit unconfigured Linear namespace")
+	require.NotContains(t, doc, "143-tools linear", "skills doc should omit unconfigured Linear examples")
+	require.NotContains(t, doc, "sentry_", "skills doc should omit old flat Sentry command names")
 }
 
 func TestGenerateSkillsDoc_LinearOnly(t *testing.T) {
@@ -132,19 +73,10 @@ func TestGenerateSkillsDoc_LinearOnly(t *testing.T) {
 	tr := NewToolRegistry(reg)
 	doc := GenerateSkillsDoc(tr)
 
-	if doc == "" {
-		t.Fatal("expected non-empty skills doc with linear only")
-	}
-	if !strings.Contains(doc, "## Linear") {
-		t.Error("missing Linear section")
-	}
-	if strings.Contains(doc, "## Sentry") {
-		t.Error("Sentry section should not appear when only Linear is configured")
-	}
-	if strings.Contains(doc, "sentry_") {
-		t.Error("sentry tools should not appear when only Linear is configured")
-	}
-	if strings.Contains(doc, "143-tools sentry_list_errors") {
-		t.Error("sentry-specific usage tips should not appear when only Linear is configured")
-	}
+	require.NotEmpty(t, doc, "skills doc should be generated for Linear")
+	require.Contains(t, doc, "`linear`", "skills doc should include Linear namespace")
+	require.Contains(t, doc, "143-tools linear get_task", "skills doc should include Linear example")
+	require.NotContains(t, doc, "`sentry`", "skills doc should omit unconfigured Sentry namespace")
+	require.NotContains(t, doc, "143-tools sentry", "skills doc should omit unconfigured Sentry examples")
+	require.NotContains(t, doc, "linear_", "skills doc should omit old flat Linear command names")
 }
