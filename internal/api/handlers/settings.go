@@ -130,21 +130,9 @@ func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", err)
 		return
 	}
-	status := h.staticEgress
-	reason := status.UnavailableReason
-	if status.Available && h.workers != nil {
-		hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(r.Context(), status.PublicIP)
-		if workerErr != nil {
-			h.logger.Warn().Err(workerErr).Msg("failed to verify static egress worker availability")
-			status.Available = false
-			reason = "failed to verify static egress worker availability"
-		} else if !hasWorker {
-			status.Available = false
-			reason = "not all active session workers are static-egress-capable for the configured public IP"
-		}
-	}
-	if !status.Available && reason == "" {
-		reason = "static egress gateway is not configured for this environment"
+	status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), false)
+	if availabilityErr != nil {
+		h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress worker availability")
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[networkStatusResponse]{Data: networkStatusResponse{
 		StaticEgressAvailable:         status.Available,
@@ -152,6 +140,46 @@ func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Reques
 		StaticEgressPublicIP:          status.PublicIP,
 		StaticEgressUnavailableReason: reason,
 	}})
+}
+
+func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireWorkerChecker bool) (StaticEgressStatus, string, error) {
+	status := h.staticEgress
+	reason := status.UnavailableReason
+	if status.Available {
+		if h.workers == nil {
+			if requireWorkerChecker {
+				status.Available = false
+				reason = "static egress worker availability checker is not configured"
+			}
+		} else {
+			hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(ctx, status.PublicIP)
+			if workerErr != nil {
+				status.Available = false
+				reason = "failed to verify static egress worker availability"
+				return status, reason, workerErr
+			}
+			if !hasWorker {
+				status.Available = false
+				reason = "not all active session workers are static-egress-capable for the configured public IP"
+			}
+		}
+	}
+	if !status.Available && reason == "" {
+		reason = "static egress gateway is not configured for this environment"
+	}
+	return status, reason, nil
+}
+
+func staticEgressEnableTransition(beforeRaw, afterRaw json.RawMessage) (bool, error) {
+	before, err := models.ParseOrgSettings(beforeRaw)
+	if err != nil {
+		return false, err
+	}
+	after, err := models.ParseOrgSettings(afterRaw)
+	if err != nil {
+		return false, err
+	}
+	return !before.SandboxNetwork.StaticEgressEnabled && after.SandboxNetwork.StaticEgressEnabled, nil
 }
 
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -218,6 +246,21 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		org.Settings = merged
+		enableStaticEgress, transitionErr := staticEgressEnableTransition(beforeSettings, org.Settings)
+		if transitionErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", transitionErr)
+			return
+		}
+		if enableStaticEgress {
+			status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), true)
+			if availabilityErr != nil {
+				h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress availability before settings update")
+			}
+			if !status.Available {
+				writeError(w, r, http.StatusServiceUnavailable, "STATIC_EGRESS_UNAVAILABLE", reason, availabilityErr)
+				return
+			}
+		}
 	}
 
 	// Build the audit diff from what actually changed. Skip the emit entirely

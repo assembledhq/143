@@ -158,16 +158,25 @@ if [ -z "$fleet_hosts" ]; then
 fi
 
 declare -a worker_hosts
+egress_host_count=0
 IFS=',' read -r -a fleet_entries <<< "$fleet_hosts"
 for entry in "${fleet_entries[@]}"; do
   entry="$(trim_spaces "$entry")"
   [ -n "$entry" ] || continue
   role="${entry%%:*}"
   host="${entry#*:}"
+  if [ "$role" = "egress" ] && [ -n "$host" ] && [ "$host" != "$entry" ]; then
+    egress_host_count=$((egress_host_count + 1))
+  fi
   if [ "$role" = "worker" ] && [ -n "$host" ] && [ "$host" != "$entry" ]; then
     worker_hosts+=("$host")
   fi
 done
+
+if [ "$egress_host_count" -ne 1 ]; then
+  echo "ERROR: FLEET_HOSTS must include exactly one egress:<host> entry when STATIC_EGRESS_PUBLIC_IP is configured." >&2
+  exit 1
+fi
 
 if [ "${#worker_hosts[@]}" -eq 0 ]; then
   echo "ERROR: FLEET_HOSTS has no worker:<host> entries." >&2
@@ -274,3 +283,4 @@ fi
 sops --encrypt --input-type dotenv --output-type dotenv "$tmp_env" > "$tmp_env.enc"
 mv "$tmp_env.enc" "$ENC_FILE"
 echo "Updated $ENC_FILE with generated static egress config."
+echo "Commit $ENC_FILE after provisioning succeeds so generated gateway and worker keys are preserved."

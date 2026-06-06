@@ -434,6 +434,7 @@ provision-worker:
 
 provision-egress:
 	$(check-ssh-key)
+	@deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "$(HOST)" "$(SSH_KEY)"
 
 provision-db:

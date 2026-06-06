@@ -51,7 +51,7 @@ resolve_egress_host_from_fleet() {
     if [ "$role" = "egress" ] && [ -n "$host" ] && [ "$host" != "$entry" ]; then
       if [ -n "${resolved_host:-}" ] && [ "$resolved_host" != "$host" ]; then
         echo "ERROR: FLEET_HOSTS contains multiple egress:<host> entries." >&2
-        exit 1
+        return 1
       fi
       resolved_host="$host"
     fi
@@ -65,6 +65,7 @@ resolve_egress_host_from_fleet() {
 load_static_egress_env() {
   local tmp_env
   tmp_env="$(mktemp)"
+  trap 'rm -f "$tmp_env"' RETURN
   sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" > "$tmp_env"
   resolve_egress_host_from_fleet "$tmp_env"
 
@@ -79,7 +80,6 @@ load_static_egress_env() {
     STATIC_EGRESS_PUBLIC_INTERFACE; do
     load_env_key "$key" "$tmp_env"
   done
-  rm -f "$tmp_env"
 }
 
 if [ ! -f "$ENC_FILE" ]; then
