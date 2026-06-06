@@ -732,7 +732,7 @@ type SessionLog struct {
 	TurnNumber int             `db:"turn_number" json:"turn_number"`
 }
 
-// SessionMessage represents a chat message in a multi-turn session.
+// SessionMessageSource identifies the originator of a session message.
 type SessionMessageSource string
 
 const (
@@ -765,7 +765,7 @@ type SessionMessage struct {
 	CreatedAt   time.Time              `db:"created_at" json:"created_at"`
 }
 
-// SessionThread represents an agent thread within a multi-agent session.
+// ThreadCreatedBySource identifies what or who created a session thread.
 type ThreadCreatedBySource string
 
 const (
@@ -783,7 +783,7 @@ func (s ThreadCreatedBySource) Validate() error {
 	}
 }
 
-// Each thread is one agent doing one piece of work. All threads in a session
+// SessionThread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
 	ID                    uuid.UUID                   `db:"id" json:"id"`

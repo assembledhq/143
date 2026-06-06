@@ -116,7 +116,7 @@ func (m *InternalSessionTabManager) do(ctx context.Context, method, path string,
 		reader = bytes.NewReader(raw)
 	}
 	reqURL := m.baseURL + path
-	if q != nil && len(q) > 0 {
+	if len(q) > 0 {
 		reqURL += "?" + q.Encode()
 	}
 	req, err := http.NewRequestWithContext(ctx, method, reqURL, reader) // #nosec G107 -- baseURL is trusted server config.
