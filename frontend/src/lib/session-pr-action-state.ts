@@ -1,5 +1,14 @@
 import type { PullRequestHealthResponse } from "./types";
 
+type RepairableFailedChecksInput = Pick<PullRequestHealthResponse, "can_fix_tests" | "failing_test_count" | "checks">;
+
+export function hasRepairableFailedChecks(health: RepairableFailedChecksInput | null | undefined): boolean {
+  if (!health) {
+    return false;
+  }
+  return health.can_fix_tests || health.failing_test_count > 0 || (health.checks ?? []).some((check) => check.status === "failed");
+}
+
 export type LifecycleActionState = {
   visible: boolean;
   disabled: boolean;

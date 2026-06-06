@@ -1344,6 +1344,16 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.True(t, resp.CanResolveConflicts, "derivePullRequestRepairActions should enable conflict repair for conflicted PRs")
 	require.True(t, resp.CanFixTests, "derivePullRequestRepairActions should enable test repair for failing checks")
 
+	resp = &models.PullRequestHealthResponse{
+		MergeState:       models.PullRequestMergeStateClean,
+		FailingTestCount: 0,
+		Checks: []models.PullRequestCheckSummary{
+			{Name: "backend", Category: models.PullRequestCheckCategoryUnknown, Status: models.PullRequestCheckStatusFailed},
+		},
+	}
+	derivePullRequestRepairActions(resp)
+	require.True(t, resp.CanFixTests, "derivePullRequestRepairActions should enable repair for failed checks without a legacy failing-test count")
+
 	first := "first"
 	second := "second"
 	require.Equal(t, "value", firstNonEmpty("", "value", "other"), "firstNonEmpty should return the first non-empty string")
@@ -2041,6 +2051,64 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 				require.Contains(t, err.Error(), tt.wantErr, "StartPullRequestRepair should describe why the repair action is ineligible")
 			})
 		}
+	})
+
+	t.Run("start fix tests accepts failed check summaries without legacy test count", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		service := &PRService{
+			pullRequests: db.NewPullRequestStore(mock),
+			sessions:     db.NewSessionStore(mock),
+			logger:       zerolog.New(io.Discard),
+		}
+
+		orgID := uuid.New()
+		pullRequestID := uuid.New()
+		now := time.Now().UTC()
+		summary := models.PullRequestHealthSummary{
+			MergeState:       models.PullRequestMergeStateClean,
+			FailingTestCount: 0,
+			Checks: []models.PullRequestCheckSummary{
+				{Name: "backend", Category: models.PullRequestCheckCategoryUnknown, Status: models.PullRequestCheckStatusFailed},
+			},
+		}
+		summaryJSON, err := json.Marshal(summary)
+		require.NoError(t, err, "should marshal health summary")
+
+		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
+			WillReturnRows(pgxmock.NewRows(prHealthSnapshotTestColumns).AddRow(
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, nil, nil, 0, models.PullRequestHealthEnrichmentStatusReady, nil, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
+			WithArgs(pgx.NamedArgs{
+				"org_id":          orgID,
+				"pull_request_id": pullRequestID,
+				"action_type":     models.PullRequestRepairActionTypeFixTests,
+				"health_version":  int64(5),
+			}).
+			WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns))
+
+		_, err = service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), models.PullRequestRepairActionTypeFixTests)
+		require.Error(t, err, "StartPullRequestRepair should still require a canonical session after accepting the failed check state")
+		require.Contains(t, err.Error(), "pull request is not linked to a canonical session", "StartPullRequestRepair should pass failed-check validation before requiring session context")
+		require.NoError(t, mock.ExpectationsWereMet(), "all failed-check repair expectations should be met")
 	})
 }
 
