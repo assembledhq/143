@@ -117,8 +117,14 @@ func runPreflight(ctx context.Context, store *db.NodeStore, args []string) {
 	candidatePort := fs.String("candidate-port", "", "candidate worker host port")
 	buildSHA := fs.String("build-sha", "", "candidate build sha")
 	expectedSchemaVersion := fs.Int("expected-schema-version", 0, "minimum schema migration version required by the candidate")
+	workerProcessFingerprint := fs.String("worker-process-fingerprint", "", "candidate worker-process config fingerprint")
+	expectedWorkerProcessFingerprint := fs.String("expected-worker-process-fingerprint", "", "currently active worker-process config fingerprint")
 	supportFingerprint := fs.String("support-services-fingerprint", "", "candidate support-service config fingerprint")
 	expectedSupportFingerprint := fs.String("expected-support-services-fingerprint", "", "currently active support-service config fingerprint")
+	hostRuntimeFingerprint := fs.String("host-runtime-fingerprint", "", "candidate host-runtime config fingerprint")
+	expectedHostRuntimeFingerprint := fs.String("expected-host-runtime-fingerprint", "", "currently active host-runtime config fingerprint")
+	dockerDaemonFingerprint := fs.String("docker-daemon-fingerprint", "", "candidate docker-daemon config fingerprint")
+	expectedDockerDaemonFingerprint := fs.String("expected-docker-daemon-fingerprint", "", "currently active docker-daemon config fingerprint")
 	freeMemoryMB := fs.Int("free-memory-mb", -1, "observed free memory on the host")
 	minFreeMemoryMB := fs.Int("min-free-memory-mb", 0, "minimum free memory required for temporary worker overlap")
 	idleCPUMillis := fs.Int("idle-cpu-millis", -1, "observed idle CPU budget on the host in millicores")
@@ -161,6 +167,12 @@ func runPreflight(ctx context.Context, store *db.NodeStore, args []string) {
 	if *mode == "routine" && *expectedSupportFingerprint != "" && *supportFingerprint != "" && *expectedSupportFingerprint != *supportFingerprint {
 		exitErr("support-service config fingerprint changed during routine deploy; run maintenance mode (current=%s candidate=%s)", *expectedSupportFingerprint, *supportFingerprint)
 	}
+	if *mode == "routine" && *expectedHostRuntimeFingerprint != "" && *hostRuntimeFingerprint != "" && *expectedHostRuntimeFingerprint != *hostRuntimeFingerprint {
+		exitErr("worker host-runtime config fingerprint changed during routine deploy; run maintenance mode (current=%s candidate=%s)", *expectedHostRuntimeFingerprint, *hostRuntimeFingerprint)
+	}
+	if *mode == "routine" && *expectedDockerDaemonFingerprint != "" && *dockerDaemonFingerprint != "" && *expectedDockerDaemonFingerprint != *dockerDaemonFingerprint {
+		exitErr("worker docker-daemon config fingerprint changed during routine deploy; run maintenance mode (current=%s candidate=%s)", *expectedDockerDaemonFingerprint, *dockerDaemonFingerprint)
+	}
 	if *mode == "routine" && *minFreeMemoryMB > 0 && (*freeMemoryMB < 0 || *freeMemoryMB < *minFreeMemoryMB) {
 		exitErr("insufficient free memory for worker overlap: free_memory_mb=%d min_free_memory_mb=%d", *freeMemoryMB, *minFreeMemoryMB)
 	}
@@ -169,19 +181,26 @@ func runPreflight(ctx context.Context, store *db.NodeStore, args []string) {
 	}
 
 	out := map[string]any{
-		"ok":                           true,
-		"mode":                         *mode,
-		"host":                         *host,
-		"node_id":                      resolvedNodeID,
-		"candidate_port":               *candidatePort,
-		"build_sha":                    *buildSHA,
-		"current_node":                 status,
-		"free_memory_mb":               *freeMemoryMB,
-		"min_free_memory_mb":           *minFreeMemoryMB,
-		"idle_cpu_millis":              *idleCPUMillis,
-		"min_idle_cpu_millis":          *minIdleCPUMillis,
-		"support_services_fingerprint": *supportFingerprint,
-		"expected_schema_version":      *expectedSchemaVersion,
+		"ok":                                    true,
+		"mode":                                  *mode,
+		"host":                                  *host,
+		"node_id":                               resolvedNodeID,
+		"candidate_port":                        *candidatePort,
+		"build_sha":                             *buildSHA,
+		"current_node":                          status,
+		"free_memory_mb":                        *freeMemoryMB,
+		"min_free_memory_mb":                    *minFreeMemoryMB,
+		"idle_cpu_millis":                       *idleCPUMillis,
+		"min_idle_cpu_millis":                   *minIdleCPUMillis,
+		"worker_process_fingerprint":            *workerProcessFingerprint,
+		"expected_worker_process_fingerprint":   *expectedWorkerProcessFingerprint,
+		"support_services_fingerprint":          *supportFingerprint,
+		"expected_support_services_fingerprint": *expectedSupportFingerprint,
+		"host_runtime_fingerprint":              *hostRuntimeFingerprint,
+		"expected_host_runtime_fingerprint":     *expectedHostRuntimeFingerprint,
+		"docker_daemon_fingerprint":             *dockerDaemonFingerprint,
+		"expected_docker_daemon_fingerprint":    *expectedDockerDaemonFingerprint,
+		"expected_schema_version":               *expectedSchemaVersion,
 	}
 	if *includeImpact {
 		impact, err := store.WorkerDeployImpact(ctx, resolvedNodeID)
