@@ -11,6 +11,32 @@ import (
 	"strings"
 )
 
+// CLINamespace is the first positional argument to 143-tools — a provider name
+// or 143-owned category. Using a distinct type prevents accidental swaps with
+// CLIAction and makes switch exhaustiveness checks meaningful.
+type CLINamespace string
+
+// CLIAction is the second positional argument to 143-tools — the operation to
+// perform within the namespace. Using a distinct type prevents accidental swaps
+// with CLINamespace.
+type CLIAction string
+
+// Fixed namespaces for 143-owned tools and the provider-agnostic logs category.
+// Provider-derived namespaces such as "sentry" or "linear" are not declared as
+// constants because they are derived from configured integrations at runtime.
+const (
+	NamespaceLogs    CLINamespace = "logs"
+	NamespaceIssue   CLINamespace = "issue"
+	NamespacePR      CLINamespace = "pr"
+	NamespaceProject CLINamespace = "project"
+)
+
+// Fixed actions for the hardcoded 143-owned namespace mappings.
+const (
+	ActionCreate  CLIAction = "create"
+	ActionPropose CLIAction = "propose"
+)
+
 // RunCLI executes a tool call from command-line arguments, printing the result
 // to stdout. This provides the same dispatch as the MCP server but via a
 // simple CLI that agents already know how to use.
@@ -30,8 +56,9 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 		return 0
 	}
 
-	namespace := args[0]
-	if replacement, ok := replacementForOldFlatCommand(namespace, commands); ok {
+	// Convert raw CLI strings to typed values at the entry boundary.
+	namespace := CLINamespace(args[0])
+	if replacement, ok := replacementForOldFlatCommand(args[0], commands); ok {
 		fmt.Fprintf(stderr, "error: %q is no longer supported. Use '%s [flags]'.\n\nRun '%s --help' for detailed usage.\n", namespace, replacement, replacement)
 		return 1
 	}
@@ -51,7 +78,7 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 		return 1
 	}
 
-	action := args[1]
+	action := CLIAction(args[1])
 	cmd, ok := findCLICommand(commands, namespace, action)
 	if !ok {
 		fmt.Fprintf(stderr, "error: unknown action %q for namespace %q.\n\nUsage: 143-tools %s <action> [--flag value ...]\nRun '143-tools %s --help' to list available actions.\n", action, namespace, namespace, namespace)
@@ -99,8 +126,8 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 }
 
 type CLICommand struct {
-	Namespace   string
-	Action      string
+	Namespace   CLINamespace
+	Action      CLIAction
 	ToolName    string
 	Category    string
 	Description string
@@ -136,48 +163,52 @@ func buildCLICommands(tools []Tool) []CLICommand {
 	return commands
 }
 
-func cliPathForTool(name string) (string, string, bool) {
+// cliPathForTool maps a flat tool registry name to its hierarchical CLI path.
+// The fixed 143-owned mappings use named constants; provider-derived names use
+// typed conversions from the split tool name prefix and suffix.
+func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 	switch {
 	case name == "create_pr":
-		return "pr", "create", true
+		return NamespacePR, ActionCreate, true
 	case name == "issue_create":
-		return "issue", "create", true
+		return NamespaceIssue, ActionCreate, true
 	case name == "project_propose":
-		return "project", "propose", true
+		return NamespaceProject, ActionPropose, true
 	case strings.HasPrefix(name, "log_"):
-		return "logs", strings.TrimPrefix(name, "log_"), true
+		return NamespaceLogs, CLIAction(strings.TrimPrefix(name, "log_")), true
 	default:
 		parts := strings.SplitN(name, "_", 2)
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return "", "", false
 		}
-		return parts[0], parts[1], true
+		return CLINamespace(parts[0]), CLIAction(parts[1]), true
 	}
 }
 
-func cliCategory(namespace, action string) string {
+func cliCategory(namespace CLINamespace, action CLIAction) string {
 	switch namespace {
-	case "logs":
+	case NamespaceLogs:
 		return "Logs"
-	case "issue":
+	case NamespaceIssue:
 		return "143 issues"
-	case "pr":
+	case NamespacePR:
 		return "143 pull requests"
-	case "project":
+	case NamespaceProject:
 		return "143 projects"
 	}
+	a := string(action)
 	switch {
-	case strings.Contains(action, "error"):
+	case strings.Contains(a, "error"):
 		return "Error tracking"
-	case strings.Contains(action, "task"):
+	case strings.Contains(a, "task"):
 		return "Tasks"
-	case strings.Contains(action, "document"):
+	case strings.Contains(a, "document"):
 		return "Documents"
-	case strings.Contains(action, "pr_review") || strings.Contains(action, "recent_pr"):
+	case strings.Contains(a, "pr_review") || strings.Contains(a, "recent_pr"):
 		return "Code review"
-	case strings.Contains(action, "flaky") || strings.Contains(action, "test"):
+	case strings.Contains(a, "flaky") || strings.Contains(a, "test"):
 		return "CI test insights"
-	case strings.Contains(action, "message") || strings.Contains(action, "thread"):
+	case strings.Contains(a, "message") || strings.Contains(a, "thread"):
 		return "Messages"
 	default:
 		return "Tools"
@@ -188,7 +219,7 @@ func isHelpArg(arg string) bool {
 	return arg == "--help" || arg == "-h"
 }
 
-func hasNamespace(commands []CLICommand, namespace string) bool {
+func hasNamespace(commands []CLICommand, namespace CLINamespace) bool {
 	for _, cmd := range commands {
 		if cmd.Namespace == namespace {
 			return true
@@ -197,7 +228,7 @@ func hasNamespace(commands []CLICommand, namespace string) bool {
 	return false
 }
 
-func findCLICommand(commands []CLICommand, namespace, action string) (CLICommand, bool) {
+func findCLICommand(commands []CLICommand, namespace CLINamespace, action CLIAction) (CLICommand, bool) {
 	for _, cmd := range commands {
 		if cmd.Namespace == namespace && cmd.Action == action {
 			return cmd, true
@@ -296,7 +327,7 @@ func printCLIUsage(commands []CLICommand, w io.Writer) {
 		nsCommands := commandsForNamespace(commands, namespace)
 		actions := make([]string, 0, len(nsCommands))
 		for _, cmd := range nsCommands {
-			actions = append(actions, cmd.Action)
+			actions = append(actions, string(cmd.Action))
 		}
 		category := nsCommands[0].Category
 		fmt.Fprintf(w, "  %-10s %s: %s\n", namespace, category, strings.Join(actions, ", "))
@@ -306,7 +337,7 @@ func printCLIUsage(commands []CLICommand, w io.Writer) {
 	fmt.Fprintln(w, "Run '143-tools <namespace> --help' for namespace-specific commands.")
 }
 
-func printNamespaceHelp(commands []CLICommand, namespace string, w io.Writer) {
+func printNamespaceHelp(commands []CLICommand, namespace CLINamespace, w io.Writer) {
 	nsCommands := commandsForNamespace(commands, namespace)
 	if len(nsCommands) == 0 {
 		fmt.Fprintf(w, "unknown namespace: %s\n", namespace)
@@ -361,9 +392,9 @@ func printActionHelp(cmd CLICommand, w io.Writer) {
 	}
 }
 
-func cliNamespaceOrder(commands []CLICommand) []string {
-	seen := make(map[string]bool)
-	namespaces := make([]string, 0)
+func cliNamespaceOrder(commands []CLICommand) []CLINamespace {
+	seen := make(map[CLINamespace]bool)
+	namespaces := make([]CLINamespace, 0)
 	for _, cmd := range commands {
 		if seen[cmd.Namespace] {
 			continue
@@ -371,11 +402,13 @@ func cliNamespaceOrder(commands []CLICommand) []string {
 		seen[cmd.Namespace] = true
 		namespaces = append(namespaces, cmd.Namespace)
 	}
-	sort.Strings(namespaces)
+	sort.Slice(namespaces, func(i, j int) bool {
+		return namespaces[i] < namespaces[j]
+	})
 	return namespaces
 }
 
-func commandsForNamespace(commands []CLICommand, namespace string) []CLICommand {
+func commandsForNamespace(commands []CLICommand, namespace CLINamespace) []CLICommand {
 	var result []CLICommand
 	for _, cmd := range commands {
 		if cmd.Namespace == namespace {

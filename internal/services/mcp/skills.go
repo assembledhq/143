@@ -35,7 +35,7 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 		}
 		actions := make([]string, 0, len(nsCommands))
 		for _, cmd := range nsCommands {
-			actions = append(actions, cmd.Action)
+			actions = append(actions, string(cmd.Action))
 		}
 		b.WriteString(fmt.Sprintf("- `%s`: %s (`%s`)\n", namespace, nsCommands[0].Category, strings.Join(actions, "`, `")))
 	}
@@ -55,7 +55,7 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 	b.WriteString("- Output is JSON. Pipe through `jq` when scanning result sets.\n")
 	b.WriteString("- Run `143-tools <namespace> --help` before using unfamiliar commands.\n")
 	b.WriteString("- Use `--limit` to keep result size manageable.\n")
-	if hasCommand(commands, "logs", "query") {
+	if hasCommand(commands, NamespaceLogs, "query") {
 		b.WriteString("- Log queries require a time bound: provide `--since` or `--start_time`/`--end_time`.\n")
 	}
 
@@ -64,21 +64,21 @@ func GenerateSkillsDoc(tr *ToolRegistry) string {
 
 func skillsExamples(commands []CLICommand) []string {
 	candidates := []struct {
-		namespace string
-		action    string
+		namespace CLINamespace
+		action    CLIAction
 		example   string
 	}{
 		{"sentry", "list_errors", "143-tools sentry list_errors --severity critical --limit 20"},
 		{"linear", "get_task", "143-tools linear get_task --task_id ENG-123"},
-		{"logs", "query", "143-tools logs query --provider victorialogs --query 'service:api AND level:error' --since 1h --limit 100"},
+		{NamespaceLogs, "query", "143-tools logs query --provider victorialogs --query 'service:api AND level:error' --since 1h --limit 100"},
 		{"notion", "search_documents", "143-tools notion search_documents --query \"webhook retry policy\" --limit 10"},
 		{"github", "list_recent_prs", "143-tools github list_recent_prs --state merged --limit 20"},
 		{"circleci", "list_flaky_tests", "143-tools circleci list_flaky_tests --limit 25"},
 		{"slack", "search_messages", "143-tools slack search_messages --query \"checkout timeout\" --limit 10"},
-		{"pr", "create", "143-tools pr create --draft false"},
+		{NamespacePR, ActionCreate, "143-tools pr create --draft false"},
 	}
 
-	examples := make([]string, 0, 4)
+	examples := make([]string, 0, 5)
 	for _, candidate := range candidates {
 		if hasCommand(commands, candidate.namespace, candidate.action) {
 			examples = append(examples, candidate.example)
@@ -99,7 +99,7 @@ func skillsExamples(commands []CLICommand) []string {
 	return examples
 }
 
-func hasCommand(commands []CLICommand, namespace, action string) bool {
+func hasCommand(commands []CLICommand, namespace CLINamespace, action CLIAction) bool {
 	_, ok := findCLICommand(commands, namespace, action)
 	return ok
 }
