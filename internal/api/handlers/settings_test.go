@@ -384,6 +384,26 @@ func TestSettingsHandler_Update(t *testing.T) {
 	}
 }
 
+func TestSettingsHandler_UpdateRejectsNonBooleanAgentTabTools(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"coding_agent_tab_tools_enabled":"yes"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "Update should reject non-boolean tab-tool settings")
+	require.Contains(t, w.Body.String(), "INVALID_SETTINGS", "response should use a stable settings validation error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSettingsHandler_Update_BlocksCappedPlatformModelWithOrgCredential(t *testing.T) {
 	t.Parallel()
 

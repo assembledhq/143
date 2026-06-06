@@ -20,7 +20,7 @@ var sessionThreadTestColumns = []string{
 	"current_turn", "last_activity_at",
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
-	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+	"created_by_source", "created_by_thread_id", "archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
 
@@ -31,7 +31,7 @@ func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now
 		0, nil,
 		nil, nil, nil, nil,
 		nil, nil, now,
-		nil, nil, float64(0), 0, nil,
+		"user", nil, nil, nil, float64(0), 0, nil,
 		"", nil, "", "", []byte("[]"),
 	}
 }
@@ -66,6 +66,43 @@ func TestSessionThreadStore_Create(t *testing.T) {
 	require.NoError(t, err, "Create should not return an error")
 	require.Equal(t, threadID, thread.ID, "should set the thread ID from RETURNING clause")
 	require.Equal(t, now, thread.CreatedAt, "should set the created_at from RETURNING clause")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionThreadStore_CreateWithProvenance(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	sourceThreadID := uuid.New()
+	now := time.Now()
+
+	args := append(anyArgs(8), models.ThreadCreatedBySourceAgentTool, &sourceThreadID, 4)
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(args...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(threadID, now))
+
+	thread := &models.SessionThread{
+		SessionID:         sessionID,
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeCodex,
+		Label:             "Review tab",
+		Status:            models.ThreadStatusPending,
+		CreatedBySource:   models.ThreadCreatedBySourceAgentTool,
+		CreatedByThreadID: &sourceThreadID,
+	}
+
+	err = store.CreateWithProvenance(context.Background(), thread, 4)
+	require.NoError(t, err, "CreateWithProvenance should not return an error")
+	require.Equal(t, threadID, thread.ID, "CreateWithProvenance should set the thread ID")
+	require.Equal(t, now, thread.CreatedAt, "CreateWithProvenance should set created_at")
+	require.Equal(t, models.ThreadCreatedBySourceAgentTool, thread.CreatedBySource, "CreateWithProvenance should preserve source")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -219,8 +256,8 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 			switch tt.name {
 			case "returns threads for session":
 				expected := []models.SessionThread{
-					{ID: threadID1, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Backend", Status: "pending", CreatedAt: now, RecoveryEventHistory: []byte("[]")},
-					{ID: threadID2, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Frontend", Status: "pending", CreatedAt: now, RecoveryEventHistory: []byte("[]")},
+					{ID: threadID1, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Backend", Status: "pending", CreatedAt: now, CreatedBySource: models.ThreadCreatedBySourceUser, RecoveryEventHistory: []byte("[]")},
+					{ID: threadID2, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Frontend", Status: "pending", CreatedAt: now, CreatedBySource: models.ThreadCreatedBySourceUser, RecoveryEventHistory: []byte("[]")},
 				}
 				require.Equal(t, expected, threads, "should return the expected threads for session")
 			case "returns empty for session with no threads":
@@ -263,7 +300,7 @@ func TestSessionThreadStore_ListBySession_SelectsArchivedAt(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 
-	mock.ExpectQuery(`(?s)SELECT .+created_at,\s+archived_at,\s+base_snapshot_key.+FROM session_threads`).
+	mock.ExpectQuery(`(?s)SELECT .+created_at,\s+created_by_source,\s+created_by_thread_id,\s+archived_at,\s+base_snapshot_key.+FROM session_threads`).
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 
@@ -432,7 +469,7 @@ func TestSessionThreadStore_Archive(t *testing.T) {
 	now := time.Now()
 	row := newSessionThreadRow(threadID, sessionID, orgID, "Review", now)
 	row[8] = "completed"
-	row[19] = &now
+	row[21] = &now
 
 	mock.ExpectQuery(`WITH visible_threads AS[\s\S]*FOR UPDATE[\s\S]*UPDATE session_threads[\s\S]*SET archived_at = now\(\)[\s\S]*WHERE id = @id[\s\S]*session_id = @session_id[\s\S]*org_id = @org_id[\s\S]*archived_at IS NULL[\s\S]*RETURNING`).
 		WithArgs(anyArgs(3)...).

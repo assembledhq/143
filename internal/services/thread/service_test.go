@@ -2139,6 +2139,44 @@ func TestService_SendMessage_AppliesInboxBackpressureWithoutClientMessageID(t *t
 	require.Empty(t, deps.inboxStore.appendCalls, "SendMessage should reject before appending more inbox entries")
 }
 
+func TestService_SendMessage_ReturnsExistingMessageForClientMessageID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	existingMessageID := int64(99)
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.inboxStore.getByClientMessageIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error) {
+		require.Equal(t, orgID, gotOrgID, "idempotency lookup should be org scoped")
+		require.Equal(t, threadID, gotThreadID, "idempotency lookup should be thread scoped")
+		require.Equal(t, "agent-tool-repeat", clientMessageID, "idempotency lookup should use the client message id")
+		return models.ThreadInboxEntry{MessageID: existingMessageID}, nil
+	}
+	deps.messageStore.getByIDFn = func(_ context.Context, gotOrgID uuid.UUID, id int64) (models.SessionMessage, error) {
+		require.Equal(t, orgID, gotOrgID, "existing message lookup should be org scoped")
+		require.Equal(t, existingMessageID, id, "existing message lookup should use the inbox message id")
+		return models.SessionMessage{ID: id, OrgID: gotOrgID, SessionID: sessionID, ThreadID: &threadID, Content: "already accepted"}, nil
+	}
+	deps.threadStore.claimIdleFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("claim should not be called for idempotent sends")
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID:       sessionID,
+		OrgID:           orgID,
+		ThreadID:        threadID,
+		ClientMessageID: "agent-tool-repeat",
+		Message:         "run tests again",
+	})
+	require.NoError(t, err, "SendMessage should return the existing message without mutating state")
+	require.NotNil(t, result, "SendMessage should return a result for idempotent sends")
+	require.Equal(t, existingMessageID, result.Message.ID, "SendMessage should return the previously accepted message")
+	require.Empty(t, deps.inboxStore.appendCalls, "SendMessage should not append a second inbox entry")
+}
+
 func TestService_SendMessage_RunningThreadEnqueuesLiveInboxDelivery(t *testing.T) {
 	t.Parallel()
 

@@ -57,6 +57,12 @@ func TestRunCLI_NamespaceHelp(t *testing.T) {
 			contains:  []string{"143-tools pr <action>", "create"},
 			notString: "create_pr",
 		},
+		{
+			name:      "session tabs namespace",
+			args:      []string{"session-tabs", "--help"},
+			contains:  []string{"143-tools session-tabs <action>", "list", "send", "messages"},
+			notString: "session_tabs_",
+		},
 	}
 
 	for _, tt := range tests {
@@ -168,6 +174,11 @@ func TestRunCLI_RejectsFlatCommandsWithMigrationHelp(t *testing.T) {
 			args:              []string{"create_pr", "--help"},
 			expectedMigration: "143-tools pr create",
 		},
+		{
+			name:              "session tabs command",
+			args:              []string{"session_tabs_send", "--help"},
+			expectedMigration: "143-tools session-tabs send",
+		},
 	}
 
 	for _, tt := range tests {
@@ -227,12 +238,12 @@ func TestRunCLI_ParsingErrorsAreSelfCorrecting(t *testing.T) {
 		{
 			name:     "missing required flag",
 			args:     []string{"sentry", "get_error"},
-			contains: []string{"missing required flag: --error_id", "143-tools sentry get_error --help"},
+			contains: []string{"missing required flag: --error-id", "143-tools sentry get_error --help"},
 		},
 		{
 			name:     "unexpected positional argument",
 			args:     []string{"sentry", "list_errors", "severity", "high"},
-			contains: []string{`unexpected argument "severity"`, "143-tools sentry list_errors --help"},
+			contains: []string{`unexpected argument \"severity\"`, "143-tools sentry list_errors --help"},
 		},
 	}
 
@@ -286,6 +297,60 @@ func TestParseFlagsToJSON(t *testing.T) {
 	require.Equal(t, []string{"a", "b", "c"}, result["states"], "array flag should split comma-separated values")
 }
 
+func TestParseFlagsToJSON_BooleanFlagWithoutValue(t *testing.T) {
+	t.Parallel()
+	schema := ToolSchema{
+		Type: "object",
+		Properties: map[string]SchemaProperty{
+			"include_archived": {Type: "boolean"},
+			"limit":            {Type: "number"},
+		},
+	}
+
+	result, err := parseFlagsToJSON([]string{"--include_archived", "--limit", "5"}, schema)
+	require.NoError(t, err, "boolean flag parsing should accept value-less flags")
+	require.Equal(t, true, result["include_archived"], "value-less boolean flag should parse as true")
+}
+
+func TestParseFlagsToJSON_KebabFlagAliasesSchemaSnakeCase(t *testing.T) {
+	t.Parallel()
+	schema := ToolSchema{
+		Type: "object",
+		Properties: map[string]SchemaProperty{
+			"tab_id":            {Type: "string"},
+			"message_file":      {Type: "string"},
+			"include_archived":  {Type: "boolean"},
+			"client_message_id": {Type: "string"},
+		},
+	}
+
+	result, err := parseFlagsToJSON([]string{
+		"--tab-id", "tab-1",
+		"--message-file", "/tmp/message.txt",
+		"--include-archived",
+		"--client-message-id", "agent-tool-1",
+	}, schema)
+	require.NoError(t, err, "kebab-case CLI flags should parse against snake_case schema keys")
+	require.Equal(t, "tab-1", result["tab_id"], "kebab tab-id should populate tab_id")
+	require.Equal(t, "/tmp/message.txt", result["message_file"], "kebab message-file should populate message_file")
+	require.Equal(t, true, result["include_archived"], "value-less kebab boolean should populate include_archived")
+	require.Equal(t, "agent-tool-1", result["client_message_id"], "kebab client-message-id should populate client_message_id")
+}
+
+func TestRunCLI_SessionTabHelpUsesKebabFlags(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	var stdout, stderr bytes.Buffer
+	code := RunCLI(context.Background(), tr, []string{"session-tabs", "send", "--help"}, &stdout, &stderr)
+	require.Equal(t, 0, code, "tool help should exit successfully")
+	require.Empty(t, stderr.String(), "tool help should not write stderr")
+	require.Contains(t, stdout.String(), "Usage: 143-tools session-tabs send", "session tab help should use hierarchical commands")
+	require.Contains(t, stdout.String(), "--tab-id", "session tab help should prefer kebab-case flags")
+	require.Contains(t, stdout.String(), "--message-file", "session tab help should prefer kebab-case flags")
+	require.NotContains(t, stdout.String(), "--tab_id", "session tab help should not expose snake_case flags")
+}
+
 func TestParseFlagsToJSON_InvalidNumber(t *testing.T) {
 	t.Parallel()
 
@@ -316,6 +381,7 @@ func TestDetectOldFlatCommand(t *testing.T) {
 		{name: "provider-prefixed", input: "sentry_list_errors", expected: "143-tools sentry list_errors"},
 		{name: "logs", input: "log_query", expected: "143-tools logs query"},
 		{name: "pull request", input: "create_pr", expected: "143-tools pr create"},
+		{name: "session tabs", input: "session_tabs_send", expected: "143-tools session-tabs send"},
 		{name: "not flat", input: "sentry", expected: ""},
 		{name: "unknown underscore name", input: "foo_bar", expected: ""},
 	}

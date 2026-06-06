@@ -29,12 +29,17 @@ const (
 	NamespaceIssue   CLINamespace = "issue"
 	NamespacePR      CLINamespace = "pr"
 	NamespaceProject CLINamespace = "project"
+	NamespaceTabs    CLINamespace = "session-tabs"
 )
 
 // Fixed actions for the hardcoded 143-owned namespace mappings.
 const (
-	ActionCreate  CLIAction = "create"
-	ActionPropose CLIAction = "propose"
+	ActionCreate   CLIAction = "create"
+	ActionGet      CLIAction = "get"
+	ActionList     CLIAction = "list"
+	ActionMessages CLIAction = "messages"
+	ActionPropose  CLIAction = "propose"
+	ActionSend     CLIAction = "send"
 )
 
 // RunCLI executes a tool call from command-line arguments, printing the result
@@ -96,32 +101,43 @@ func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr
 	// Parse flags into a JSON object.
 	argsJSON, err := parseFlagsToJSON(flagArgs, cmd.Tool.InputSchema)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %s\n\nUsage: %s [flags]\nRun '%s --help' for detailed usage.\n", err, cmd.Usage(), cmd.Usage())
+		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("%s. Usage: %s [flags]. Run '%s --help' for detailed usage.", err, cmd.Usage(), cmd.Usage()))
 		return 1
 	}
 
 	// Check required fields.
 	if err := checkRequired(argsJSON, cmd.Tool.InputSchema.Required); err != nil {
-		fmt.Fprintf(stderr, "error: %s\n\nUsage: %s [flags]\nRun '%s --help' for detailed usage.\n", err, cmd.Usage(), cmd.Usage())
+		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("%s. Usage: %s [flags]. Run '%s --help' for detailed usage.", err, cmd.Usage(), cmd.Usage()))
 		return 1
 	}
 
 	// Dispatch to the integration layer.
 	rawJSON, err := json.Marshal(argsJSON)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: failed to marshal arguments: %s\n", err)
+		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("failed to marshal arguments: %s", err))
 		return 1
 	}
 	result := tr.CallTool(ctx, cmd.ToolName, rawJSON)
+
+	if result.IsError {
+		message := ""
+		if len(result.Content) > 0 {
+			message = result.Content[0].Text
+		}
+		code := "TOOL_ERROR"
+		if apiCode, apiMessage, ok := extractAPIError(message); ok {
+			code = apiCode
+			message = apiMessage
+		}
+		writeCLIError(stderr, code, message)
+		return 1
+	}
 
 	// Print output.
 	for _, c := range result.Content {
 		fmt.Fprintln(stdout, c.Text)
 	}
 
-	if result.IsError {
-		return 1
-	}
 	return 0
 }
 
@@ -174,6 +190,16 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceIssue, ActionCreate, true
 	case name == "project_propose":
 		return NamespaceProject, ActionPropose, true
+	case name == "session_tabs_list":
+		return NamespaceTabs, ActionList, true
+	case name == "session_tabs_get":
+		return NamespaceTabs, ActionGet, true
+	case name == "session_tabs_create":
+		return NamespaceTabs, ActionCreate, true
+	case name == "session_tabs_send":
+		return NamespaceTabs, ActionSend, true
+	case name == "session_tabs_messages":
+		return NamespaceTabs, ActionMessages, true
 	case strings.HasPrefix(name, "log_"):
 		return NamespaceLogs, CLIAction(strings.TrimPrefix(name, "log_")), true
 	default:
@@ -195,6 +221,8 @@ func cliCategory(namespace CLINamespace, action CLIAction) string {
 		return "143 pull requests"
 	case NamespaceProject:
 		return "143 projects"
+	case NamespaceTabs:
+		return "Session tabs"
 	}
 	a := string(action)
 	switch {
@@ -256,8 +284,13 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 		if !strings.HasPrefix(arg, "--") {
 			return nil, fmt.Errorf("unexpected argument %q (flags must start with --)", arg)
 		}
-		key := strings.TrimPrefix(arg, "--")
+		key := normalizeCLIFlagName(strings.TrimPrefix(arg, "--"))
+		prop, hasProp := schema.Properties[key]
 
+		if hasProp && prop.Type == "boolean" && (i+1 >= len(args) || strings.HasPrefix(args[i+1], "--")) {
+			result[key] = true
+			continue
+		}
 		if i+1 >= len(args) {
 			return nil, fmt.Errorf("flag --%s requires a value", key)
 		}
@@ -265,7 +298,6 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 		value := args[i]
 
 		// Coerce based on schema type.
-		prop, hasProp := schema.Properties[key]
 		if hasProp {
 			switch prop.Type {
 			case "number":
@@ -302,10 +334,56 @@ func parseFlagsToJSON(args []string, schema ToolSchema) (map[string]any, error) 
 func checkRequired(args map[string]any, required []string) error {
 	for _, r := range required {
 		if _, ok := args[r]; !ok {
-			return fmt.Errorf("missing required flag: --%s", r)
+			return fmt.Errorf("missing required flag: --%s", displayCLIFlagName(r))
 		}
 	}
 	return nil
+}
+
+func normalizeCLIFlagName(key string) string {
+	return strings.ReplaceAll(key, "-", "_")
+}
+
+func displayCLIFlagName(key string) string {
+	return strings.ReplaceAll(key, "_", "-")
+}
+
+func writeCLIError(w io.Writer, code, message string) {
+	payload := map[string]any{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintf(w, `{"error":{"code":"%s","message":"%s"}}`+"\n", code, strings.ReplaceAll(message, `"`, `'`))
+		return
+	}
+	fmt.Fprintln(w, string(raw))
+}
+
+func extractAPIError(message string) (string, string, bool) {
+	idx := strings.Index(message, `{"error":`)
+	if idx < 0 {
+		return "", "", false
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(message[idx:]), &payload); err != nil {
+		return "", "", false
+	}
+	if payload.Error.Code == "" {
+		return "", "", false
+	}
+	if payload.Error.Message == "" {
+		payload.Error.Message = message
+	}
+	return payload.Error.Code, payload.Error.Message, true
 }
 
 // printCLIUsage prints compact top-level help listing namespaces.
@@ -388,7 +466,7 @@ func printActionHelp(cmd CLICommand, w io.Writer) {
 		if prop.Type == "array" {
 			typeHint = "comma-separated"
 		}
-		fmt.Fprintf(w, "  --%-20s %-20s %s%s\n", pName, typeHint, prop.Description, req)
+		fmt.Fprintf(w, "  --%-20s %-20s %s%s\n", displayCLIFlagName(pName), typeHint, prop.Description, req)
 	}
 }
 

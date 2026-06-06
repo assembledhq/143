@@ -49,6 +49,21 @@ func TestGenerateSkillsDoc_TokenEfficiency(t *testing.T) {
 	require.Greater(t, words, 50, "skills doc should contain enough discovery guidance to be useful")
 }
 
+func TestGenerateSkillsDoc_SessionTabsIncludeCoordinationGuidanceAndKebabFlags(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	doc := GenerateSkillsDoc(tr)
+
+	require.Contains(t, doc, "Use a new tab for parallel review/testing/investigation in the same branch.", "session tab tools should teach when to create sibling tabs")
+	require.Contains(t, doc, "Use a new session only when work needs an independent branch or PR.", "session tab tools should distinguish tabs from sessions")
+	require.Contains(t, doc, "`session-tabs`", "session tab tools should appear under the hierarchical session-tabs namespace")
+	require.Contains(t, doc, "143-tools session-tabs", "session tab examples should use hierarchical commands")
+	require.Contains(t, doc, "--tab-id", "session tab examples should prefer kebab-case flags")
+	require.NotContains(t, doc, "--tab_id", "session tab examples should not expose snake_case flags")
+	require.NotContains(t, doc, "session_tabs_", "skills doc should not expose old flat session tab command names")
+}
+
 func TestGenerateSkillsDoc_SentryOnly(t *testing.T) {
 	t.Parallel()
 

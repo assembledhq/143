@@ -63,6 +63,38 @@ func TestSessionMessageStore_Create(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionMessageStore_CreateWithSource(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+	now := time.Now()
+
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(append(anyArgs(11), models.SessionMessageSourceAgentTool)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(int64(2), now),
+		)
+
+	msg := &models.SessionMessage{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Role:      models.MessageRoleUser,
+		Content:   "Run focused tests",
+		Source:    models.SessionMessageSourceAgentTool,
+	}
+
+	err = store.CreateWithSource(context.Background(), msg)
+	require.NoError(t, err, "CreateWithSource should persist the message")
+	require.Equal(t, int64(2), msg.ID, "CreateWithSource should set the message ID")
+	require.Equal(t, now, msg.CreatedAt, "CreateWithSource should set created_at")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionMessageStore_ListBySession(t *testing.T) {
 	t.Parallel()
 
@@ -78,9 +110,9 @@ func TestSessionMessageStore_ListBySession(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "created_at"}).
-				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "user", "Fix the bug", nil, []byte(`[{"kind":"file","token":"@internal/api/handlers/sessions.go","path":"internal/api/handlers/sessions.go","display":"internal/api/handlers/sessions.go"}]`), []byte(`[{"kind":"command","agent_type":"claude_code","name":"review","token":"/review","display":"/review"}]`), nil, now).
-				AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Done", nil, nil, nil, nil, now),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}).
+				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "user", "Fix the bug", nil, []byte(`[{"kind":"file","token":"@internal/api/handlers/sessions.go","path":"internal/api/handlers/sessions.go","display":"internal/api/handlers/sessions.go"}]`), []byte(`[{"kind":"command","agent_type":"claude_code","name":"review","token":"/review","display":"/review"}]`), nil, "agent_tool", now).
+				AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Done", nil, nil, nil, nil, "", now),
 		)
 
 	msgs, err := store.ListBySession(context.Background(), orgID, sessionID)
@@ -93,6 +125,7 @@ func TestSessionMessageStore_ListBySession(t *testing.T) {
 	require.Len(t, msgs[0].Commands, 1)
 	require.Equal(t, "review", msgs[0].Commands[0].Name)
 	require.Equal(t, models.AgentTypeClaudeCode, msgs[0].Commands[0].AgentType)
+	require.Equal(t, models.SessionMessageSourceAgentTool, msgs[0].Source)
 	require.Equal(t, "Done", msgs[1].Content)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -150,8 +183,8 @@ func TestSessionMessageStore_ListByThread(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE org_id .+ thread_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "created_at"}).
-				AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, "user", "Hello thread", nil, nil, nil, nil, now),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}).
+				AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, "user", "Hello thread", nil, nil, nil, nil, "", now),
 		)
 
 	msgs, err := store.ListByThread(context.Background(), orgID, threadID)
@@ -193,13 +226,13 @@ func TestSessionMessageStore_ListWindowByThread_Latest(t *testing.T) {
 	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM session_messages").
+	mock.ExpectQuery("SELECT .+ FROM session_messages.+ORDER BY created_at DESC, id DESC").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "created_at"}).
-				AddRow(int64(4), sessionID, orgID, &threadID, nil, 2, "assistant", "latest", nil, nil, nil, nil, now).
-				AddRow(int64(3), sessionID, orgID, &threadID, nil, 2, "user", "ask", nil, nil, nil, nil, now).
-				AddRow(int64(2), sessionID, orgID, &threadID, nil, 1, "assistant", "older", nil, nil, nil, nil, now),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}).
+				AddRow(int64(4), sessionID, orgID, &threadID, nil, 2, "assistant", "latest", nil, nil, nil, nil, "", now).
+				AddRow(int64(3), sessionID, orgID, &threadID, nil, 2, "user", "ask", nil, nil, nil, nil, "", now).
+				AddRow(int64(2), sessionID, orgID, &threadID, nil, 1, "assistant", "older", nil, nil, nil, nil, "", now),
 		)
 	mock.ExpectQuery("SELECT .+ max\\(id\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -229,12 +262,12 @@ func TestSessionMessageStore_ListWindowByThread_Before(t *testing.T) {
 	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM session_messages").
+	mock.ExpectQuery("SELECT .+ FROM session_messages.+ORDER BY created_at DESC, id DESC").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "created_at"}).
-				AddRow(int64(2), sessionID, orgID, &threadID, nil, 1, "assistant", "older", nil, nil, nil, nil, now).
-				AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, "user", "oldest", nil, nil, nil, nil, now),
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}).
+				AddRow(int64(2), sessionID, orgID, &threadID, nil, 1, "assistant", "older", nil, nil, nil, nil, "", now).
+				AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, "user", "oldest", nil, nil, nil, nil, "", now),
 		)
 	mock.ExpectQuery("SELECT .+ max\\(id\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

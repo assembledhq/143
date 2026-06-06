@@ -53,7 +53,9 @@ const (
 	// forces an unknown_delivery inbox entry back into the delivery loop —
 	// the entry may already have reached the runtime, so the replay is a
 	// dual-write decision worth a paper trail.
-	AuditActionSessionThreadInboxReplayed AuditAction = "session.thread.inbox_replayed"
+	AuditActionSessionThreadInboxReplayed       AuditAction = "session.thread.inbox_replayed"
+	AuditActionSessionThreadCreatedByAgentTool  AuditAction = "session.thread.created_by_agent_tool"
+	AuditActionSessionThreadMessagedByAgentTool AuditAction = "session.thread.messaged_by_agent_tool"
 
 	// Project actions
 	AuditActionProjectCreated        AuditAction = "project.created"
@@ -152,6 +154,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
 		AuditActionSessionPRRequested, AuditActionSessionBranchRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived, AuditActionSessionPreviewLifetimeSet,
+		AuditActionSessionThreadInboxReplayed, AuditActionSessionThreadCreatedByAgentTool, AuditActionSessionThreadMessagedByAgentTool,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
 		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectArchived,
 		AuditActionProjectUnarchived, AuditActionProjectRunTriggered,
