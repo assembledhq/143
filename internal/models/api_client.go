@@ -32,9 +32,9 @@ const (
 	APITokenScopeSessionsCancel    APITokenScope = "sessions:cancel"
 	APITokenScopeSessionsPublish   APITokenScope = "sessions:publish"
 	APITokenScopeAutomationsRead   APITokenScope = "automations:read"
-	APITokenScopeAutomationsCreate APITokenScope = "automations:create"
-	APITokenScopeAutomationsWrite  APITokenScope = "automations:write"
-	APITokenScopeAutomationsRun    APITokenScope = "automations:run"
+	APITokenScopeAutomationsCreate APITokenScope = "automations:create" // #nosec G101 -- API permission scope, not a credential
+	APITokenScopeAutomationsWrite  APITokenScope = "automations:write"  // #nosec G101 -- API permission scope, not a credential
+	APITokenScopeAutomationsRun    APITokenScope = "automations:run"    // #nosec G101 -- API permission scope, not a credential
 	APITokenScopePreviewsRead      APITokenScope = "previews:read"
 	APITokenScopePreviewsCreate    APITokenScope = "previews:create"
 	APITokenScopePreviewsStop      APITokenScope = "previews:stop"

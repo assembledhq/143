@@ -110,14 +110,7 @@ func emitUserAuditsWithSession(emitter *db.AuditEmitter, r *http.Request, entrie
 	if user == nil {
 		entriesForAPI := make([]apiAuditEntry, 0, len(entries))
 		for _, e := range entries {
-			entriesForAPI = append(entriesForAPI, apiAuditEntry{
-				Action:       e.Action,
-				ResourceType: e.ResourceType,
-				ResourceID:   e.ResourceID,
-				SessionID:    e.SessionID,
-				ProjectID:    e.ProjectID,
-				Details:      e.Details,
-			})
+			entriesForAPI = append(entriesForAPI, apiAuditEntry(e))
 		}
 		emitAPIAudits(emitter, r, entriesForAPI)
 		return
