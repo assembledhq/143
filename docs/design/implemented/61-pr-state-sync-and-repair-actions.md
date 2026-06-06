@@ -195,7 +195,7 @@ Show `Resolve conflicts` when:
 
 Show `Fix tests` when:
 
-- one or more latest checks are classified as failing test checks
+- one or more latest checks failed. Test-classified failures still drive the `failing_test_count` summary and copy, but failed lint/build/unknown checks are also repairable because GitHub often names test jobs generically.
 
 If both are true:
 
@@ -253,7 +253,7 @@ Recommended behavior:
 
 - if a fresh summary sync is in progress, show a lightweight syncing state and suppress repair buttons until eligibility is known
 - if mergeability remains `mergeability_pending` after retry, do not show `Resolve conflicts` yet; keep the Merge action visible but disabled in a neutral checking state
-- if failed checks cannot yet be confidently classified as `test`, do not show `Fix tests`; show the blocker summary without an agent-action CTA
+- if failed checks are present but cannot be confidently classified, still show `Fix tests` and pass the failed check names, provider, URL, summary, annotations, and log excerpt when available
 - if the health snapshot is older than a defined freshness threshold, show the row as stale and trigger a refresh rather than reusing old button eligibility
 
 The system should prefer temporarily hiding a button over showing an incorrect repair action against stale state.
@@ -484,7 +484,7 @@ and classify failed checks into:
 - `deploy`
 - `unknown`
 
-Only `test` failures should drive the `Fix tests` button in v1.
+Any failed check can drive the `Fix tests` repair action. The category is still stored so summary copy and future routing can distinguish test, lint, build, deploy, and unknown failures.
 
 ## Data Model
 
