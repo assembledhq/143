@@ -109,12 +109,13 @@ func (s *ScopedCredentialStore) UpsertWithLabel(ctx context.Context, scope model
 				}
 				return &existing.ID, nil
 			case models.CodingCredentialStatusActive,
-				models.CodingCredentialStatusInvalid,
-				models.CodingCredentialStatusDisabled:
-				if err := s.coding.UpdateConfig(ctx, scope, existing.ID, unified); err != nil {
+				models.CodingCredentialStatusInvalid:
+				if err := s.coding.UpdateConfigVerified(ctx, scope, existing.ID, unified); err != nil {
 					return nil, err
 				}
 				return &existing.ID, nil
+			case models.CodingCredentialStatusDisabled:
+				return s.coding.Create(ctx, scope, label, unified, CreateOpts{CreatedBy: createdBy})
 			}
 		}
 		return s.coding.Create(ctx, scope, label, unified, CreateOpts{CreatedBy: createdBy})
@@ -143,7 +144,7 @@ func (s *ScopedCredentialStore) UpsertByID(ctx context.Context, scope models.Sco
 		}
 		// UpdateConfig refuses to resurrect disabled rows — matches the
 		// legacy UpsertByID's `WHERE status != 'disabled'` guard.
-		return s.coding.UpdateConfig(ctx, scope, id, unified)
+		return s.coding.UpdateConfigVerified(ctx, scope, id, unified)
 	}
 	return s.org.UpsertByID(ctx, scope.OrgID, id, cfg)
 }

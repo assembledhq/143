@@ -31,7 +31,12 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-const codingCredentialsColumns = "id, org_id, user_id, provider, label, config, priority, status, created_by, last_verified_at, rate_limited_until, rate_limited_observed_at, rate_limit_message, created_at, updated_at" // #nosec G101 -- SQL column list
+const codingCredentialsColumns = `cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
+	rt.status, cc.created_by, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message,
+	cc.team_default_origin_user_id, cc.active, cc.created_at, GREATEST(cc.updated_at, rt.created_at) AS updated_at` // #nosec G101 -- SQL column list
+
+const codingCredentialsFrom = `coding_credentials cc
+	JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true` // #nosec G101 -- SQL table join, not a credential
 
 // ErrCodingCredentialNotFound is returned by every Get/mutation method when
 // either no row matches or the row matches but lives in a different scope.
@@ -79,6 +84,29 @@ func (e *ErrCodingCredentialLabelTaken) Error() string {
 type CreateOpts struct {
 	CreatedBy *uuid.UUID
 	Status    models.CodingCredentialRowStatus // defaults to "active"
+}
+
+type codingCredentialConfigSnapshot struct {
+	ID                      uuid.UUID
+	VersionID               uuid.UUID
+	OrgID                   uuid.UUID
+	UserID                  *uuid.UUID
+	Provider                models.ProviderName
+	Label                   string
+	Config                  []byte
+	Priority                int
+	Status                  models.CodingCredentialRowStatus
+	CreatedBy               *uuid.UUID
+	TeamDefaultOriginUserID *uuid.UUID
+	CreatedAt               time.Time
+}
+
+type codingCredentialRuntimeSnapshot struct {
+	Status                models.CodingCredentialRowStatus
+	LastVerifiedAt        *time.Time
+	RateLimitedUntil      *time.Time
+	RateLimitedObservedAt *time.Time
+	RateLimitMessage      *string
 }
 
 // CodingCredentialStore is the unified credential store.
@@ -281,40 +309,52 @@ func (s *CodingCredentialStore) MarkRateLimitedForScope(ctx context.Context, sco
 		message = &limit.Message
 	}
 	var provider models.ProviderName
-	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
-		provider = rowProvider
-		args := pgx.NamedArgs{
-			"id":          id,
-			"org_id":      scope.OrgID,
-			"until":       until,
-			"message":     message,
-			"observed_at": s.clock(),
-		}
-		var query string
-		if scope.IsPersonal() {
-			args["user_id"] = *scope.UserID
-			query = `UPDATE coding_credentials
-				 SET rate_limited_until = @until,
-				     rate_limited_observed_at = @observed_at,
-				     rate_limit_message = @message,
-				     updated_at = now()
-				 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
-		} else {
-			query = `UPDATE coding_credentials
-				 SET rate_limited_until = @until,
-				     rate_limited_observed_at = @observed_at,
-				     rate_limit_message = @message,
-				     updated_at = now()
-				 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
-		}
-		tag, execErr := tx.Exec(ctx, query, args)
-		if execErr != nil {
-			return fmt.Errorf("mark credential rate limited: %w", execErr)
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrCodingCredentialNotFound
-		}
-		return nil
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		provider = current.Provider
+		runtime.RateLimitedUntil = &until
+		observedAt := s.clock()
+		runtime.RateLimitedObservedAt = &observedAt
+		runtime.RateLimitMessage = message
+		return s.insertRuntimeVersionTx(ctx, tx, scope, id, runtime)
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
+// ClearRateLimitedForScope clears durable rate-limit metadata for a
+// credential while preserving its current status and verification timestamp.
+func (s *CodingCredentialStore) ClearRateLimitedForScope(ctx context.Context, scope models.Scope, id uuid.UUID) error {
+	s.health.clear(id)
+	var provider models.ProviderName
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		provider = current.Provider
+		runtime.RateLimitedUntil = nil
+		runtime.RateLimitedObservedAt = nil
+		runtime.RateLimitMessage = nil
+		return s.insertRuntimeVersionTx(ctx, tx, scope, id, runtime)
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
+// MarkVerifiedForScope records a successful runtime verification without
+// changing credential config.
+func (s *CodingCredentialStore) MarkVerifiedForScope(ctx context.Context, scope models.Scope, id uuid.UUID) error {
+	s.health.clear(id)
+	var provider models.ProviderName
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		provider = current.Provider
+		now := s.clock()
+		runtime.Status = models.CodingCredentialStatusActive
+		runtime.LastVerifiedAt = &now
+		runtime.RateLimitedUntil = nil
+		runtime.RateLimitedObservedAt = nil
+		runtime.RateLimitMessage = nil
+		return s.insertRuntimeVersionTx(ctx, tx, scope, id, runtime)
 	}); err != nil {
 		return err
 	}
@@ -364,12 +404,12 @@ func (s *CodingCredentialStore) GetByProviderAndLabel(ctx context.Context, scope
 	if scope.IsPersonal() {
 		args["user_id"] = *scope.UserID
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND label = @label`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.user_id = @user_id AND cc.provider = @provider AND cc.label = @label AND cc.active = true`
 	} else {
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.user_id IS NULL AND cc.provider = @provider AND cc.label = @label AND cc.active = true`
 	}
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
@@ -393,14 +433,14 @@ func (s *CodingCredentialStore) ListByScope(ctx context.Context, scope models.Sc
 	if scope.IsPersonal() {
 		args["user_id"] = *scope.UserID
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND user_id = @user_id AND status != 'disabled'
-			ORDER BY priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.user_id = @user_id AND cc.active = true AND rt.status != 'disabled'
+			ORDER BY cc.priority, cc.created_at`
 	} else {
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND user_id IS NULL AND status != 'disabled'
-			ORDER BY priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.user_id IS NULL AND cc.active = true AND rt.status != 'disabled'
+			ORDER BY cc.priority, cc.created_at`
 	}
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
@@ -420,14 +460,14 @@ func (s *CodingCredentialStore) ListByProvider(ctx context.Context, scope models
 	if scope.IsPersonal() {
 		args["user_id"] = *scope.UserID
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status != 'disabled'
-			ORDER BY priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.user_id = @user_id AND cc.provider = @provider AND cc.active = true AND rt.status != 'disabled'
+			ORDER BY cc.priority, cc.created_at`
 	} else {
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND status != 'disabled'
-			ORDER BY priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.user_id IS NULL AND cc.provider = @provider AND cc.active = true AND rt.status != 'disabled'
+			ORDER BY cc.priority, cc.created_at`
 	}
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
@@ -545,14 +585,14 @@ func (s *CodingCredentialStore) queryResolverHalfMulti(ctx context.Context, orgI
 	if userID != nil {
 		args["user_id"] = *userID
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND provider = ANY(@providers) AND user_id = @user_id AND status = 'active'
-			ORDER BY provider, priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.provider = ANY(@providers) AND cc.user_id = @user_id AND cc.active = true AND rt.status = 'active'
+			ORDER BY cc.provider, cc.priority, cc.created_at`
 	} else {
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND provider = ANY(@providers) AND user_id IS NULL AND status = 'active'
-			ORDER BY provider, priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.provider = ANY(@providers) AND cc.user_id IS NULL AND cc.active = true AND rt.status = 'active'
+			ORDER BY cc.provider, cc.priority, cc.created_at`
 	}
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
@@ -584,14 +624,14 @@ func (s *CodingCredentialStore) queryResolverHalf(ctx context.Context, orgID uui
 	if userID != nil {
 		args["user_id"] = *userID
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND provider = @provider AND user_id = @user_id AND status = 'active'
-			ORDER BY priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.provider = @provider AND cc.user_id = @user_id AND cc.active = true AND rt.status = 'active'
+			ORDER BY cc.priority, cc.created_at`
 	} else {
 		query = `SELECT ` + codingCredentialsColumns + `
-			FROM coding_credentials
-			WHERE org_id = @org_id AND provider = @provider AND user_id IS NULL AND status = 'active'
-			ORDER BY priority, created_at`
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.org_id = @org_id AND cc.provider = @provider AND cc.user_id IS NULL AND cc.active = true AND rt.status = 'active'
+			ORDER BY cc.priority, cc.created_at`
 	}
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
@@ -768,66 +808,50 @@ func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, 
 
 	var id uuid.UUID
 	err = s.withScopeLock(ctx, scope, func(tx pgx.Tx, nextPriority int) error {
-		args := pgx.NamedArgs{
-			"org_id":     scope.OrgID,
-			"user_id":    scope.UserID,
-			"provider":   string(cfg.Provider()),
-			"label":      label,
-			"config":     encrypted,
-			"status":     string(status),
-			"created_by": opts.CreatedBy,
-			"priority":   nextPriority,
+		existing, existingRuntime, lookupErr := s.fetchActiveConfigByProviderLabelTx(ctx, tx, scope, cfg.Provider(), label, true)
+		if lookupErr != nil && !errors.Is(lookupErr, ErrCodingCredentialNotFound) {
+			return lookupErr
 		}
-		// On conflict (label collision) we surface a typed error so the API
-		// layer can render a meaningful message. Disabled and pending_auth
-		// rows are eligible for resurrection — disabled rows take the new
-		// tail-slot priority (their old slot was relinquished when they were
-		// soft-deleted), while pending_auth rows keep their existing priority
-		// so a pending OAuth flow that completes does not jump the stack
-		// behind unrelated rows added in the meantime. Active and invalid
-		// rows are not eligible: the WHERE clause makes RETURNING return no
-		// rows, and the lookup-after-conflict below surfaces
-		// ErrCodingCredentialLabelTaken with the existing status.
-		query := `
-			INSERT INTO coding_credentials
-				(org_id, user_id, provider, label, config, status, created_by, priority)
-			VALUES (@org_id, @user_id, @provider, @label, @config, @status, @created_by, @priority)
-			ON CONFLICT (org_id, user_id, provider, label) DO UPDATE
-			SET config = EXCLUDED.config,
-			    status = EXCLUDED.status,
-			    last_verified_at = NULL,
-			    updated_at = now(),
-			    priority = CASE WHEN coding_credentials.status = 'disabled'
-			                    THEN EXCLUDED.priority
-			                    ELSE coding_credentials.priority END
-			WHERE coding_credentials.status IN ('disabled', 'pending_auth')
-			RETURNING id`
+		if existing != nil {
+			switch existingRuntime.Status {
+			case models.CodingCredentialStatusDisabled, models.CodingCredentialStatusPendingAuth:
+				id = existing.ID
+				priority := existing.Priority
+				if existingRuntime.Status == models.CodingCredentialStatusDisabled {
+					priority = nextPriority
+				}
+				next := *existing
+				next.Config = encrypted
+				next.Priority = priority
+				if err := s.insertConfigVersionTx(ctx, tx, next); err != nil {
+					return err
+				}
+				return s.insertRuntimeVersionTx(ctx, tx, scope, id, codingCredentialRuntimeSnapshot{Status: status})
+			default:
+				return &ErrCodingCredentialLabelTaken{Label: label, ExistingStatus: existingRuntime.Status}
+			}
+		}
 
-		scanErr := tx.QueryRow(ctx, query, args).Scan(&id)
-		if scanErr == nil {
-			return nil
+		id = uuid.New()
+		createdAt := s.clock()
+		if err := s.insertInitialConfigVersionTx(ctx, tx, codingCredentialConfigSnapshot{
+			ID:        id,
+			OrgID:     scope.OrgID,
+			UserID:    scope.UserID,
+			Provider:  cfg.Provider(),
+			Label:     label,
+			Config:    encrypted,
+			Priority:  nextPriority,
+			Status:    status,
+			CreatedBy: opts.CreatedBy,
+			CreatedAt: createdAt,
+		}); err != nil {
+			if isUniqueViolation(err) {
+				return &ErrCodingCredentialLabelTaken{Label: label}
+			}
+			return fmt.Errorf("insert credential: %w", err)
 		}
-		if !errors.Is(scanErr, pgx.ErrNoRows) {
-			return fmt.Errorf("insert credential: %w", scanErr)
-		}
-		// Active or invalid row blocked the insert; report typed error.
-		var existingStatus models.CodingCredentialRowStatus
-		lookupArgs := pgx.NamedArgs{
-			"org_id":   scope.OrgID,
-			"user_id":  scope.UserID,
-			"provider": string(cfg.Provider()),
-			"label":    label,
-		}
-		var lookupQuery string
-		if scope.IsPersonal() {
-			lookupQuery = `SELECT status FROM coding_credentials
-				WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND label = @label`
-		} else {
-			lookupQuery = `SELECT status FROM coding_credentials
-				WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`
-		}
-		_ = tx.QueryRow(ctx, lookupQuery, lookupArgs).Scan(&existingStatus)
-		return &ErrCodingCredentialLabelTaken{Label: label, ExistingStatus: existingStatus}
+		return s.insertInitialRuntimeVersionTx(ctx, tx, scope, id, codingCredentialRuntimeSnapshot{Status: status})
 	})
 	if err != nil {
 		return nil, err
@@ -858,31 +882,19 @@ func (s *CodingCredentialStore) PromotePending(ctx context.Context, scope models
 		return err
 	}
 	var provider models.ProviderName
-	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
-		if rowProvider != cfg.Provider() {
-			return fmt.Errorf("provider mismatch: row is %q, config is %q", rowProvider, cfg.Provider())
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		if current.Provider != cfg.Provider() {
+			return fmt.Errorf("provider mismatch: row is %q, config is %q", current.Provider, cfg.Provider())
 		}
-		provider = rowProvider
-		args := pgx.NamedArgs{"id": id, "config": encrypted, "org_id": scope.OrgID}
-		var query string
-		if scope.IsPersonal() {
-			args["user_id"] = *scope.UserID
-			query = `UPDATE coding_credentials
-			 SET config = @config, status = 'active', last_verified_at = now(), updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
-		} else {
-			query = `UPDATE coding_credentials
-			 SET config = @config, status = 'active', last_verified_at = now(), updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+		provider = current.Provider
+		current.Config = encrypted
+		if err := s.insertConfigVersionTx(ctx, tx, current); err != nil {
+			return err
 		}
-		tag, execErr := tx.Exec(ctx, query, args)
-		if execErr != nil {
-			return fmt.Errorf("promote pending: %w", execErr)
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrCodingCredentialNotFound
-		}
-		return nil
+		now := s.clock()
+		runtime.Status = models.CodingCredentialStatusActive
+		runtime.LastVerifiedAt = &now
+		return s.insertRuntimeVersionTx(ctx, tx, scope, id, runtime)
 	}); err != nil {
 		return err
 	}
@@ -897,31 +909,16 @@ func (s *CodingCredentialStore) UpdateConfig(ctx context.Context, scope models.S
 		return err
 	}
 	var provider models.ProviderName
-	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
-		if rowProvider != cfg.Provider() {
-			return fmt.Errorf("provider mismatch: row is %q, config is %q", rowProvider, cfg.Provider())
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		if current.Provider != cfg.Provider() {
+			return fmt.Errorf("provider mismatch: row is %q, config is %q", current.Provider, cfg.Provider())
 		}
-		provider = rowProvider
-		args := pgx.NamedArgs{"id": id, "config": encrypted, "org_id": scope.OrgID}
-		var query string
-		if scope.IsPersonal() {
-			args["user_id"] = *scope.UserID
-			query = `UPDATE coding_credentials
-			 SET config = @config, status = 'active', updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id AND status != 'disabled'`
-		} else {
-			query = `UPDATE coding_credentials
-			 SET config = @config, status = 'active', updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id IS NULL AND status != 'disabled'`
-		}
-		tag, execErr := tx.Exec(ctx, query, args)
-		if execErr != nil {
-			return fmt.Errorf("update config: %w", execErr)
-		}
-		if tag.RowsAffected() == 0 {
+		if runtime.Status == models.CodingCredentialStatusDisabled {
 			return ErrCodingCredentialNotFound
 		}
-		return nil
+		provider = current.Provider
+		current.Config = encrypted
+		return s.insertConfigVersionTx(ctx, tx, current)
 	}); err != nil {
 		return err
 	}
@@ -929,32 +926,54 @@ func (s *CodingCredentialStore) UpdateConfig(ctx context.Context, scope models.S
 	return nil
 }
 
+// UpdateConfigVerified overwrites config and records a successful verification
+// runtime version in the same transaction. Used by OAuth completion, token
+// refresh, and sandbox credential harvest paths where the new credential
+// material has just been accepted by the upstream provider.
+func (s *CodingCredentialStore) UpdateConfigVerified(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return err
+	}
+	var provider models.ProviderName
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		if current.Provider != cfg.Provider() {
+			return fmt.Errorf("provider mismatch: row is %q, config is %q", current.Provider, cfg.Provider())
+		}
+		if runtime.Status == models.CodingCredentialStatusDisabled {
+			return ErrCodingCredentialNotFound
+		}
+		provider = current.Provider
+		current.Config = encrypted
+		if err := s.insertConfigVersionTx(ctx, tx, current); err != nil {
+			return err
+		}
+		now := s.clock()
+		runtime.Status = models.CodingCredentialStatusActive
+		runtime.LastVerifiedAt = &now
+		runtime.RateLimitedUntil = nil
+		runtime.RateLimitedObservedAt = nil
+		runtime.RateLimitMessage = nil
+		return s.insertRuntimeVersionTx(ctx, tx, scope, id, runtime)
+	}); err != nil {
+		return err
+	}
+	s.health.clear(id)
+	s.invalidate(scope, provider)
+	return nil
+}
+
 // Rename updates the label.
 func (s *CodingCredentialStore) Rename(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error {
 	var provider models.ProviderName
-	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
-		provider = rowProvider
-		args := pgx.NamedArgs{"id": id, "label": label, "org_id": scope.OrgID}
-		var query string
-		if scope.IsPersonal() {
-			args["user_id"] = *scope.UserID
-			query = `UPDATE coding_credentials
-			 SET label = @label, updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
-		} else {
-			query = `UPDATE coding_credentials
-			 SET label = @label, updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
-		}
-		tag, execErr := tx.Exec(ctx, query, args)
-		if execErr != nil {
-			if isUniqueViolation(execErr) {
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, _ codingCredentialRuntimeSnapshot) error {
+		provider = current.Provider
+		current.Label = label
+		if err := s.insertConfigVersionTx(ctx, tx, current); err != nil {
+			if isUniqueViolation(err) {
 				return &ErrCodingCredentialLabelTaken{Label: label}
 			}
-			return fmt.Errorf("rename credential: %w", execErr)
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrCodingCredentialNotFound
+			return fmt.Errorf("rename credential: %w", err)
 		}
 		return nil
 	}); err != nil {
@@ -976,28 +995,10 @@ func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.S
 		return fmt.Errorf("invalid status: %q", status)
 	}
 	var provider models.ProviderName
-	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
-		provider = rowProvider
-		args := pgx.NamedArgs{"id": id, "status": string(status), "org_id": scope.OrgID}
-		var query string
-		if scope.IsPersonal() {
-			args["user_id"] = *scope.UserID
-			query = `UPDATE coding_credentials
-				 SET status = @status, updated_at = now()
-				 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
-		} else {
-			query = `UPDATE coding_credentials
-				 SET status = @status, updated_at = now()
-				 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
-		}
-		tag, execErr := tx.Exec(ctx, query, args)
-		if execErr != nil {
-			return fmt.Errorf("update status: %w", execErr)
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrCodingCredentialNotFound
-		}
-		return nil
+	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		provider = current.Provider
+		runtime.Status = status
+		return s.insertRuntimeVersionTx(ctx, tx, scope, id, runtime)
 	}); err != nil {
 		return err
 	}
@@ -1036,9 +1037,6 @@ func (s *CodingCredentialStore) Reorder(ctx context.Context, scope models.Scope,
 	}
 
 	for idx, id := range orderedIDs {
-		if err := s.assertScopeAndProviderTx(ctx, tx, scope, id); err != nil {
-			return err
-		}
 		tag, execErr := s.updatePriorityTx(ctx, tx, scope, id, idx+1)
 		if execErr != nil {
 			return fmt.Errorf("reorder credential %s: %w", id, execErr)
@@ -1136,13 +1134,17 @@ func (s *CodingCredentialStore) Move(ctx context.Context, scope models.Scope, id
 	var priorityQuery string
 	if scope.IsPersonal() {
 		priorityArgs["user_id"] = *scope.UserID
-		priorityQuery = `SELECT id, priority FROM coding_credentials
-			WHERE id = ANY(@ids) AND status != 'disabled'
-			  AND org_id = @org_id AND user_id = @user_id`
+		priorityQuery = `SELECT cc.id, cc.priority
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.id = ANY(@ids) AND cc.active = true AND rt.status != 'disabled'
+			  AND cc.org_id = @org_id AND cc.user_id = @user_id`
 	} else {
-		priorityQuery = `SELECT id, priority FROM coding_credentials
-			WHERE id = ANY(@ids) AND status != 'disabled'
-			  AND org_id = @org_id AND user_id IS NULL`
+		priorityQuery = `SELECT cc.id, cc.priority
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.id = ANY(@ids) AND cc.active = true AND rt.status != 'disabled'
+			  AND cc.org_id = @org_id AND cc.user_id IS NULL`
 	}
 	rows, err := tx.Query(ctx, priorityQuery, priorityArgs)
 	if err != nil {
@@ -1188,36 +1190,54 @@ func (s *CodingCredentialStore) Move(ctx context.Context, scope models.Scope, id
 //
 // lint:allow-no-orgid reason="cross-org janitor sweep; runs as a system task with no caller scope"
 func (s *CodingCredentialStore) JanitorDeletePendingAuthOlderThan(ctx context.Context, ttl time.Duration) (int64, error) {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM coding_credentials
-		 WHERE status = 'pending_auth' AND created_at < now() - @ttl::interval`,
+	var deactivated int64
+	err := s.db.QueryRow(ctx,
+		`WITH expired AS (
+			SELECT cc.id
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.active = true
+			  AND cc.org_id IS NOT NULL
+			  AND rt.status = 'pending_auth'
+			  AND cc.created_at < now() - @ttl::interval
+		),
+		deactivated_runtime AS (
+			UPDATE coding_credential_runtime_state rt
+			SET active = false
+			FROM expired
+			WHERE rt.credential_id = expired.id AND rt.active = true
+			RETURNING rt.credential_id
+		),
+		deactivated_config AS (
+			UPDATE coding_credentials cc
+			SET active = false, updated_at = now()
+			FROM expired
+			WHERE cc.id = expired.id AND cc.active = true
+			RETURNING cc.id
+		)
+		SELECT count(*)::bigint FROM deactivated_config`,
 		pgx.NamedArgs{"ttl": fmt.Sprintf("%d seconds", int(ttl.Seconds()))},
-	)
+	).Scan(&deactivated)
 	if err != nil {
 		return 0, fmt.Errorf("janitor sweep: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return deactivated, nil
 }
 
 // ----- Internals -----
 
-// withScopedRowTx begins a transaction, locks the row identified by id with
-// SELECT ... FOR UPDATE, asserts (org_id, user_id) matches scope, and invokes
-// fn with the tx and the row's provider. The fn must perform its UPDATE on tx
-// so the work happens under the same lock. Scope mismatch is conflated with
-// "row missing" so id enumeration cannot tell which is which.
-func (s *CodingCredentialStore) withScopedRowTx(ctx context.Context, scope models.Scope, id uuid.UUID, fn func(tx pgx.Tx, provider models.ProviderName) error) error {
+func (s *CodingCredentialStore) withScopedConfigTx(ctx context.Context, scope models.Scope, id uuid.UUID, fn func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	provider, err := s.lockAndAssertScope(ctx, tx, scope, id)
+	current, runtime, err := s.fetchActiveConfigByIDTx(ctx, tx, scope, id, true)
 	if err != nil {
 		return err
 	}
-	if err := fn(tx, provider); err != nil {
+	if err := fn(tx, *current, *runtime); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1227,32 +1247,11 @@ func (s *CodingCredentialStore) withScopedRowTx(ctx context.Context, scope model
 // returns the provider when the row matches scope. Returns
 // ErrCodingCredentialNotFound for any mismatch.
 func (s *CodingCredentialStore) lockAndAssertScope(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID) (models.ProviderName, error) {
-	var orgID uuid.UUID
-	var userID *uuid.UUID
-	var provider string
-	args := pgx.NamedArgs{"id": id, "org_id": scope.OrgID}
-	var query string
-	if scope.IsPersonal() {
-		args["user_id"] = *scope.UserID
-		query = `SELECT org_id, user_id, provider FROM coding_credentials
-			WHERE id = @id AND org_id = @org_id AND user_id = @user_id
-			FOR UPDATE`
-	} else {
-		query = `SELECT org_id, user_id, provider FROM coding_credentials
-			WHERE id = @id AND org_id = @org_id AND user_id IS NULL
-			FOR UPDATE`
-	}
-	err := tx.QueryRow(ctx, query, args).Scan(&orgID, &userID, &provider)
+	current, _, err := s.fetchActiveConfigByIDTx(ctx, tx, scope, id, true)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrCodingCredentialNotFound
-		}
-		return "", fmt.Errorf("scope-check credential: %w", err)
+		return "", err
 	}
-	if orgID != scope.OrgID || !sameUserPointer(userID, scope.UserID) {
-		return "", ErrCodingCredentialNotFound
-	}
-	return models.ProviderName(provider), nil
+	return current.Provider, nil
 }
 
 // assertScopeAndProviderTx is the legacy two-return-value variant kept for
@@ -1273,16 +1272,209 @@ func sameUserPointer(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
+func (s *CodingCredentialStore) fetchActiveConfigByIDTx(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID, forUpdate bool) (*codingCredentialConfigSnapshot, *codingCredentialRuntimeSnapshot, error) {
+	args := pgx.NamedArgs{"id": id, "org_id": scope.OrgID}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT
+				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
+				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.id = @id AND cc.org_id = @org_id AND cc.user_id = @user_id AND cc.active = true`
+	} else {
+		query = `SELECT
+				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
+				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.id = @id AND cc.org_id = @org_id AND cc.user_id IS NULL AND cc.active = true`
+	}
+	if forUpdate {
+		query += ` FOR UPDATE OF cc, rt`
+	}
+	return scanActiveConfigRuntime(tx.QueryRow(ctx, query, args))
+}
+
+func (s *CodingCredentialStore) fetchActiveConfigByIDAnyScopeTx(ctx context.Context, tx pgx.Tx, orgID, id uuid.UUID, forUpdate bool) (*codingCredentialConfigSnapshot, *codingCredentialRuntimeSnapshot, error) {
+	query := `SELECT
+			cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
+			cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+			rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
+		FROM coding_credentials cc
+		JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+		WHERE cc.id = @id AND cc.org_id = @org_id AND cc.active = true`
+	if forUpdate {
+		query += ` FOR UPDATE OF cc, rt`
+	}
+	return scanActiveConfigRuntime(tx.QueryRow(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID}))
+}
+
+func (s *CodingCredentialStore) fetchActiveConfigByProviderLabelTx(ctx context.Context, tx pgx.Tx, scope models.Scope, provider models.ProviderName, label string, forUpdate bool) (*codingCredentialConfigSnapshot, *codingCredentialRuntimeSnapshot, error) {
+	args := pgx.NamedArgs{"org_id": scope.OrgID, "provider": string(provider), "label": label}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT
+				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
+				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.org_id = @org_id AND cc.user_id = @user_id AND cc.provider = @provider AND cc.label = @label AND cc.active = true`
+	} else {
+		query = `SELECT
+				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
+				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.org_id = @org_id AND cc.user_id IS NULL AND cc.provider = @provider AND cc.label = @label AND cc.active = true`
+	}
+	if forUpdate {
+		query += ` FOR UPDATE OF cc, rt`
+	}
+	return scanActiveConfigRuntime(tx.QueryRow(ctx, query, args))
+}
+
+func scanActiveConfigRuntime(row pgx.Row) (*codingCredentialConfigSnapshot, *codingCredentialRuntimeSnapshot, error) {
+	var cfg codingCredentialConfigSnapshot
+	var runtime codingCredentialRuntimeSnapshot
+	var provider string
+	if err := row.Scan(
+		&cfg.ID,
+		&cfg.VersionID,
+		&cfg.OrgID,
+		&cfg.UserID,
+		&provider,
+		&cfg.Label,
+		&cfg.Config,
+		&cfg.Priority,
+		&cfg.Status,
+		&cfg.CreatedBy,
+		&cfg.TeamDefaultOriginUserID,
+		&cfg.CreatedAt,
+		&runtime.Status,
+		&runtime.LastVerifiedAt,
+		&runtime.RateLimitedUntil,
+		&runtime.RateLimitedObservedAt,
+		&runtime.RateLimitMessage,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, ErrCodingCredentialNotFound
+		}
+		return nil, nil, fmt.Errorf("fetch active credential: %w", err)
+	}
+	cfg.Provider = models.ProviderName(provider)
+	return &cfg, &runtime, nil
+}
+
+func (s *CodingCredentialStore) insertConfigVersionTx(ctx context.Context, tx pgx.Tx, next codingCredentialConfigSnapshot) error {
+	tag, err := tx.Exec(ctx,
+		`UPDATE coding_credentials
+		 SET active = false, updated_at = now()
+		 WHERE version_id = @version_id AND org_id = @org_id AND active = true`,
+		pgx.NamedArgs{"version_id": next.VersionID, "org_id": next.OrgID},
+	)
+	if err != nil {
+		return fmt.Errorf("deactivate credential config version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrCodingCredentialNotFound
+	}
+
+	return s.insertInitialConfigVersionTx(ctx, tx, next)
+}
+
+func (s *CodingCredentialStore) insertInitialConfigVersionTx(ctx context.Context, tx pgx.Tx, next codingCredentialConfigSnapshot) error {
+	if next.Status == "" {
+		next.Status = models.CodingCredentialStatusActive
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO coding_credentials (
+			id, org_id, user_id, provider, label, config, priority, status, created_by,
+			team_default_origin_user_id, active, created_at, updated_at
+		) VALUES (
+			@id, @org_id, @user_id, @provider, @label, @config, @priority, @status, @created_by,
+			@team_default_origin_user_id, true, @created_at, now()
+		)`,
+		pgx.NamedArgs{
+			"id":                          next.ID,
+			"org_id":                      next.OrgID,
+			"user_id":                     next.UserID,
+			"provider":                    string(next.Provider),
+			"label":                       next.Label,
+			"config":                      next.Config,
+			"priority":                    next.Priority,
+			"status":                      string(next.Status),
+			"created_by":                  next.CreatedBy,
+			"team_default_origin_user_id": next.TeamDefaultOriginUserID,
+			"created_at":                  next.CreatedAt,
+		},
+	)
+	return err
+}
+
+func (s *CodingCredentialStore) insertInitialRuntimeVersionTx(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID, next codingCredentialRuntimeSnapshot) error {
+	if next.Status == "" {
+		next.Status = models.CodingCredentialStatusActive
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO coding_credential_runtime_state (
+			credential_id, org_id, user_id, status, last_verified_at,
+			rate_limited_until, rate_limited_observed_at, rate_limit_message, active
+		) VALUES (
+			@credential_id, @org_id, @user_id, @status, @last_verified_at,
+			@rate_limited_until, @rate_limited_observed_at, @rate_limit_message, true
+		)`,
+		pgx.NamedArgs{
+			"credential_id":            id,
+			"org_id":                   scope.OrgID,
+			"user_id":                  scope.UserID,
+			"status":                   string(next.Status),
+			"last_verified_at":         next.LastVerifiedAt,
+			"rate_limited_until":       next.RateLimitedUntil,
+			"rate_limited_observed_at": next.RateLimitedObservedAt,
+			"rate_limit_message":       next.RateLimitMessage,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("insert credential runtime state: %w", err)
+	}
+	return nil
+}
+
+func (s *CodingCredentialStore) insertRuntimeVersionTx(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID, next codingCredentialRuntimeSnapshot) error {
+	tag, err := tx.Exec(ctx,
+		`UPDATE coding_credential_runtime_state
+		 SET active = false
+		 WHERE credential_id = @credential_id AND active = true`,
+		pgx.NamedArgs{"credential_id": id},
+	)
+	if err != nil {
+		return fmt.Errorf("deactivate credential runtime state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrCodingCredentialNotFound
+	}
+	return s.insertInitialRuntimeVersionTx(ctx, tx, scope, id, next)
+}
+
 func (s *CodingCredentialStore) fetchRowByID(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.CodingCredential, error) {
 	args := pgx.NamedArgs{"id": id, "org_id": scope.OrgID}
 	var query string
 	if scope.IsPersonal() {
 		args["user_id"] = *scope.UserID
-		query = `SELECT ` + codingCredentialsColumns + ` FROM coding_credentials
-			WHERE id = @id AND org_id = @org_id AND user_id = @user_id`
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.id = @id AND cc.org_id = @org_id AND cc.user_id = @user_id AND cc.active = true`
 	} else {
-		query = `SELECT ` + codingCredentialsColumns + ` FROM coding_credentials
-			WHERE id = @id AND org_id = @org_id AND user_id IS NULL`
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM ` + codingCredentialsFrom + `
+			WHERE cc.id = @id AND cc.org_id = @org_id AND cc.user_id IS NULL AND cc.active = true`
 	}
 	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
@@ -1309,13 +1501,17 @@ func (s *CodingCredentialStore) fetchStackTx(ctx context.Context, tx pgx.Tx, sco
 	var query string
 	if scope.IsPersonal() {
 		args["user_id"] = *scope.UserID
-		query = `SELECT id FROM coding_credentials
-			WHERE org_id = @org_id AND user_id = @user_id AND status != 'disabled'
-			ORDER BY priority, created_at`
+		query = `SELECT cc.id
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.org_id = @org_id AND cc.user_id = @user_id AND cc.active = true AND rt.status != 'disabled'
+			ORDER BY cc.priority, cc.created_at`
 	} else {
-		query = `SELECT id FROM coding_credentials
-			WHERE org_id = @org_id AND user_id IS NULL AND status != 'disabled'
-			ORDER BY priority, created_at`
+		query = `SELECT cc.id
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.org_id = @org_id AND cc.user_id IS NULL AND cc.active = true AND rt.status != 'disabled'
+			ORDER BY cc.priority, cc.created_at`
 	}
 	rows, err := tx.Query(ctx, query, args)
 	if err != nil {
@@ -1374,11 +1570,15 @@ func (s *CodingCredentialStore) withScopeLock(ctx context.Context, scope models.
 	var query string
 	if scope.IsPersonal() {
 		args["user_id"] = *scope.UserID
-		query = `SELECT COALESCE(MAX(priority), 0) + 1 FROM coding_credentials
-			WHERE org_id = @org_id AND user_id = @user_id AND status != 'disabled'`
+		query = `SELECT COALESCE(MAX(cc.priority), 0) + 1
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.org_id = @org_id AND cc.user_id = @user_id AND cc.active = true AND rt.status != 'disabled'`
 	} else {
-		query = `SELECT COALESCE(MAX(priority), 0) + 1 FROM coding_credentials
-			WHERE org_id = @org_id AND user_id IS NULL AND status != 'disabled'`
+		query = `SELECT COALESCE(MAX(cc.priority), 0) + 1
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.org_id = @org_id AND cc.user_id IS NULL AND cc.active = true AND rt.status != 'disabled'`
 	}
 	var nextPriority int
 	if err := tx.QueryRow(ctx, query, args).Scan(&nextPriority); err != nil {
@@ -1403,22 +1603,18 @@ func (s *CodingCredentialStore) acquireScopeLockTx(ctx context.Context, tx pgx.T
 }
 
 func (s *CodingCredentialStore) updatePriorityTx(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID, priority int) (pgconn.CommandTag, error) {
-	args := pgx.NamedArgs{"priority": priority, "id": id, "org_id": scope.OrgID}
-	if scope.IsPersonal() {
-		args["user_id"] = *scope.UserID
-		return tx.Exec(ctx,
-			`UPDATE coding_credentials
-			 SET priority = @priority, updated_at = now()
-			 WHERE id = @id AND org_id = @org_id AND user_id = @user_id`,
-			args,
-		)
+	current, _, err := s.fetchActiveConfigByIDTx(ctx, tx, scope, id, true)
+	if err != nil {
+		if errors.Is(err, ErrCodingCredentialNotFound) {
+			return pgconn.NewCommandTag("UPDATE 0"), nil
+		}
+		return pgconn.CommandTag{}, err
 	}
-	return tx.Exec(ctx,
-		`UPDATE coding_credentials
-		 SET priority = @priority, updated_at = now()
-		 WHERE id = @id AND org_id = @org_id AND user_id IS NULL`,
-		args,
-	)
+	current.Priority = priority
+	if err := s.insertConfigVersionTx(ctx, tx, *current); err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
 func scopePtrKey(u *uuid.UUID) string {
@@ -1473,6 +1669,7 @@ func (s *CodingCredentialStore) decryptRow(row models.CodingCredential) (*models
 	}
 	return &models.DecryptedCodingCredential{
 		ID:                    row.ID,
+		VersionID:             row.VersionID,
 		OrgID:                 row.OrgID,
 		UserID:                row.UserID,
 		Provider:              row.Provider,
@@ -1698,6 +1895,15 @@ func (h *healthCache) shed(id uuid.UUID) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.data[id] = h.clock().Add(h.ttl)
+}
+
+func (h *healthCache) clear(id uuid.UUID) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.data, id)
 }
 
 func (h *healthCache) isShed(id uuid.UUID) bool {

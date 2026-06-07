@@ -16,7 +16,19 @@ import (
 )
 
 var codingCredentialTestColumns = []string{
-	"id", "org_id", "user_id", "provider", "label", "config", "priority", "status", "created_by", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message", "created_at", "updated_at",
+	"id", "version_id", "org_id", "user_id", "provider", "label", "config", "priority", "status", "created_by", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message", "team_default_origin_user_id", "active", "created_at", "updated_at",
+}
+
+var codingCredentialSnapshotColumns = []string{
+	"id", "version_id", "org_id", "user_id", "provider", "label", "config", "priority", "config_status", "created_by", "team_default_origin_user_id", "created_at", "runtime_status", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message",
+}
+
+func TestCodingCredentialsColumnsProjectsRuntimeUpdatedAt(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, codingCredentialsColumns,
+		"GREATEST(cc.updated_at, rt.created_at) AS updated_at",
+		"credential reads should expose runtime-state changes through updated_at")
 }
 
 func encryptedCodingConfig(t *testing.T, store *CodingCredentialStore, cfg models.ProviderConfig) []byte {
@@ -33,6 +45,7 @@ func codingCredentialRow(t *testing.T, store *CodingCredentialStore, orgID uuid.
 	now := time.Now().UTC()
 	return []any{
 		id,
+		uuid.New(),
 		orgID,
 		userID,
 		string(provider),
@@ -45,6 +58,8 @@ func codingCredentialRow(t *testing.T, store *CodingCredentialStore, orgID uuid.
 		nil,
 		nil,
 		nil,
+		nil,
+		true,
 		now,
 		now,
 	}
@@ -56,9 +71,9 @@ func codingCredentialRowWithRateLimit(t *testing.T, store *CodingCredentialStore
 	row := codingCredentialRow(t, store, orgID, userID, id, provider, cfg, priority, models.CodingCredentialStatusActive)
 	observedAt := rateLimitedUntil.Add(-time.Minute)
 	message := "try again later"
-	row[10] = &rateLimitedUntil
-	row[11] = &observedAt
-	row[12] = &message
+	row[11] = &rateLimitedUntil
+	row[12] = &observedAt
+	row[13] = &message
 	return row
 }
 
@@ -81,6 +96,31 @@ func codingAnyArgs(n int) []any {
 		out[i] = pgxmock.AnyArg()
 	}
 	return out
+}
+
+func codingCredentialSnapshotRow(t *testing.T, store *CodingCredentialStore, scope models.Scope, id uuid.UUID, provider models.ProviderName, status models.CodingCredentialRowStatus) []any {
+	t.Helper()
+
+	now := time.Now().UTC()
+	return []any{
+		id,
+		uuid.New(),
+		scope.OrgID,
+		scope.UserID,
+		string(provider),
+		"Test credential",
+		encryptedCodingConfig(t, store, models.OpenAIConfig{APIKey: "sk-openai-123456"}),
+		1,
+		status,
+		nil,
+		nil,
+		now,
+		status,
+		nil,
+		nil,
+		nil,
+		nil,
+	}
 }
 
 // fakeClock returns a controllable time source used by the cache TTL tests.
@@ -823,9 +863,15 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 				mock.ExpectQuery("SELECT COALESCE").
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows([]string{"next_priority"}).AddRow(1))
-				mock.ExpectQuery(`INSERT INTO coding_credentials[\s\S]+last_verified_at = NULL`).
+				mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(4)...).
+					WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns))
+				mock.ExpectExec(`INSERT INTO coding_credentials`).
+					WithArgs(codingAnyArgs(11)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
 					WithArgs(codingAnyArgs(8)...).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(id))
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectCommit()
 			},
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, _ uuid.UUID) error {
@@ -837,9 +883,18 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "promote pending",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec("UPDATE coding_credentials").
-					WithArgs(codingAnyArgs(4)...).
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credentials`).
+					WithArgs(codingAnyArgs(11)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectCommit()
 			},
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
@@ -850,9 +905,12 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "update config",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec("UPDATE coding_credentials").
-					WithArgs(codingAnyArgs(4)...).
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credentials`).
+					WithArgs(codingAnyArgs(11)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectCommit()
 			},
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
@@ -860,12 +918,37 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			},
 		},
 		{
+			name: "update config verified writes runtime verification",
+			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
+				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+					WithArgs(codingAnyArgs(2)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credentials`).
+					WithArgs(codingAnyArgs(11)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectCommit()
+			},
+			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
+				return store.UpdateConfigVerified(ctx, scope, id, models.OpenAIConfig{APIKey: "sk-openai-verified"})
+			},
+		},
+		{
 			name: "rename",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec("UPDATE coding_credentials").
-					WithArgs(codingAnyArgs(4)...).
+				mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credentials`).
+					WithArgs(codingAnyArgs(11)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectCommit()
 			},
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
@@ -876,8 +959,11 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "update status",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
-					WithArgs(codingAnyArgs(4)...).
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -889,8 +975,11 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "mark rate limited",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET rate_limited_until = @until`).
-					WithArgs(codingAnyArgs(6)...).
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -902,11 +991,46 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			},
 		},
 		{
+			name: "clear rate limited",
+			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
+				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectCommit()
+			},
+			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
+				return store.ClearRateLimitedForScope(ctx, scope, id)
+			},
+		},
+		{
+			name: "mark verified",
+			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
+				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectCommit()
+			},
+			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) error {
+				return store.MarkVerifiedForScope(ctx, scope, id)
+			},
+		},
+		{
 			name: "mark auth rejected",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
-					WithArgs(codingAnyArgs(4)...).
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -918,8 +1042,11 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 			name: "disable",
 			setup: func(t *testing.T, mock pgxmock.PgxPoolIface, store *CodingCredentialStore, scope models.Scope, id uuid.UUID) {
 				expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET status = @status, updated_at = now\(\)`).
-					WithArgs(codingAnyArgs(4)...).
+				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+					WithArgs(codingAnyArgs(8)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectCommit()
 			},
@@ -967,12 +1094,10 @@ func TestCodingCredentialStoreCreateLabelTaken(t *testing.T) {
 	mock.ExpectQuery("SELECT COALESCE").
 		WithArgs(codingAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"next_priority"}).AddRow(1))
-	mock.ExpectQuery("INSERT INTO coding_credentials").
-		WithArgs(codingAnyArgs(8)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}))
-	mock.ExpectQuery("SELECT status FROM coding_credentials").
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 		WithArgs(codingAnyArgs(4)...).
-		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.CodingCredentialStatusActive))
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+			AddRow(codingCredentialSnapshotRow(t, store, scope, uuid.New(), models.ProviderOpenAI, models.CodingCredentialStatusActive)...))
 	mock.ExpectRollback()
 
 	_, err := store.Create(context.Background(), scope, "Codex", models.OpenAIConfig{APIKey: "sk-openai-123456"}, CreateOpts{})
@@ -995,8 +1120,11 @@ func TestCodingCredentialStoreRenameLabelTaken(t *testing.T) {
 	scope := models.Scope{OrgID: orgID, UserID: &userID}
 
 	expectScopedMutation(t, mock, scope, id, models.ProviderOpenAI)
-	mock.ExpectExec("UPDATE coding_credentials SET label").
-		WithArgs(codingAnyArgs(4)...).
+	mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(codingAnyArgs(11)...).
 		WillReturnError(&pgconn.PgError{Code: "23505"})
 	mock.ExpectRollback()
 
@@ -1023,15 +1151,19 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 				mock.ExpectExec("pg_advisory_xact_lock").
 					WithArgs(codingAnyArgs(1)...).
 					WillReturnResult(pgxmock.NewResult("SELECT", 1))
-				mock.ExpectQuery("SELECT id FROM coding_credentials").
+				mock.ExpectQuery(`SELECT cc.id\s+FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]).AddRow(ids[2]))
 				for range ids {
-					mock.ExpectQuery("SELECT org_id, user_id, provider").
+					mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 						WithArgs(codingAnyArgs(3)...).
-						WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(models.ProviderOpenAI)))
-					mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
-						WithArgs(codingAnyArgs(4)...).
+						WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+							AddRow(codingCredentialSnapshotRow(t, NewCodingCredentialStore(mock, nil), scope, uuid.New(), models.ProviderOpenAI, models.CodingCredentialStatusActive)...))
+					mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+						WithArgs(codingAnyArgs(2)...).
+						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+					mock.ExpectExec(`INSERT INTO coding_credentials`).
+						WithArgs(codingAnyArgs(11)...).
 						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				}
 				mock.ExpectCommit()
@@ -1047,24 +1179,25 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 				mock.ExpectExec("pg_advisory_xact_lock").
 					WithArgs(codingAnyArgs(1)...).
 					WillReturnResult(pgxmock.NewResult("SELECT", 1))
-				mock.ExpectQuery("SELECT org_id, user_id, provider").
-					WithArgs(codingAnyArgs(3)...).
-					WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(models.ProviderOpenAI)))
-				mock.ExpectQuery("SELECT id FROM coding_credentials").
+				expectScopedSnapshot(t, mock, scope, ids[2], models.ProviderOpenAI)
+				mock.ExpectQuery(`SELECT cc.id\s+FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]).AddRow(ids[2]))
-				mock.ExpectQuery("SELECT id, priority FROM coding_credentials").
+				mock.ExpectQuery(`SELECT cc.id, cc.priority\s+FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 					WithArgs(codingAnyArgs(3)...).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "priority"}).AddRow(ids[0], 1).AddRow(ids[1], 2).AddRow(ids[2], 3))
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
-					WithArgs(codingAnyArgs(4)...).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
-					WithArgs(codingAnyArgs(4)...).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectExec(`UPDATE coding_credentials\s+SET priority`).
-					WithArgs(codingAnyArgs(4)...).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				for range ids {
+					mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+						WithArgs(codingAnyArgs(3)...).
+						WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+							AddRow(codingCredentialSnapshotRow(t, NewCodingCredentialStore(mock, nil), scope, uuid.New(), models.ProviderOpenAI, models.CodingCredentialStatusActive)...))
+					mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+						WithArgs(codingAnyArgs(2)...).
+						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+					mock.ExpectExec(`INSERT INTO coding_credentials`).
+						WithArgs(codingAnyArgs(11)...).
+						WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				}
 				mock.ExpectCommit()
 			},
 			call: func(ctx context.Context, store *CodingCredentialStore, scope models.Scope, ids []uuid.UUID) error {
@@ -1114,13 +1247,10 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 		mock.ExpectExec("pg_advisory_xact_lock").
 			WithArgs(codingAnyArgs(1)...).
 			WillReturnResult(pgxmock.NewResult("SELECT", 1))
-		mock.ExpectQuery("SELECT org_id, user_id, provider").
-			WithArgs(codingAnyArgs(3)...).
-			WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
-				AddRow(orgID, &userID, string(models.ProviderOpenAI)))
+		expectScopedSnapshot(t, mock, scope, movingID, models.ProviderOpenAI)
 		// 2. fetchStackTx returns only ids that belong to scope. foreignID is
 		//    deliberately absent.
-		mock.ExpectQuery("SELECT id FROM coding_credentials").
+		mock.ExpectQuery(`SELECT cc.id\s+FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 			WithArgs(codingAnyArgs(2)...).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(movingID).AddRow(stackID))
 		// 3. The store sees foreignID is not in `without`, returns an error,
@@ -1139,14 +1269,14 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 		store, mock := newMockCodingCredentialStore(t)
 		defer mock.Close()
 
-		mock.ExpectExec("DELETE FROM coding_credentials").
+		mock.ExpectQuery("WITH expired").
 			WithArgs(codingAnyArgs(1)...).
-			WillReturnResult(pgxmock.NewResult("DELETE", 2))
+			WillReturnRows(pgxmock.NewRows([]string{"deactivated_count"}).AddRow(int64(2)))
 
 		n, err := store.JanitorDeletePendingAuthOlderThan(context.Background(), time.Hour)
 
 		require.NoError(t, err, "janitor sweep should not return an error")
-		require.Equal(t, int64(2), n, "janitor sweep should return rows affected")
+		require.Equal(t, int64(2), n, "janitor sweep should return deactivated logical credential count")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 }
@@ -1167,7 +1297,7 @@ func TestCodingCredentialStoreReorderRejectsPartialStack(t *testing.T) {
 	mock.ExpectExec("pg_advisory_xact_lock").
 		WithArgs(codingAnyArgs(1)...).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectQuery("SELECT id FROM coding_credentials").
+	mock.ExpectQuery(`SELECT cc.id\s+FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 		WithArgs(codingAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(firstID).AddRow(secondID))
 	mock.ExpectRollback()
@@ -1183,9 +1313,16 @@ func expectScopedMutation(t *testing.T, mock pgxmock.PgxPoolIface, scope models.
 	t.Helper()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT org_id, user_id, provider").
+	expectScopedSnapshot(t, mock, scope, id, provider)
+}
+
+func expectScopedSnapshot(t *testing.T, mock pgxmock.PgxPoolIface, scope models.Scope, id uuid.UUID, provider models.ProviderName) {
+	t.Helper()
+
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
 		WithArgs(codingAnyArgs(3)...).
-		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).AddRow(scope.OrgID, scope.UserID, string(provider)))
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+			AddRow(codingCredentialSnapshotRow(t, NewCodingCredentialStore(mock, nil), scope, id, provider, models.CodingCredentialStatusActive)...))
 }
 
 func TestMoveCodingCredentialInputValidate(t *testing.T) {
