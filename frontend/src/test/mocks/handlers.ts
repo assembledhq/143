@@ -878,6 +878,16 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/settings/network', () => {
+    return HttpResponse.json({
+      data: {
+        static_egress_available: true,
+        static_egress_enabled: false,
+        static_egress_public_ip: '203.0.113.10',
+      },
+    });
+  }),
+
   http.get('/api/v1/settings/credentials/team', () => {
     return HttpResponse.json({
       data: [],

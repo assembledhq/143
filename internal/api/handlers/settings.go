@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -24,12 +25,33 @@ type OrgSettingsInvalidator interface {
 	InvalidateOrg(orgID uuid.UUID)
 }
 
+type StaticEgressWorkerChecker interface {
+	HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error)
+}
+
 type SettingsHandler struct {
-	orgStore    *db.OrganizationStore
-	llmDefaults map[string]string // provider name → masked key (from server env)
-	audit       *db.AuditEmitter
-	logger      zerolog.Logger
-	invalidator OrgSettingsInvalidator
+	orgStore     *db.OrganizationStore
+	llmDefaults  map[string]string // provider name → masked key (from server env)
+	audit        *db.AuditEmitter
+	logger       zerolog.Logger
+	invalidator  OrgSettingsInvalidator
+	staticEgress StaticEgressStatus
+	workers      StaticEgressWorkerChecker
+}
+
+// StaticEgressStatus is platform-level availability for the opt-in static
+// sandbox egress path.
+type StaticEgressStatus struct {
+	Available         bool
+	PublicIP          string
+	UnavailableReason string
+}
+
+type networkStatusResponse struct {
+	StaticEgressAvailable         bool   `json:"static_egress_available"`
+	StaticEgressEnabled           bool   `json:"static_egress_enabled"`
+	StaticEgressPublicIP          string `json:"static_egress_public_ip,omitempty"`
+	StaticEgressUnavailableReason string `json:"static_egress_unavailable_reason,omitempty"`
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -50,6 +72,15 @@ func (h *SettingsHandler) SetLogger(logger zerolog.Logger) {
 // session start without waiting for the cache TTL.
 func (h *SettingsHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInvalidator) {
 	h.invalidator = invalidator
+}
+
+// SetStaticEgressStatus injects platform-level static egress availability.
+func (h *SettingsHandler) SetStaticEgressStatus(status StaticEgressStatus) {
+	h.staticEgress = status
+}
+
+func (h *SettingsHandler) SetStaticEgressWorkerChecker(workers StaticEgressWorkerChecker) {
+	h.workers = workers
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
@@ -84,6 +115,71 @@ func (h *SettingsHandler) GetLLMDefaults(w http.ResponseWriter, r *http.Request)
 // maintaining its own hardcoded list.
 func (h *SettingsHandler) GetLLMModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": models.LLMModelsByProvider()})
+}
+
+// GetNetworkStatus returns the customer-facing network settings status.
+func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	org, err := h.orgStore.GetByID(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "organization not found")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", err)
+		return
+	}
+	status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), false)
+	if availabilityErr != nil {
+		h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress worker availability")
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[networkStatusResponse]{Data: networkStatusResponse{
+		StaticEgressAvailable:         status.Available,
+		StaticEgressEnabled:           settings.SandboxNetwork.StaticEgressEnabled,
+		StaticEgressPublicIP:          status.PublicIP,
+		StaticEgressUnavailableReason: reason,
+	}})
+}
+
+func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireWorkerChecker bool) (StaticEgressStatus, string, error) {
+	status := h.staticEgress
+	reason := status.UnavailableReason
+	if status.Available {
+		if h.workers == nil {
+			if requireWorkerChecker {
+				status.Available = false
+				reason = "static egress worker availability checker is not configured"
+			}
+		} else {
+			hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(ctx, status.PublicIP)
+			if workerErr != nil {
+				status.Available = false
+				reason = "failed to verify static egress worker availability"
+				return status, reason, workerErr
+			}
+			if !hasWorker {
+				status.Available = false
+				reason = "not all active session workers are static-egress-capable for the configured public IP"
+			}
+		}
+	}
+	if !status.Available && reason == "" {
+		reason = "static egress gateway is not configured for this environment"
+	}
+	return status, reason, nil
+}
+
+func staticEgressEnableTransition(beforeRaw, afterRaw json.RawMessage) (bool, error) {
+	before, err := models.ParseOrgSettings(beforeRaw)
+	if err != nil {
+		return false, err
+	}
+	after, err := models.ParseOrgSettings(afterRaw)
+	if err != nil {
+		return false, err
+	}
+	return !before.SandboxNetwork.StaticEgressEnabled && after.SandboxNetwork.StaticEgressEnabled, nil
 }
 
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +250,21 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		org.Settings = merged
+		enableStaticEgress, transitionErr := staticEgressEnableTransition(beforeSettings, org.Settings)
+		if transitionErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", transitionErr)
+			return
+		}
+		if enableStaticEgress {
+			status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), true)
+			if availabilityErr != nil {
+				h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress availability before settings update")
+			}
+			if !status.Available {
+				writeError(w, r, http.StatusServiceUnavailable, "STATIC_EGRESS_UNAVAILABLE", reason, availabilityErr)
+				return
+			}
+		}
 	}
 
 	// Build the audit diff from what actually changed. Skip the emit entirely

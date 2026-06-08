@@ -30,6 +30,7 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
 	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
 	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
+	require.False(t, s.SandboxNetwork.StaticEgressEnabled, "static egress should be disabled by default")
 }
 
 func TestOrgSettings_EffectiveCodingAgentTabToolsEnabled(t *testing.T) {
@@ -92,6 +93,9 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		},
 		"builder_permissions": {
 			"require_review_before_pr": false
+		},
+		"sandbox_network": {
+			"static_egress_enabled": true
 		}
 	}`)
 
@@ -117,6 +121,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
 	require.Equal(t, 0.15, s.PriorityWeights.RevenueRisk, "should override revenue_risk")
 	require.False(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "should allow admins to disable builder review requirement")
+	require.True(t, s.SandboxNetwork.StaticEgressEnabled, "should parse sandbox_network.static_egress_enabled")
 }
 
 func TestParseOrgSettings_PartialOverride(t *testing.T) {

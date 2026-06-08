@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # sandbox-firewall.sh — apply host-level egress rules for the sandbox network.
 #
-# Blocks sandbox container traffic to cloud metadata (169.254/16) and
-# RFC1918 (10/8, 172.16/12, 192.168/16). A prompt-injected agent could
-# otherwise pivot to internal infra (DB, monitoring, metadata API) that
-# happens to be reachable from the worker host.
+# Blocks sandbox container traffic to cloud metadata (169.254/16), Tailscale
+# CGNAT (100.64/10), and RFC1918 (10/8, 172.16/12, 192.168/16). A
+# prompt-injected agent could otherwise pivot to internal infra (DB,
+# monitoring, metadata API) that happens to be reachable from the worker host.
 #
 # Carves out intra-bridge traffic via a RETURN rule so sandboxes can still
 # reach preview-infrastructure containers (postgres, etc.) and the
@@ -30,9 +30,11 @@
 set -euo pipefail
 
 NETWORK="${1:-143-sandbox}"
-COMMENT_TAG="143-sandbox-egress"
+NETWORK_TAG="${NETWORK//[^A-Za-z0-9_.-]/-}"
+COMMENT_TAG="143-sandbox-egress-${NETWORK_TAG}"
 BLOCKED_DESTS=(
   "169.254.0.0/16"   # cloud metadata (all major providers)
+  "100.64.0.0/10"    # Tailscale/CGNAT
   "10.0.0.0/8"       # RFC1918
   "172.16.0.0/12"    # RFC1918 (includes Docker default pools)
   "192.168.0.0/16"   # RFC1918
