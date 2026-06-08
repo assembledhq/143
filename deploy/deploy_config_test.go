@@ -926,6 +926,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, syncText, "STATIC_EGRESS_WORKER_PEERS", "static egress sync should update the derived gateway peer list")
 	require.Contains(t, syncText, "PROVISION_WORKER_HOST", "static egress sync should validate provision-worker is backed by FLEET_HOSTS")
 	require.Contains(t, syncText, "sops --encrypt", "static egress sync should write updated generated config back to encrypted production secrets only in apply mode")
+	require.Contains(t, syncText, "--filename-override \"$ENC_FILE\"", "static egress sync should encrypt temp files using .env.production.enc creation rules")
 	require.Contains(t, syncText, "Commit $ENC_FILE after provisioning succeeds", "static egress sync should remind operators to commit generated encrypted secrets after provisioning succeeds")
 
 	provisionEgressScript, err := os.ReadFile("../deploy/scripts/provision-egress.sh")

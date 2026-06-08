@@ -292,7 +292,7 @@ if [ "$APPLY" -ne 1 ]; then
   exit 0
 fi
 
-sops --encrypt --input-type dotenv --output-type dotenv "$tmp_env" > "$tmp_env.enc"
+sops --encrypt --filename-override "$ENC_FILE" --input-type dotenv --output-type dotenv "$tmp_env" > "$tmp_env.enc"
 mv "$tmp_env.enc" "$ENC_FILE"
 echo "Updated $ENC_FILE with generated static egress config."
 echo "Commit $ENC_FILE after provisioning succeeds so generated gateway and worker keys are preserved."
