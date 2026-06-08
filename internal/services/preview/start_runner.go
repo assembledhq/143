@@ -36,9 +36,11 @@ type StartRunner struct {
 	previews        *db.PreviewStore
 	sessions        *db.SessionStore
 	repositories    *db.RepositoryStore
+	orgs            agent.OrgSettingsReader
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
 	sandboxCapacity *agent.SandboxCapacityGate
+	staticEgress    agent.StaticEgressRuntimeConfig
 	snapshots       storage.SnapshotStore
 	snapshotCache   previewStartupCache
 	github          branchPreviewGitHub
@@ -51,9 +53,11 @@ type StartRunnerConfig struct {
 	Previews        *db.PreviewStore
 	Sessions        *db.SessionStore
 	Repositories    *db.RepositoryStore
+	Orgs            agent.OrgSettingsReader
 	FileReader      sandbox.FileReader
 	SandboxProvider agent.SandboxProvider
 	SandboxCapacity *agent.SandboxCapacityGate
+	StaticEgress    agent.StaticEgressRuntimeConfig
 	Snapshots       storage.SnapshotStore
 	SnapshotCache   *SnapshotCache
 	GitHub          branchPreviewGitHub
@@ -77,9 +81,11 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 		previews:        cfg.Previews,
 		sessions:        cfg.Sessions,
 		repositories:    cfg.Repositories,
+		orgs:            cfg.Orgs,
 		fileReader:      cfg.FileReader,
 		sandboxProvider: cfg.SandboxProvider,
 		sandboxCapacity: cfg.SandboxCapacity,
+		staticEgress:    cfg.StaticEgress,
 		snapshots:       cfg.Snapshots,
 		snapshotCache:   snapshotCache,
 		github:          cfg.GitHub,
@@ -151,6 +157,10 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	sandboxCfg.OrgID = payload.OrgID.String()
 	sandboxCfg.Purpose = "branch_preview"
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, payload.Config)
+	if err := r.applyBranchPreviewSandboxNetwork(ctx, payload.OrgID, &sandboxCfg); err != nil {
+		r.abort(ctx, reservation, "", fmt.Sprintf("resolve sandbox network: %v", err))
+		return fmt.Errorf("resolve sandbox network: %w", err)
+	}
 
 	var capacityReservation *agent.SandboxCapacityReservation
 	if r.sandboxCapacity != nil {
@@ -493,8 +503,19 @@ func (r *StartRunner) resolveSandboxWorkDir(ctx context.Context, session *models
 	return defaults.HomeDir + "/" + slug
 }
 
+func (r *StartRunner) applyBranchPreviewSandboxNetwork(ctx context.Context, orgID uuid.UUID, cfg *agent.SandboxConfig) error {
+	if r == nil {
+		return nil
+	}
+	return agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, cfg)
+}
+
 func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := r.resolveSandboxWorkDir(ctx, session)
+	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, r.orgs, orgID, r.staticEgress)
+	if expectedErr != nil {
+		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
+	}
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
 		if ownerCheck := r.checkLiveContainerWorker(session.WorkerNodeID); ownerCheck.Err != nil {
@@ -513,7 +534,13 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 			if inspectErr != nil {
 				r.logger.Warn().Err(inspectErr).Str("session_id", session.ID.String()).Str("container_id", candidate.ID).Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				return acquireSandboxResult{Sandbox: candidate}
+				if match, mismatchErr := agent.SandboxNetworkMatches(ctx, r.sandboxProvider, candidate, expectedNetwork, r.staticEgress.NetworkName); mismatchErr != nil {
+					r.logger.Warn().Err(mismatchErr).Str("session_id", session.ID.String()).Str("container_id", candidate.ID).Msg("preview reuse: network check failed; falling through to hydrate")
+				} else if !match {
+					return acquireSandboxResult{ErrCode: "NETWORK_SETTING_RESTART_REQUIRED", Err: fmt.Errorf("restart environment to apply network setting")}
+				} else {
+					return acquireSandboxResult{Sandbox: candidate}
+				}
 			}
 		} else {
 			return acquireSandboxResult{Sandbox: candidate}
@@ -536,6 +563,9 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, &sandboxCfg); err != nil {
+		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: err}
+	}
 
 	winningID, winningWorkerID, freshErr := r.sessions.PeekContainerOwnership(ctx, orgID, session.ID)
 	switch {

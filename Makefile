@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -335,7 +335,7 @@ secrets-rotate:
 # Optional Tailscale provisioning env vars:
 #   TS_AUTH_KEY_<ROLE>           — role-specific auth keys: TS_AUTH_KEY_APP,
 #                                  TS_AUTH_KEY_DB, TS_AUTH_KEY_WORKER,
-#                                  TS_AUTH_KEY_REDIS.
+#                                  TS_AUTH_KEY_REDIS, TS_AUTH_KEY_EGRESS.
 #   TS_TAG_<ROLE>                — role-specific tags. Defaults to tag:prod-<role>.
 #   TS_HOSTNAME                  — defaults to 143-<role>-<HOST with dots as dashes>.
 #   TS_WORKER_HOSTS              — comma-separated tailnet workers. Entries can be
@@ -349,6 +349,16 @@ secrets-rotate:
 #   make provision-worker HOST=<public-ip>
 #   make tailscale-enroll ROLE=app HOST=<existing-app-public-ip>
 #   make tailscale-enroll ROLE=redis HOST=<existing-redis-public-ip>
+#
+# Static egress worker provisioning:
+#   When STATIC_EGRESS_PUBLIC_IP is configured, provision-worker derives
+#   WireGuard peer config from worker:<host> entries in FLEET_HOSTS, updates
+#   generated static egress fields in .env.production.enc, reloads the egress
+#   gateway from the egress:<host> FLEET_HOSTS entry, then provisions the
+#   worker. Add worker:<HOST> to FLEET_HOSTS before running make
+#   provision-worker HOST=<HOST>. EGRESS_SSH_KEY and SSH_USER let the gateway
+#   use a different key/user from workers, e.g. AWS Ubuntu hosts:
+#   make provision-worker HOST=<worker-ip> EGRESS_SSH_KEY=~/Downloads/143-john.pem SSH_USER=ubuntu
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -394,18 +404,22 @@ export TS_AUTH_KEY_APP
 export TS_AUTH_KEY_DB
 export TS_AUTH_KEY_WORKER
 export TS_AUTH_KEY_REDIS
+export TS_AUTH_KEY_EGRESS
 export TS_TAG_APP
 export TS_TAG_DB
 export TS_TAG_WORKER
 export TS_TAG_REDIS
+export TS_TAG_EGRESS
 export TS_WORKER_HOSTS
 export TS_AUTH_KEY
 export TS_TAG
 export TS_HOSTNAME
 export TS_ADVERTISE_ROUTES
+export SSH_USER
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
+EGRESS_SSH_KEY ?= $(SSH_KEY)
 
 # Guard: fail with a helpful message when SSH_KEY is empty.
 define check-ssh-key
@@ -420,7 +434,15 @@ provision-app:
 provision-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
+	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
+provision-egress:
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@deploy/scripts/sync-static-egress-secrets.sh --apply
+	@deploy/scripts/provision-egress.sh "$(HOST)" "$(EGRESS_SSH_KEY)"
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }

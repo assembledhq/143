@@ -249,6 +249,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithMembershipStore(membershipStore),
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
+	settingsHandler.SetStaticEgressStatus(handlers.StaticEgressStatus{
+		Available:         cfg.StaticEgressPublicIP != "",
+		PublicIP:          cfg.StaticEgressPublicIP,
+		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
+	})
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -682,6 +687,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		PreferredRegion:      cfg.NodeRegion,
 	})
 	workerClient := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+	settingsHandler.SetStaticEgressWorkerChecker(workerSelector)
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
 	// gwSrv is stored so callers can shut it down gracefully.
@@ -719,7 +725,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
 	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
+	branchPreviewHandler.SetStaticEgressSettings(orgStore, cfg.StaticEgressPublicIP)
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
@@ -988,6 +996,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
+				r.Get("/api/v1/settings/network", settingsHandler.GetNetworkStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 				r.Get("/api/v1/pm/current", pmHandler.Current)

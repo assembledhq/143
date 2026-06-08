@@ -18,6 +18,7 @@ export type SettingsPatch = {
 const NESTED_OBJECT_KEYS: ReadonlySet<keyof OrgSettings> = new Set([
   "agent_config",
   "product_context",
+  "sandbox_network",
 ]);
 
 /**

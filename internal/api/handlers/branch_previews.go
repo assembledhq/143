@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/preview"
 )
@@ -45,6 +46,8 @@ type BranchPreviewHandler struct {
 	jobs                  *db.JobStore
 	selector              *preview.WorkerSelector
 	stopper               *preview.WorkerStopper
+	orgStore              agent.OrgSettingsReader
+	staticEgressPublicIP  string
 	baseURL               string
 	previewOriginTemplate string
 	// configContentCache caches raw .143/config.json content keyed by
@@ -71,6 +74,11 @@ func NewBranchPreviewHandler(previews *db.PreviewStore, repos *db.RepositoryStor
 func (h *BranchPreviewHandler) SetWorkerRuntime(jobs *db.JobStore, selector *preview.WorkerSelector) {
 	h.jobs = jobs
 	h.selector = selector
+}
+
+func (h *BranchPreviewHandler) SetStaticEgressSettings(orgStore agent.OrgSettingsReader, publicIP string) {
+	h.orgStore = orgStore
+	h.staticEgressPublicIP = publicIP
 }
 
 func (h *BranchPreviewHandler) SetStopper(stopper *preview.WorkerStopper) {
@@ -718,8 +726,15 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 	if err := h.previews.UpsertPreviewLink(ctx, link); err != nil {
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_LINK_CREATE_FAILED", "failed to create stable preview link", err)
 	}
+	reqs, err := h.workerSelectionRequirements(ctx, orgID)
+	if err != nil {
+		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to read network settings", err)
+	}
 	if active, activeErr := h.previews.GetActivePreviewForTarget(ctx, orgID, target.ID); activeErr == nil && active != nil {
 		if !restart {
+			if !branchPreviewRuntimeMatchesWorkerRequirements(active, reqs) {
+				return branchPreviewResponse{}, newPreviewHTTPError(http.StatusConflict, "NETWORK_SETTING_RESTART_REQUIRED", "restart preview to apply network setting", nil)
+			}
 			return h.responseForPreview(link.Slug, target, active), nil
 		}
 		if h.stopper != nil {
@@ -742,7 +757,8 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 				// sandbox may be in a restart loop; let the caller get a fresh
 				// instance instead.
 				(reusable.Status == models.PreviewStatusReady || reusable.Status == models.PreviewStatusPartiallyReady) &&
-				reusable.PreviewHandle != "" {
+				reusable.PreviewHandle != "" &&
+				branchPreviewRuntimeMatchesWorkerRequirements(reusable, reqs) {
 				attached, attachErr := h.previews.AttachPreviewTarget(ctx, orgID, reusable.ID, target.ID)
 				if attachErr != nil {
 					return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_REUSE_FAILED", "failed to attach session preview", attachErr)
@@ -769,7 +785,7 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 		return resp, nil
 	}
 
-	worker, err := h.selector.SelectLeastLoadedNode(ctx)
+	worker, err := h.selector.SelectLeastLoadedNodeWithRequirements(ctx, reqs)
 	if err != nil {
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, "no preview worker is available", err)
 	}
@@ -1603,6 +1619,33 @@ func previewInstanceExpired(instance *models.PreviewInstance) bool {
 		return true
 	}
 	return instance.ExpiresAt.Before(time.Now())
+}
+
+func branchPreviewRuntimeMatchesWorkerRequirements(instance *models.PreviewInstance, req preview.WorkerSelectionRequirements) bool {
+	if instance == nil {
+		return false
+	}
+	egressMode := agent.SandboxEgressModeDirect
+	if len(instance.RecycleSandbox) > 2 {
+		var sb agent.Sandbox
+		if err := json.Unmarshal(instance.RecycleSandbox, &sb); err != nil {
+			return false
+		}
+		if sb.Metadata != nil && sb.Metadata[agent.SandboxMetadataEgressMode] != "" {
+			egressMode = sb.Metadata[agent.SandboxMetadataEgressMode]
+		}
+	}
+	if req.StaticEgressRequired {
+		return egressMode == agent.SandboxEgressModeStatic
+	}
+	return egressMode != agent.SandboxEgressModeStatic
+}
+
+func (h *BranchPreviewHandler) workerSelectionRequirements(ctx context.Context, orgID uuid.UUID) (preview.WorkerSelectionRequirements, error) {
+	if h == nil {
+		return preview.WorkerSelectionRequirements{}, nil
+	}
+	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgressPublicIP)
 }
 
 func (h *BranchPreviewHandler) previewURL(id uuid.UUID) string {

@@ -118,7 +118,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"LinearAgentSettingsHandler.DeleteMapping": "delegates to requireOrgID which uses OrgIDFromContext",
 
 		// Session creation thin wrappers — both delegate to createManual which calls OrgIDFromContext.
-		"SessionHandler.CreateManual":  "delegates to createManual which uses OrgIDFromContext",
+		"SessionHandler.CreateManual":   "delegates to createManual which uses OrgIDFromContext",
 		"SessionHandler.CreateExternal": "delegates to createManual which uses OrgIDFromContext",
 
 		// Automation creation thin wrappers — both delegate to Create or CreateExternal

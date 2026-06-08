@@ -5,6 +5,7 @@ import SettingsPage from './page';
 const {
   settingsGetMock,
   settingsUpdateMock,
+  settingsNetworkStatusMock,
   auditLogsListMock,
   teamListMembersMock,
   useAuthMock,
@@ -27,6 +28,13 @@ const {
       updated_at: '2026-05-06T15:30:00Z',
     },
   }),
+  settingsNetworkStatusMock: vi.fn().mockResolvedValue({
+    data: {
+      static_egress_available: true,
+      static_egress_enabled: false,
+      static_egress_public_ip: '203.0.113.10',
+    },
+  }),
   auditLogsListMock: vi.fn().mockResolvedValue({ data: [] }),
   teamListMembersMock: vi.fn().mockResolvedValue({ data: [] }),
   useAuthMock: vi.fn(() => ({
@@ -39,6 +47,7 @@ vi.mock('@/lib/api', () => ({
     settings: {
       get: settingsGetMock,
       update: settingsUpdateMock,
+      getNetworkStatus: settingsNetworkStatusMock,
     },
     auditLogs: {
       list: auditLogsListMock,
@@ -57,6 +66,7 @@ describe('SettingsPage', () => {
   beforeEach(() => {
     settingsGetMock.mockClear();
     settingsUpdateMock.mockClear();
+    settingsNetworkStatusMock.mockClear();
     useAuthMock.mockReset();
     useAuthMock.mockReturnValue({
       user: { role: 'admin' },
@@ -68,6 +78,13 @@ describe('SettingsPage', () => {
         settings: {},
         created_at: '2026-05-01T12:00:00Z',
         updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: true,
+        static_egress_enabled: true,
+        static_egress_public_ip: '203.0.113.10',
       },
     });
     auditLogsListMock.mockClear();
@@ -220,6 +237,72 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(screen.getByLabelText('Organization name')).toBeDisabled();
+    });
+  });
+
+  it('shows static egress network access with copyable public IP', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText('Network access')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText('Use static egress IP for sessions and previews')).toBeChecked();
+    });
+    expect(screen.getByText('203.0.113.10')).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText('Use static egress IP for sessions and previews'));
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_network: { static_egress_enabled: false } },
+      });
+    });
+  });
+
+  it('allows admins to disable static egress when the gateway is unavailable', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: false,
+        static_egress_enabled: true,
+        static_egress_public_ip: '203.0.113.10',
+        static_egress_unavailable_reason: 'no active static-egress-capable workers are available',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const toggle = await screen.findByLabelText('Use static egress IP for sessions and previews');
+    await waitFor(() => {
+      expect(toggle).toBeChecked();
+      expect(toggle).not.toBeDisabled();
+    });
+
+    const user = userEvent.setup();
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_network: { static_egress_enabled: false } },
+      });
     });
   });
 });

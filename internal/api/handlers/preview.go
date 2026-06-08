@@ -30,16 +30,25 @@ type PreviewHandler struct {
 	store           *db.PreviewStore
 	jobStore        *db.JobStore
 	sessionStore    *db.SessionStore
+	orgStore        agent.OrgSettingsReader
 	repoStore       *db.RepositoryStore
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
 	sandboxCapacity *agent.SandboxCapacityGate
+	staticEgress    agent.StaticEgressRuntimeConfig
 	snapshots       storage.SnapshotStore
 	workerSelector  *preview.WorkerSelector
 	workerClient    *preview.WorkerPreviewClient
 	localNodeID     string
 	logger          zerolog.Logger
 	audit           *db.AuditEmitter
+}
+
+// SetStaticEgressRuntime injects the worker-local static egress runtime for
+// local preview hydration.
+func (h *PreviewHandler) SetStaticEgressRuntime(orgs agent.OrgSettingsReader, runtime agent.StaticEgressRuntimeConfig) {
+	h.orgStore = orgs
+	h.staticEgress = runtime
 }
 
 // NewPreviewHandler creates a new PreviewHandler. fileReader is used to
@@ -318,6 +327,10 @@ func (h *PreviewHandler) resolveSandboxWorkDir(ctx context.Context, session *mod
 //     return 410 only when the reaper explicitly expired the snapshot.
 func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
 	workDir := h.resolveSandboxWorkDir(ctx, session)
+	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, h.orgStore, orgID, h.staticEgress)
+	if expectedErr != nil {
+		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: expectedErr}
+	}
 
 	// Reuse is only safe when the row believes the container is actually
 	// running. A lingering container_id from a crashed worker or a session
@@ -348,7 +361,16 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 					Str("container_id", candidate.ID).
 					Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				return acquireSandboxResult{Sandbox: candidate}
+				if match, mismatchErr := agent.SandboxNetworkMatches(ctx, h.sandboxProvider, candidate, expectedNetwork, h.staticEgress.NetworkName); mismatchErr != nil {
+					h.logger.Warn().Err(mismatchErr).
+						Str("session_id", session.ID.String()).
+						Str("container_id", candidate.ID).
+						Msg("preview reuse: network check failed; falling through to hydrate")
+				} else if !match {
+					return acquireSandboxResult{ErrCode: "NETWORK_SETTING_RESTART_REQUIRED", Err: fmt.Errorf("restart environment to apply network setting")}
+				} else {
+					return acquireSandboxResult{Sandbox: candidate}
+				}
 			} else {
 				h.logger.Info().
 					Str("session_id", session.ID.String()).
@@ -391,6 +413,12 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
 	preview.ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, h.orgStore, orgID, h.staticEgress, &sandboxCfg); err != nil {
+		return acquireSandboxResult{
+			ErrCode: "STATIC_EGRESS_UNAVAILABLE",
+			Err:     err,
+		}
+	}
 
 	// Pre-hydrate race check: re-read just container_id and bail early if a
 	// peer (typically a continue_session turn) has published one since we
@@ -533,6 +561,27 @@ func classifyLaunchError(err error) *previewHTTPError {
 	}
 	classified := preview.ClassifyLaunchFailure(err)
 	return newPreviewHTTPError(http.StatusUnprocessableEntity, classified.Code, classified.Message, err)
+}
+
+func classifyAcquireSandboxError(acq acquireSandboxResult) *previewHTTPError {
+	switch acq.ErrCode {
+	case "SNAPSHOT_EXPIRED":
+		return newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "SNAPSHOT_UNAVAILABLE":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "NO_SANDBOX":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "SANDBOX_BUSY":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "NETWORK_SETTING_RESTART_REQUIRED":
+		return newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case "STATIC_EGRESS_UNAVAILABLE":
+		return newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, acq.Err.Error(), acq.Err)
+	case preview.PreviewCapacityCode:
+		return newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, preview.PreviewCapacityMessage, acq.Err)
+	default:
+		return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
+	}
 }
 
 // =============================================================================
@@ -719,20 +768,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 			abortReason = preview.PreviewCapacityMessage
 		}
 		h.manager.AbortReservation(ctx, reservation, "", abortReason)
-		switch acq.ErrCode {
-		case "SNAPSHOT_EXPIRED":
-			return nil, newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "SNAPSHOT_UNAVAILABLE":
-			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "NO_SANDBOX":
-			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case "SANDBOX_BUSY":
-			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
-		case preview.PreviewCapacityCode:
-			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, acq.ErrCode, preview.PreviewCapacityMessage, acq.Err)
-		default:
-			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
-		}
+		return nil, classifyAcquireSandboxError(acq)
 	}
 	sb := acq.Sandbox
 
@@ -808,6 +844,10 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 	if err != nil {
 		return nil, 0, newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
 	}
+	reqs, err := h.workerSelectionRequirements(ctx, orgID)
+	if err != nil {
+		return nil, 0, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to read network settings", err)
+	}
 	repoID := uuid.Nil
 	if session.RepositoryID != nil {
 		repoID = *session.RepositoryID
@@ -837,7 +877,7 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 			}
 		}
 	}
-	worker, err := h.workerSelector.SelectStartNodeWithPlacement(ctx, orgID, &session, repoID, placementKey)
+	worker, err := h.workerSelector.SelectStartNodeWithPlacementAndRequirements(ctx, orgID, &session, repoID, placementKey, reqs)
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):
@@ -885,6 +925,31 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, status, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+}
+
+func (h *PreviewHandler) workerSelectionRequirements(ctx context.Context, orgID uuid.UUID) (preview.WorkerSelectionRequirements, error) {
+	if h == nil {
+		return preview.WorkerSelectionRequirements{}, nil
+	}
+	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgress.PublicIP)
+}
+
+func previewWorkerSelectionRequirements(ctx context.Context, orgStore agent.OrgSettingsReader, orgID uuid.UUID, staticEgressPublicIP string) (preview.WorkerSelectionRequirements, error) {
+	if orgStore == nil {
+		return preview.WorkerSelectionRequirements{}, nil
+	}
+	org, err := orgStore.GetByID(ctx, orgID)
+	if err != nil {
+		return preview.WorkerSelectionRequirements{}, err
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return preview.WorkerSelectionRequirements{}, err
+	}
+	return preview.WorkerSelectionRequirements{
+		StaticEgressRequired: settings.SandboxNetwork.StaticEgressEnabled,
+		StaticEgressPublicIP: staticEgressPublicIP,
+	}, nil
 }
 
 // =============================================================================
