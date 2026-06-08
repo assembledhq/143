@@ -149,7 +149,11 @@ if [ -z "$static_public_ip" ]; then
   echo "Static egress is not configured; STATIC_EGRESS_PUBLIC_IP is empty."
   exit 0
 fi
-require_command wg
+if ! command -v wg >/dev/null 2>&1; then
+  echo "ERROR: WireGuard tools are required to generate static egress keys, but 'wg' was not found." >&2
+  echo "Install locally with: brew install wireguard-tools" >&2
+  exit 1
+fi
 
 fleet_hosts="$(dotenv_get FLEET_HOSTS "$tmp_env")"
 if [ -z "$fleet_hosts" ]; then

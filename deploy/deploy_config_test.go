@@ -919,6 +919,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, syncText, "egress_host_count", "static egress sync should count egress inventory entries before mutating production secrets")
 	require.Contains(t, syncText, "exactly one egress:<host>", "static egress sync should require exactly one gateway host in FLEET_HOSTS")
 	require.Contains(t, syncText, "duplicate worker:<host>", "static egress sync should reject duplicate worker inventory entries before generating WireGuard peers")
+	require.Contains(t, syncText, "brew install wireguard-tools", "static egress sync should explain how to install the local WireGuard CLI prerequisite")
 	require.Contains(t, syncText, "STATIC_EGRESS_GATEWAY_PRIVATE_KEY", "static egress sync should generate or preserve the gateway private key")
 	require.Contains(t, syncText, "STATIC_EGRESS_GATEWAY_PUBLIC_KEY", "static egress sync should derive the gateway public key")
 	require.Contains(t, syncText, "STATIC_EGRESS_WORKER_HOSTS", "static egress sync should update the generated worker private-key map")
