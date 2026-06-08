@@ -1144,6 +1144,14 @@ func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer
 
 func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
 
+type previewStaticEgressOrgStore struct {
+	settings json.RawMessage
+}
+
+func (s previewStaticEgressOrgStore) GetByID(_ context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{ID: orgID, Settings: s.settings}, nil
+}
+
 // TestPreviewHandler_StartPreview_NoWorkspaceConfig covers the common path where
 // the user clicks Start Preview on a repo that has no .143/config.json
 // committed and supplies no explicit config. The handler must abort the
@@ -2535,6 +2543,90 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure surfaces as 422 PREVIEW_START_FAILED")
 	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetwork(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "direct-container"
+	h := newPreviewTestHandler()
+	h.SetStaticEgressRuntime(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}, agent.StaticEgressRuntimeConfig{
+		Enabled:     true,
+		Capable:     true,
+		NetworkName: "143-sandbox-static-egress",
+		PublicIP:    "203.0.113.10",
+	})
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sb.ID, "liveness check should inspect the recorded container")
+		return true, nil
+	}
+	sp.ConnInfoFn = func(_ context.Context, _ *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+		return &agent.SandboxConnectionInfo{
+			Environment: map[string]string{"DOCKER_HOST": "143-sandbox"},
+		}, nil
+	}
+	h.sandboxProvider = sp
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		SandboxState: models.SandboxStateRunning,
+	}, &models.PreviewConfig{})
+
+	require.Nil(t, result.Sandbox, "live container on the direct bridge should not be reused for static egress")
+	require.Equal(t, "NETWORK_SETTING_RESTART_REQUIRED", result.ErrCode, "network mismatch should return a restart-required error code")
+	require.Error(t, result.Err, "network mismatch should surface an actionable error")
+}
+
+func TestClassifyAcquireSandboxErrorPreservesNetworkErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		result         acquireSandboxResult
+		expectedStatus int
+		expectedCode   string
+		expectedMsg    string
+	}{
+		{
+			name: "restart required",
+			result: acquireSandboxResult{
+				ErrCode: "NETWORK_SETTING_RESTART_REQUIRED",
+				Err:     errors.New("restart environment to apply network setting"),
+			},
+			expectedStatus: http.StatusConflict,
+			expectedCode:   "NETWORK_SETTING_RESTART_REQUIRED",
+			expectedMsg:    "restart environment to apply network setting",
+		},
+		{
+			name: "static egress unavailable",
+			result: acquireSandboxResult{
+				ErrCode: "STATIC_EGRESS_UNAVAILABLE",
+				Err:     errors.New("static egress is enabled for this org, but this worker is not static-egress capable"),
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedCode:   "STATIC_EGRESS_UNAVAILABLE",
+			expectedMsg:    "static egress is enabled for this org, but this worker is not static-egress capable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := classifyAcquireSandboxError(tt.result)
+
+			require.Equal(t, tt.expectedStatus, actual.status, "network acquisition errors should use actionable HTTP statuses")
+			require.Equal(t, tt.expectedCode, actual.code, "network acquisition errors should preserve their specific codes")
+			require.Equal(t, tt.expectedMsg, actual.message, "network acquisition errors should preserve the actionable message")
+		})
+	}
 }
 
 // TestClassifyLaunchError verifies the error-code mapping that turns

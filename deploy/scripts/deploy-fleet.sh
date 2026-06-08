@@ -14,7 +14,7 @@ set -euo pipefail
 #   1. FLEET_HOSTS env var             — comma-separated "role:IP" pairs
 #   2. .env.production.enc (FLEET_HOSTS) — encrypted, decrypted via SOPS
 #
-# FLEET_HOSTS format:  app:10.0.0.2,worker:10.0.0.4,db:10.0.0.3,logging:10.0.0.6,redis:10.0.0.5
+# FLEET_HOSTS format:  app:10.0.0.2,worker:10.0.0.4,db:10.0.0.3,logging:10.0.0.6,redis:10.0.0.5,egress:10.0.0.7
 
 SSH_KEY="$1"
 TAG="${2:-latest}"
@@ -88,6 +88,10 @@ IFS=',' read -ra ENTRIES <<< "$FLEET_HOSTS"
 for entry in "${ENTRIES[@]}"; do
   ROLE="${entry%%:*}"
   IP="${entry#*:}"
+  if [ "$ROLE" = "egress" ]; then
+    echo "Skipping egress@$IP (static egress gateways are managed by make provision-egress)."
+    continue
+  fi
   if ! should_deploy_role "$ROLE"; then
     echo "Skipping $ROLE@$IP (not in requested roles: $REQUESTED_ROLES)."
     continue

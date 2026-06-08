@@ -22,7 +22,6 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
@@ -579,6 +578,18 @@ func (d *DockerProvider) configLogger(cfg agent.SandboxConfig) zerolog.Logger {
 // sandbox image — because sudo's setuid bit is stripped under gVisor /
 // nosuid mounts and the provider runs with CapDrop=ALL.
 func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	networkName := cfg.NetworkName
+	if networkName == "" {
+		networkName = d.network
+	}
+	resolvConf := cfg.ResolvConfPath
+	if resolvConf == "" {
+		resolvConf = d.resolvConf
+	}
+	egressMode := cfg.EgressMode
+	if egressMode == "" {
+		egressMode = agent.SandboxEgressModeDirect
+	}
 	log := d.configLogger(cfg)
 	log.Info().
 		Str("image", cfg.Image).
@@ -586,6 +597,8 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		Int("memory_limit_mb", cfg.MemoryLimitMB).
 		Int("disk_limit_gb", cfg.DiskLimitGB).
 		Str("runtime", d.runtime).
+		Str("network", networkName).
+		Str("egress_mode", egressMode).
 		Msg("creating sandbox container")
 
 	pidsLimit := int64(256)
@@ -635,7 +648,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			Memory:    int64(cfg.MemoryLimitMB) * 1024 * 1024,
 			PidsLimit: &pidsLimit,
 		},
-		NetworkMode: container.NetworkMode(d.network),
+		NetworkMode: container.NetworkMode(networkName),
 		CapDrop:     []string{"ALL"},
 		// No CapAdd: sudo was removed from the sandbox image (setuid bits
 		// are stripped under gVisor / nosuid), and bootstrap provisioning
@@ -668,10 +681,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	// host-managed resolv.conf bypasses the embedded resolver entirely and
 	// works for any runtime. The host path is provisioned out-of-band; see
 	// deploy/scripts/provision.sh and the SANDBOX_RESOLV_CONF env var.
-	if d.resolvConf != "" {
+	if resolvConf != "" {
 		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
 			Type:     mount.TypeBind,
-			Source:   d.resolvConf,
+			Source:   resolvConf,
 			Target:   "/etc/resolv.conf",
 			ReadOnly: true,
 		})
@@ -747,8 +760,9 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		HomeDir:  cfg.HomeDir,
 		Env:      cloneEnv(cfg.Env),
 		Metadata: map[string]string{
-			"runtime": d.runtime,
-			"network": d.network,
+			"runtime":                       d.runtime,
+			"network":                       networkName,
+			agent.SandboxMetadataEgressMode: egressMode,
 		},
 		SessionID: cfg.SessionID,
 		OrgID:     cfg.OrgID,
@@ -807,32 +821,28 @@ func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[st
 	return labels
 }
 
-// CountLiveSandboxes counts running local sandbox containers attached to the
-// configured sandbox network. Labels are preferred for newly-created
-// containers; image-name matching keeps existing unlabeled sandboxes visible.
+// CountLiveSandboxes counts running local sandbox containers across all
+// sandbox bridges. Labels are preferred for newly-created containers; image-name
+// matching keeps existing unlabeled sandboxes visible on the default bridge.
 func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
-	args := filters.NewArgs()
-	if d.network != "" {
-		args.Add("network", d.network)
-	}
-	containers, err := d.client.ContainerList(ctx, container.ListOptions{Filters: args})
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("list live sandbox containers: %w", err)
 	}
 	count := 0
 	for _, summary := range containers {
-		if isLiveSandboxContainer(summary) {
+		if isLiveSandboxContainer(summary, d.network) {
 			count++
 		}
 	}
 	return count, nil
 }
 
-func isLiveSandboxContainer(summary container.Summary) bool {
+func isLiveSandboxContainer(summary container.Summary, sandboxNetwork string) bool {
 	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
 		return true
 	}
-	return isLegacySandboxImage(summary)
+	return isLegacySandboxImage(summary) && isContainerAttachedToNetwork(summary, sandboxNetwork)
 }
 
 func isLegacySandboxImage(summary container.Summary) bool {

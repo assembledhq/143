@@ -37,6 +37,8 @@ type WorkerNodeMetadata struct {
 	Region                 string `json:"region,omitempty"`
 	PreviewCapable         bool   `json:"preview_capable,omitempty"`
 	PreviewInternalBaseURL string `json:"preview_internal_base_url,omitempty"`
+	StaticEgressCapable    bool   `json:"static_egress_capable,omitempty"`
+	StaticEgressPublicIP   string `json:"static_egress_public_ip,omitempty"`
 }
 
 // WorkerNode is a preview-routable worker node.
@@ -45,6 +47,12 @@ type WorkerNode struct {
 	Mode    string
 	BaseURL string
 	Region  string
+}
+
+// WorkerSelectionRequirements constrains cold-start worker selection.
+type WorkerSelectionRequirements struct {
+	StaticEgressRequired bool
+	StaticEgressPublicIP string
 }
 
 // WorkerSelector resolves preview-owning workers and selects workers for cold starts.
@@ -82,13 +90,17 @@ func NewWorkerSelectorWithOptions(nodes *db.NodeStore, previews *db.PreviewStore
 	}
 }
 
-func parseWorkerNode(node models.Node) (WorkerNode, error) {
+func parseWorkerNodeMetadata(node models.Node) (WorkerNodeMetadata, error) {
 	var metadata WorkerNodeMetadata
 	if len(node.Metadata) > 0 {
 		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
-			return WorkerNode{}, fmt.Errorf("parse node metadata: %w", err)
+			return WorkerNodeMetadata{}, fmt.Errorf("parse node metadata: %w", err)
 		}
 	}
+	return metadata, nil
+}
+
+func parseWorkerNodeFromMetadata(node models.Node, metadata WorkerNodeMetadata) (WorkerNode, error) {
 	if !metadata.PreviewCapable {
 		return WorkerNode{}, fmt.Errorf("node %s is not preview-capable", node.ID)
 	}
@@ -102,6 +114,30 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 		BaseURL: baseURL,
 		Region:  strings.TrimSpace(metadata.Region),
 	}, nil
+}
+
+func parseWorkerNode(node models.Node) (WorkerNode, error) {
+	metadata, err := parseWorkerNodeMetadata(node)
+	if err != nil {
+		return WorkerNode{}, err
+	}
+	return parseWorkerNodeFromMetadata(node, metadata)
+}
+
+func parseWorkerNodeWithRequirements(node models.Node, req WorkerSelectionRequirements) (WorkerNode, error) {
+	metadata, err := parseWorkerNodeMetadata(node)
+	if err != nil {
+		return WorkerNode{}, err
+	}
+	if req.StaticEgressRequired {
+		if req.StaticEgressPublicIP == "" {
+			return WorkerNode{}, fmt.Errorf("static egress public IP is required")
+		}
+		if !workerMetadataMatchesStaticEgress(metadata, req.StaticEgressPublicIP) {
+			return WorkerNode{}, fmt.Errorf("node %s is not static-egress capable", node.ID)
+		}
+	}
+	return parseWorkerNodeFromMetadata(node, metadata)
 }
 
 func parseRoutableWorkerNode(node models.Node) (WorkerNode, error) {
@@ -127,6 +163,15 @@ func isResolvableNodeStatus(status models.NodeStatus) bool {
 	return status == models.NodeStatusActive || status == models.NodeStatusDraining
 }
 
+func nodeCanClaimSessionJobs(node models.Node) bool {
+	mode := string(node.Mode)
+	return mode == "worker" || mode == "all"
+}
+
+func workerMetadataMatchesStaticEgress(metadata WorkerNodeMetadata, publicIP string) bool {
+	return publicIP != "" && metadata.StaticEgressCapable && metadata.StaticEgressPublicIP == publicIP
+}
+
 // ResolveNode returns a routable worker by ID. Existing previews and live
 // sandboxes stay pinned to their owning worker, so routing only requires the
 // internal base URL; cold-start selection still requires preview_capable.
@@ -143,10 +188,20 @@ func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (Worker
 
 // SelectStartNode picks the worker that should handle Start Preview for the session.
 func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, session *models.Session) (WorkerNode, error) {
-	return s.SelectStartNodeWithPlacement(ctx, orgID, session, uuid.Nil, "")
+	return s.SelectStartNodeWithRequirements(ctx, orgID, session, WorkerSelectionRequirements{})
+}
+
+// SelectStartNodeWithRequirements picks the worker that should handle Start
+// Preview for the session while honoring optional runtime capabilities.
+func (s *WorkerSelector) SelectStartNodeWithRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, req WorkerSelectionRequirements) (WorkerNode, error) {
+	return s.SelectStartNodeWithPlacementAndRequirements(ctx, orgID, session, uuid.Nil, "", req)
 }
 
 func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placementKey string) (WorkerNode, error) {
+	return s.SelectStartNodeWithPlacementAndRequirements(ctx, orgID, session, repoID, placementKey, WorkerSelectionRequirements{})
+}
+
+func (s *WorkerSelector) SelectStartNodeWithPlacementAndRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placementKey string, req WorkerSelectionRequirements) (WorkerNode, error) {
 	if session == nil {
 		return WorkerNode{}, fmt.Errorf("session is required")
 	}
@@ -170,14 +225,14 @@ func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID
 	}
 
 	if repoID != uuid.Nil && strings.TrimSpace(placementKey) != "" {
-		worker, ok, lookupErr := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, true)
+		worker, ok, lookupErr := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, true, req)
 		if lookupErr == nil && ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "local_cache_holder")
 			return worker, nil
 		} else if lookupErr != nil {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
 		}
-		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, true); err != nil && !errors.Is(err, ErrNoPreviewWorkers) {
+		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, true, req); err != nil && !errors.Is(err, ErrNoPreviewWorkers) {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "rendezvous")
@@ -185,7 +240,7 @@ func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID
 		}
 	}
 
-	worker, err := s.SelectLeastLoadedNodeInPreferredRegion(ctx)
+	worker, err := s.selectLeastLoadedNode(ctx, nil, true, req)
 	if err == nil {
 		metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "least_loaded")
 		return worker, nil
@@ -194,13 +249,13 @@ func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID
 		return WorkerNode{}, err
 	}
 	if repoID != uuid.Nil && strings.TrimSpace(placementKey) != "" {
-		if worker, ok, err := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, false); err != nil {
+		if worker, ok, err := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, false, req); err != nil {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
 			return worker, nil
 		}
-		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, false); err != nil {
+		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, false, req); err != nil {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
@@ -208,7 +263,7 @@ func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID
 		}
 	}
 	metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
-	return s.SelectLeastLoadedNodeExcept(ctx, nil)
+	return s.selectLeastLoadedNode(ctx, nil, false, req)
 }
 
 // SelectLeastLoadedNode picks the preview-capable active worker with the fewest active previews.
@@ -217,16 +272,48 @@ func (s *WorkerSelector) SelectLeastLoadedNode(ctx context.Context) (WorkerNode,
 }
 
 func (s *WorkerSelector) SelectLeastLoadedNodeInPreferredRegion(ctx context.Context) (WorkerNode, error) {
-	return s.selectLeastLoadedNode(ctx, nil, true)
+	return s.selectLeastLoadedNode(ctx, nil, true, WorkerSelectionRequirements{})
 }
 
 // SelectLeastLoadedNodeExcept picks the least-loaded preview-capable active
 // worker while skipping any excluded worker IDs.
 func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, excluded map[string]struct{}) (WorkerNode, error) {
-	return s.selectLeastLoadedNode(ctx, excluded, false)
+	return s.selectLeastLoadedNode(ctx, excluded, false, WorkerSelectionRequirements{})
 }
 
-func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, preferredOnly bool) (WorkerNode, error) {
+// SelectLeastLoadedNodeWithRequirements picks the least-loaded worker that
+// satisfies the requested runtime capabilities.
+func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Context, req WorkerSelectionRequirements) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, nil, false, req)
+}
+
+// HasStaticEgressCapableWorker reports whether all active workers that can
+// claim session jobs are verified for static egress. Session jobs are claimed
+// from the generic jobs queue, so mixed-capability worker fleets cannot safely
+// expose the org setting as available.
+func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error) {
+	nodes, err := s.nodes.ListActive(ctx)
+	if err != nil {
+		return false, err
+	}
+	hasSessionWorker := false
+	for _, node := range nodes {
+		if !nodeCanClaimSessionJobs(node) {
+			continue
+		}
+		hasSessionWorker = true
+		metadata, err := parseWorkerNodeMetadata(node)
+		if err != nil {
+			return false, nil
+		}
+		if !workerMetadataMatchesStaticEgress(metadata, publicIP) {
+			return false, nil
+		}
+	}
+	return hasSessionWorker, nil
+}
+
+func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, error) {
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {
 		return WorkerNode{}, err
@@ -238,11 +325,11 @@ func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map
 		if _, skip := excluded[node.ID]; skip {
 			continue
 		}
-		worker, err := parseWorkerNode(node)
+		worker, err := parseWorkerNodeWithRequirements(node, req)
 		if err != nil {
 			continue
 		}
-		if worker.Mode != "worker" && worker.Mode != "all" {
+		if !nodeCanClaimSessionJobs(node) {
 			continue
 		}
 		if preferredOnly && !s.inPreferredRegion(worker) {
@@ -285,7 +372,7 @@ func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map
 	return best, nil
 }
 
-func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, preferredOnly bool) (WorkerNode, bool, error) {
+func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
 	locations, err := s.previews.ListDependencyCacheWorkersByPlacement(lookupCtx, orgID, repoID, placementKey, 64)
@@ -301,8 +388,8 @@ func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, 
 	}
 	routable := make(map[string]WorkerNode, len(nodes))
 	for _, node := range nodes {
-		worker, err := parseWorkerNode(node)
-		if err != nil || (worker.Mode != "worker" && worker.Mode != "all") {
+		worker, err := parseWorkerNodeWithRequirements(node, req)
+		if err != nil || !nodeCanClaimSessionJobs(node) {
 			continue
 		}
 		if preferredOnly && !s.inPreferredRegion(worker) {
@@ -341,15 +428,15 @@ func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, 
 	return WorkerNode{}, false, nil
 }
 
-func (s *WorkerSelector) selectRendezvousWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, topN int, preferredOnly bool) (WorkerNode, bool, error) {
+func (s *WorkerSelector) selectRendezvousWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, topN int, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {
 		return WorkerNode{}, false, err
 	}
 	var eligible []WorkerNode
 	for _, node := range nodes {
-		worker, err := parseWorkerNode(node)
-		if err != nil || (worker.Mode != "worker" && worker.Mode != "all") {
+		worker, err := parseWorkerNodeWithRequirements(node, req)
+		if err != nil || !nodeCanClaimSessionJobs(node) {
 			continue
 		}
 		if preferredOnly && !s.inPreferredRegion(worker) {
