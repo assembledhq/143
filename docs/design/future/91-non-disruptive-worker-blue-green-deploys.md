@@ -54,6 +54,10 @@ changing runtime ownership semantics.
   of sending a routine SIGTERM.
 - Routine worker deploys fail closed when no safe blue/green worker port is
   available.
+- Manual routine worker deploys use the same port-range contract as CI. Run
+  `make deploy-worker-preflight`, then deploy with
+  `make deploy-fleet ROLES=app,worker`; Make defaults the worker blue/green
+  range to `8080-8087`.
 - Routine worker deploys skip support-service recreation and block Docker/runsc
   mutation paths unless the operator explicitly chooses maintenance-style
   behavior.
@@ -229,6 +233,9 @@ Before starting green on a host, deploy preflight checks:
 - The host is healthy enough to run another worker generation.
 - A free worker endpoint exists in the configured blue/green port range.
 - No active preview runtime currently leases the candidate endpoint.
+- Endpoint ownership queries can reach Postgres with the worker's `DB_HOST` and
+  `DB_PASSWORD`; synchronous manual deploys load those values from
+  `/opt/143/.env` before selecting a routine port.
 - Docker daemon config is already compatible; the deploy will not need to
   restart Docker.
 - Shared support service config changes are either absent or classified as
