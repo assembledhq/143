@@ -254,15 +254,41 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(makefile), "ROLES ?= app,worker", "Makefile should make the default fleet role set visible to operators")
 	require.Contains(t, string(makefile), "force ?=", "Makefile should expose active-session force deploys as a make argument")
 	require.Contains(t, string(makefile), "TAG ?= latest", "Makefile should expose the image tag as the same kind of make argument as roles")
-	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)`, "single-role deploy targets should honor the same force argument as fleet deploys")
-	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG)`, "multi-host single-role deploy targets should pass force through for every host")
+	require.Contains(t, string(makefile), "WORKER_BLUE_GREEN_PORT_START ?= 8080", "Makefile should default manual worker deploys to the CI blue/green port range start")
+	require.Contains(t, string(makefile), "WORKER_BLUE_GREEN_PORT_END ?= 8087", "Makefile should default manual worker deploys to the CI blue/green port range end")
+	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)", "single-role deploy targets should honor force and the default blue/green range")
+	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG)", "multi-host single-role deploy targets should pass force and the default blue/green range for every host")
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
+	require.Contains(t, string(makefile), "make deploy-fleet ROLES=app,worker", "Makefile should document the manual non-disruptive worker deploy command")
 	require.Contains(t, string(makefile), "make deploy-fleet force=true", "Makefile should document how to override the active-session guardrail with a make argument")
-	require.Contains(t, string(makefile), `$(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)`, "Makefile should pass role, tag, and force arguments through to deploy-fleet.sh")
+	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)", "Makefile should pass role, tag, force, and the default blue/green range through to deploy-fleet.sh")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	require.Contains(t, string(deployScript), `-e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}"`, "worker deploy guardrail container should receive the force override from the deploy environment")
+}
+
+func TestWorkerDeployPreflightTargetValidatesBlueGreenReadiness(t *testing.T) {
+	t.Parallel()
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	makefileText := string(makefile)
+
+	require.Contains(t, makefileText, "deploy-worker-preflight", "Makefile should expose a read-only worker deploy preflight target")
+	require.Contains(t, makefileText, "./deploy/scripts/deploy-worker-preflight.sh", "preflight target should delegate validation to a dedicated script")
+	require.Contains(t, makefileText, "WORKER_BLUE_GREEN_PORT_START", "preflight target should pass the configured worker blue/green port start")
+	require.Contains(t, makefileText, "WORKER_BLUE_GREEN_PORT_END", "preflight target should pass the configured worker blue/green port end")
+
+	preflightScript, err := os.ReadFile("../deploy/scripts/deploy-worker-preflight.sh")
+	require.NoError(t, err, "test should read worker preflight script")
+	preflightText := string(preflightScript)
+
+	require.Contains(t, preflightText, "NODE_ID WORKER_PRIVATE_IP DB_HOST DB_PASSWORD", "preflight should validate required worker env values")
+	require.Contains(t, preflightText, "WORKER_BLUE_GREEN_PORT_START and WORKER_BLUE_GREEN_PORT_END must be numeric", "preflight should validate numeric blue/green port range")
+	require.Contains(t, preflightText, "SELECT COUNT(*) FROM preview_runtimes", "preflight should validate preview runtime endpoint ownership queries")
+	require.Contains(t, preflightText, "No safe worker blue/green port found", "preflight should give an actionable message when routine deploy cannot find a safe endpoint")
+	require.Contains(t, preflightText, "Use DEPLOY_MODE=maintenance only for disruptive host/runtime/support-service changes", "preflight should preserve the routine-vs-maintenance operator contract")
 }
 
 // Worker preview routing and sandbox orchestration require per-host values:
@@ -334,6 +360,7 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, `local end="${WORKER_BLUE_GREEN_PORT_END:-$start}"`, "worker deploy should default to the existing worker port only unless operators explicitly open a blue/green range")
 	require.Contains(t, deploy, "app-to-worker network must allow every configured worker blue/green port", "worker deploy should warn operators that app nodes must be able to reach every advertised worker generation port")
 	require.Contains(t, deploy, "worker_runtime_endpoint_in_use", "worker deploy should check preview runtime DB ownership before reusing a worker endpoint")
+	require.Contains(t, deploy, "load_worker_endpoint_check_env", "synchronous worker deploy should load DB endpoint-check credentials before selecting a routine port")
 	require.Contains(t, deploy, "FROM preview_runtimes WHERE endpoint_url", "worker deploy should query active preview runtime endpoints before selecting a generation port")
 	require.Contains(t, deploy, "status IN ('starting', 'ready', 'draining')", "worker deploy should treat starting, ready, and draining preview runtimes as endpoint owners")
 	require.Contains(t, deploy, `find_free_worker_port "$worker_private_ip"`, "worker deploy should pass the worker private IP into port selection so endpoint URLs match runtime routing")
@@ -510,6 +537,21 @@ func TestWorkerRuntimeEndpointQueryUsesPsqlStdinVariables(t *testing.T) {
 	require.NotContains(t, deploy, `-tAc "SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint'`, "worker endpoint ownership query must not use psql -c with psql variables because -c sends the colon syntax to Postgres")
 }
 
+func TestSynchronousWorkerDeployReadsDatabaseEnvFromRemoteEnvFile(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+	functionBody := extractShellFunction(t, deployText, "deploy_worker_blue_green", "dump_diagnostics")
+
+	require.Contains(t, deployText, `load_worker_endpoint_check_env()`, "deploy.sh should define one helper for loading endpoint-check DB credentials")
+	require.Contains(t, deployText, `DB_HOST="${DB_HOST:-$(read_worker_env_value DB_HOST)}"`, "helper should load DB_HOST from the refreshed remote .env file")
+	require.Contains(t, deployText, `DB_PASSWORD="${DB_PASSWORD:-$(read_worker_env_value DB_PASSWORD)}"`, "helper should load DB_PASSWORD from the refreshed remote .env file")
+	require.Contains(t, functionBody, `load_worker_endpoint_check_env`, "synchronous worker deploy should load endpoint-check credentials before finding a strict routine port")
+	require.Contains(t, functionBody, `find_free_worker_port "$worker_private_ip"`, "synchronous worker deploy should find a routine worker port after loading credentials")
+}
+
 func TestWorkerRuntimeEndpointQueryExecutesThroughPsqlStdin(t *testing.T) {
 	t.Parallel()
 
@@ -565,10 +607,16 @@ func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	deploy := string(deployScript)
+	functionBody := extractShellFunction(t, deploy, "deploy_worker_blue_green", "dump_diagnostics")
 
 	require.Contains(t, deploy, `endpoint_reuse_mode="${2:-strict}"`, "worker port selection should default to strict preview runtime endpoint ownership checks")
 	require.Contains(t, deploy, `[ "$endpoint_reuse_mode" = "after-blocking-drain" ]`, "worker port selection should retain explicit maintenance-only reuse after the old worker generation has fully drained")
-	require.NotContains(t, deploy, `host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"`, "routine worker deploy should not reuse the default endpoint through a blocking drain fallback")
+	require.Contains(t, functionBody, `deploy_mode="${DEPLOY_MODE:-routine}"`, "worker deploy should resolve deploy mode once before selecting a rollout path")
+	require.Contains(t, functionBody, `if [ "$deploy_mode" = "maintenance" ]; then`, "maintenance worker deploy should take an explicit blocking drain path")
+	require.Contains(t, functionBody, `drain_worker_containers_blocking "$old_containers"`, "maintenance worker deploy should stop old containers before reusing their endpoint")
+	require.Contains(t, functionBody, `host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"`, "maintenance worker deploy should allow default endpoint reuse after the blocking drain")
+	require.Contains(t, functionBody, `host_port="$(find_free_worker_port "$worker_private_ip")"`, "routine worker deploy should keep strict endpoint selection")
+	require.Contains(t, functionBody, `routine blue/green deploy refuses blocking drain fallback`, "routine worker deploy should still explain why it refuses endpoint reuse")
 }
 
 func extractShellFunction(t *testing.T, script, startFunc, nextFunc string) string {
