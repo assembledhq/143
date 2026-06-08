@@ -1129,6 +1129,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' /opt/143/.env
   }
 
+  load_worker_endpoint_check_env() {
+    DB_HOST="${DB_HOST:-$(read_worker_env_value DB_HOST)}"
+    DB_PASSWORD="${DB_PASSWORD:-$(read_worker_env_value DB_PASSWORD)}"
+    export DB_HOST DB_PASSWORD
+
+    if [ -z "${DB_HOST:-}" ] || [ -z "${DB_PASSWORD:-}" ]; then
+      echo "ERROR: DB_HOST and DB_PASSWORD are required to verify preview runtime endpoint reuse safety." >&2
+      echo "Run make deploy-worker-preflight to verify worker blue/green readiness before a routine deploy." >&2
+      return 1
+    fi
+  }
+
   sanitize_compose_project() {
     local raw="$1" sanitized
     sanitized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
@@ -1551,26 +1563,44 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   deploy_worker_blue_green() {
-    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id
+    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id deploy_mode
 
     old_containers="$(list_running_worker_containers || true)"
     preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"
     base_node_id="${WORKER_BASE_NODE_ID:-$(read_worker_env_value NODE_ID)}"
     worker_private_ip="$(read_worker_env_value WORKER_PRIVATE_IP)"
+    deploy_mode="${DEPLOY_MODE:-routine}"
     if [ -z "$base_node_id" ] || [ -z "$worker_private_ip" ]; then
       echo "ERROR: NODE_ID and WORKER_PRIVATE_IP must be present in /opt/143/.env for worker blue/green deploy." >&2
       return 1
     fi
-    worker_host_capacity_preflight
     ensure_routine_worker_fingerprints_compatible
+
+    if [ "$deploy_mode" = "maintenance" ]; then
+      if [ -n "$old_containers" ]; then
+        drain_worker_containers_blocking "$old_containers"
+      else
+        echo "No existing worker containers found; maintenance deploy will start a fresh generation."
+      fi
+    else
+      load_worker_endpoint_check_env
+      worker_host_capacity_preflight
+    fi
 
     generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
     node_id="${base_node_id}-g${generation}"
     deploy_id="worker-${generation}"
-    if ! host_port="$(find_free_worker_port "$worker_private_ip")"; then
-      echo "ERROR: no free worker generation port; routine blue/green deploy refuses blocking drain fallback." >&2
-      echo "Configure WORKER_BLUE_GREEN_PORT_START/END or run an explicit maintenance deploy." >&2
-      return 1
+    if [ "$deploy_mode" = "maintenance" ]; then
+      if ! host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"; then
+        echo "ERROR: no reusable worker host port after maintenance drain." >&2
+        return 1
+      fi
+    else
+      if ! host_port="$(find_free_worker_port "$worker_private_ip")"; then
+        echo "ERROR: no free worker generation port; routine blue/green deploy refuses blocking drain fallback." >&2
+        echo "Configure WORKER_BLUE_GREEN_PORT_START/END or run an explicit maintenance deploy." >&2
+        return 1
+      fi
     fi
     base_url="http://${worker_private_ip}:${host_port}"
     project="$(sanitize_compose_project "143-${node_id}")"
@@ -1892,7 +1922,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'

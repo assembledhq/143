@@ -65,10 +65,13 @@ are true:
 - No active `preview_runtimes.endpoint_url` equals
   `http://<worker_private_ip>:<port>`.
 
-Routine CI worker deploys explicitly configure a small blue/green port range so
-old worker generations keep serving owned previews while the replacement
-generation starts on another reachable port. When no extra blue/green port range
-is configured, the deploy blocks on old worker drain. After Docker releases the
-old worker's host port, the deploy may reuse that same endpoint while stale
-runtime leases expire; previews owned by the stopped generation are unavailable
-and restartable.
+Routine CI and manual worker deploys explicitly configure a small blue/green
+port range so old worker generations keep serving owned previews while the
+replacement generation starts on another reachable port. Operators can validate
+this with `make deploy-worker-preflight`, then deploy with
+`make deploy-fleet ROLES=app,worker`. Make defaults the worker blue/green range
+to `8080-8087`.
+When no safe blue/green endpoint is available,
+routine deploy fails closed. Explicit maintenance deploys may block on old
+worker drain and then reuse the drained endpoint; previews owned by the stopped
+generation are unavailable and restartable.

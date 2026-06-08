@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -495,8 +495,11 @@ spin-down-worker:
 TAG ?= latest
 ROLES ?= app,worker
 force ?=
+WORKER_BLUE_GREEN_PORT_START ?= 8080
+WORKER_BLUE_GREEN_PORT_END ?= 8087
 
 deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS))
+worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_START) WORKER_BLUE_GREEN_PORT_END=$(WORKER_BLUE_GREEN_PORT_END)
 
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
@@ -506,6 +509,7 @@ deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(
 #   make deploy-app    HOST=87.99.150.138
 #   make deploy-app    TAG=<sha>
 #   make deploy-worker force=true
+#   make deploy-fleet ROLES=app,worker
 
 # Shell snippet to read FLEET_HOSTS from env var or .env.production.enc via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);
@@ -523,7 +527,7 @@ endef
 define resolve-host
 if [ -n "$(HOST)" ]; then \
 	echo "Deploying $(1) → $(HOST)"; \
-	$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG); \
+	$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG); \
 else \
 	$(read-fleet-hosts); \
 	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^$(1):' | cut -d: -f2)"; \
@@ -533,7 +537,7 @@ else \
 	fi; \
 	for h in $$HOSTS; do \
 		echo "Deploying $(1) → $$h"; \
-		$(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG); \
+		$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $$h $(SSH_KEY) $(TAG); \
 	done; \
 fi
 endef
@@ -545,6 +549,24 @@ deploy-app:
 deploy-worker:
 	$(check-ssh-key)
 	@$(call resolve-host,worker)
+
+deploy-worker-preflight:
+	$(check-ssh-key)
+	@if [ -n "$(HOST)" ]; then \
+		HOSTS="$(HOST)"; \
+	else \
+		$(read-fleet-hosts); \
+		HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^worker:' | cut -d: -f2)"; \
+	fi; \
+	if [ -z "$$HOSTS" ]; then \
+		echo "ERROR: no worker host in FLEET_HOSTS; set HOST=<worker-host> or add worker:<ip> to FLEET_HOSTS"; exit 1; \
+	fi; \
+	for h in $$HOSTS; do \
+		echo "=== worker preflight $$h ==="; \
+		WORKER_BLUE_GREEN_PORT_START="$(WORKER_BLUE_GREEN_PORT_START)" \
+		WORKER_BLUE_GREEN_PORT_END="$(WORKER_BLUE_GREEN_PORT_END)" \
+		bash ./deploy/scripts/deploy-worker-preflight.sh $$h $(SSH_KEY); \
+	done
 
 # Tail the latest detached worker rollover log on each worker host.
 # Useful after a CI deploy (which runs with WORKER_DEPLOY_DETACH=1) to see
@@ -588,7 +610,7 @@ deploy-redis:
 #   make deploy-fleet force=true
 deploy-fleet:
 	$(check-ssh-key)
-	$(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
+	$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
