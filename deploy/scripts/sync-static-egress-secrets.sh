@@ -149,7 +149,11 @@ if [ -z "$static_public_ip" ]; then
   echo "Static egress is not configured; STATIC_EGRESS_PUBLIC_IP is empty."
   exit 0
 fi
-require_command wg
+if ! command -v wg >/dev/null 2>&1; then
+  echo "ERROR: WireGuard tools are required to generate static egress keys, but 'wg' was not found." >&2
+  echo "Install locally with: brew install wireguard-tools" >&2
+  exit 1
+fi
 
 fleet_hosts="$(dotenv_get FLEET_HOSTS "$tmp_env")"
 if [ -z "$fleet_hosts" ]; then
@@ -288,7 +292,7 @@ if [ "$APPLY" -ne 1 ]; then
   exit 0
 fi
 
-sops --encrypt --input-type dotenv --output-type dotenv "$tmp_env" > "$tmp_env.enc"
+sops --encrypt --filename-override "$ENC_FILE" --input-type dotenv --output-type dotenv "$tmp_env" > "$tmp_env.enc"
 mv "$tmp_env.enc" "$ENC_FILE"
 echo "Updated $ENC_FILE with generated static egress config."
 echo "Commit $ENC_FILE after provisioning succeeds so generated gateway and worker keys are preserved."
