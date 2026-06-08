@@ -159,6 +159,7 @@ fi
 
 declare -a worker_hosts
 egress_host_count=0
+seen_worker_hosts=","
 IFS=',' read -r -a fleet_entries <<< "$fleet_hosts"
 for entry in "${fleet_entries[@]}"; do
   entry="$(trim_spaces "$entry")"
@@ -169,6 +170,13 @@ for entry in "${fleet_entries[@]}"; do
     egress_host_count=$((egress_host_count + 1))
   fi
   if [ "$role" = "worker" ] && [ -n "$host" ] && [ "$host" != "$entry" ]; then
+    case "$seen_worker_hosts" in
+      *",$host,"*)
+        echo "ERROR: duplicate worker:<host> entry in FLEET_HOSTS: worker:$host" >&2
+        exit 1
+        ;;
+    esac
+    seen_worker_hosts="${seen_worker_hosts}${host},"
     worker_hosts+=("$host")
   fi
 done
