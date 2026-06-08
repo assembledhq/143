@@ -21,11 +21,15 @@ func automationColumnSlice() []string {
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
 }
 
 func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
+	metadata := a.ExternalMetadata
+	if len(metadata) == 0 {
+		metadata = []byte(`{}`)
+	}
 	return rows.AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.IconType.OrDefault(), a.IconValue,
@@ -33,7 +37,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
-		a.Priority, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
+		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
 	)
 }
 
@@ -75,7 +79,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(25)...).
+		WithArgs(anyArgs(26)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -204,7 +208,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(27)...).
+		WithArgs(anyArgs(28)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))
@@ -581,6 +585,27 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 	got, err := store.GetByID(context.Background(), orgID, automationID, runID)
 	require.NoError(t, err)
 	require.Equal(t, runID, got.ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_CountConsecutiveFailures(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	store := NewAutomationRunStore(mock)
+
+	mock.ExpectQuery(`WITH ordered AS`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+	count, err := store.CountConsecutiveFailures(context.Background(), orgID, automationID)
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

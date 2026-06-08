@@ -144,3 +144,120 @@ func TestSlackUserLinkStore_DeleteByID_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, pgx.ErrNoRows, "DeleteByID should return ErrNoRows when no link is found")
 	require.NoError(t, mock.ExpectationsWereMet(), "DeleteByID not-found should satisfy expected SQL")
 }
+
+func TestSessionAttributionStore_Create(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	attributionID := uuid.New()
+	now := time.Now()
+	metadata := json.RawMessage(`{"slack_team_id":"T123","slack_channel_id":"C123","team_session":true}`)
+	store := NewSessionAttributionStore(mock)
+
+	mock.ExpectQuery(`INSERT INTO session_attributions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "source", "source_metadata", "created_at",
+		}).AddRow(
+			attributionID, orgID, sessionID, models.SessionAttributionSourceSlack, metadata, now,
+		))
+
+	attribution := &models.SessionAttribution{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		Source:         models.SessionAttributionSourceSlack,
+		SourceMetadata: metadata,
+	}
+
+	err = store.Create(context.Background(), attribution)
+
+	require.NoError(t, err, "Create should persist an org-scoped session attribution")
+	require.Equal(t, attributionID, attribution.ID, "Create should scan the stored attribution")
+	require.Equal(t, metadata, attribution.SourceMetadata, "Create should preserve sanitized source metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "Create should satisfy expected SQL")
+}
+
+func TestSessionAttributionStore_Create_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	metadata := json.RawMessage(`{"slack_team_id":"T123"}`)
+	store := NewSessionAttributionStore(mock)
+
+	mock.ExpectQuery(`INSERT INTO session_attributions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "source", "source_metadata", "created_at",
+		}))
+
+	attribution := &models.SessionAttribution{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		Source:         models.SessionAttributionSourceSlack,
+		SourceMetadata: metadata,
+	}
+
+	err = store.Create(context.Background(), attribution)
+
+	require.NoError(t, err, "Create should be idempotent when attribution already exists for the session")
+	require.NoError(t, mock.ExpectationsWereMet(), "Create conflict path should satisfy expected SQL")
+}
+
+func TestSlackSessionLinkStore_AppHomePreviewQueryIncludesLinkedSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+	store := NewSlackSessionLinkStore(mock)
+
+	mock.ExpectQuery(`LEFT JOIN slack_session_links sl`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"preview_id", "name", "status", "expires_at", "updated_at"}).
+			AddRow(previewID, "web", "ready", nil, now))
+
+	got, err := store.ListActivePreviewsForSlackUser(context.Background(), orgID, "T123", "U123", 5)
+
+	require.NoError(t, err, "App Home preview query should include linked-session previews")
+	require.Equal(t, []SlackHomePreviewSummary{{PreviewID: previewID, Name: "web", Status: "ready", UpdatedAt: now}}, got, "App Home preview query should scan summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "preview query should include Slack session links")
+}
+
+func TestSlackSessionLinkStore_AppHomeAutomationRunsIncludeSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	automationID := uuid.New()
+	now := time.Now()
+	store := NewSlackSessionLinkStore(mock)
+
+	mock.ExpectQuery(`jsonb_array_elements_text\(COALESCE\(scs.notification_subscriptions->'automations'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"run_id", "automation_id", "goal_snapshot", "status", "result_summary", "session_id", "updated_at"}).
+			AddRow(runID, automationID, "ship the thing", "completed", nil, nil, now))
+
+	got, err := store.ListRecentAutomationRunsForSlackUser(context.Background(), orgID, "T123", "U123", 5)
+
+	require.NoError(t, err, "App Home automation query should include subscribed automations")
+	require.Equal(t, []SlackHomeAutomationRunSummary{{RunID: runID, AutomationID: automationID, GoalSnapshot: "ship the thing", Status: "completed", UpdatedAt: now}}, got, "App Home automation query should scan summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation query should inspect channel automation subscriptions")
+}

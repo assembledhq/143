@@ -364,7 +364,7 @@ describe('SessionSidebar', () => {
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
-  it('shows a pending opening state immediately when a session row is clicked', async () => {
+  it('uses direct session links without an intermediate opening state', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Slow session' }),
       makeSession({ id: 's2', result_summary: 'Other session' }),
@@ -377,18 +377,13 @@ describe('SessionSidebar', () => {
 
     await userEvent.click(link!);
 
-    expect(link).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByText('Opening')).toBeInTheDocument();
-    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveClass(
-      'border-primary/20',
-      'bg-background',
-      'shadow-sm',
-    );
+    expect(link).not.toHaveAttribute('aria-busy');
+    expect(screen.queryByText('Opening')).not.toBeInTheDocument();
+    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveTextContent('Completed');
     expect(screen.getByText('Other session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
   });
 
-  it('keeps the target row pending when switching from one selected session to another', async () => {
+  it('does not hold a target row pending when switching from one selected session to another', async () => {
     mockSelectedSegment = 's1';
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Current session' }),
@@ -402,14 +397,10 @@ describe('SessionSidebar', () => {
 
     await userEvent.click(nextLink!);
 
-    expect(nextLink).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText('Current session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
-    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveClass(
-      'border-primary/20',
-      'bg-background',
-      'shadow-sm',
-    );
+    expect(nextLink).not.toHaveAttribute('aria-busy');
+    expect(screen.queryByText('Opening')).not.toBeInTheDocument();
+    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByText('Current session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
   });
 
   it('uses the same row padding frame for the new-session draft and normal sessions', async () => {
@@ -1304,6 +1295,8 @@ describe('SessionSidebar', () => {
 
     await user.keyboard('{Enter}');
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s3');
+    expect(screen.queryByText('Opening')).not.toBeInTheDocument();
+    expect(screen.getByText('Gamma keyboard').closest('a')).not.toHaveAttribute('aria-busy');
   });
 
   it('focuses search, starts a new session, and archives the active session by shortcut', async () => {

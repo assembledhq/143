@@ -143,6 +143,33 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 delivered");
   });
 
+  it("shows agent-tool provenance in the tab tooltip", async () => {
+    const user = userEvent.setup();
+    const thread = makeThread({
+      created_by_source: "agent_tool",
+      created_by_thread_id: "source-thread-1",
+    });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.hover(screen.getByText("Main tab"));
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Created by agent via 143-tools");
+  });
+
   it("keeps the single-agent tooltip trigger scoped to the visible tab label", () => {
     const thread = makeThread({ label: "Main" });
 

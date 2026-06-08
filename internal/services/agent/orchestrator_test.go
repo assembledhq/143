@@ -295,6 +295,8 @@ type mockSessionStore struct {
 	mu                     sync.Mutex
 	countRunning           int
 	statusUpdates          []string
+	statusUpdateContexts   []statusUpdateContext
+	sandboxStateContexts   []sandboxStateUpdateContext
 	resultUpdates          []resultUpdate
 	workspaceUpdates       []workspaceUpdate
 	turnUpdates            []turnUpdate
@@ -353,6 +355,16 @@ type failureUpdate struct {
 	category     string
 	nextSteps    []string
 	retryAdvised bool
+}
+
+type statusUpdateContext struct {
+	status models.SessionStatus
+	err    error
+}
+
+type sandboxStateUpdateContext struct {
+	state models.SandboxState
+	err   error
 }
 
 type workerOwnershipUpdate struct {
@@ -415,6 +427,10 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.U
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusUpdates = append(m.statusUpdates, string(status))
+	m.statusUpdateContexts = append(m.statusUpdateContexts, statusUpdateContext{
+		status: status,
+		err:    ctx.Err(),
+	})
 	return nil
 }
 
@@ -469,6 +485,13 @@ func (m *mockSessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uu
 		hardDeadline: hardDeadline,
 		observedAt:   observedAt,
 	})
+	if m.beginRuntimeErr == nil {
+		m.statusUpdates = append(m.statusUpdates, string(models.SessionStatusRunning))
+		m.statusUpdateContexts = append(m.statusUpdateContexts, statusUpdateContext{
+			status: models.SessionStatusRunning,
+			err:    ctx.Err(),
+		})
+	}
 	return m.beginRuntimeErr
 }
 
@@ -555,6 +578,12 @@ func (m *mockSessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessi
 }
 
 func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sandboxStateContexts = append(m.sandboxStateContexts, sandboxStateUpdateContext{
+		state: state,
+		err:   ctx.Err(),
+	})
 	return nil
 }
 
@@ -722,6 +751,22 @@ func (m *mockSessionStore) getStatusUpdates() []string {
 	defer m.mu.Unlock()
 	out := make([]string, len(m.statusUpdates))
 	copy(out, m.statusUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getStatusUpdateContexts() []statusUpdateContext {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]statusUpdateContext, len(m.statusUpdateContexts))
+	copy(out, m.statusUpdateContexts)
+	return out
+}
+
+func (m *mockSessionStore) getSandboxStateUpdateContexts() []sandboxStateUpdateContext {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]sandboxStateUpdateContext, len(m.sandboxStateContexts))
+	copy(out, m.sandboxStateContexts)
 	return out
 }
 
@@ -1266,6 +1311,10 @@ func testRun(orgID, issueID uuid.UUID) *models.Session {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 type testDeps struct {
@@ -2169,7 +2218,7 @@ func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T)
 	require.Contains(t, err.Error(), "begin runtime control", "RecoverSession should wrap the runtime initialization failure")
 
 	statuses := d.sessions.getStatusUpdates()
-	require.Equal(t, []string{"running", "running"}, statuses, "recovery should preserve the running status when runtime initialization fails")
+	require.Equal(t, []string{"running"}, statuses, "recovery should preserve the running status when runtime initialization fails")
 }
 
 // TestRunAgent_PreviewHoldsContainerSkipsDestroy covers the branch where
@@ -7106,6 +7155,72 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when hydrate fails after the listener was opened")
 }
 
+func TestContinueSession_HydrateFailureCleanupUsesDetachedContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	snapshotKey := "snap-key"
+	session.SnapshotKey = &snapshotKey
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, _ io.Reader) error {
+		cancel()
+		return context.Canceled
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(ctx, session, nil)
+	require.Error(t, err, "ContinueSession should propagate the hydrate cancellation")
+	require.Contains(t, err.Error(), "hydrate sandbox", "ContinueSession should surface the hydrate failure")
+
+	var idleRevert *statusUpdateContext
+	for _, update := range d.sessions.getStatusUpdateContexts() {
+		if update.status == models.SessionStatusIdle {
+			updateCopy := update
+			idleRevert = &updateCopy
+			break
+		}
+	}
+	require.NotNil(t, idleRevert, "hydrate failure should revert the session to idle")
+	require.NoError(t, idleRevert.err, "hydrate failure session cleanup should use a detached context")
+
+	var snapshottedRevert *sandboxStateUpdateContext
+	for _, update := range d.sessions.getSandboxStateUpdateContexts() {
+		if update.state == models.SandboxStateSnapshotted {
+			updateCopy := update
+			snapshottedRevert = &updateCopy
+			break
+		}
+	}
+	require.NotNil(t, snapshottedRevert, "hydrate failure should restore the snapshotted sandbox state")
+	require.NoError(t, snapshottedRevert.err, "hydrate failure sandbox-state cleanup should use a detached context")
+}
+
 // TestContinueSession_AcquireHoldErrorFailsTurn covers the branch where
 // AcquireTurnHold errors after fresh sandbox creation: we must destroy the
 // local sandbox and fail the turn rather than leaking a container that
@@ -9078,7 +9193,7 @@ func TestRunAgent_RevertsToPendingWhenRuntimeInitFails(t *testing.T) {
 	require.Contains(t, err.Error(), "begin runtime control", "RunAgent should wrap the runtime initialization failure")
 
 	statuses := d.sessions.getStatusUpdates()
-	require.Equal(t, []string{"running", "pending"}, statuses, "RunAgent should roll the session back out of running when runtime initialization fails")
+	require.Equal(t, []string{"pending"}, statuses, "RunAgent should not expose a running state when atomic runtime initialization fails")
 }
 
 // TestRunAgent_UserCancelTakesPrecedenceOverDeadline guards the ordering
@@ -9363,6 +9478,62 @@ func TestRunAgent_PiModelOverrideReachesSandbox(t *testing.T) {
 	require.NoError(t, orch.RunAgent(context.Background(), run))
 	require.Equal(t, "pi-key", capturedCfg.Env["PI_API_KEY"], "Pi should keep using the dedicated Pi credential")
 	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "per-run model override should reach the sandbox env")
+}
+
+func TestBuildIntegrationSkills_SessionTabsRespectOrgSetting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		settings     models.OrgSettings
+		settingsErr  error
+		wantTabTools bool
+	}{
+		{
+			name:         "default exposes session tab tools",
+			settings:     models.OrgSettings{},
+			wantTabTools: true,
+		},
+		{
+			name: "disabled hides session tab tools",
+			settings: models.OrgSettings{
+				CodingAgentTabToolsEnabled: boolPtr(false),
+			},
+			wantTabTools: false,
+		},
+		{
+			name:         "settings lookup failure hides session tab tools",
+			settingsErr:  errors.New("settings unavailable"),
+			wantTabTools: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			settingsJSON, err := json.Marshal(tt.settings)
+			require.NoError(t, err, "org settings fixture should marshal")
+
+			orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+				Provider:          testutil.NewMockSandboxProvider(),
+				Orgs:              &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}, err: tt.settingsErr},
+				Credentials:       &mockCredentialProvider{},
+				InternalAPIURL:    "http://internal-api",
+				InternalAPISecret: "secret",
+				Logger:            zerolog.Nop(),
+			})
+
+			doc := orch.BuildIntegrationSkills(context.Background(), orgID)
+			require.Contains(t, doc, "143-tools pr create", "PR creation should remain available when internal API credentials are configured")
+			if tt.wantTabTools {
+				require.Contains(t, doc, "`session-tabs`", "default-enabled orgs should expose session tab tools in sandbox docs")
+				return
+			}
+			require.NotContains(t, doc, "`session-tabs`", "disabled orgs should hide session tab tools from sandbox docs")
+		})
+	}
 }
 
 // TestRunAgent_PiMissingCredentialFailsFast asserts that a Pi run fails fast

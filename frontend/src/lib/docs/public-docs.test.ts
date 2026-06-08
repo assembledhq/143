@@ -40,14 +40,16 @@ function readPublicMdx(filePath: string) {
   const description = match[1]
     .match(/^description:\s*(.+)$/m)?.[1]
     .replace(/^"|"$/g, "");
+  const status = match[1].match(/^status:\s*(.+)$/m)?.[1].replace(/^"|"$/g, "");
 
-  if (!title || !description) {
-    throw new Error(`${filePath} is missing title or description`);
+  if (!title || !description || !status) {
+    throw new Error(`${filePath} is missing title, description, or status`);
   }
 
   return {
     body: match[2].trimStart(),
     description,
+    status,
     title,
   };
 }
@@ -96,6 +98,14 @@ describe("public docs source", () => {
     }
   });
 
+  it("marks every public docs page as generally available", () => {
+    for (const filePath of publicMdxFiles()) {
+      const page = readPublicMdx(filePath);
+
+      expect(page.status).toBe("stable");
+    }
+  });
+
   it("documents the public docs authoring model for future pages", () => {
     const agentsPath = join(publicDocsPath, "AGENTS.md");
 
@@ -135,6 +145,19 @@ describe("public docs source", () => {
     expect(raw.content).toContain("## Secrets and config");
     expect(raw.content).toContain("`preview.credentials`");
     expect(raw.content).toContain("admin-managed values");
+  });
+
+  it("publishes an agent-facing 143-tools CLI reference", () => {
+    expect(referenceMeta.pages).toContain("agent-tools");
+
+    const raw = getRawPublicDocBySlug(["reference", "agent-tools"]);
+
+    expect(raw.content).toContain("## CLI contract");
+    expect(raw.content).toContain("### `linear list_tasks`");
+    expect(raw.content).toContain("`--team`");
+    expect(raw.content).toContain("### `pr create`");
+    expect(raw.content).toContain("### `circleci get_recent_test_failures`");
+    expect(raw.content).toContain("### `logs query`");
   });
 
   it("generates llms.txt from the public docs index", () => {

@@ -43,25 +43,25 @@ Run `143-tools --help` for the full list. Key tools:
 {{.SkillsDoc}}
 {{if .HasNotion}}
 For Notion: Search for new or updated documents since last refresh:
-  143-tools notion_search_documents --query "roadmap"
-  143-tools notion_search_documents --query "strategy"
-  143-tools notion_search_documents --query "post-mortem"
+  143-tools notion search_documents --query "roadmap"
+  143-tools notion search_documents --query "strategy"
+  143-tools notion search_documents --query "post-mortem"
 For each relevant result, fetch the full document:
-  143-tools notion_get_document --doc_id <id>
+  143-tools notion get_document --doc_id <id>
 {{end}}
 {{if .HasLinear}}
 For Linear: Check for new projects, completed initiatives, priority shifts:
-  143-tools linear_list_tasks --limit 50
-  143-tools linear_list_tasks --priority urgent
+  143-tools linear list_tasks --limit 50
+  143-tools linear list_tasks --priority urgent
 {{end}}
 {{if .HasSentry}}
 For Sentry: Check for new error patterns or shifts in reliability:
-  143-tools sentry_list_errors --severity critical --limit 20
+  143-tools sentry list_errors --severity critical --limit 20
 {{end}}
 {{if .HasGitHub}}
 For GitHub PRs: Check for new code review patterns since the last refresh:
-  143-tools github_list_recent_prs --limit 20
-  143-tools github_get_pr_reviews --pr_number <number>
+  143-tools github list_recent_prs --limit 20
+  143-tools github get_pr_reviews --pr_number <number>
 Look for shifts in review feedback themes or new quality concerns.
 {{end}}
 

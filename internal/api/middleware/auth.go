@@ -2,11 +2,13 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
@@ -119,6 +121,8 @@ type AuthStores struct {
 	Users            *db.UserStore
 	Memberships      *db.OrganizationMembershipStore
 	PreviewAPITokens *db.PreviewAPITokenStore
+	APITokens        *db.APITokenStore
+	Audit            *db.AuditEmitter
 }
 
 // Auth reads the session cookie (or Bearer token), loads the user identity,
@@ -163,6 +167,11 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		// terminal — logs the user out. Surface transient errors as 503 so
 		// the useAuth retry path handles them.
 		if errors.Is(err, pgx.ErrNoRows) {
+			if !cookieBased && stores.APITokens != nil && strings.HasPrefix(token, "143_sk_") {
+				if handleGeneralAPIToken(w, r, next, stores, logger, token) {
+					return
+				}
+			}
 			if !cookieBased && stores.PreviewAPITokens != nil {
 				if handlePreviewAPIToken(w, r, next, stores, logger, token) {
 					return
@@ -260,6 +269,62 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		recorder.SetResolvedIdentity(activeOrgID, user.ID)
 	}
 	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func handleGeneralAPIToken(w http.ResponseWriter, r *http.Request, next http.Handler, stores AuthStores, logger zerolog.Logger, rawToken string) bool {
+	resolved, err := stores.APITokens.GetByToken(r.Context(), rawToken, remoteAddrIP(r), r.UserAgent())
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Msg("auth: api token lookup failed")
+			writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "api token lookup failed")
+			return true
+		}
+		return false
+	}
+	if resolved.Client.Status == models.APIClientStatusDisabled {
+		writeError(w, http.StatusForbidden, "API_CLIENT_DISABLED", "API client is disabled")
+		return true
+	}
+	ctx := WithAPIIdentity(r.Context(), &resolved.Client, &resolved.Token)
+	ctx = WithActiveRole(ctx, "api_token")
+	emitAPITokenUsed(r, stores.Audit, resolved)
+	next.ServeHTTP(w, r.WithContext(ctx))
+	return true
+}
+
+func emitAPITokenUsed(r *http.Request, emitter *db.AuditEmitter, resolved models.AuthenticatedAPIToken) {
+	if emitter == nil {
+		return
+	}
+	tokenID := resolved.Token.ID
+	resourceID := tokenID.String()
+	var requestID *string
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		requestID = &reqID
+	}
+	var userAgent *string
+	if ua := r.UserAgent(); ua != "" {
+		userAgent = &ua
+	}
+	details, err := json.Marshal(map[string]any{
+		"method":       r.Method,
+		"path":         r.URL.Path,
+		"token_prefix": resolved.Token.TokenPrefix,
+	})
+	if err != nil {
+		details = []byte(`{}`)
+	}
+	emitter.EmitAPIAction(r.Context(), db.APIActionParams{
+		OrgID:        resolved.Client.OrgID,
+		APIClientID:  resolved.Client.ID,
+		APITokenID:   &tokenID,
+		Action:       models.AuditActionAPITokenUsed,
+		ResourceType: models.AuditResourceAPIToken,
+		ResourceID:   &resourceID,
+		Details:      details,
+		RequestID:    requestID,
+		UserAgent:    userAgent,
+	})
 }
 
 func handlePreviewAPIToken(w http.ResponseWriter, r *http.Request, next http.Handler, stores AuthStores, logger zerolog.Logger, rawToken string) bool {

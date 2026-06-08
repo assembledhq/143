@@ -92,6 +92,18 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 			expected:  true,
 		},
 		{
+			name:      "event family wildcard matches event",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "preview.stale",
+			expected:  true,
+		},
+		{
+			name:      "event family wildcard rejects other family",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "session.completed",
+			expected:  false,
+		},
+		{
 			name:         "automation list matches automation event",
 			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, automationID)),
 			eventKind:    "automation.run.completed",
@@ -119,6 +131,53 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 
 			got := slackNotificationSubscriptionMatches(tt.raw, tt.eventKind, tt.automationID)
 			require.Equal(t, tt.expected, got, "subscription matcher should return the expected decision")
+		})
+	}
+}
+
+func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) {
+	t.Parallel()
+
+	subscriber := "U999"
+	tests := []struct {
+		name          string
+		settings      models.SlackChannelSettings
+		expectedDests []slackNotificationDestination
+	}{
+		{
+			name: "thread visibility sends channel plus explicit DM subscribers",
+			settings: models.SlackChannelSettings{
+				SlackTeamID:               "T123",
+				SlackChannelID:            "C123",
+				ResponseVisibility:        "thread",
+				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
+			},
+			expectedDests: []slackNotificationDestination{
+				{TeamID: "T123", ChannelID: "C123"},
+				{TeamID: "T123", SlackUserID: subscriber},
+			},
+		},
+		{
+			name: "dm visibility suppresses general channel notification and sends configured DMs",
+			settings: models.SlackChannelSettings{
+				SlackTeamID:               "T123",
+				SlackChannelID:            "C123",
+				ResponseVisibility:        "dm",
+				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
+			},
+			expectedDests: []slackNotificationDestination{
+				{TeamID: "T123", SlackUserID: subscriber},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationDestinations(tt.settings, slackNotificationFanoutInput{EventKind: "session.completed"})
+
+			require.Equal(t, tt.expectedDests, got, "notification destinations should honor response visibility")
 		})
 	}
 }
@@ -202,6 +261,43 @@ func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.
 	view := slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}})
 
 	require.Contains(t, slackBlockIDs(view.Blocks), "notification_events", "channel config modal should include Slack-native notification event selection")
+	blocksJSON, err := json.Marshal(view.Blocks)
+	require.NoError(t, err, "channel config modal blocks should marshal to JSON")
+	blocksStr := string(blocksJSON)
+	require.Contains(t, blocksStr, "automation.run.failure_streak", "channel config modal should expose automation failure-streak notifications")
+	require.Contains(t, blocksStr, `"preview.*"`, "channel config modal should expose all-preview-events wildcard subscription")
+}
+
+func TestSlackHomeOrgSelectorBlockIsActionable(t *testing.T) {
+	t.Parallel()
+
+	activeOrgID := uuid.New()
+	otherOrgID := uuid.New()
+	block := slackHomeOrgSelectorBlock([]models.MembershipSummary{
+		{OrgID: activeOrgID, OrgName: "Active", Role: models.RoleAdmin},
+		{OrgID: otherOrgID, OrgName: "Other", Role: models.RoleMember},
+	}, activeOrgID)
+
+	require.Equal(t, "actions", block.Type, "multi-org Slack App Home should render an actionable organization selector")
+	require.NotEmpty(t, block.Elements, "organization selector should include select elements")
+	require.Equal(t, "slack_select_org", block.Elements[0]["action_id"], "organization selector should route to Slack org selection")
+}
+
+func TestRenderSlackFinalBlocksIncludesSpecializedOutcomeActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	_, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:              sessionID,
+			PRCreationState: models.PRCreationStateFailed,
+		},
+		PullRequest: &models.PullRequest{GitHubPRURL: "https://github.com/acme/repo/pull/42", Status: models.PullRequestStatusOpen},
+	})
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_repair_pr"), "failed PR outcome should include a repair action")
+	require.True(t, slackBlocksContainAction(blocks, "slack_merge_pr"), "open PR outcome should include a merge action")
 }
 
 func TestSlackTeamSessionLabel(t *testing.T) {
@@ -209,6 +305,78 @@ func TestSlackTeamSessionLabel(t *testing.T) {
 
 	require.Contains(t, slackTeamSessionLine(models.SlackSessionLink{TeamSession: true}), "team session", "team sessions should be clearly labeled")
 	require.Empty(t, slackTeamSessionLine(models.SlackSessionLink{}), "mapped user sessions should not include team-session copy")
+}
+
+func TestSlackSessionAttributionMetadataIsSanitized(t *testing.T) {
+	t.Parallel()
+
+	mappedUserID := uuid.New()
+	raw := slackSessionAttributionMetadata(models.SlackSessionLink{
+		SlackTeamID:           "T123",
+		SlackChannelID:        "C123",
+		SlackThreadTS:         "1710000000.000000",
+		SlackRootTS:           "1710000000.000000",
+		SlackMessagePermalink: "https://slack.example/thread",
+		SlackUserID:           "U123",
+		MappedUserID:          &mappedUserID,
+		TeamSession:           false,
+	})
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got), "metadata should be valid JSON")
+	require.Equal(t, "T123", got["slack_team_id"], "metadata should include Slack team attribution")
+	require.Equal(t, "C123", got["slack_channel_id"], "metadata should include Slack channel attribution")
+	require.Equal(t, "1710000000.000000", got["slack_thread_ts"], "metadata should include Slack thread attribution")
+	require.Equal(t, mappedUserID.String(), got["mapped_user_id"], "metadata should include mapped user attribution")
+	require.NotContains(t, got, "text", "metadata should not store raw Slack message text")
+	require.NotContains(t, got, "raw_payload", "metadata should not duplicate raw Slack payloads")
+}
+
+func TestSlackPreviewIsStaleForSession(t *testing.T) {
+	t.Parallel()
+
+	oldRevision := int64(2)
+	currentRevision := int64(4)
+	tests := []struct {
+		name     string
+		session  models.Session
+		preview  models.PreviewInstance
+		expected bool
+	}{
+		{
+			name:     "active preview behind session is stale",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &oldRevision, Status: models.PreviewStatusReady},
+			expected: true,
+		},
+		{
+			name:     "matching revision is current",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &currentRevision, Status: models.PreviewStatusReady},
+			expected: false,
+		},
+		{
+			name:     "terminal preview is not notified as stale",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &oldRevision, Status: models.PreviewStatusStopped},
+			expected: false,
+		},
+		{
+			name:     "preview without source revision is unknown",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{Status: models.PreviewStatusReady},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackPreviewIsStaleForSession(tt.session, tt.preview)
+			require.Equal(t, tt.expected, got, "stale preview detection should match session and preview revisions")
+		})
+	}
 }
 
 func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
@@ -224,6 +392,37 @@ func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
 	require.Contains(t, text, "Session: https://143.test/sessions/"+sessionID.String(), "final text should include the session link")
 	require.True(t, slackBlocksContainAction(blocks, "slack_open_preview"), "final Slack blocks should include open-preview button when preview exists")
 	require.Contains(t, slackBlocksActionValue(blocks, "slack_open_preview"), orgID.String(), "open-preview action value must contain the correct org_id")
+}
+
+func TestSlackHumanInputAuthorizationAllowsTeamSessionClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	requestID := uuid.New()
+	link := models.SlackSessionLink{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		SlackTeamID:    "T123",
+		SlackChannelID: "C123",
+		TeamSession:    true,
+	}
+	slackLink := models.SlackUserLink{UserID: &userID}
+	membership := models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: models.RoleMember}
+
+	decision, err := authorizeSlackHumanInputAnswer(context.Background(), workerSlackHumanInputAuthStores{
+		sessionLinks: workerSlackSessionLinkLookup{link: link},
+		userLinks:    workerSlackUserLinkLookup{link: slackLink},
+		memberships:  workerSlackMembershipLookup{membership: membership},
+	}, orgID, sessionID, requestID, models.SlackInteractionJobPayload{
+		TeamID:    "T123",
+		ChannelID: "C123",
+		UserID:    "U123",
+	})
+
+	require.NoError(t, err, "authorized mapped Slack users should be able to claim human input on originating team sessions")
+	require.Equal(t, userID, decision.AnsweredByUserID, "human input should be answered as the mapped 143 user")
 }
 
 func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
@@ -266,6 +465,42 @@ func slackBlocksActionValue(blocks []ingestion.SlackBlock, actionID string) stri
 		}
 	}
 	return ""
+}
+
+type workerSlackSessionLinkLookup struct {
+	link models.SlackSessionLink
+	err  error
+}
+
+func (s workerSlackSessionLinkLookup) GetBySession(context.Context, uuid.UUID, uuid.UUID) (models.SlackSessionLink, error) {
+	if s.err != nil {
+		return models.SlackSessionLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerSlackUserLinkLookup struct {
+	link models.SlackUserLink
+	err  error
+}
+
+func (s workerSlackUserLinkLookup) GetBySlackUser(context.Context, uuid.UUID, string, string) (models.SlackUserLink, error) {
+	if s.err != nil {
+		return models.SlackUserLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerSlackMembershipLookup struct {
+	membership models.OrganizationMembership
+	err        error
+}
+
+func (s workerSlackMembershipLookup) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	if s.err != nil {
+		return models.OrganizationMembership{}, s.err
+	}
+	return s.membership, nil
 }
 
 func TestSlackThreadRoutingBySource(t *testing.T) {
@@ -3998,7 +4233,7 @@ func automationRowColumns() []string {
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
 }
 
@@ -4085,7 +4320,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// 3. Atomically claim pending → running BEFORE creating the session, so
@@ -4177,7 +4412,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// 3. The conditional transition finds the row already non-pending (the
@@ -4313,7 +4548,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, false, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// Run gets marked skipped via the conditional pending → skipped transition.
@@ -4367,7 +4602,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4440,7 +4675,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &clickerID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4519,7 +4754,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4590,7 +4825,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).

@@ -39,6 +39,11 @@ const (
 	defaultMaxConcurrent    = 10
 	mentionIndexWarmTimeout = 2 * time.Second
 	planModePrefix          = "[PLAN_MODE]\n"
+
+	// Claude Code access tokens are short-lived. A sandbox credential with an
+	// expiration far beyond this bound is more likely corrupted or synthetic
+	// than a valid CLI refresh result.
+	maxClaudeCodeHarvestedTokenLifetime = 24 * time.Hour
 )
 
 // ErrConcurrencyLimit is returned when an org has reached its maximum
@@ -281,6 +286,12 @@ type ClaudeCodeAuthProvider interface {
 // to the org fallback after their first 8h of token life.
 type ClaudeCodeAuthRefresher interface {
 	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error)
+}
+
+// ClaudeCodeAuthTokenStore persists Claude Code OAuth tokens that were
+// refreshed by the Claude Code CLI inside the sandbox.
+type ClaudeCodeAuthTokenStore interface {
+	StoreTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error)
 }
 
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
@@ -1092,7 +1103,7 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	return authState, nil
 }
 
-func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
+func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, threadID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
 	if o.internalAPIURL == "" || o.internalAPISecret == "" || session == nil || repoID == nil || sandboxCfg == nil {
 		return
 	}
@@ -1100,7 +1111,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		sandboxCfg.Env = make(map[string]string)
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
-	internalToken, err := auth.GenerateSessionToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, tokenTTL)
+	internalToken, err := auth.GenerateSessionThreadToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, tokenTTL)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
 		return
@@ -1991,14 +2002,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		defer capacityReservation.Release()
 	}
 
-	// 2. Update status to "running" (sets started_at in DB). We also capture
-	// the start time locally so the timeout branch below can log a
-	// meaningful elapsed duration regardless of whether run.StartedAt was
-	// populated by the caller.
-	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusRunning); err != nil {
-		return fmt.Errorf("update run status to running: %w", err)
-	}
 	var primaryThreadID *uuid.UUID
+
+	// 2. Atomically mark the session running and initialize runtime control.
+	// runStartedAt is captured immediately before the atomic runtime start, so
+	// the elapsed reported on timeout includes everything after runtime
+	// control begins (sandbox create, credential inject, agent execute,
+	// snapshot).
+	runStartedAt := time.Now()
+	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
+	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
+	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	runtimeController.SetStopFallback(cancel)
+	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
+		return err
+	}
 	if run.PrimaryThreadID != nil && *run.PrimaryThreadID != uuid.Nil {
 		threadID := *run.PrimaryThreadID
 		primaryThreadID = &threadID
@@ -2021,20 +2039,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// makes a re-entry from a resumed/retried run a no-op, so this call is
 	// safe on every RunAgent invocation.
 	o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneStarted))
-	// runStartedAt is captured AFTER UpdateStatus, so the elapsed reported on
-	// a timeout excludes concurrency check + status write but includes
-	// everything from issue fetch onward (sandbox create, credential inject,
-	// agent execute, snapshot). An on-call reader seeing a sub-minute
-	// elapsed on a 25-minute timeout should suspect the deadline fired
-	// during sandbox creation, not the adapter.
-	runStartedAt := time.Now()
-	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
-	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
-	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
-	runtimeController.SetStopFallback(cancel)
-	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
-		return err
-	}
 
 	turnNumber := run.CurrentTurn + 1
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, run, turnNumber)
@@ -2223,7 +2227,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
-	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, &sandboxCfg, log)
+	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, primaryThreadID, &sandboxCfg, log)
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -2600,6 +2604,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, primaryThreadID, turnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
+		log.Warn().
+			Err(harvestErr).
+			Str("session_id", run.ID.String()).
+			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
+	}
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
 	}
@@ -2928,17 +2938,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		defer capacityReservation.Release()
 	}
 
-	// 1. Update status to running. Capture wall-clock start locally so the
-	// timeout branch below can log a meaningful elapsed regardless of
-	// whether session.StartedAt is populated (it's set from the first
-	// turn; on a later turn this captures THIS turn's elapsed).
-	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusRunning); err != nil {
-		return fmt.Errorf("update session status to running: %w", err)
-	}
+	// 1. Capture wall-clock start locally; BeginRuntime persists the same
+	// instant while atomically transitioning the session row to running.
 	// turnStartedAt scopes elapsed to THIS turn only — it excludes any time
-	// the session spent idle between turns, and excludes the status write
-	// above. It includes snapshot restore, sandbox create, and agent
-	// execute. See runStartedAt in RunAgent for analogous semantics.
+	// the session spent idle between turns and includes snapshot restore,
+	// sandbox create, and agent execute. See runStartedAt in RunAgent for
+	// analogous semantics.
 	turnStartedAt := time.Now()
 	runtimeCfg := o.resolveRuntimeConfig(ctx, session.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
@@ -3095,11 +3100,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
+	snapshottedState := models.SandboxStateSnapshotted
 	resolvedRepoID := session.RepositoryID
 	if resolvedRepoID == nil && promptIssue != nil {
 		resolvedRepoID = promptIssue.RepositoryID
 	}
-	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, &sandboxCfg, log)
+	var internalAPIThreadID *uuid.UUID
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+		threadIDCopy := *opts.ThreadID
+		internalAPIThreadID = &threadIDCopy
+	}
+	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, internalAPIThreadID, &sandboxCfg, log)
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network failure")
@@ -3147,15 +3158,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	slug, slugErr := o.sessionRepoSlug(ctx, session)
 	if slugErr != nil {
 		log.Error().Err(slugErr).Msg("sandbox workdir resolution failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after workdir resolution failure")
-		}
-		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
-		}
-		o.registerSandboxFailureMessage(
+		o.cleanupContinueSessionStartupFailure(
 			ctx,
 			session,
+			log,
+			models.SessionStatusIdle,
+			&snapshottedState,
+			"failed to revert session to idle after workdir resolution failure",
+			"failed to revert sandbox state after workdir resolution failure",
 			fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
 			"workdir resolution",
 		)
@@ -3352,15 +3362,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		repo, repoErr := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 		if repoErr != nil {
 			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring repo lookup failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring repo lookup failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after auth wiring repo lookup failure",
+				"failed to revert sandbox state after auth wiring repo lookup failure",
 				fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", repoErr),
 				"sandbox github auth",
 			)
@@ -3375,15 +3384,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			token, tokenErr := o.github.GetInstallationToken(ctx, repo.InstallationID)
 			if tokenErr != nil {
 				log.Error().Err(tokenErr).Msg("failed to get installation token for continue-session auth wiring")
-				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-					log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring token failure")
-				}
-				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-					log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring token failure")
-				}
-				o.registerSandboxFailureMessage(
+				o.cleanupContinueSessionStartupFailure(
 					ctx,
 					session,
+					log,
+					models.SessionStatusIdle,
+					&snapshottedState,
+					"failed to revert session to idle after auth wiring token failure",
+					"failed to revert sandbox state after auth wiring token failure",
 					fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", tokenErr),
 					"sandbox github auth",
 				)
@@ -3395,15 +3403,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after auth wiring failure",
+				"failed to revert sandbox state after auth wiring failure",
 				fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", authErr),
 				"sandbox github auth",
 			)
@@ -3438,15 +3445,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after hydrate failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after hydrate failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after hydrate failure",
+				"failed to revert sandbox state after hydrate failure",
 				fmt.Sprintf("Failed to restore the sandbox environment: %s\n\nPlease try again in a moment.", err),
 				"sandbox hydrate",
 			)
@@ -3460,15 +3466,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
-			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
-			}
-			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, models.SandboxStateSnapshotted); revertErr != nil {
-				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
-			}
-			o.registerSandboxFailureMessage(
+			o.cleanupContinueSessionStartupFailure(
 				ctx,
 				session,
+				log,
+				models.SessionStatusIdle,
+				&snapshottedState,
+				"failed to revert session to idle after sandbox failure",
+				"failed to revert sandbox state after sandbox failure",
 				fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
 				"sandbox creation",
 			)
@@ -3524,12 +3529,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// turn's auth wiring, so it's our responsibility to release it.
 		// Server.Close is idempotent and a no-op when no listener exists.
 		o.closeSandboxAuth(session.ID, log)
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after turn hold DB error")
-		}
-		o.registerSandboxFailureMessage(
+		o.cleanupContinueSessionStartupFailure(
 			ctx,
 			session,
+			log,
+			models.SessionStatusIdle,
+			nil,
+			"failed to revert session to idle after turn hold DB error",
+			"",
 			fmt.Sprintf("Failed to acquire sandbox lease: %s\n\nPlease try again in a moment.", holdErr),
 			"turn hold",
 		)
@@ -4032,6 +4039,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, threadID, messageTurnNumber, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
+		log.Warn().
+			Err(harvestErr).
+			Str("session_id", session.ID.String()).
+			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
+	}
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
 	}
@@ -4527,6 +4540,32 @@ func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, sessio
 				Msg("failed to create dead-letter error message")
 		}
 	})
+}
+
+func (o *Orchestrator) cleanupContinueSessionStartupFailure(
+	ctx context.Context,
+	session *models.Session,
+	log zerolog.Logger,
+	status models.SessionStatus,
+	sandboxState *models.SandboxState,
+	statusLogMessage string,
+	sandboxStateLogMessage string,
+	failureMessage string,
+	stage string,
+) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, status); revertErr != nil {
+		log.Error().Err(revertErr).Msg(statusLogMessage)
+	}
+	if sandboxState != nil {
+		if revertErr := o.sessions.UpdateSandboxState(cleanupCtx, session.OrgID, session.ID, *sandboxState); revertErr != nil {
+			log.Warn().Err(revertErr).Msg(sandboxStateLogMessage)
+		}
+	}
+	if failureMessage != "" {
+		o.registerSandboxFailureMessage(cleanupCtx, session, failureMessage, stage)
+	}
 }
 
 // registerSandboxInfraFailure is the deferred companion to
@@ -5532,17 +5571,26 @@ func cloneStringMap(in map[string]string) map[string]string {
 // uses; we translate from the space-separated `scope` response string when
 // the tokens are issued. If Anthropic ever changes this format, update this
 // marshal block and the AnthropicSubscription struct together.
-func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, string, error) {
+func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
 	if o.claudeCodeAuth == nil {
 		return false, "", nil
 	}
 
-	sub, _, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
+	sub, credID, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
 	if err != nil {
 		return false, "", fmt.Errorf("get claude code subscription token: %w", err)
 	}
 	if sub == nil {
 		return false, "", nil
+	}
+	if credID != nil && o.env != nil {
+		o.env.recordCredentialPick(orgID, userID, models.ProviderAnthropic, models.DecryptedCodingCredential{
+			ID:       *credID,
+			OrgID:    orgID,
+			Provider: models.ProviderAnthropicSubscription,
+			Status:   models.CodingCredentialStatusActive,
+			Config:   models.FromAnthropicSubscription(*sub),
+		})
 	}
 
 	injected, err := o.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub)
@@ -5605,6 +5653,159 @@ func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID,
 		Msg("injected claude subscription credentials into sandbox")
 
 	return true, nil
+}
+
+func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session *models.Session, sandbox *Sandbox, billingMode TokenBillingMode, log zerolog.Logger) (bool, error) {
+	if o == nil || session == nil || sandbox == nil {
+		return false, nil
+	}
+	if session.AgentType != models.AgentTypeClaudeCode || billingMode != TokenBillingModeSubscription {
+		return false, nil
+	}
+	if o.env == nil || o.provider == nil || o.claudeCodeAuth == nil {
+		return false, nil
+	}
+	store, ok := o.claudeCodeAuth.(ClaudeCodeAuthTokenStore)
+	if !ok {
+		return false, nil
+	}
+
+	rec, ok := o.env.lookupRecentPickRecord(session.OrgID, session.TriggeredByUserID, models.ProviderAnthropic)
+	if !ok || rec.credID == uuid.Nil {
+		return false, nil
+	}
+
+	scope := models.Scope{OrgID: session.OrgID}
+	var existing *models.AnthropicSubscription
+	if rec.credential != nil {
+		if rec.credential.Provider != models.ProviderAnthropicSubscription {
+			return false, nil
+		}
+		scope = rec.credential.Scope()
+		if cfg, ok := rec.credential.Config.(models.AnthropicSubscriptionConfig); ok {
+			existing = &models.AnthropicSubscription{
+				AccessToken:   cfg.AccessToken,
+				RefreshToken:  cfg.RefreshToken,
+				ExpiresAt:     cfg.ExpiresAt,
+				AccountType:   cfg.AccountType,
+				RateLimitTier: cfg.RateLimitTier,
+				Scopes:        cfg.Scopes,
+			}
+		}
+	}
+
+	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
+	raw, err := o.provider.ReadFile(ctx, sandbox, credsPath)
+	if err != nil {
+		if isSandboxFileMissing(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read claude credentials: %w", err)
+	}
+
+	sub, err := parseClaudeCodeCredentialsFile(raw, existing)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil && !anthropicSubscriptionChanged(*existing, sub) {
+		return false, nil
+	}
+	stored, err := store.StoreTokenByID(ctx, scope, rec.credID, sub)
+	if err != nil {
+		return false, fmt.Errorf("store harvested claude credentials: %w", err)
+	}
+	if !stored {
+		return false, nil
+	}
+
+	scopeKind := "org"
+	if scope.IsPersonal() {
+		scopeKind = "personal"
+	}
+	log.Info().
+		Str("cred_id", rec.credID.String()).
+		Str("scope", scopeKind).
+		Msg("harvested refreshed Claude Code OAuth token from sandbox")
+	return true, nil
+}
+
+func parseClaudeCodeCredentialsFile(raw []byte, existing *models.AnthropicSubscription) (models.AnthropicSubscription, error) {
+	var payload struct {
+		ClaudeAiOAuth struct {
+			AccessToken      string   `json:"accessToken"`
+			RefreshToken     string   `json:"refreshToken"`
+			ExpiresAt        int64    `json:"expiresAt"`
+			Scopes           []string `json:"scopes"`
+			SubscriptionType string   `json:"subscriptionType"`
+			RateLimitTier    string   `json:"rateLimitTier"`
+		} `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return models.AnthropicSubscription{}, fmt.Errorf("parse claude credentials: %w", err)
+	}
+
+	oauth := payload.ClaudeAiOAuth
+	if oauth.AccessToken == "" {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials missing access token")
+	}
+	if oauth.RefreshToken == "" {
+		if existing == nil || existing.RefreshToken == "" {
+			return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials missing refresh token")
+		}
+		oauth.RefreshToken = existing.RefreshToken
+	}
+	if oauth.ExpiresAt <= 0 {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials missing expiration")
+	}
+
+	sub := models.AnthropicSubscription{
+		AccessToken:   oauth.AccessToken,
+		RefreshToken:  oauth.RefreshToken,
+		ExpiresAt:     time.UnixMilli(oauth.ExpiresAt),
+		AccountType:   oauth.SubscriptionType,
+		RateLimitTier: oauth.RateLimitTier,
+		Scopes:        oauth.Scopes,
+	}
+	if existing != nil {
+		if sub.AccountType == "" {
+			sub.AccountType = existing.AccountType
+		}
+		if sub.RateLimitTier == "" {
+			sub.RateLimitTier = existing.RateLimitTier
+		}
+		if len(sub.Scopes) == 0 {
+			sub.Scopes = existing.Scopes
+		}
+	}
+	if sub.IsExpired() {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials are expired")
+	}
+	if time.Until(sub.ExpiresAt) > maxClaudeCodeHarvestedTokenLifetime {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials expiration is implausibly far in the future")
+	}
+	if existing != nil && anthropicSubscriptionChanged(*existing, sub) && !sub.ExpiresAt.After(existing.ExpiresAt) {
+		return models.AnthropicSubscription{}, errors.New("sandbox Claude credentials changed without a later expiration")
+	}
+	return sub, nil
+}
+
+func anthropicSubscriptionChanged(existing, next models.AnthropicSubscription) bool {
+	if existing.AccessToken != next.AccessToken ||
+		existing.RefreshToken != next.RefreshToken ||
+		existing.ExpiresAt.UnixMilli() != next.ExpiresAt.UnixMilli() ||
+		existing.AccountType != next.AccountType ||
+		existing.RateLimitTier != next.RateLimitTier {
+		return true
+	}
+	if len(existing.Scopes) != len(next.Scopes) {
+		return true
+	}
+	for i := range existing.Scopes {
+		if existing.Scopes[i] != next.Scopes[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
@@ -5708,7 +5909,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeSubscription, nil
 	}
 
-	injected, accountType, err = o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	injected, accountType, err = o.injectClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
@@ -5915,6 +6116,12 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	}
 	if o.internalAPIURL != "" && o.internalAPISecret != "" {
 		reg.RegisterPullRequestCreator(&integration.StubPullRequestCreator{ProviderName: "session"})
+		settings, err := o.sandboxAuthOrgSettings(ctx, orgID)
+		if err != nil {
+			o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load org settings for session tab tools; hiding tools from skills doc")
+		} else if settings.EffectiveCodingAgentTabToolsEnabled() {
+			reg.RegisterSessionTabManager(&integration.StubSessionTabManager{ProviderName: "session_tabs"})
+		}
 	}
 
 	if !reg.HasAny() {

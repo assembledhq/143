@@ -19,6 +19,7 @@ type InternalTokenClaims struct {
 	OrgID     uuid.UUID  `json:"org_id"`
 	RepoID    uuid.UUID  `json:"repo_id"`
 	SessionID *uuid.UUID `json:"session_id,omitempty"`
+	ThreadID  *uuid.UUID `json:"thread_id,omitempty"`
 	ExpiresAt time.Time  `json:"exp"`
 }
 
@@ -49,10 +50,17 @@ func GenerateInternalToken(secret string, orgID uuid.UUID, repoID uuid.UUID, ttl
 // Use this instead of GenerateInternalToken when the token will be used for session-specific operations
 // such as PR creation, so the handler can enforce that the caller is acting on the correct session.
 func GenerateSessionToken(secret string, orgID uuid.UUID, repoID uuid.UUID, sessionID uuid.UUID, ttl time.Duration) (string, error) {
+	return GenerateSessionThreadToken(secret, orgID, repoID, sessionID, nil, ttl)
+}
+
+// GenerateSessionThreadToken creates a short-lived HMAC token scoped to an
+// org, repo, session, and optionally the source thread currently running.
+func GenerateSessionThreadToken(secret string, orgID uuid.UUID, repoID uuid.UUID, sessionID uuid.UUID, threadID *uuid.UUID, ttl time.Duration) (string, error) {
 	claims := InternalTokenClaims{
 		OrgID:     orgID,
 		RepoID:    repoID,
 		SessionID: &sessionID,
+		ThreadID:  threadID,
 		ExpiresAt: time.Now().Add(ttl),
 	}
 	payload, err := json.Marshal(claims)

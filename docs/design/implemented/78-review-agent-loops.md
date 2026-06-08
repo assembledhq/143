@@ -361,7 +361,9 @@ For `passIndex` from `1..max_review_passes`:
 4. Run the selected agent's native review command in that thread.
 5. Ask the same agent whether the latest review is clean; if it is not clean,
    the agent fixes the issues in that turn.
-6. If the agent reports `REVIEW_CLEAN`, mark the loop `clean` and stop.
+6. If the agent reports an unambiguous `REVIEW_CLEAN` sentinel as its own line
+   or as a first-line directive, including in the review pass output itself,
+   mark the loop `clean` and stop without sending another continuation prompt.
 7. If the agent made fixes, capture the fix summary and continue to the next
    review pass.
 

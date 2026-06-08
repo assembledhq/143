@@ -590,6 +590,8 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+  created_by_source?: 'user' | 'agent_tool' | 'system';
+  created_by_thread_id?: string;
   archived_at?: string;
   base_snapshot_key?: string;
   cost_cents: number;
@@ -745,6 +747,7 @@ export interface SessionMessage {
   references?: SessionInputReference[];
   commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
+  source?: 'agent_tool';
   created_at: string;
 }
 
@@ -1031,6 +1034,7 @@ export interface OrgSettings {
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
+  coding_agent_tab_tools_enabled?: boolean;
   builder_permissions?: {
     require_review_before_pr?: boolean;
   };

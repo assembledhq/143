@@ -44,9 +44,14 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"IngestionWebhookHandler.HandleLinear": "external webhook, signature auth",
 
 		// Internal API routes — use claims.OrgID from internal JWT, not middleware.
-		"InternalIssueHandler.Create":       "internal API, uses claims.OrgID",
-		"InternalPullRequestHandler.Create": "internal API, uses claims.OrgID",
-		"InternalProjectHandler.Propose":    "internal API, uses claims.OrgID",
+		"InternalIssueHandler.Create":            "internal API, uses claims.OrgID",
+		"InternalPullRequestHandler.Create":      "internal API, uses claims.OrgID",
+		"InternalProjectHandler.Propose":         "internal API, uses claims.OrgID",
+		"InternalSessionTabsHandler.List":        "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.Get":         "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.Create":      "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.SendMessage": "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.Messages":    "internal sandbox API, uses claims.OrgID and claims.SessionID",
 
 		// Authenticated but legitimately no org-scoped data access.
 		"AuthHandler.Me":                     "returns user from context only",
@@ -111,6 +116,15 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"LinearAgentSettingsHandler.ListSessions":  "delegates to requireOrgID which uses OrgIDFromContext",
 		"LinearAgentSettingsHandler.GetSession":    "delegates to requireOrgID which uses OrgIDFromContext",
 		"LinearAgentSettingsHandler.DeleteMapping": "delegates to requireOrgID which uses OrgIDFromContext",
+
+		// Session creation thin wrappers — both delegate to createManual which calls OrgIDFromContext.
+		"SessionHandler.CreateManual":   "delegates to createManual which uses OrgIDFromContext",
+		"SessionHandler.CreateExternal": "delegates to createManual which uses OrgIDFromContext",
+
+		// Automation creation thin wrappers — both delegate to Create or CreateExternal
+		// which calls OrgIDFromContext.
+		"AutomationHandler.CreatePublic":   "delegates to Create or CreateExternal which use OrgIDFromContext",
+		"AutomationHandler.CreateExternal": "delegates to Create which uses OrgIDFromContext",
 	}
 
 	fset := token.NewFileSet()

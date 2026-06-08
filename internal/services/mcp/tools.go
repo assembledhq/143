@@ -289,6 +289,10 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	if len(tr.integrations.SessionTabManagers()) > 0 {
+		tools = append(tools, sessionTabToolDefinitions()...)
+	}
+
 	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
 		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
@@ -400,6 +404,15 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("pull request creator not registered")
 		}
 		return tr.callPullRequestCreator(ctx, creators[0], "create_pr", args)
+	}
+
+	switch name {
+	case "session_tabs_list", "session_tabs_get", "session_tabs_create", "session_tabs_send", "session_tabs_messages":
+		managers := tr.integrations.SessionTabManagers()
+		if len(managers) == 0 {
+			return ErrorResult("session tab manager not registered")
+		}
+		return tr.callSessionTabs(ctx, managers[0], name, args)
 	}
 
 	switch name {
@@ -961,6 +974,129 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 	default:
 		return ErrorResult(fmt.Sprintf("unknown pull request creator method: %s", method))
 	}
+}
+
+func sessionTabToolDefinitions() []Tool {
+	return []Tool{
+		{
+			Name:        "session_tabs_list",
+			Description: "List tabs in the current session only. Returns sibling tab status, activity, cost, and delivery state.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"include_archived": {Type: "boolean", Description: "Include archived tabs in the current session only", Default: false},
+			}},
+		},
+		{
+			Name:        "session_tabs_get",
+			Description: "Get one tab from the current session only, including recent touched files and delivery state.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"tab_id": {Type: "string", Description: "Tab/thread UUID in the current session only"},
+			}, Required: []string{"tab_id"}},
+		},
+		{
+			Name:        "session_tabs_create",
+			Description: "Create a blank idle tab in the current session only. Does not start agent execution.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"agent":        {Type: "string", Description: "Agent type for the new tab", Enum: []string{"codex", "claude_code", "gemini_cli", "amp", "pi"}},
+				"instructions": {Type: "string", Description: "Optional stored instructions for the new tab"},
+				"label":        {Type: "string", Description: "Optional tab label"},
+				"model":        {Type: "string", Description: "Optional model override"},
+			}},
+		},
+		{
+			Name:        "session_tabs_send",
+			Description: "Send a user message to a tab in the current session only and queue delivery.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"client_message_id": {Type: "string", Description: "Optional idempotency key"},
+				"message":           {Type: "string", Description: "Message to send (required unless --message-file is provided)"},
+				"message_file":      {Type: "string", Description: "Path to a file inside the sandbox containing the message (alternative to --message)"},
+				"tab_id":            {Type: "string", Description: "Target tab/thread UUID in the current session only"},
+			}, Required: []string{"tab_id"}},
+		},
+		{
+			Name:        "session_tabs_messages",
+			Description: "Read recent transcript messages from a tab in the current session only. Newest messages are returned first.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"before":              {Type: "string", Description: "Older-page cursor"},
+				"include_tool_events": {Type: "boolean", Description: "Include sanitized tool-event summaries when available", Default: false},
+				"limit":               {Type: "number", Description: "Max messages to return (default 20, max 100)", Default: 20},
+				"tab_id":              {Type: "string", Description: "Tab/thread UUID in the current session only"},
+			}, Required: []string{"tab_id"}},
+		},
+	}
+}
+
+func (tr *ToolRegistry) callSessionTabs(ctx context.Context, manager integration.SessionTabManager, name string, args json.RawMessage) *ToolCallResult {
+	switch name {
+	case "session_tabs_list":
+		var p integration.ListSessionTabsParams
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		raw, err := manager.ListTabs(ctx, p)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list session tabs failed: %s", err))
+		}
+		return TextResult(string(unwrapListResponseData(raw)))
+	case "session_tabs_get":
+		var p integration.GetSessionTabParams
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		raw, err := manager.GetTab(ctx, p)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get session tab failed: %s", err))
+		}
+		return TextResult(string(raw))
+	case "session_tabs_create":
+		var p integration.CreateSessionTabParams
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		raw, err := manager.CreateTab(ctx, p)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("create session tab failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	case "session_tabs_send":
+		var p integration.SendSessionTabMessageParams
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if strings.TrimSpace(p.Message) == "" && strings.TrimSpace(p.MessageFile) == "" {
+			return ErrorResult("message is required unless message_file is supplied")
+		}
+		raw, err := manager.SendTabMessage(ctx, p)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("send session tab message failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	case "session_tabs_messages":
+		var p integration.ListSessionTabMessagesParams
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		raw, err := manager.ListTabMessages(ctx, p)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list session tab messages failed: %s", err))
+		}
+		return TextResult(string(raw))
+	default:
+		return ErrorResult(fmt.Sprintf("unknown session tab tool: %s", name))
+	}
+}
+
+func unwrapListResponseData(raw json.RawMessage) json.RawMessage {
+	return unwrapResponseData(raw)
+}
+
+func unwrapResponseData(raw json.RawMessage) json.RawMessage {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || len(envelope.Data) == 0 {
+		return raw
+	}
+	return envelope.Data
 }
 
 // --------------------------------------------------------------------------

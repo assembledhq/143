@@ -195,7 +195,8 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
-	if user == nil {
+	userID, ok := previewRequestUserID(r.Context(), user)
+	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
@@ -312,7 +313,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		existing, idemErr := h.previews.GetPreviewTargetByIdempotencyKey(r.Context(), orgID, idemKey)
 		if idemErr == nil && existing != nil {
 			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), orgID.String(), "header")
-			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart, nil)
+			resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, existing, req.TTLSeconds, restart, nil)
 			if startErr != nil {
 				writePreviewHTTPError(w, r, startErr)
 				return
@@ -330,7 +331,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		existing, sourceErr := h.previews.GetPreviewTargetBySource(r.Context(), orgID, sourceType, sourceID)
 		if sourceErr == nil && existing != nil {
 			metrics.RecordBranchPreviewIdempotencyHit(r.Context(), orgID.String(), "source")
-			resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, existing, req.TTLSeconds, restart, nil)
+			resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, existing, req.TTLSeconds, restart, nil)
 			if startErr != nil {
 				writePreviewHTTPError(w, r, startErr)
 				return
@@ -352,7 +353,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SourceType:        sourceType,
 		SourceID:          sourceID,
 		SourceURL:         sourceURL,
-		CreatedByUserID:   user.ID,
+		CreatedByUserID:   userID,
 		RequestID:         nilIfEmpty(chiMiddleware.GetReqID(r.Context())),
 	}
 	if err := h.previews.CreatePreviewTarget(r.Context(), target); err != nil {
@@ -364,7 +365,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics.RecordBranchPreviewCreate(r.Context(), orgID.String(), string(sourceType), repo.FullName)
 
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, req.TTLSeconds, restart, parsedConfig)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, target, req.TTLSeconds, restart, parsedConfig)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -418,7 +419,8 @@ func validatePreviewConfigContent(content []byte, requestedName string) (string,
 func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
-	if user == nil {
+	userID, ok := previewRequestUserID(r.Context(), user)
+	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
@@ -518,7 +520,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 			SourceType:      models.PreviewSourceTypePullRequest,
 			SourceID:        fmt.Sprintf("%s/%s#%d@%s", owner, repoName, number, head.SHA),
 			SourceURL:       head.HTMLURL,
-			CreatedByUserID: user.ID,
+			CreatedByUserID: userID,
 		}
 		if err := h.previews.CreatePreviewTarget(r.Context(), target); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_CREATE_FAILED", "failed to create PR preview target", err)
@@ -537,7 +539,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LINK_CREATE_FAILED", "failed to create PR preview link", err)
 		return
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, nil, false, nil)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, target, nil, false, nil)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -958,6 +960,16 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if token := middleware.APITokenFromContext(r.Context()); token != nil {
+		if repoID == nil && len(token.RepositoryIDs) > 0 {
+			writeError(w, r, http.StatusBadRequest, "REPOSITORY_ID_REQUIRED", "repository_id is required for repository-scoped API tokens")
+			return
+		}
+		if repoID != nil && !previewTokenAllows(r.Context(), "previews:read", *repoID) {
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "API token is not allowed to access this repository")
+			return
+		}
+	}
 	const defaultPreviewListLimit = 50
 	const maxPreviewListLimit = 100
 	limit := clampListLimit(queryInt(r, "limit", defaultPreviewListLimit), defaultPreviewListLimit, maxPreviewListLimit)
@@ -1097,7 +1109,8 @@ func (h *BranchPreviewHandler) RevokeAPIToken(w http.ResponseWriter, r *http.Req
 func (h *BranchPreviewHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
-	if user == nil {
+	userID, ok := previewRequestUserID(r.Context(), user)
+	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
@@ -1122,14 +1135,14 @@ func (h *BranchPreviewHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	// then skips its own stop (active is nil) and correctly reserves fresh.
 	_ = active // resolved by resolveTargetRepoAndActive, used implicitly by startTargetRuntime
 	if req.StartLatest {
-		latest, err := h.resolveLatestTarget(r.Context(), orgID, user.ID, repo, target)
+		latest, err := h.resolveLatestTarget(r.Context(), orgID, userID, repo, target)
 		if err != nil {
 			writeError(w, r, http.StatusBadGateway, "BRANCH_HEAD_RESOLVE_FAILED", "failed to resolve latest branch head", err)
 			return
 		}
 		target = latest
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, target, nil, true, nil)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, target, nil, true, nil)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -1140,7 +1153,8 @@ func (h *BranchPreviewHandler) Restart(w http.ResponseWriter, r *http.Request) {
 func (h *BranchPreviewHandler) StartLatest(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
-	if user == nil {
+	userID, ok := previewRequestUserID(r.Context(), user)
+	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
@@ -1152,12 +1166,12 @@ func (h *BranchPreviewHandler) StartLatest(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to start previews for this repository")
 		return
 	}
-	latest, err := h.resolveLatestTarget(r.Context(), orgID, user.ID, repo, target)
+	latest, err := h.resolveLatestTarget(r.Context(), orgID, userID, repo, target)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "BRANCH_HEAD_RESOLVE_FAILED", "failed to resolve latest branch head", err)
 		return
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, user.ID, repo, latest, nil, false, nil)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, latest, nil, false, nil)
 	if startErr != nil {
 		writePreviewHTTPError(w, r, startErr)
 		return
@@ -1534,23 +1548,42 @@ func githubBranchURL(fullName, branch string) string {
 
 func previewTokenAllows(ctx context.Context, scope string, repositoryID uuid.UUID) bool {
 	token := middleware.PreviewAPITokenFromContext(ctx)
-	if token == nil {
-		return true
-	}
-	hasScope := false
-	for _, item := range token.Scopes {
-		if item == scope {
-			hasScope = true
-			break
+	if token != nil {
+		hasScope := false
+		for _, item := range token.Scopes {
+			if item == scope {
+				hasScope = true
+				break
+			}
 		}
+		if !hasScope {
+			return false
+		}
+		return repositoryIDAllowed(token.RepositoryIDs, repositoryID)
 	}
-	if !hasScope {
-		return false
+	apiToken := middleware.APITokenFromContext(ctx)
+	if apiToken != nil {
+		return repositoryIDAllowed(apiToken.RepositoryIDs, repositoryID)
 	}
-	if len(token.RepositoryIDs) == 0 {
+	return true
+}
+
+func previewRequestUserID(ctx context.Context, user *models.User) (uuid.UUID, bool) {
+	if user != nil {
+		return user.ID, true
+	}
+	token := middleware.APITokenFromContext(ctx)
+	if token != nil && token.CreatedByUserID != nil {
+		return *token.CreatedByUserID, true
+	}
+	return uuid.Nil, false
+}
+
+func repositoryIDAllowed(allowedIDs []uuid.UUID, repositoryID uuid.UUID) bool {
+	if len(allowedIDs) == 0 {
 		return true
 	}
-	for _, allowed := range token.RepositoryIDs {
+	for _, allowed := range allowedIDs {
 		if allowed == repositoryID {
 			return true
 		}

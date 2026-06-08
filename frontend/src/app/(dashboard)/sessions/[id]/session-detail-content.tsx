@@ -155,7 +155,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { deriveCreatePRActionState, derivePushChangesActionState } from "@/lib/session-pr-action-state";
+import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
@@ -2052,6 +2052,72 @@ function SessionTimelineSkeleton() {
         </div>
       ))}
       <span className="sr-only">Loading session activity…</span>
+    </div>
+  );
+}
+
+function SkeletonLine({ className }: { className: string }) {
+  return <div className={cn("rounded bg-muted-foreground/15", className)} />;
+}
+
+function SessionDetailLoadingSkeleton() {
+  return (
+    <div
+      data-testid="session-detail-loading-skeleton"
+      aria-busy="true"
+      className="flex h-full min-h-0 bg-background"
+    >
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
+          <div className="min-w-0 flex-1 animate-pulse space-y-2">
+            <SkeletonLine className="h-4 w-2/5 max-w-[360px]" />
+            <SkeletonLine className="h-3 w-1/4 max-w-[220px]" />
+          </div>
+          <div className="flex shrink-0 gap-2 animate-pulse">
+            <SkeletonLine className="h-8 w-8 rounded-md" />
+            <SkeletonLine className="h-8 w-8 rounded-md" />
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="hidden h-10 shrink-0 border-b border-border px-3 md:flex md:items-center">
+            <div className="flex gap-2 animate-pulse">
+              <SkeletonLine className="h-6 w-24 rounded-md" />
+              <SkeletonLine className="h-6 w-28 rounded-md" />
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden p-4">
+            <div className="mx-auto flex h-full max-w-3xl flex-col justify-end gap-3">
+              <SessionTimelineSkeleton />
+            </div>
+          </div>
+          <div className="shrink-0 border-t border-border p-3">
+            <div className="animate-pulse rounded-lg border border-border bg-card p-3">
+              <SkeletonLine className="h-16 w-full rounded-md" />
+              <div className="mt-3 flex items-center justify-between">
+                <div className="flex gap-2">
+                  <SkeletonLine className="h-8 w-8 rounded-md" />
+                  <SkeletonLine className="h-8 w-24 rounded-md" />
+                </div>
+                <SkeletonLine className="h-8 w-8 rounded-md" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="hidden w-[360px] shrink-0 border-l border-border bg-background md:flex md:flex-col">
+        <div className="h-12 shrink-0 border-b border-border px-3">
+          <div className="flex h-full items-center gap-2 animate-pulse">
+            <SkeletonLine className="h-7 w-20 rounded-md" />
+            <SkeletonLine className="h-7 w-20 rounded-md" />
+            <SkeletonLine className="h-7 w-20 rounded-md" />
+          </div>
+        </div>
+        <div className="space-y-4 p-4 animate-pulse">
+          <SkeletonLine className="h-24 w-full rounded-md" />
+          <SkeletonLine className="h-16 w-full rounded-md" />
+          <SkeletonLine className="h-32 w-full rounded-md" />
+        </div>
+      </div>
     </div>
   );
 }
@@ -5047,7 +5113,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
       canPush: canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: canManagePR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canFixTests: canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
       canResolveConflicts: canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
       canMerge: canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
@@ -5060,14 +5126,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading session...</p>
-        </div>
-      </div>
-    );
+    return <SessionDetailLoadingSkeleton />;
   }
 
   if (error || !session) {

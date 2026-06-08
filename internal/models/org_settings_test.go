@@ -28,8 +28,32 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
+	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
 	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
 	require.False(t, s.SandboxNetwork.StaticEgressEnabled, "static egress should be disabled by default")
+}
+
+func TestOrgSettings_EffectiveCodingAgentTabToolsEnabled(t *testing.T) {
+	t.Parallel()
+
+	f := false
+	tVal := true
+	tests := []struct {
+		name     string
+		settings OrgSettings
+		expected bool
+	}{
+		{name: "missing defaults on", settings: OrgSettings{}, expected: true},
+		{name: "explicit false disables", settings: OrgSettings{CodingAgentTabToolsEnabled: &f}, expected: false},
+		{name: "explicit true enables", settings: OrgSettings{CodingAgentTabToolsEnabled: &tVal}, expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.settings.EffectiveCodingAgentTabToolsEnabled(), "effective tab-tool setting should match expected value")
+		})
+	}
 }
 
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {

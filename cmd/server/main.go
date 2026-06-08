@@ -505,6 +505,7 @@ func main() {
 			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
 			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
 			SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
+			SessionAttributions: db.NewSessionAttributionStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
