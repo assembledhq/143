@@ -167,7 +167,11 @@ fingerprint_candidate_files() {
 compose_service_fingerprint() {
   local compose_file="$1"
   shift
-  if [ ! -e "$compose_file" ]; then
+  local read_file="$compose_file"
+  if [ -e "${compose_file}.new" ]; then
+    read_file="${compose_file}.new"
+  fi
+  if [ ! -e "$read_file" ]; then
     printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
     return 0
   fi
@@ -182,7 +186,7 @@ compose_service_fingerprint() {
           in_service=(current == svc)
         }
         in_service { print }
-      ' "$compose_file"
+      ' "$read_file"
     done
   } | sha256sum | awk '{print $1}'
 }
@@ -361,8 +365,14 @@ else
   echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
 fi
 
-# Sync compose file so the remote always runs the latest version
-scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+# Sync compose file so the remote always runs the latest version. Worker
+# compose can include support-service changes, so stage it until the routine
+# worker fingerprint gate allows promotion.
+if [ "$ROLE" = "worker" ]; then
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new
+else
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+fi
 if [ "$ROLE" = "db" ]; then
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy/postgres"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/postgresql.conf" deploy@"$HOST":/opt/143/deploy/postgres/
@@ -377,7 +387,11 @@ fi
 # own stack and doesn't include it). Stage the file so docker compose can
 # resolve the include directive.
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
-  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+  if [ "$ROLE" = "worker" ]; then
+    scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/docker-compose.dns-probe.yml.new
+  else
+    scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+  fi
 fi
 if [ "$ROLE" = "logging" ]; then
   # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
@@ -478,7 +492,9 @@ if [ "$ROLE" = "worker" ]; then
     deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
   run_worker_staged_fingerprint_gate
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
+    "mv /opt/143/$COMPOSE_FILE.new /opt/143/$COMPOSE_FILE \
+     && mv /opt/143/docker-compose.dns-probe.yml.new /opt/143/docker-compose.dns-probe.yml \
+     && mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
      && mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      && mv /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh \
@@ -486,7 +502,7 @@ if [ "$ROLE" = "worker" ]; then
      && mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh \
      && chmod +x /opt/143/deploy/scripts/reconcile-worker-host.sh \
      && mv /opt/143/Dockerfile.dnsmasq.new /opt/143/Dockerfile.dnsmasq \
-     || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
+     || { rm -f /opt/143/$COMPOSE_FILE.new /opt/143/docker-compose.dns-probe.yml.new /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 
   echo "Reconciling worker host invariants..."
   if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
