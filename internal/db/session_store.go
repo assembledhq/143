@@ -156,6 +156,16 @@ const (
 	sessionDiffHistoryMaxBytes = 512 * 1024
 )
 
+const sessionResumeRuntimeResetAssignments = `runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL,
+		    runtime_last_progress_at = NULL,
+		    runtime_last_progress_type = '',
+		    runtime_last_progress_strength = '',
+		    runtime_extension_count = 0,
+		    runtime_extension_seconds = 0,
+		    runtime_stop_reason = '',
+		    runtime_graceful_stop_at = NULL`
+
 // sessionListColumns excludes raw diff payloads and large JSONB blobs
 // (diff_history) from list queries to avoid returning multi-megabyte payloads
 // when listing many sessions.
@@ -1394,13 +1404,14 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 // single source of truth.
 // Sessions whose sandbox snapshot has been destroyed cannot be resumed.
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
-	query := `
+	query := fmt.Sprintf(`
 		UPDATE sessions
-		SET status = 'running', completed_at = NULL,
+		SET status = 'running', started_at = now(), completed_at = NULL,
+		    %s,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
 		  AND sandbox_state != 'destroyed'
-		RETURNING ` + sessionSelectColumns
+		RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,

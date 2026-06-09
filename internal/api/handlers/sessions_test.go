@@ -5574,7 +5574,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5654,7 +5654,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5720,7 +5720,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5786,7 +5786,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
