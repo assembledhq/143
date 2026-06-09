@@ -1,11 +1,11 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandler, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -22,7 +22,7 @@ import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimi
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/session-linear-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
-import type { ListResponse, SessionDetail, SessionListItem, User } from "@/lib/types";
+import type { ListResponse, SessionCounts, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
@@ -96,12 +96,16 @@ function SessionSidebarRowSurface({
   ariaCurrent,
   className,
   onClick,
+  onFocus,
+  onMouseEnter,
   children,
 }: {
   href?: string;
   ariaCurrent?: "page";
   className?: string;
   onClick?: MouseEventHandler<HTMLAnchorElement>;
+  onFocus?: FocusEventHandler<HTMLAnchorElement>;
+  onMouseEnter?: MouseEventHandler<HTMLAnchorElement>;
   children: ReactNode;
 }) {
   const surfaceClassName = cn(sessionSidebarLinkSurfaceClass, className);
@@ -123,6 +127,8 @@ function SessionSidebarRowSurface({
       data-session-row-surface="true"
       className={surfaceClassName}
       onClick={onClick}
+      onFocus={onFocus}
+      onMouseEnter={onMouseEnter}
     >
       {children}
     </Link>
@@ -479,24 +485,104 @@ export function SessionSidebar() {
     );
   };
 
+  const removeSessionFromExtraPages = (sessionId: string) => {
+    setExtraPages((pages) =>
+      pages.map((page) => page.filter((session) => session.id !== sessionId)),
+    );
+  };
+
+  const updateCappedCount = (current: number, delta: number, cap: number) => {
+    if (current >= cap) {
+      return cap;
+    }
+    return Math.max(0, current + delta);
+  };
+
+  const updateCachedSessionCounts = (session: SessionListItem, direction: "archive" | "unarchive") => {
+    queryClient.setQueryData<SingleResponse<SessionCounts>>(
+      queryKeys.sessions.counts(repo, serializedPeopleParam),
+      (current) => {
+        if (!current?.data) return current;
+        const activeDelta = workingSet.has(session.status) ? 1 : 0;
+        const archivedDelta = direction === "archive" ? 1 : -1;
+        const visibleDelta = direction === "archive" ? -1 : 1;
+        const activeVisibleDelta = direction === "archive" ? -activeDelta : activeDelta;
+        return {
+          ...current,
+          data: {
+            ...current.data,
+            all: updateCappedCount(current.data.all, visibleDelta, current.data.cap),
+            active: updateCappedCount(current.data.active, activeVisibleDelta, current.data.cap),
+            archived: updateCappedCount(current.data.archived, archivedDelta, current.data.cap),
+          },
+        };
+      },
+    );
+  };
+
+  type ArchiveMutationContext = {
+    lists: Array<[QueryKey, ListResponse<SessionListItem> | undefined]>;
+    counts: Array<[QueryKey, SingleResponse<SessionCounts> | undefined]>;
+    extraPages: SessionListItem[][];
+  };
+
+  const snapshotSessionCaches = (): ArchiveMutationContext => ({
+    lists: queryClient.getQueriesData<ListResponse<SessionListItem>>({ queryKey: queryKeys.sessions.all })
+      .filter(([, current]) => Array.isArray(current?.data)),
+    counts: queryClient.getQueriesData<SingleResponse<SessionCounts>>({ queryKey: queryKeys.sessions.counts(repo, serializedPeopleParam) })
+      .filter(([, value]) => value !== undefined),
+    extraPages,
+  });
+
+  const restoreSessionCaches = (snapshot?: ArchiveMutationContext) => {
+    if (!snapshot) return;
+    for (const [key, value] of snapshot.lists) {
+      queryClient.setQueryData(key, value);
+    }
+    for (const [key, value] of snapshot.counts) {
+      if (value !== undefined) {
+        queryClient.setQueryData(key, value);
+      }
+    }
+    setExtraPages(snapshot.extraPages);
+  };
+
   const archiveMutation = useMutation({
-    mutationFn: (sessionId: string) => api.sessions.archive(sessionId),
-    onSuccess: (_response, sessionId) => {
-      removeSessionFromCachedLists(sessionId);
+    mutationFn: (session: SessionListItem) => api.sessions.archive(session.id),
+    onMutate: async (session) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.sessions.all });
+      const snapshot = snapshotSessionCaches();
+      removeSessionFromCachedLists(session.id);
+      removeSessionFromExtraPages(session.id);
+      updateCachedSessionCounts(session, "archive");
+      return snapshot;
+    },
+    onSuccess: () => {
       invalidateSessions();
     },
-    onError: () => {
+    onError: (_error, _session, snapshot) => {
+      restoreSessionCaches(snapshot);
+      invalidateSessions();
       toast.error("Failed to archive session");
     },
   });
 
   const unarchiveMutation = useMutation({
-    mutationFn: (sessionId: string) => api.sessions.unarchive(sessionId),
-    onSuccess: (_response, sessionId) => {
-      removeSessionFromCachedLists(sessionId);
+    mutationFn: (session: SessionListItem) => api.sessions.unarchive(session.id),
+    onMutate: async (session) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.sessions.all });
+      const snapshot = snapshotSessionCaches();
+      removeSessionFromCachedLists(session.id);
+      removeSessionFromExtraPages(session.id);
+      updateCachedSessionCounts(session, "unarchive");
+      return snapshot;
+    },
+    onSuccess: () => {
       invalidateSessions();
     },
-    onError: () => {
+    onError: (_error, _session, snapshot) => {
+      restoreSessionCaches(snapshot);
+      invalidateSessions();
       toast.error("Failed to unarchive session");
     },
   });
@@ -639,13 +725,17 @@ export function SessionSidebar() {
     router.push(sessionHref);
   }, [activeSession, filterSuffix, router]);
 
+  const prefetchRoute = useCallback((href: string) => {
+    router.prefetch(href);
+  }, [router]);
+
   const toggleArchiveActiveSession = useCallback(() => {
     if (!activeSession) return;
     if (activeSession.archived_at) {
-      unarchiveMutation.mutate(activeSession.id);
+      unarchiveMutation.mutate(activeSession);
       return;
     }
-    archiveMutation.mutate(activeSession.id);
+    archiveMutation.mutate(activeSession);
   }, [activeSession, archiveMutation, unarchiveMutation]);
 
   const handleListKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -768,6 +858,8 @@ export function SessionSidebar() {
         {/* New session button */}
         <Link
           href={`/sessions/new${filterSuffix}`}
+          onMouseEnter={() => prefetchRoute(`/sessions/new${filterSuffix}`)}
+          onFocus={() => prefetchRoute(`/sessions/new${filterSuffix}`)}
           className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
         >
           <Plus className="h-4 w-4" />
@@ -921,9 +1013,9 @@ export function SessionSidebar() {
               actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
               onAction={() => {
                 if (isArchived) {
-                  return unarchiveMutation.mutateAsync(session.id);
+                  return unarchiveMutation.mutateAsync(session);
                 } else {
-                  return archiveMutation.mutateAsync(session.id);
+                  return archiveMutation.mutateAsync(session);
                 }
               }}
             >
@@ -951,6 +1043,8 @@ export function SessionSidebar() {
                 <SessionSidebarRowSurface
                   href={sessionHref}
                   ariaCurrent={isSelected ? "page" : undefined}
+                  onMouseEnter={() => prefetchRoute(sessionHref)}
+                  onFocus={() => prefetchRoute(sessionHref)}
                   className={
                     isSelected
                       ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"

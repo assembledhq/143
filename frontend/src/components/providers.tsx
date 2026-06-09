@@ -7,6 +7,9 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { ThemeProvider } from "@/components/theme-provider";
 import { DocumentTitle } from "@/components/document-title";
 
+export const DEFAULT_QUERY_STALE_TIME_MS = 30_000;
+export const DEFAULT_QUERY_GC_TIME_MS = 10 * 60_000;
+
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
     () =>
@@ -14,6 +17,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
         defaultOptions: {
           queries: {
             retry: 2,
+            staleTime: DEFAULT_QUERY_STALE_TIME_MS,
+            gcTime: DEFAULT_QUERY_GC_TIME_MS,
+            refetchOnWindowFocus: false,
           },
           mutations: {
             retry: 0,
