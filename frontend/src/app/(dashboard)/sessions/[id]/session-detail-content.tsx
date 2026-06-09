@@ -3188,6 +3188,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.sessions.detail(id),
     queryFn: () => api.sessions.get(id),
+    // Sidebar navigation may seed this key with list-row data so the detail
+    // shell can open immediately. Always treat that cache entry as stale so
+    // the authoritative detail payload replaces it on mount.
+    staleTime: 0,
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
