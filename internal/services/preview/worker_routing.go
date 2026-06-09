@@ -55,6 +55,20 @@ type WorkerSelectionRequirements struct {
 	StaticEgressPublicIP string
 }
 
+type StaticEgressWorkerDiagnostics struct {
+	Available  bool                         `json:"available"`
+	Mismatches []StaticEgressWorkerMismatch `json:"mismatches,omitempty"`
+}
+
+type StaticEgressWorkerMismatch struct {
+	NodeID               string `json:"node_id,omitempty"`
+	Host                 string `json:"host,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
+	StaticEgressCapable  bool   `json:"static_egress_capable"`
+	StaticEgressPublicIP string `json:"static_egress_public_ip,omitempty"`
+	Reason               string `json:"reason"`
+}
+
 // WorkerSelector resolves preview-owning workers and selects workers for cold starts.
 type WorkerSelector struct {
 	nodes                *db.NodeStore
@@ -170,6 +184,16 @@ func nodeCanClaimSessionJobs(node models.Node) bool {
 
 func workerMetadataMatchesStaticEgress(metadata WorkerNodeMetadata, publicIP string) bool {
 	return publicIP != "" && metadata.StaticEgressCapable && metadata.StaticEgressPublicIP == publicIP
+}
+
+func staticEgressMismatchReason(metadata WorkerNodeMetadata, publicIP string) string {
+	if !metadata.StaticEgressCapable {
+		return "missing static egress capability"
+	}
+	if metadata.StaticEgressPublicIP != publicIP {
+		return "static egress public IP mismatch"
+	}
+	return "public IP not configured"
 }
 
 // ResolveNode returns a routable worker by ID. Existing previews and live
@@ -292,10 +316,19 @@ func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Conte
 // from the generic jobs queue, so mixed-capability worker fleets cannot safely
 // expose the org setting as available.
 func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error) {
-	nodes, err := s.nodes.ListActive(ctx)
+	diagnostics, err := s.StaticEgressWorkerDiagnostics(ctx, publicIP)
 	if err != nil {
 		return false, err
 	}
+	return diagnostics.Available, nil
+}
+
+func (s *WorkerSelector) StaticEgressWorkerDiagnostics(ctx context.Context, publicIP string) (StaticEgressWorkerDiagnostics, error) {
+	nodes, err := s.nodes.ListActive(ctx)
+	if err != nil {
+		return StaticEgressWorkerDiagnostics{}, err
+	}
+	diagnostics := StaticEgressWorkerDiagnostics{Available: true}
 	hasSessionWorker := false
 	for _, node := range nodes {
 		if !nodeCanClaimSessionJobs(node) {
@@ -304,13 +337,34 @@ func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context, publi
 		hasSessionWorker = true
 		metadata, err := parseWorkerNodeMetadata(node)
 		if err != nil {
-			return false, nil
+			diagnostics.Available = false
+			diagnostics.Mismatches = append(diagnostics.Mismatches, StaticEgressWorkerMismatch{
+				NodeID: node.ID,
+				Host:   node.Host,
+				Mode:   string(node.Mode),
+				Reason: "invalid worker metadata",
+			})
+			continue
 		}
 		if !workerMetadataMatchesStaticEgress(metadata, publicIP) {
-			return false, nil
+			diagnostics.Available = false
+			diagnostics.Mismatches = append(diagnostics.Mismatches, StaticEgressWorkerMismatch{
+				NodeID:               node.ID,
+				Host:                 node.Host,
+				Mode:                 string(node.Mode),
+				StaticEgressCapable:  metadata.StaticEgressCapable,
+				StaticEgressPublicIP: metadata.StaticEgressPublicIP,
+				Reason:               staticEgressMismatchReason(metadata, publicIP),
+			})
 		}
 	}
-	return hasSessionWorker, nil
+	if !hasSessionWorker {
+		diagnostics.Available = false
+		diagnostics.Mismatches = append(diagnostics.Mismatches, StaticEgressWorkerMismatch{
+			Reason: "no active session workers",
+		})
+	}
+	return diagnostics, nil
 }
 
 func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map[string]struct{}, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, error) {
