@@ -1327,11 +1327,26 @@ func TestFilterCodexStderrLines(t *testing.T) {
 			expect: "",
 		},
 		{
-			name: "removes apply patch verification diagnostic block while preserving real stderr",
+			name: "removes apply patch verification diagnostic with top-level Go context",
+			input: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/db/autopilot_queue.go:\n" +
+				"func ptrTime(t time.Time) *time.Time {\n" +
+				"\treturn &t\n" +
+				"}",
+			expect: "",
+		},
+		{
+			name: "removes arbitrary apply patch verification context until next Codex record",
+			input: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/query.sql:\n" +
+				"SELECT * FROM widgets\n" +
+				"WHERE active = true;",
+			expect: "",
+		},
+		{
+			name: "removes apply patch verification diagnostic block while preserving next Codex record",
 			input: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx:\n" +
 				"    const formattedMessage = composerPlanMode && activeThread?.agent_type === \"claude_code\"\n" +
-				"real error line",
-			expect: "real error line",
+				"2026-05-22T05:52:31.204805Z ERROR codex_core::exec: real error line",
+			expect: "2026-05-22T05:52:31.204805Z ERROR codex_core::exec: real error line",
 		},
 		{
 			name:   "removes benign stdin diagnostic while preserving real stderr",
