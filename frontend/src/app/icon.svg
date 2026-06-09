@@ -1,7 +1,68 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <rect width="64" height="64" rx="12" fill="#091f33" />
-  <path d="M13 17h10v30h-6V24h-4z" fill="#f8fbff" />
-  <path d="M35 17v18h4v6h-4v6h-6v-6H16v-6l12-18zm-6 18V26l-6 9z" fill="#8bd3ff" />
-  <path d="M43 17h11v6h-8v6h7v6h-7v6h8v6H43v-6h4v-6h-4v-6h4v-6h-4z" fill="#f8fbff" />
-  <rect x="6" y="6" width="52" height="52" rx="10" fill="none" stroke="#63c7f2" stroke-opacity="0.45" stroke-width="2" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 900" width="100%" height="100%">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="15" stdDeviation="15" flood-color="#001833" flood-opacity="0.15" />
+    </filter>
+
+    <linearGradient id="body-gradient" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#abcbe6" />
+      <stop offset="50%" stop-color="#88bce3" />
+      <stop offset="100%" stop-color="#699ec5" />
+    </linearGradient>
+
+    <linearGradient id="glass-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1c3b57" />
+      <stop offset="100%" stop-color="#091f33" />
+    </linearGradient>
+
+    <path id="p80-solid" d="
+      M 500 100
+      C 530 150, 540 300, 540 380
+      L 740 420
+      L 740 350
+      C 740 320, 780 320, 780 350
+      L 780 550
+      C 780 580, 740 580, 740 550
+      L 740 480
+      L 540 520
+      L 520 680
+      L 650 710
+      C 660 710, 660 740, 650 740
+      L 510 760
+      L 510 800
+      C 505 810, 495 810, 490 800
+      L 490 760
+      L 350 740
+      C 340 740, 340 710, 350 710
+      L 480 680
+      L 460 520
+      L 260 480
+      L 260 550
+      C 260 580, 220 580, 220 550
+      L 220 350
+      C 220 320, 260 320, 260 350
+      L 260 420
+      L 460 380
+      C 460 300, 470 150, 500 100
+      Z"
+    />
+  </defs>
+
+  <use href="#p80-solid" fill="url(#body-gradient)" filter="url(#shadow)" />
+  <use href="#p80-solid" fill="none" stroke="#2c4c68" stroke-width="2.5" stroke-linejoin="round" />
+
+  <path d="M 500 100 C 470 150, 460 300, 460 380 L 460 520 L 480 680 L 490 760 L 500 760 L 500 100 Z"
+        fill="#ffffff" opacity="0.12" />
+
+  <path d="M 540 C 555 385, 555 410, 538 415 Z" fill="#142436" />
+  <path d="M 460 C 445 385, 445 410, 462 415 Z" fill="#142436" />
+
+  <path d="M 500 100 C 510 120, 510 160, 500 180 C 490 160, 490 120, 500 100 Z" fill="#182c40" opacity="0.85" />
+
+  <line x1="500" y1="380" x2="500" y2="760" stroke="#1c344c" stroke-width="1" opacity="0.4" stroke-linecap="round" />
+
+  <path d="M 500 180 C 520 200, 520 320, 500 350 C 480 320, 480 200, 500 180 Z"
+        fill="url(#glass-gradient)" stroke="#5d88ab" stroke-width="1.5" stroke-linejoin="round" />
+
+  <path d="M 495 185 C 488 220, 488 300, 495 330 C 493 300, 493 220, 495 185 Z" fill="#ffffff" opacity="0.25" />
 </svg>
