@@ -549,6 +549,29 @@ type PendingThreadPreview = Pick<
 
 const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 
+function threadMatchesPendingPreview(thread: SessionThread, pending: PendingThreadPreview): boolean {
+  return thread.id === pending.id || (
+    thread.session_id === pending.session_id &&
+    thread.agent_type === pending.agent_type &&
+    thread.label === pending.label &&
+    (thread.model_override ?? null) === (pending.model_override ?? null) &&
+    new Date(thread.created_at) >= new Date(pending.created_at)
+  );
+}
+
+export function buildChromeThreads(
+  threads: SessionThread[],
+  pendingThreadPreview: PendingThreadPreview | null,
+): SessionThread[] {
+  if (!pendingThreadPreview) {
+    return threads;
+  }
+  if (threads.some((thread) => threadMatchesPendingPreview(thread, pendingThreadPreview))) {
+    return threads;
+  }
+  return [...threads, pendingThreadPreview];
+}
+
 function mergePendingMessages(
   baseMessages: SessionMessage[],
   pendingMessages: SessionMessage[],
@@ -3309,12 +3332,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [diffRevisionKey, isDiffFetchedAfterMount, refetchDiff, sessionDiffPayload, shouldLoadDiff]);
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
-  const chromeThreads = useMemo(() => {
-    if (!pendingThreadPreview || threads.some((thread) => thread.id === pendingThreadPreview.id)) {
-      return threads;
-    }
-    return [...threads, pendingThreadPreview];
-  }, [pendingThreadPreview, threads]);
+  const chromeThreads = useMemo(
+    () => buildChromeThreads(threads, pendingThreadPreview),
+    [pendingThreadPreview, threads],
+  );
   const nonInteractiveThreadIds = useMemo(
     () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
     [pendingThreadPreview],
