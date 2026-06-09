@@ -52,6 +52,18 @@ vi.mock('@/lib/notify', () => ({
   notify: toast,
 }));
 
+vi.mock('@/components/markdown', () => ({
+  MarkdownContent: ({ content, className }: { content: string; className?: string }) => (
+    <div className={className}>{content}</div>
+  ),
+}));
+
+vi.mock('@/components/session-keyboard-help-overlay', () => ({
+  SessionKeyboardHelpOverlay: ({ open }: { open: boolean }) => (
+    open ? <div role="dialog" aria-label="Session keyboard shortcuts" /> : null
+  ),
+}));
+
 vi.mock('next/navigation', () => ({
   useRouter: () => ({
     push: routerPush,
@@ -136,6 +148,14 @@ function getChatScroller(container: HTMLElement): HTMLDivElement {
   const scroller = container.querySelector('div.flex-1.overflow-y-auto.space-y-2.p-4');
   expect(scroller).toBeInstanceOf(HTMLDivElement);
   return scroller as HTMLDivElement;
+}
+
+function changeFieldValue(element: HTMLElement, value: string) {
+  fireEvent.change(element, { target: { value } });
+}
+
+function submitFieldWithEnter(element: HTMLElement) {
+  fireEvent.keyDown(element, { key: 'Enter', code: 'Enter', charCode: 13 });
 }
 
 function renderSessionDetailWithQueryClient(id: string, queryClient: QueryClient) {
@@ -701,6 +721,7 @@ describe('SessionDetailPage', () => {
   it('lets the user edit the session title inline', async () => {
     const updatedTitle = 'Renamed session title';
     let currentTitle = 'Original editable title';
+    const user = userEvent.setup();
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -725,15 +746,13 @@ describe('SessionDetailPage', () => {
       }),
     );
 
-    const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findByRole('heading', { level: 1, name: currentTitle });
     await user.click(screen.getByRole('button', { name: 'Edit session title' }));
 
     const input = screen.getByDisplayValue(currentTitle);
-    await user.clear(input);
-    await user.type(input, updatedTitle);
+    changeFieldValue(input, updatedTitle);
     await user.click(screen.getByRole('button', { name: 'Save title' }));
 
     await waitFor(() => {
@@ -757,6 +776,7 @@ describe('SessionDetailPage', () => {
   });
 
   it('seeds the title editor from the same title shown in the header', async () => {
+    const user = userEvent.setup();
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -770,7 +790,6 @@ describe('SessionDetailPage', () => {
       }),
     );
 
-    const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findByRole('heading', { level: 1, name: 'Quick null check fix' });
@@ -1005,7 +1024,7 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByRole('tab', { name: /Claude Code 3/ })).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a message to Claude Code 3...')).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText('Send a message to Claude Code 3...'), 'Run the frontend checks.');
+    changeFieldValue(screen.getByPlaceholderText('Send a message to Claude Code 3...'), 'Run the frontend checks.');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
@@ -1478,9 +1497,7 @@ describe('SessionDetailPage', () => {
 
     await user.click(screen.getByLabelText('Model override'));
     await user.click(await screen.findByRole('option', { name: 'gpt-5.4-mini' }));
-    fireEvent.change(screen.getByPlaceholderText('Send a message to Codex 2...'), {
-      target: { value: 'Use the selected model.' },
-    });
+    changeFieldValue(screen.getByPlaceholderText('Send a message to Codex 2...'), 'Use the selected model.');
     await user.click(screen.getByRole('button', { name: 'Send message' }));
 
     await waitFor(() => {
@@ -5809,7 +5826,7 @@ describe('SessionDetailPage', () => {
     expect(textarea).toBeEnabled();
 
     const user = userEvent.setup();
-    await user.type(textarea, 'Queue this behind the current work');
+    changeFieldValue(textarea, 'Queue this behind the current work');
     await user.click(screen.getByTitle('Send message'));
 
     await waitFor(() => {
@@ -6509,9 +6526,8 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
 
-    const user = userEvent.setup();
-    await user.type(textarea, 'Hello agent');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Hello agent');
+    submitFieldWithEnter(textarea);
 
     await waitFor(() => {
       expect(messageSent).toBe(true);
@@ -6553,12 +6569,11 @@ describe('SessionDetailPage', () => {
       }),
     );
 
-    const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
-    await user.type(textarea, 'Show this immediately');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Show this immediately');
+    submitFieldWithEnter(textarea);
 
     expect(await screen.findByText('Show this immediately')).toBeInTheDocument();
     expect(textarea).toHaveValue('');
@@ -6622,12 +6637,11 @@ describe('SessionDetailPage', () => {
       }),
     );
 
-    const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
-    await user.type(textarea, 'Show once');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Show once');
+    submitFieldWithEnter(textarea);
 
     expect(await screen.findByText('Show once')).toBeInTheDocument();
 
@@ -6681,8 +6695,9 @@ describe('SessionDetailPage', () => {
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
     await user.click(screen.getByTitle('Switch to plan mode (Shift+Tab)'));
-    await user.type(screen.getByPlaceholderText('Describe what you want to plan...'), 'Plan this change');
-    await user.keyboard('{Enter}');
+    const planTextarea = screen.getByPlaceholderText('Describe what you want to plan...');
+    changeFieldValue(planTextarea, 'Plan this change');
+    submitFieldWithEnter(planTextarea);
 
     const sessionStream = MockEventSource.instances.find((instance) =>
       instance.url.includes(`/api/v1/sessions/${idleSession.id}/logs/stream`),
@@ -6715,6 +6730,7 @@ describe('SessionDetailPage', () => {
   it('clears attached review comments after sending them to the agent', async () => {
     let postedMessage = '';
     let postedResolveIDs: string[] | undefined;
+    const user = userEvent.setup();
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -6774,7 +6790,6 @@ describe('SessionDetailPage', () => {
       }),
     );
 
-    const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
@@ -6786,8 +6801,8 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
     expect(screen.getAllByText('Handle the null edge case').length).toBeGreaterThan(0);
 
-    await user.type(textarea, 'Hello agent');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Hello agent');
+    submitFieldWithEnter(textarea);
 
     await waitFor(() => {
       expect(postedMessage).toContain('Please address the following code review comments:');
@@ -6863,14 +6878,13 @@ describe('SessionDetailPage', () => {
       }),
     );
 
-    const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
     expect(await screen.findByText('50 comments attached')).toBeInTheDocument();
 
-    await user.type(textarea, 'Please handle these');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Please handle these');
+    submitFieldWithEnter(textarea);
 
     await waitFor(() => {
       expect(postedResolveIDs).toHaveLength(50);
@@ -6925,9 +6939,8 @@ describe('SessionDetailPage', () => {
       scroller.dispatchEvent(new Event('scroll'));
     });
 
-    const user = userEvent.setup();
-    await user.type(textarea, 'Hello agent');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Hello agent');
+    submitFieldWithEnter(textarea);
 
     await waitFor(() => {
       expect(messageSent).toBe(true);
@@ -7333,7 +7346,7 @@ describe('SessionDetailPage', () => {
     await screen.findByPlaceholderText('Send a follow-up message...');
     await user.click(screen.getByTitle('Add files, photos, or a Linear issue'));
     await user.click(await screen.findByRole('menuitem', { name: 'Add image URL' }));
-    await user.type(screen.getByRole('textbox', { name: 'Image URL' }), 'https://example.com/follow-up-shot.png');
+    changeFieldValue(screen.getByRole('textbox', { name: 'Image URL' }), 'https://example.com/follow-up-shot.png');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
     expect(await screen.findByRole('button', { name: 'Preview follow-up-shot.png' })).toBeInTheDocument();
@@ -7387,7 +7400,7 @@ describe('SessionDetailPage', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Add linear issue' }));
 
     const linearInput = await screen.findByLabelText('Linear issue id or URL');
-    await user.type(linearInput, 'ACS-1234');
+    changeFieldValue(linearInput, 'ACS-1234');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
     expect(composer).toHaveValue('ACS-1234');
@@ -7420,7 +7433,7 @@ describe('SessionDetailPage', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Add linear issue' }));
 
     const linearInput = await screen.findByLabelText('Linear issue id or URL');
-    await user.type(linearInput, 'fix the bug');
+    changeFieldValue(linearInput, 'fix the bug');
     await user.click(screen.getByRole('button', { name: 'Add' }));
 
     // The ref-validation error must surface so the user knows why nothing
@@ -7997,7 +8010,7 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const composer = await screen.findByPlaceholderText('Send a follow-up message...') as HTMLTextAreaElement;
-    await user.type(composer, 'Please fix this and add tests');
+    changeFieldValue(composer, 'Please fix this and add tests');
     expect(composer.value).toBe('Please fix this and add tests');
 
     await user.click(screen.getAllByTitle('View changes')[0]);
@@ -8051,8 +8064,8 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getAllByTitle('View changes')[0]);
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
 
-    await user.type(textarea, 'Hello from review');
-    await user.keyboard('{Enter}');
+    changeFieldValue(textarea, 'Hello from review');
+    submitFieldWithEnter(textarea);
 
     await waitFor(() => {
       expect(screen.queryByText('src/app.ts')).not.toBeInTheDocument();
@@ -8959,7 +8972,7 @@ describe('SessionDetailPage', () => {
     const textarea = await screen.findByPlaceholderText('Send a follow-up message...') as HTMLTextAreaElement;
 
     const user = userEvent.setup();
-    await user.type(textarea, 'Test message');
+    changeFieldValue(textarea, 'Test message');
     expect(textarea.value).toBe('Test message');
 
     // Click send button
