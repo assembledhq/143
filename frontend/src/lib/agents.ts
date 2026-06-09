@@ -62,7 +62,7 @@ export const AGENTS: readonly AgentMeta[] = [
     label: "Claude Code",
     short: "CC",
     color: "#cc785c",
-    description: "Anthropic Claude (Opus, Sonnet, Haiku)",
+    description: "Anthropic Claude (Fable, Opus, Sonnet, Haiku)",
     providerKey: "anthropic",
     models: AVAILABLE_CLAUDE_CODE_MODELS,
     envVars: [
