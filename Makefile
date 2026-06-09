@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -443,6 +443,31 @@ provision-egress:
 	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "$(HOST)" "$(EGRESS_SSH_KEY)"
+
+# Provision (or re-provision) every worker:<host> in FLEET_HOSTS in one pass.
+# Syncs per-worker WireGuard secrets and provisions the egress gateway once,
+# then runs provision.sh for each worker host. Use after enabling/repairing
+# static egress so every worker rewrites /etc/143/static-egress-capable and
+# starts advertising static_egress_capable in its node metadata.
+# Honors REPROVISION=true (tears down and rebuilds each worker).
+# Usage:
+#   make provision-workers
+#   make provision-workers REPROVISION=true
+#   make provision-workers SSH_USER=ubuntu EGRESS_SSH_KEY=~/Downloads/143-john.pem
+provision-workers:
+	$(check-ssh-key)
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@deploy/scripts/sync-static-egress-secrets.sh --apply
+	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
+	@$(read-fleet-hosts); \
+	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^worker:' | cut -d: -f2)"; \
+	if [ -z "$$HOSTS" ]; then \
+		echo "ERROR: no worker:<host> entries in FLEET_HOSTS."; exit 1; \
+	fi; \
+	for h in $$HOSTS; do \
+		echo "=== provisioning worker $$h ==="; \
+		./deploy/scripts/provision.sh worker "$$h" $(SSH_KEY) $(if $(REPROVISION),--reprovision) || { echo "FAILED on $$h"; exit 1; }; \
+	done
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
