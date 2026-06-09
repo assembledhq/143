@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -958,6 +959,10 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	workerInstallScript, err := os.ReadFile("../deploy/scripts/install-static-egress-worker.sh")
 	require.NoError(t, err, "test should read static egress worker installer")
 	workerInstallText := string(workerInstallScript)
+	workerInterfaceDefault := regexp.MustCompile(`STATIC_EGRESS_WG_INTERFACE:-([^}]+)`).FindStringSubmatch(workerInstallText)
+	require.Len(t, workerInterfaceDefault, 2, "static egress worker installer should define a default WireGuard interface")
+	require.Equal(t, "wg-egress", workerInterfaceDefault[1], "worker WireGuard interface default should stay short and readable")
+	require.LessOrEqual(t, len(workerInterfaceDefault[1]), 15, "worker WireGuard interface name must fit Linux IFNAMSIZ so wg-quick can create it")
 	require.Contains(t, workerInstallText, "docker run", "static egress verification should probe from a sandbox-network container")
 	require.Contains(t, workerInstallText, "--network \"$STATIC_EGRESS_NETWORK\"", "static egress verification should exercise the static egress bridge")
 	require.Contains(t, workerInstallText, "--dns \"$STATIC_EGRESS_DNS_IP\"", "static egress verification should use the sandbox DNS resolver")
