@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/rs/zerolog"
 )
 
@@ -27,6 +28,10 @@ type OrgSettingsInvalidator interface {
 
 type StaticEgressWorkerChecker interface {
 	HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error)
+}
+
+type StaticEgressWorkerDiagnosticsProvider interface {
+	StaticEgressWorkerDiagnostics(ctx context.Context, publicIP string) (preview.StaticEgressWorkerDiagnostics, error)
 }
 
 type SettingsHandler struct {
@@ -152,7 +157,7 @@ func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireW
 				reason = "static egress worker availability checker is not configured"
 			}
 		} else {
-			hasWorker, workerErr := h.workers.HasStaticEgressCapableWorker(ctx, status.PublicIP)
+			hasWorker, diagnostics, workerErr := h.staticEgressWorkerAvailability(ctx, status.PublicIP)
 			if workerErr != nil {
 				status.Available = false
 				reason = "failed to verify static egress worker availability"
@@ -161,6 +166,10 @@ func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireW
 			if !hasWorker {
 				status.Available = false
 				reason = "not all active session workers are static-egress-capable for the configured public IP"
+				h.logger.Warn().
+					Str("static_egress_public_ip", status.PublicIP).
+					Interface("static_egress_worker_mismatches", diagnostics.Mismatches).
+					Msg("static egress worker capability mismatch")
 			}
 		}
 	}
@@ -168,6 +177,18 @@ func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireW
 		reason = "static egress gateway is not configured for this environment"
 	}
 	return status, reason, nil
+}
+
+func (h *SettingsHandler) staticEgressWorkerAvailability(ctx context.Context, publicIP string) (bool, preview.StaticEgressWorkerDiagnostics, error) {
+	if diagnosticsProvider, ok := h.workers.(StaticEgressWorkerDiagnosticsProvider); ok {
+		diagnostics, err := diagnosticsProvider.StaticEgressWorkerDiagnostics(ctx, publicIP)
+		if err != nil {
+			return false, preview.StaticEgressWorkerDiagnostics{}, err
+		}
+		return diagnostics.Available, diagnostics, nil
+	}
+	hasWorker, err := h.workers.HasStaticEgressCapableWorker(ctx, publicIP)
+	return hasWorker, preview.StaticEgressWorkerDiagnostics{Available: hasWorker}, err
 }
 
 func staticEgressEnableTransition(beforeRaw, afterRaw json.RawMessage) (bool, error) {
@@ -256,13 +277,11 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if enableStaticEgress {
-			status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), true)
+			status, _, availabilityErr := h.staticEgressAvailability(r.Context(), false)
 			if availabilityErr != nil {
-				h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress availability before settings update")
-			}
-			if !status.Available {
-				writeError(w, r, http.StatusServiceUnavailable, "STATIC_EGRESS_UNAVAILABLE", reason, availabilityErr)
-				return
+				logger.Warn().Err(availabilityErr).Msg("failed to verify static egress availability before settings update")
+			} else if !status.Available {
+				logger.Warn().Str("org_id", orgID.String()).Msg("static egress enabled while worker availability is degraded")
 			}
 		}
 	}
