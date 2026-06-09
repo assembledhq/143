@@ -161,6 +161,55 @@ func expectLinearLinkInsert(t *testing.T, mock pgxmock.PgxPoolIface, linkID uuid
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(linkID))
 }
 
+func TestUpsertLinearIssueStoresIssueURL(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	issueID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), rawDataURLArg{expectedURL: "https://linear.app/acme/issue/ACS-123"},
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
+
+	svc := &Service{issues: db.NewIssueStore(mock)}
+	got, err := svc.upsertLinearIssue(context.Background(), uuid.New(), uuid.New(), fetchedIssueForTest("ACS-123"))
+
+	require.NoError(t, err, "upsertLinearIssue should not return an error")
+	require.Equal(t, issueID, got, "upsertLinearIssue should return the stored issue ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type rawDataURLArg struct {
+	expectedURL string
+}
+
+func (a rawDataURLArg) Match(v interface{}) bool {
+	var raw []byte
+	switch typed := v.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	default:
+		return false
+	}
+	var payload struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false
+	}
+	return payload.URL == a.expectedURL
+}
+
 func expectPrepareStateUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
 	t.Helper()
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").

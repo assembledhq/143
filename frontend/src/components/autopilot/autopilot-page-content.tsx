@@ -25,6 +25,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import type { AutopilotQueueRow, AutopilotRunState } from "@/lib/types";
+import { safeExternalUrl } from "@/lib/utils";
 
 const ALL_VALUE = "all";
 
@@ -350,7 +351,7 @@ function QueueTable({
               <TableRow key={row.id}>
                 <TableCell className="font-medium text-muted-foreground">#{row.rank}</TableCell>
                 <TableCell className="whitespace-normal">
-                  <div className="font-medium text-foreground">{row.title}</div>
+                  <IssueTitle row={row} />
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{row.repo?.name ?? "No repo"}</span>
                     <span>{row.issue_status}</span>
@@ -389,6 +390,25 @@ function QueueTable({
         </div>
       )}
     </div>
+  );
+}
+
+function IssueTitle({ row }: { row: AutopilotQueueRow }) {
+  const issueUrl = safeExternalUrl(row.issue_url);
+  if (!issueUrl) {
+    return <div className="font-medium text-foreground">{row.title}</div>;
+  }
+
+  return (
+    <a
+      href={issueUrl}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex min-w-0 items-center gap-1 font-medium text-foreground underline-offset-4 hover:underline"
+    >
+      <span>{row.title}</span>
+      <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+    </a>
   );
 }
 

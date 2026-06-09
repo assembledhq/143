@@ -961,6 +961,18 @@ func (s *Service) upsertLinearIssue(ctx context.Context, orgID, integrationID uu
 		title = fetched.Identifier + ": " + fetched.Title
 	}
 	desc := fetched.Description
+	rawData, err := json.Marshal(struct {
+		ID         string `json:"id"`
+		Identifier string `json:"identifier"`
+		URL        string `json:"url,omitempty"`
+	}{
+		ID:         fetched.ID,
+		Identifier: fetched.Identifier,
+		URL:        fetched.URL,
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("marshal linear issue raw data: %w", err)
+	}
 	issue := &models.Issue{
 		OrgID:               orgID,
 		ExternalID:          fetched.ID,
@@ -969,6 +981,7 @@ func (s *Service) upsertLinearIssue(ctx context.Context, orgID, integrationID uu
 		RepositoryID:        fetched.RepositoryID,
 		Title:               title,
 		Description:         &desc,
+		RawData:             rawData,
 		Status:              "open",
 		FirstSeenAt:         now,
 		LastSeenAt:          now,

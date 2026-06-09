@@ -353,6 +353,7 @@ export interface AutopilotQueueRow {
   rank: number;
   source: { type: string; key: string };
   title: string;
+  issue_url?: string;
   repo?: { id: string; name: string };
   issue_status: string;
   customer_impact: { label: string; count: number };
