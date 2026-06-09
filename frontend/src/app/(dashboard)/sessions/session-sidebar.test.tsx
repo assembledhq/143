@@ -633,6 +633,26 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('opens a clicked session with client navigation', async () => {
+    const session = makeSession({
+      id: 's1',
+      result_summary: 'Instant open session',
+      status: 'running',
+      diff_stats: { added: 12, removed: 4, files_changed: 3 },
+    });
+    serveSessions([session]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Instant open session')).closest('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
+
+    await userEvent.click(link!);
+
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
+  });
+
   // -----------------------------------------------------------------------
   // "No sessions match this filter" vs "No sessions yet"
   // -----------------------------------------------------------------------
