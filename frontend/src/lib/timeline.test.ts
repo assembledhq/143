@@ -115,6 +115,20 @@ describe("buildTimeline", () => {
     expect(result[0].kind).toBe("log");
   });
 
+  it("keeps recoverable Codex apply_patch diagnostics with top-level context behind the log toggle", () => {
+    const logs = [
+      makeLog({
+        id: 1,
+        created_at: "2026-01-01T00:00:01Z",
+        level: "error",
+        message: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/db/autopilot_queue.go:\nfunc ptrTime(t time.Time) *time.Time {\n\treturn &t\n}",
+      }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("log");
+  });
+
   it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {
     const logs = [
       makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text" }),
