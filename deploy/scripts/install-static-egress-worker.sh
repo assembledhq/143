@@ -62,8 +62,15 @@ for legacy_interface in $LEGACY_WG_INTERFACES; do
     rm -f "/etc/wireguard/${legacy_interface}.conf"
   fi
 done
+
+systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
+ip rule del fwmark "$FWMARK" table "$TABLE_ID" 2>/dev/null || true
+ip route flush table "$TABLE_ID" 2>/dev/null || true
+if ip link show "$WG_INTERFACE" >/dev/null 2>&1; then
+  ip link delete dev "$WG_INTERFACE"
+fi
 systemctl enable "wg-quick@${WG_INTERFACE}" >/dev/null
-systemctl restart "wg-quick@${WG_INTERFACE}"
+systemctl start "wg-quick@${WG_INTERFACE}"
 
 iptables -t mangle -N STATIC_EGRESS_MARK 2>/dev/null || true
 iptables -t mangle -F STATIC_EGRESS_MARK
