@@ -797,7 +797,32 @@ func classifyBenignCodexDiagnostic(msg string) (kind string, multiline bool, ok 
 }
 
 func isCodexDiagnosticContinuation(line string) bool {
-	return strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	return !isCodexLogRecordStart(trimmed)
+}
+
+func isCodexLogRecordStart(trimmed string) bool {
+	fields := strings.Fields(trimmed)
+	if len(fields) >= 3 {
+		if _, err := time.Parse(time.RFC3339Nano, fields[0]); err == nil &&
+			isCodexLogLevel(fields[1]) &&
+			strings.HasPrefix(fields[2], "codex_core::") {
+			return true
+		}
+	}
+	return len(fields) >= 2 && isCodexLogLevel(fields[0]) && strings.HasPrefix(fields[1], "codex_core::")
+}
+
+func isCodexLogLevel(value string) bool {
+	switch value {
+	case "ERROR", "WARN", "INFO", "DEBUG", "TRACE":
+		return true
+	default:
+		return false
+	}
 }
 
 func codexHiddenDiagnosticMetadata(kind string) map[string]interface{} {
