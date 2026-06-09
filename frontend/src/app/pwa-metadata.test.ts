@@ -65,8 +65,22 @@ describe("PWA metadata", () => {
       },
     ]);
     expect(existsSync(join(publicDir, "favicon.ico"))).toBe(true);
-    expect(readFileSync(join(publicDir, "favicon.ico")).subarray(0, 4)).toEqual(Buffer.from([0, 0, 1, 0]));
+    const favicon = readFileSync(join(publicDir, "favicon.ico"));
+    expect(favicon.subarray(0, 4)).toEqual(Buffer.from([0, 0, 1, 0]));
+    expect(favicon.readUInt16LE(4)).toBe(4);
+    expect([0, 1, 2, 3].map((index) => [favicon[6 + index * 16] || 256, favicon[7 + index * 16] || 256])).toEqual([
+      [16, 16],
+      [32, 32],
+      [48, 48],
+      [256, 256],
+    ]);
     expect(readFileSync(join(publicDir, "icon-32.png")).subarray(1, 4).toString("ascii")).toBe("PNG");
     expect(readFileSync(join(publicDir, "apple-icon.png")).subarray(1, 4).toString("ascii")).toBe("PNG");
+
+    const iconSvg = readFileSync(join(process.cwd(), "src/app/icon.svg"), "utf8");
+    expect(iconSvg).toContain('id="p80-solid"');
+    expect(iconSvg).toContain("#abcbe6");
+    expect(iconSvg).toContain("#699ec5");
+    expect(iconSvg).not.toContain(">143<");
   });
 });
