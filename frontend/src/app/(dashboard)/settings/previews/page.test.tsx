@@ -444,6 +444,35 @@ describe("PreviewSettingsPage", () => {
     });
   }, 10000);
 
+  it("preserves leading mask characters when replacing an existing environment secret", async () => {
+    let patchedBody: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({
+        data: [bundle("bundle-1", "repo-1", "assembled-dev")],
+        meta: {},
+      })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.patch("*/api/v1/preview-secret-bundles/:bundleId", async ({ request }) => {
+        patchedBody = await request.json();
+        return HttpResponse.json({ data: bundle("bundle-1", "repo-1", "assembled-dev") });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
+    await userEvent.click(screen.getByLabelText("Secret value"));
+    await userEvent.type(screen.getByLabelText("Secret value"), "********TOKEN");
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(patchedBody).toMatchObject({
+        source: { type: "managed", values: { DATABASE_URL: "********TOKEN" } },
+      });
+    });
+  }, 10000);
+
   it("preserves existing secret file contents when editing file bundle metadata", async () => {
     let patchedBody: unknown;
     const fileBundle = {
@@ -489,6 +518,47 @@ describe("PreviewSettingsPage", () => {
     });
   }, 10000);
 
+  it("preserves leading mask lines when replacing existing secret file contents", async () => {
+    let patchedBody: unknown;
+    const fileBundle = {
+      id: "bundle-file",
+      repository_id: "repo-1",
+      name: "file-bundle",
+      source_type: "managed",
+      exposure_policy: "preview_runtime",
+      outputs: [{ type: "file", path: "config.json", format: "raw" }],
+      created_by_user_id: "user-1",
+      created_at: "2026-05-27T00:00:00Z",
+    };
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () =>
+        HttpResponse.json({ data: [fileBundle], meta: {} }),
+      ),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.patch("*/api/v1/preview-secret-bundles/:bundleId", async ({ request }) => {
+        patchedBody = await request.json();
+        return HttpResponse.json({ data: fileBundle });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
+    await userEvent.click(screen.getByLabelText("Secret file contents"));
+    fireEvent.change(screen.getByLabelText("Secret file contents"), {
+      target: { value: "********\n********\n********\nactual-content" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => {
+      expect(patchedBody).toMatchObject({
+        source: { type: "managed", values: { SECRET_FILE_CONTENT: "********\n********\n********\nactual-content" } },
+      });
+    });
+  }, 10000);
+
   it("reveals existing secret file contents on explicit request", async () => {
     const fileBundle = {
       id: "bundle-file",
@@ -522,7 +592,8 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
 
-    expect(screen.getByLabelText("Secret file contents")).toHaveValue("");
+    expect(screen.getByLabelText("Secret file contents")).toHaveValue("********\n********\n********");
+    expect(screen.getByLabelText("Secret file contents")).toHaveClass("[-webkit-text-security:disc]");
 
     expect(screen.queryByRole("button", { name: "Reveal contents" })).not.toBeInTheDocument();
 
@@ -557,7 +628,8 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle/i }))[0]);
 
-    expect(screen.getByLabelText("Secret value")).toHaveValue("");
+    expect(screen.getByLabelText("Secret value")).toHaveValue("********");
+    expect(screen.getByLabelText("Secret value")).toHaveAttribute("type", "password");
 
     await userEvent.click(screen.getByRole("button", { name: "Reveal secret value DATABASE_URL" }));
 
