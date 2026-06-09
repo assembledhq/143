@@ -817,6 +817,7 @@ func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
 	require.Contains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP//./-}`, "provision.sh's NODE_ID default should use the full dotted-to-dash IP so workers across multiple /24s don't collide on \"worker-<last-octet>\"")
 	require.NotContains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP##*.}`, "provision.sh should not fall back to the last-octet-only default — it collides across /24s")
 	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
+	require.Contains(t, string(provisionScript), `docker|br-|veth|virbr|lo|wg`, "provision.sh should ignore static-egress WireGuard interfaces when auto-detecting the app-reachable worker IP")
 }
 
 func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
