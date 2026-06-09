@@ -309,14 +309,14 @@ resolve_worker_identity() {
     else
       echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
       # Enumerate every private IPv4 on a real network interface, deliberately
-      # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
+      # skipping docker/bridge/veth/WireGuard/loopback. A naive "first private IPv4"
       # filter would silently return 172.17.0.1 (docker0) on hosts where the
       # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
       # the *public* IP because the default route goes through the public NIC.
       # We collect candidates (no awk `exit`) so multi-homed hosts surface as
       # an error rather than silently picking whichever NIC enumerates first.
       WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
-        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo|wg)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
     fi
     CANDIDATE_COUNT="$(printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | grep -c . || true)"
     if [ "$CANDIDATE_COUNT" -eq 0 ]; then
