@@ -6,7 +6,8 @@ set -euo pipefail
 # packets sourced from STATIC_EGRESS_SUBNET; ordinary host and sandbox traffic
 # keeps the existing route.
 
-WG_INTERFACE="${STATIC_EGRESS_WG_INTERFACE:-wg-static-egress}"
+WG_INTERFACE="${STATIC_EGRESS_WG_INTERFACE:-wg-egress}"
+LEGACY_WG_INTERFACES="wg-static-egress wgstegress"
 WG_PRIVATE_KEY="${STATIC_EGRESS_WORKER_PRIVATE_KEY:?STATIC_EGRESS_WORKER_PRIVATE_KEY is required}"
 WG_ADDRESS="${STATIC_EGRESS_WORKER_WG_ADDRESS:?STATIC_EGRESS_WORKER_WG_ADDRESS is required, e.g. 10.143.0.2/32}"
 WG_PEER_PUBLIC_KEY="${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:?STATIC_EGRESS_GATEWAY_PUBLIC_KEY is required}"
@@ -21,6 +22,17 @@ CAPABILITY_FILE="/etc/143/static-egress-capable"
 PROBE_URL="${STATIC_EGRESS_PROBE_URL:-https://api.ipify.org}"
 PROBE_IMAGE="${STATIC_EGRESS_PROBE_IMAGE:-ghcr.io/assembledhq/143-sandbox:latest}"
 PROBE_TIMEOUT="${STATIC_EGRESS_PROBE_TIMEOUT_SECONDS:-10}"
+
+if [ "${#WG_INTERFACE}" -gt 15 ]; then
+  echo "ERROR: STATIC_EGRESS_WG_INTERFACE '$WG_INTERFACE' is too long; Linux interface names must be 15 characters or fewer." >&2
+  exit 1
+fi
+case "$WG_INTERFACE" in
+  ""|.|..|*/*)
+    echo "ERROR: STATIC_EGRESS_WG_INTERFACE '$WG_INTERFACE' is not a valid WireGuard interface name." >&2
+    exit 1
+    ;;
+esac
 
 apt-get update >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireguard iproute2 iptables iptables-persistent >/dev/null
@@ -44,6 +56,12 @@ Endpoint = ${WG_ENDPOINT}
 PersistentKeepalive = 25
 WGCONF
 
+for legacy_interface in $LEGACY_WG_INTERFACES; do
+  if [ "$WG_INTERFACE" != "$legacy_interface" ]; then
+    systemctl disable --now "wg-quick@${legacy_interface}" >/dev/null 2>&1 || true
+    rm -f "/etc/wireguard/${legacy_interface}.conf"
+  fi
+done
 systemctl enable "wg-quick@${WG_INTERFACE}" >/dev/null
 systemctl restart "wg-quick@${WG_INTERFACE}"
 
