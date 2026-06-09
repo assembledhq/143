@@ -55,7 +55,7 @@ function installHandlers() {
 }
 
 describe("Agent settings page", () => {
-  it("renders the stack helper text and restored execution settings", async () => {
+  it("renders the stack helper text without shared runtime controls", async () => {
     installHandlers();
 
     renderWithProviders(<AgentPage />);
@@ -63,50 +63,9 @@ describe("Agent settings page", () => {
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
     expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
-    expect(screen.getByLabelText("Max concurrent sessions")).toHaveValue(5);
-    expect(screen.getByLabelText("Session max time (minutes)")).toHaveValue(25);
-  });
-
-  it("defaults agent tab tools to enabled when the setting is absent", async () => {
-    installHandlers();
-
-    renderWithProviders(<AgentPage />);
-
-    expect(await screen.findByLabelText("Agent tab tools")).toBeChecked();
-  });
-
-  it("saves the agent tab tools setting when toggled", async () => {
-    const user = userEvent.setup();
-    const updates: unknown[] = [];
-    installHandlers();
-    server.use(
-      http.patch("/api/v1/settings", async ({ request }) => {
-        updates.push(await request.json());
-        return HttpResponse.json({
-          data: {
-            id: "org-1",
-            name: "Acme",
-            settings: {
-              default_agent_type: "codex",
-              max_concurrent_runs: 5,
-              max_session_duration_seconds: 1500,
-              coding_agent_tab_tools_enabled: false,
-              agent_config: {},
-            },
-            created_at: "2026-04-22T10:00:00Z",
-            updated_at: "2026-04-22T10:00:00Z",
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(<AgentPage />);
-
-    await user.click(await screen.findByLabelText("Agent tab tools"));
-
-    await waitFor(() => {
-      expect(updates).toEqual([{ settings: { coding_agent_tab_tools_enabled: false } }]);
-    });
+    expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
   });
 
   it("keeps the details sheet closed after dismissing it", async () => {

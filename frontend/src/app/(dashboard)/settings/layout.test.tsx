@@ -60,7 +60,7 @@ describe('SettingsLayout', () => {
 
   it('redirects members away from admin-only pages (LLM, General, Usage, etc.)', async () => {
     useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
-    pathnameMock.value = '/settings/llm';
+    pathnameMock.value = '/settings/runtime';
 
     renderWithProviders(
       <SettingsLayout>
