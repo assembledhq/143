@@ -3320,10 +3320,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     // (b) backend state changes (new failure, reaper marking unknown
     // delivery). Poll slowly to catch (b), and pause completely when the
     // tab is hidden — refetchIntervalInBackground=false (the default) stops
-    // the interval; refetchOnWindowFocus=true (the default) picks up any
-    // changes when the user returns.
+    // the interval; refetchOnWindowFocus=true picks up any changes when the
+    // user returns.
     refetchInterval: recoverableInboxThreadId ? 30_000 : false,
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const recoverableInboxEntries = useMemo(
     () => recoverableInboxQuery.data?.data ?? [],
