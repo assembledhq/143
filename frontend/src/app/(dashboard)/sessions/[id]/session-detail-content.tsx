@@ -36,7 +36,7 @@ import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
-import { MarkdownContent } from "@/components/markdown";
+import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -111,7 +111,6 @@ import {
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
 import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
-import type { DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
@@ -135,7 +134,7 @@ import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organizatio
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -172,6 +171,14 @@ const ReviewDiffView = dynamic(
   {
     ssr: false,
     loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
+
+const ChangesTab = dynamic(
+  () => import("./session-changes-tab").then((m) => ({ default: m.ChangesTab })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse" />,
   },
 );
 
@@ -658,7 +665,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <MarkdownContent content={session.result_summary} className="text-xs" />
+            <LazyMarkdownContent content={session.result_summary} className="text-xs" />
           </CardContent>
         </Card>
       )}
@@ -889,115 +896,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     </div>
   );
 }
-
-const ChangesTab = memo(function ChangesTab({
-  filteredFiles,
-  activeFileIndex,
-  onFileSelect,
-  onOpenReview,
-  comments,
-  onCommentClick,
-  passes,
-  passRange,
-  onPassRangeChange,
-  emptyStatusText,
-  isMobile,
-  diffLoadErrorText,
-  diffTruncationText,
-  onRetryDiffLoad,
-}: {
-  filteredFiles: DiffFile[];
-  activeFileIndex: number;
-  onFileSelect: (index: number) => void;
-  onOpenReview: (fileIndex?: number) => void;
-  comments: SessionReviewComment[];
-  onCommentClick: (filePath: string) => void;
-  passes: DiffPassEntry[];
-  passRange: PassRange | null;
-  onPassRangeChange: (range: PassRange | null) => void;
-  emptyStatusText: string;
-  isMobile: boolean;
-  diffLoadErrorText?: string;
-  diffTruncationText?: string;
-  onRetryDiffLoad?: () => void;
-}) {
-  const hasDiff = filteredFiles.length > 0;
-  const hasDiffLoadError = !!diffLoadErrorText;
-
-  const handleFileClick = useCallback(
-    (index: number) => {
-      onFileSelect(index);
-      onOpenReview(index);
-    },
-    [onFileSelect, onOpenReview]
-  );
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Pass selector */}
-      {passes.length >= 2 && (
-        <div className="px-4 py-3 border-b border-border">
-          <PassSelector
-            passes={passes}
-            selectedRange={passRange}
-            onRangeChange={onPassRangeChange}
-          />
-        </div>
-      )}
-
-      {/* Comments summary */}
-      {comments.length > 0 && (
-        <CommentsSummary
-          comments={comments}
-          onCommentClick={onCommentClick}
-        />
-      )}
-
-      {/* Main content: file tree or empty state */}
-      {hasDiff ? (
-        <div className="flex flex-col flex-1 min-h-0">
-          {diffTruncationText ? (
-            <div className="mx-4 mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">
-              <p className="font-medium">Large diff truncated</p>
-              <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
-            </div>
-          ) : null}
-          <div className="flex-1 overflow-hidden">
-            <FileTree
-              files={filteredFiles}
-              activeFileIndex={activeFileIndex}
-              onFileSelect={handleFileClick}
-              variant={isMobile ? "sheet" : "sidebar"}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center py-12">
-          <div className="text-center space-y-2 max-w-[280px]">
-            {hasDiffLoadError ? (
-              <AlertTriangle className="h-8 w-8 text-destructive/70 mx-auto" />
-            ) : (
-              <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-            )}
-            <p className="text-xs font-medium text-muted-foreground">
-              {hasDiffLoadError ? "Couldn't load changes" : "No changes yet"}
-            </p>
-            <p className="text-xs text-muted-foreground/60">
-              {diffLoadErrorText ?? emptyStatusText}
-            </p>
-            {hasDiffLoadError && onRetryDiffLoad ? (
-              <Button type="button" variant="outline" size="sm" className="mt-2" onClick={onRetryDiffLoad}>
-                Retry
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-});
-
-ChangesTab.displayName = "ChangesTab";
 
 // ---------------------------------------------------------------------------
 // Shared session composer (used in both chat and review mode)
