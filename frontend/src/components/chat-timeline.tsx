@@ -12,7 +12,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { MarkdownContent } from "@/components/markdown";
+import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { HumanInputRequestCard } from "@/components/human-input-request-card";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
@@ -424,7 +424,7 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
 
   return (
     <AssistantBubble>
-      <MarkdownContent content={msg.content} />
+      <LazyMarkdownContent content={msg.content} />
       {msg.attachments && msg.attachments.length > 0 && (
         <AttachmentGrid attachments={msg.attachments} />
       )}
@@ -606,7 +606,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
         rendered.push(
           wrapEntry(
             <AssistantBubble key={`aout-${entry.data.id}`}>
-              <MarkdownContent content={entry.data.message} />
+              <LazyMarkdownContent content={entry.data.message} />
             </AssistantBubble>,
             entry,
             index,
@@ -623,7 +623,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
               onAdjust={onAdjustPlan}
               isRunning={isRunning}
             >
-              <MarkdownContent content={entry.data.message} />
+              <LazyMarkdownContent content={entry.data.message} />
             </PlanOutputBubble>,
             entry,
             index,
@@ -640,7 +640,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
               onAdjust={onAdjustPlan}
               isRunning={isRunning}
             >
-              <MarkdownContent content={entry.data.content} />
+              <LazyMarkdownContent content={entry.data.content} />
               <TimestampLabel
                 dateStr={entry.data.created_at}
                 formatter={formatMessageTime}

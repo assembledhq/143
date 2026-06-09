@@ -1,10 +1,8 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clipboard } from "lucide-react";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,6 +11,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { CopyButton } from "@/components/copy-button";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
 import { useAutosave } from "@/hooks/useAutosave";
@@ -199,11 +198,11 @@ function NetworkAccessSettings() {
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const sandboxNetwork = settings.sandbox_network ?? {};
-  const enabled = sandboxNetwork.static_egress_enabled ?? false;
   const networkStatus = networkStatusResponse?.data;
   const available = networkStatus?.static_egress_available ?? false;
   const publicIP = networkStatus?.static_egress_public_ip;
   const unavailableReason = networkStatus?.static_egress_unavailable_reason;
+  const enabled = sandboxNetwork.static_egress_enabled ?? networkStatus?.static_egress_enabled ?? false;
 
   const saveStaticEgress = (checked: boolean) => {
     save({
@@ -228,7 +227,7 @@ function NetworkAccessSettings() {
             <div className="space-y-1">
               <Label htmlFor="static-egress-enabled">Use static egress IP for sessions and previews</Label>
               <p className="text-xs text-muted-foreground">
-                New and hydrated sandboxes use the allowlistable public IP when enabled.
+                Uses a stable public IP for new and hydrated sandboxes.
               </p>
               {!available && unavailableReason && (
                 <p className="text-xs text-muted-foreground">{unavailableReason}</p>
@@ -237,27 +236,14 @@ function NetworkAccessSettings() {
             <Switch
               id="static-egress-enabled"
               checked={enabled}
-              disabled={!available && !enabled}
               onCheckedChange={saveStaticEgress}
               aria-label="Use static egress IP for sessions and previews"
             />
           </div>
           <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
             <span className="text-xs text-muted-foreground">Public IP</span>
-            <code className="font-mono text-sm text-foreground">{publicIP ?? "Not configured"}</code>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              disabled={!publicIP}
-              aria-label="Copy static egress public IP"
-              onClick={() => {
-                if (publicIP) void navigator.clipboard?.writeText(publicIP);
-              }}
-            >
-              <Clipboard className="h-4 w-4" />
-            </Button>
+            <code className="font-mono text-xs text-foreground">{publicIP ?? "Not configured"}</code>
+            <CopyButton value={publicIP} label="Copy static egress public IP" />
           </div>
         </CardContent>
       </Card>
