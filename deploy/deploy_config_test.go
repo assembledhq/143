@@ -937,8 +937,11 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, syncText, "STATIC_EGRESS_WORKER_HOSTS", "static egress sync should update the generated worker private-key map")
 	require.Contains(t, syncText, "STATIC_EGRESS_WORKER_PEERS", "static egress sync should update the derived gateway peer list")
 	require.Contains(t, syncText, "PROVISION_WORKER_HOST", "static egress sync should validate provision-worker is backed by FLEET_HOSTS")
-	require.Contains(t, syncText, "sops --encrypt", "static egress sync should write updated generated config back to encrypted production secrets only in apply mode")
-	require.Contains(t, syncText, "--filename-override \"$ENC_FILE\"", "static egress sync should encrypt temp files using .env.production.enc creation rules")
+	require.Contains(t, syncText, "sops set", "static egress sync should edit generated keys in place in apply mode")
+	require.Contains(t, syncText, "--idempotent", "static egress sync should skip keys whose value is unchanged so no-op re-runs produce no diff")
+	require.NotContains(t, syncText, "sops --encrypt", "static egress sync should not full re-encrypt the file, which rotates the data key and rewrites every value into an unreviewable whole-file diff")
+	require.Contains(t, syncText, "cp \"$ENC_FILE\" \"$staged_enc\"", "static egress sync should stage edits on a copy so a partial failure cannot leave the live secrets file half-updated")
+	require.Contains(t, syncText, "mv \"$staged_enc\" \"$ENC_FILE\"", "static egress sync should swap the fully-edited staged copy in with an atomic rename")
 	require.Contains(t, syncText, "Commit $ENC_FILE after provisioning succeeds", "static egress sync should remind operators to commit generated encrypted secrets after provisioning succeeds")
 
 	provisionEgressScript, err := os.ReadFile("../deploy/scripts/provision-egress.sh")

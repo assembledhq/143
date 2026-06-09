@@ -32,6 +32,9 @@ go.work.sum
 .env.production
 .env.*.local
 # .env*.enc files are SOPS-encrypted — safe to commit (intentionally NOT listed here)
+# ...but the transient staging copies they're edited through (.env*.enc.XXXXXX
+# from sync-static-egress-secrets.sh) must never be committed.
+.env*.enc.*
 
 # air live reload
 tmp/
