@@ -356,9 +356,10 @@ secrets-rotate:
 #   generated static egress fields in .env.production.enc, reloads the egress
 #   gateway from the egress:<host> FLEET_HOSTS entry, then provisions the
 #   worker. Add worker:<HOST> to FLEET_HOSTS before running make
-#   provision-worker HOST=<HOST>. EGRESS_SSH_KEY and SSH_USER let the gateway
-#   use a different key/user from workers, e.g. AWS Ubuntu hosts:
-#   make provision-worker HOST=<worker-ip> EGRESS_SSH_KEY=~/Downloads/143-john.pem SSH_USER=ubuntu
+#   provision-worker HOST=<HOST>. EGRESS_SSH_KEY defaults to
+#   ~/.ssh/143-egress or ~/.ssh/143-egress.pem when present, then falls back
+#   to SSH_KEY. The gateway SSH user is auto-detected as root or ubuntu; set
+#   EGRESS_SSH_USER only for unusual images.
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -415,11 +416,12 @@ export TS_AUTH_KEY
 export TS_TAG
 export TS_HOSTNAME
 export TS_ADVERTISE_ROUTES
+export EGRESS_SSH_USER
 export SSH_USER
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
-EGRESS_SSH_KEY ?= $(SSH_KEY)
+EGRESS_SSH_KEY ?= $(or $(wildcard ~/.ssh/143-egress),$(wildcard ~/.ssh/143-egress.pem),$(SSH_KEY))
 
 # Guard: fail with a helpful message when SSH_KEY is empty.
 define check-ssh-key
@@ -434,13 +436,13 @@ provision-app:
 provision-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
-	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-egress:
-	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "$(HOST)" "$(EGRESS_SSH_KEY)"
 
@@ -460,10 +462,10 @@ provision-egress:
 # Usage:
 #   make provision-workers
 #   make provision-workers REPROVISION=true
-#   make provision-workers SSH_USER=ubuntu EGRESS_SSH_KEY=~/Downloads/143-john.pem
+#   make provision-workers EGRESS_SSH_USER=admin EGRESS_SSH_KEY=~/.ssh/custom-egress-key
 provision-workers:
 	$(check-ssh-key)
-	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	@$(read-fleet-hosts); \
