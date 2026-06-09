@@ -425,6 +425,76 @@ func TestWorkerDeployFingerprintsAreSeparatedByBlastRadius(t *testing.T) {
 	require.Contains(t, dockerDaemon, "install-log-rotation.sh", "docker-daemon fingerprint should include Docker log rotation installation")
 }
 
+func TestStagedFingerprintIgnoresCandidateFilename(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	functionBody := extractTopLevelShellFunction(t, string(deployScript), "fingerprint_candidate_files", "compose_service_fingerprint")
+
+	tmpDir := t.TempDir()
+	supportFile := filepath.Join(tmpDir, "support.conf")
+	script := functionBody + `
+set -euo pipefail
+printf 'same support-service config\n' > "$SUPPORT_FILE"
+active="$(fingerprint_candidate_files "$SUPPORT_FILE")"
+cp "$SUPPORT_FILE" "$SUPPORT_FILE.new"
+candidate="$(fingerprint_candidate_files "$SUPPORT_FILE")"
+printf '%s\n%s\n' "$active" "$candidate"
+`
+
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(), "SUPPORT_FILE="+supportFile)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "staged fingerprint helper should execute successfully: %s", output)
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	require.Equal(t, []string{lines[0], lines[0]}, lines, "staging an identical .new file should not change the candidate fingerprint")
+}
+
+func TestStagedFingerprintGateRepairsStaleBaselineWhenCandidateMatchesActive(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	gateScript := extractTopLevelShellBlock(t, string(deployScript), "fingerprint_candidate_files", "\nREMOTE\n}")
+
+	tmpDir := t.TempDir()
+	gateScript = strings.ReplaceAll(gateScript, "/opt/143", tmpDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "deploy", "scripts"), 0o755), "test should create deploy script directory")
+
+	compose := `services:
+  chrome:
+    image: chromedp/headless-shell:latest
+  gvisor-check:
+    image: docker:27-cli
+  sandbox-dns:
+    image: 143-sandbox-dns:local
+  worker:
+    image: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.worker.yml"), []byte(compose), 0o644), "test should seed active worker compose")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.worker.yml.new"), []byte(compose), 0o644), "test should seed identical staged worker compose")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "Dockerfile.dnsmasq"), []byte("FROM alpine:3.20\n"), 0o644), "test should seed active dnsmasq Dockerfile")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "Dockerfile.dnsmasq.new"), []byte("FROM alpine:3.20\n"), 0o644), "test should seed identical staged dnsmasq Dockerfile")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.dns-probe.yml"), []byte("services:\n  dns-probe:\n    image: alpine:3.20\n"), 0o644), "test should seed active DNS probe compose")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.dns-probe.yml.new"), []byte("services:\n  dns-probe:\n    image: alpine:3.20\n"), 0o644), "test should seed identical staged DNS probe compose")
+
+	fingerprintFile := filepath.Join(tmpDir, ".worker-support-services.v2.fingerprint")
+	require.NoError(t, os.WriteFile(fingerprintFile, []byte("stale-baseline\n"), 0o644), "test should seed a stale persisted support fingerprint")
+
+	cmd := exec.Command("bash", "-c", gateScript)
+	cmd.Env = append(os.Environ(), "DEPLOY_MODE=routine")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "staged fingerprint gate should allow stale baseline repair when candidate matches active files: %s", output)
+	require.Contains(t, string(output), "stored worker support-service fingerprint is stale", "gate should explain stale support fingerprint repair")
+
+	repaired, err := os.ReadFile(fingerprintFile)
+	require.NoError(t, err, "test should read repaired support fingerprint")
+	require.NotEqual(t, "stale-baseline\n", string(repaired), "gate should update stale support fingerprint metadata")
+	require.Len(t, strings.TrimSpace(string(repaired)), 64, "repaired support fingerprint should be a sha256 hex digest")
+}
+
 func TestRoutineWorkerDeployBlocksOnlyRuntimeFingerprints(t *testing.T) {
 	t.Parallel()
 
@@ -641,6 +711,22 @@ func extractShellFunction(t *testing.T, script, startFunc, nextFunc string) stri
 	require.NotEqual(t, -1, start, "deploy.sh should define %s", startFunc)
 	end := strings.Index(script[start:], "  "+nextFunc+"() {")
 	require.NotEqual(t, -1, end, "deploy.sh should define %s after %s", nextFunc, startFunc)
+	return script[start : start+end]
+}
+
+func extractTopLevelShellFunction(t *testing.T, script, startFunc, nextFunc string) string {
+	t.Helper()
+
+	return extractTopLevelShellBlock(t, script, startFunc, nextFunc+"() {")
+}
+
+func extractTopLevelShellBlock(t *testing.T, script, startFunc, endMarker string) string {
+	t.Helper()
+
+	start := strings.Index(script, startFunc+"() {")
+	require.NotEqual(t, -1, start, "deploy.sh should define %s", startFunc)
+	end := strings.Index(script[start:], endMarker)
+	require.NotEqual(t, -1, end, "deploy.sh should contain marker %q after %s", endMarker, startFunc)
 	return script[start : start+end]
 }
 
