@@ -796,6 +796,9 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"workspace_mode":      string(workspaceMode),
 		"pull_request_number": pr.GitHubPRNumber,
 	}
+	if threadID != nil {
+		payload["thread_id"] = threadID.String()
+	}
 	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
 		Queue:        "agent",
 		JobType:      "continue_session",
