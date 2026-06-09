@@ -4,7 +4,7 @@
 
 Two automated lints run in `make lint-tenancy` (and in CI on every PR that touches backend or migrations):
 
-1. **Schema lint** (`cmd/lint-schema`). A new migration that adds a `CREATE TABLE` without an `org_id uuid NOT NULL REFERENCES organizations(id)` column will fail CI. Schema-qualified (`public.foo`) and double-quoted (`"foo"`) table names are recognized and normalized. If a table is genuinely cross-org, allowlist it in `cmd/lint-schema/main.go` with a one-line reason — don't paper over with the inline `-- lint:no-org-id reason="..."` escape hatch unless it's a one-off. The inline escape may appear anywhere inside the `CREATE TABLE ( ... )` statement (header line or a dedicated comment line in the body).
+1. **Schema lint** (`cmd/lint-schema`). A new migration that adds a `CREATE TABLE` without an `org_id uuid NOT NULL` column will fail CI unless the table is genuinely cross-org/root/infra or transitively scoped. Schema-qualified (`public.foo`) and double-quoted (`"foo"`) table names are recognized and normalized. If a table is genuinely cross-org, allowlist it in `cmd/lint-schema/main.go` with a one-line reason — don't paper over with the inline `-- lint:no-org-id reason="..."` escape hatch unless it's a one-off. The inline escape may appear anywhere inside the `CREATE TABLE ( ... )` statement (header line or a dedicated comment line in the body). Default ordinary tables to `org_id uuid NOT NULL REFERENCES organizations(id)`, but reviewed hot append-only/event/log/cache/telemetry/runtime tables may use `org_id uuid NOT NULL` without the DB FK when the write path validates parent ownership and the migration/design explains the reason. See `docs/design/future/96-foreign-key-policy-and-hot-table-audit.md`.
 
 2. **Store lint** (`cmd/lint-stores`). Every exported method on `*XxxStore` under `internal/db/` must either:
    - take `orgID uuid.UUID` explicitly (preferred). The parameter name must end in `orgid` case-insensitively (`orgID`, `OrgID`, `org_id`, `srcOrgID`, `targetOrgID`), or
@@ -29,6 +29,20 @@ func (s *FooStore) ListByOrg(ctx context.Context, orgID uuid.UUID, f FooFilters)
 **Never** rely on `OrgIDFromContext` *inside* a store method — take it as a parameter so the dependency is visible in the signature and the tenancy test can verify it.
 
 The existing test `internal/db/tenancy_test.go` is a third layer of defense: it reads every SQL literal and requires `org_id` in any query that touches a multi-tenant table.
+
+## Foreign keys on hot tables
+
+Database foreign keys are the default for control-plane and moderate-write product tables. Do not add them mechanically to hot tables. Foreign-key checks on very high-write child tables can create parent-row shared-lock fan-in and Postgres MultiXact pressure, especially when logical replication slots or long-running transactions prevent vacuum from advancing.
+
+For append-only logs, event streams, telemetry, cache rows, billing/runtime rollups, and transient runtime state:
+
+- keep `org_id uuid NOT NULL` and indexes needed for query/cleanup paths,
+- validate parent existence and org ownership before insert/update in the service/store path,
+- document any intentionally omitted FK in the migration,
+- make orphan cleanup or retention behavior explicit,
+- avoid `ON DELETE CASCADE` from `organizations`.
+
+Use DB-backed FKs when the table is source-of-truth control-plane data, low/moderate write volume, authorization-critical, or hard to repair if orphaned.
 
 ## Prefer Non-Mutating Code
 

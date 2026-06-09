@@ -1,8 +1,8 @@
 // Command lint-schema enforces multi-tenancy rules on SQL migrations.
 //
-// Every CREATE TABLE that is not in the allowlist must declare an `org_id`
-// column so every row can be scoped to a tenant. Tables without org_id are a
-// P0 data isolation risk — see AGENTS.md ("Multi-tenancy").
+// Every CREATE TABLE that is not in the allowlist must declare a non-null
+// `org_id` column so every row can be scoped to a tenant. Tables without
+// org_id are a P0 data isolation risk — see AGENTS.md ("Multi-tenancy").
 //
 // Scope: only `migrations/*.up.sql` is scanned. Down migrations restore prior
 // state (and may legitimately re-create tables that predate the org_id rule),
@@ -119,7 +119,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q is missing org_id column\n", v.file, v.line, v.table)
 	}
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Every new table MUST have `org_id uuid NOT NULL REFERENCES organizations(id)`.")
+	fmt.Fprintln(os.Stderr, "Every new tenant-scoped table MUST have `org_id uuid NOT NULL`.")
+	fmt.Fprintln(os.Stderr, "Use `REFERENCES organizations(id)` by default; reviewed hot tables may omit the FK.")
 	fmt.Fprintln(os.Stderr, "To exempt a table, add it to allowedNoOrgID in cmd/lint-schema/main.go")
 	fmt.Fprintln(os.Stderr, "with a justification, or add `-- lint:no-org-id reason=\"...\"` (the reason")
 	fmt.Fprintln(os.Stderr, "clause is required) on the CREATE TABLE line.")
@@ -160,7 +161,7 @@ func scan(file, src string) []violation {
 		}
 
 		body := src[openParen+1 : closeParen]
-		if hasOrgIDColumn(body) {
+		if hasRequiredOrgIDColumn(body) {
 			continue
 		}
 
@@ -202,12 +203,14 @@ func findMatchingClose(src string, openParen int) int {
 	return len(src) - 1
 }
 
-// hasOrgIDColumn returns true if the column list declares an org_id column.
-// Matches lines like:   org_id uuid NOT NULL REFERENCES ...
-// or:                    org_id       UUID  NOT NULL,
-var orgIDColumnRE = regexp.MustCompile(`(?im)(?:^|,)\s*org_id\s+uuid\b`)
+// hasRequiredOrgIDColumn returns true if the column list declares a non-null
+// org_id column. Matches lines like:
+//
+//	org_id uuid NOT NULL REFERENCES ...
+//	org_id UUID NOT NULL,
+var orgIDColumnRE = regexp.MustCompile(`(?is)(?:^|,)\s*org_id\s+uuid\b[^,]*\bnot\s+null\b`)
 
-func hasOrgIDColumn(body string) bool {
+func hasRequiredOrgIDColumn(body string) bool {
 	return orgIDColumnRE.MatchString(body)
 }
 

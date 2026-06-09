@@ -34,6 +34,25 @@ func TestScan(t *testing.T) {
 			wantLen: 0,
 		},
 		{
+			name: "flags nullable org_id",
+			sql: `CREATE TABLE widgets (
+    id     uuid PRIMARY KEY,
+    org_id uuid REFERENCES organizations(id),
+    name   text NOT NULL
+);`,
+			wantLen:  1,
+			wantName: "widgets",
+		},
+		{
+			name: "accepts org_id without foreign key",
+			sql: `CREATE TABLE hot_events (
+    id     uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    name   text NOT NULL
+);`,
+			wantLen: 0,
+		},
+		{
 			name: "accepts allowlisted table",
 			sql: `CREATE TABLE nodes (
     id   uuid PRIMARY KEY,
