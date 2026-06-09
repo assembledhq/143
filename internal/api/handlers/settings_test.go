@@ -548,7 +548,7 @@ func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "no-op patch should not issue an UPDATE")
 }
 
-func TestSettingsHandler_UpdateRejectsStaticEgressEnableWhenUnavailable(t *testing.T) {
+func TestSettingsHandler_UpdateAllowsStaticEgressEnableWhenUnavailable(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -568,6 +568,11 @@ func TestSettingsHandler_UpdateRejectsStaticEgressEnableWhenUnavailable(t *testi
 				now,
 			),
 		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+		)
 
 	store := db.NewOrganizationStore(mock)
 	handler := NewSettingsHandler(store, nil)
@@ -582,9 +587,9 @@ func TestSettingsHandler_UpdateRejectsStaticEgressEnableWhenUnavailable(t *testi
 	w := httptest.NewRecorder()
 
 	handler.Update(w, req)
-	require.Equal(t, http.StatusServiceUnavailable, w.Code, "enabling static egress should fail when no capable worker is available")
-	require.Contains(t, w.Body.String(), "STATIC_EGRESS_UNAVAILABLE", "response should explain static egress cannot be enabled")
-	require.NoError(t, mock.ExpectationsWereMet(), "unavailable static egress should not issue an UPDATE")
+	require.Equal(t, http.StatusOK, w.Code, "enabling static egress should succeed even when workers are not currently capable")
+	require.Contains(t, w.Body.String(), `"static_egress_enabled":true`, "response should persist the requested static egress setting")
+	require.NoError(t, mock.ExpectationsWereMet(), "unavailable static egress should still issue an UPDATE")
 }
 
 func TestSettingsHandler_Update_LogsPatchMetadata(t *testing.T) {
