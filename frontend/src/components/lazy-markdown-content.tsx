@@ -32,7 +32,11 @@ export const LazyMarkdownContent = memo(function LazyMarkdownContent({
   }, []);
 
   if (MarkdownContent) {
-    return <MarkdownContent content={content} className={className} />;
+    return (
+      <div className={className}>
+        <MarkdownContent content={content} />
+      </div>
+    );
   }
 
   return (
