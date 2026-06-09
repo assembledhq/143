@@ -45,6 +45,7 @@ type autopilotQueueDBRow struct {
 	SourceType             string `db:"source_type"`
 	SourceKey              string `db:"source_key"`
 	Title                  string `db:"title"`
+	IssueURL               sql.NullString
 	RepoID                 sql.NullString
 	RepoName               sql.NullString
 	IssueStatus            string   `db:"issue_status"`
@@ -102,6 +103,7 @@ func (s *AutopilotQueueStore) ListQueue(ctx context.Context, orgID uuid.UUID, fi
 			&row.SourceType,
 			&row.SourceKey,
 			&row.Title,
+			&row.IssueURL,
 			&row.RepoID,
 			&row.RepoName,
 			&row.IssueStatus,
@@ -244,6 +246,16 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 				i.external_id AS source_key,
 				i.source AS source_type,
 				i.title,
+				COALESCE(
+					i.raw_data->>'url',
+					i.raw_data->>'permalink',
+					i.raw_data->>'web_url',
+					i.raw_data->>'webUrl',
+					i.raw_data->>'external_url',
+					i.raw_data#>>'{data,url}',
+					i.raw_data#>>'{data,issue,url}',
+					i.raw_data#>>'{data,issue,permalink}'
+				) AS issue_url,
 				i.repository_id AS repo_id,
 				r.full_name AS repo_name,
 				i.status AS issue_status,
@@ -373,6 +385,7 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 			i.source_type,
 			i.source_key,
 			i.title,
+			i.issue_url,
 			i.repo_id,
 			i.repo_name,
 			i.issue_status,
@@ -427,6 +440,10 @@ func (r autopilotQueueDBRow) toModel() models.AutopilotQueueRow {
 			Reasons:     r.LowHangingFruitReasons,
 			ClusterSize: int(r.ClusterSize),
 		},
+	}
+	if r.IssueURL.Valid && strings.TrimSpace(r.IssueURL.String) != "" {
+		issueURL := strings.TrimSpace(r.IssueURL.String)
+		row.IssueURL = &issueURL
 	}
 	if r.RepoID.Valid && r.RepoName.Valid {
 		row.Repo = &models.AutopilotRepoRef{ID: uuid.MustParse(r.RepoID.String), Name: r.RepoName.String}

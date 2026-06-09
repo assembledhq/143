@@ -126,6 +126,7 @@ type AutopilotQueueRow struct {
 	Rank                 int                      `json:"rank"`
 	Source               AutopilotIssueSource     `json:"source"`
 	Title                string                   `json:"title"`
+	IssueURL             *string                  `json:"issue_url,omitempty"`
 	Repo                 *AutopilotRepoRef        `json:"repo,omitempty"`
 	IssueStatus          IssueStatus              `json:"issue_status"`
 	CustomerImpact       AutopilotCustomerImpact  `json:"customer_impact"`
