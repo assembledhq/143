@@ -449,7 +449,14 @@ provision-egress:
 # then runs provision.sh for each worker host. Use after enabling/repairing
 # static egress so every worker rewrites /etc/143/static-egress-capable and
 # starts advertising static_egress_capable in its node metadata.
-# Honors REPROVISION=true (tears down and rebuilds each worker).
+#
+# On an already-running fleet you must pass REPROVISION=true: provision.sh
+# aborts when services are already running, so plain mode only works for
+# fresh hosts. REPROVISION=true serially tears down and rebuilds each worker
+# (drains active jobs first; one worker down at a time). Reprovisioning can
+# orphan old `nodes` rows when NODE_IDs change — see the reprovision notes
+# above provision-worker. A mid-fleet failure stops the loop; rerun to
+# resume (secrets sync and gateway provisioning are idempotent).
 # Usage:
 #   make provision-workers
 #   make provision-workers REPROVISION=true
