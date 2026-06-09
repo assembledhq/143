@@ -925,6 +925,8 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, reconcileText, "/opt/143/static-egress-worker.env", "worker reconciliation should load host-only static egress secrets outside the compose env file")
 	require.Contains(t, reconcileText, "load_static_egress_env_key", "worker reconciliation should parse env values without eval/source")
 	require.Contains(t, reconcileText, "static egress is configured but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing", "configured static egress must not silently skip a missing install helper")
+	require.Contains(t, reconcileText, "ensure_static_egress_dns", "worker reconciliation should ensure sandbox DNS exists before static egress verification")
+	require.Contains(t, reconcileText, "docker compose -f \"$compose_file\" up -d --build --no-deps sandbox-dns", "fresh worker provisioning should start sandbox-dns before probing the static egress bridge")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
@@ -972,6 +974,10 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.NotContains(t, workerInstallText, "ip rule replace", "worker WireGuard policy routing should avoid unsupported ip rule replace syntax")
 	require.Contains(t, workerInstallText, "ip rule add fwmark", "worker WireGuard service should restore static egress policy routing after reboot")
 	require.Contains(t, workerInstallText, "PostDown = ip rule del", "worker WireGuard service should clean up static egress policy routing on stop")
+	require.Contains(t, workerInstallText, "systemctl stop \"wg-quick@${WG_INTERFACE}\"", "worker install should stop the existing WireGuard unit before recreating the interface")
+	require.Contains(t, workerInstallText, "ip link delete dev \"$WG_INTERFACE\"", "worker install should remove stale WireGuard links before wg-quick up")
+	require.Contains(t, workerInstallText, "systemctl start \"wg-quick@${WG_INTERFACE}\"", "worker install should start from a known-clean WireGuard interface state")
+	require.NotContains(t, workerInstallText, "systemctl restart \"wg-quick@${WG_INTERFACE}\"", "worker install should avoid restart because stale links can survive a failed wg-quick down")
 	require.Contains(t, workerInstallText, "rm -f \"$CAPABILITY_FILE\"", "worker install should clear stale capability before re-verifying the gateway path")
 	require.Contains(t, workerInstallText, "iptables-persistent", "worker install should install persistent iptables support before advertising capability")
 	require.Contains(t, workerInstallText, "command -v netfilter-persistent", "worker install should verify iptables persistence is available")
@@ -1072,6 +1078,19 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, gatewayText, "169.254.0.0/16", "egress gateway should independently block metadata ranges")
 	require.Contains(t, gatewayText, "10.0.0.0/8", "egress gateway should independently block private ranges")
 	require.Contains(t, gatewayText, "100.64.0.0/10", "egress gateway should block Tailscale CGNAT ranges")
+}
+
+func TestWorkerReprovisionDrainsBlueGreenGenerations(t *testing.T) {
+	t.Parallel()
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+
+	require.Contains(t, provisionText, "list_worker_reprovision_containers", "worker reprovision should inspect all compose worker generations, not only the base compose project")
+	require.Contains(t, provisionText, `label=com.docker.compose.service=worker`, "worker reprovision should detect blue/green worker containers by compose service label")
+	require.Contains(t, provisionText, "spin-down-worker.sh", "worker reprovision should drain blue/green generations through the canonical spin-down path")
+	require.Contains(t, provisionText, "WORKER_REPROVISION_DRAIN_TIMEOUT_SECONDS", "worker reprovision should expose an operator-controlled drain timeout")
 }
 
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {

@@ -283,6 +283,16 @@ configure_tailscale_if_requested() {
       '
 }
 
+list_worker_reprovision_containers() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
+  ssh "${SSH_OPTS[@]}" root@"$HOST" \
+    "command -v docker >/dev/null 2>&1 && docker ps --filter label=com.docker.compose.service=worker --format '{{.ID}}' || true" \
+    2>/dev/null || true
+}
+
 if [ "$MODE" = "--tailscale-only" ]; then
   : "${TS_AUTH_KEY:?TS_AUTH_KEY or a role-specific TS_AUTH_KEY_* is required for Tailscale enrollment}"
 
@@ -375,6 +385,12 @@ resolve_worker_docker_gid() {
 
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
+if [ "$ROLE" = "worker" ]; then
+  WORKER_REPROVISION_CONTAINERS="$(list_worker_reprovision_containers)"
+  if [ -n "$WORKER_REPROVISION_CONTAINERS" ]; then
+    RUNNING="$(printf '%s\n%s\n' "$RUNNING" "$WORKER_REPROVISION_CONTAINERS" | grep -v '^$' || true)"
+  fi
+fi
 if [ -n "$RUNNING" ]; then
   if [ "$REPROVISION" != "--reprovision" ]; then
     echo "ERROR: $ROLE node at $HOST is already provisioned and running."
@@ -385,7 +401,13 @@ if [ -n "$RUNNING" ]; then
   fi
 
   echo "=== Reprovisioning $ROLE node at $HOST (tearing down existing) ==="
-  ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+  if [ "$ROLE" = "worker" ]; then
+    "$SCRIPT_DIR/spin-down-worker.sh" "$HOST" "$SSH_KEY" \
+      --timeout "${WORKER_REPROVISION_DRAIN_TIMEOUT_SECONDS:-14400}" \
+      --executor-timeout "${WORKER_REPROVISION_EXECUTOR_TIMEOUT_SECONDS:-900}"
+  else
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+  fi
 fi
 
 echo "=== Provisioning $ROLE node at $HOST ==="
