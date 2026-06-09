@@ -14,6 +14,7 @@ import {
   mergeSessionDetailStatusUpdate,
   mergeVisibleThreadLogs,
   trackInFlightAgentUpdate,
+  buildChromeThreads,
 } from "./session-detail-content";
 import type { SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
 
@@ -215,6 +216,66 @@ describe("getInitialComposerSelectedModel", () => {
 
   it("uses the default composer selection when the created thread has no override", () => {
     expect(getInitialComposerSelectedModel(baseThread)).toBe("");
+  });
+});
+
+describe("buildChromeThreads", () => {
+  const baseThread: SessionThread = {
+    id: "thread-1",
+    session_id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    label: "Main",
+    status: "idle",
+    current_turn: 0,
+    created_at: "2026-01-01T00:00:00.000Z",
+    cost_cents: 0,
+    pending_message_count: 0,
+  };
+
+  it("appends a pending preview while the matching real thread is not present", () => {
+    const pending = {
+      ...baseThread,
+      id: "__pending-thread__",
+      label: "Codex 2",
+      status: "pending" as const,
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+
+    expect(buildChromeThreads([baseThread], pending)).toEqual([baseThread, pending]);
+  });
+
+  it("drops the pending preview once the real created thread is in the session detail cache", () => {
+    const pending = {
+      ...baseThread,
+      id: "__pending-thread__",
+      label: "Codex 2",
+      status: "pending" as const,
+      model_override: "gpt-5.4",
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+    const created = {
+      ...baseThread,
+      id: "thread-2",
+      label: "Codex 2",
+      model_override: "gpt-5.4",
+      created_at: "2026-01-01T00:00:02.000Z",
+    };
+
+    expect(buildChromeThreads([baseThread, created], pending)).toEqual([baseThread, created]);
+  });
+
+  it("drops the pending preview when its id directly matches a thread (review-loop case)", () => {
+    const reviewThread = {
+      ...baseThread,
+      id: "thread-review-1",
+      label: "Review",
+      status: "pending" as const,
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+    const realThread = { ...baseThread, id: "thread-review-1", label: "Review" };
+
+    expect(buildChromeThreads([baseThread, realThread], reviewThread)).toEqual([baseThread, realThread]);
   });
 });
 
