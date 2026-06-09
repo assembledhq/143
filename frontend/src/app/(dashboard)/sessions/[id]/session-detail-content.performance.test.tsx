@@ -6,8 +6,9 @@ import { server } from "@/test/mocks/server";
 import { mockSessions } from "@/test/mocks/handlers";
 import type { ListResponse, Session, SessionTimelineEntry, SingleResponse } from "@/lib/types";
 
-const { chatTimelineRenderState, recordReviewDiffViewRender, recordFileTreeRender } = vi.hoisted(() => ({
+const { chatTimelineRenderState, codeReviewBarrelLoadState, recordReviewDiffViewRender, recordFileTreeRender } = vi.hoisted(() => ({
   chatTimelineRenderState: { count: 0 },
+  codeReviewBarrelLoadState: { loads: 0 },
   recordReviewDiffViewRender: vi.fn(),
   recordFileTreeRender: vi.fn(),
 }));
@@ -29,6 +30,7 @@ vi.mock("@/components/code-review/review-diff-view", async () => {
 });
 
 vi.mock("@/components/code-review", async (importOriginal) => {
+  codeReviewBarrelLoadState.loads += 1;
   const actual = await importOriginal<typeof import("@/components/code-review")>();
   const { memo } = await vi.importActual<typeof import("react")>("react");
   const FileTree = memo(function MockFileTree({ files }: { files: unknown[] }) {
@@ -107,13 +109,15 @@ function setMobileViewport(matches: boolean) {
   });
 }
 
-beforeAll(() => {
+beforeAll(async () => {
+  await import("@/components/code-review/review-diff-view");
   global.EventSource = MockEventSource as unknown as typeof EventSource;
   setMobileViewport(false);
 });
 
 beforeEach(() => {
   chatTimelineRenderState.count = 0;
+  codeReviewBarrelLoadState.loads = 0;
   recordReviewDiffViewRender.mockClear();
   recordFileTreeRender.mockClear();
   MockEventSource.instances = [];
@@ -172,6 +176,32 @@ function installSessionWithDiffHandlers() {
 }
 
 describe("SessionDetailContent performance", () => {
+  it("does not load code review panel modules for the initial chat surface", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+
+    server.use(
+      http.get("/api/v1/sessions/:id", () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByPlaceholderText("Send a follow-up message...");
+    expect(codeReviewBarrelLoadState.loads).toBe(0);
+  });
+
   it("does not rerender the transcript while typing in the follow-up composer", async () => {
     const { SessionDetailContent } = await import("./session-detail-content");
     const user = userEvent.setup();
