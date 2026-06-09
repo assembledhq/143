@@ -12,6 +12,7 @@ import {
   applyThreadRuntimeEventToThreads,
   mergeSessionLogListResponse,
   mergeSessionDetailStatusUpdate,
+  mergeVisibleThreadLogs,
   trackInFlightAgentUpdate,
 } from "./session-detail-content";
 import type { SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
@@ -353,6 +354,20 @@ describe("thread message windows", () => {
     );
 
     expect(result.data.map((item) => item.id)).toEqual([20, 30, 40]);
+  });
+
+  it("keeps live thread logs before their turn is represented in loaded message windows", () => {
+    const result = mergeVisibleThreadLogs(
+      {
+        data: [log(10, 0), log(20, 2)],
+        meta: {},
+      },
+      [log(30, 1)],
+      [message(1, 0)],
+      [],
+    );
+
+    expect(result.map((item) => item.id)).toEqual([10, 30]);
   });
 
   it("includes the execution turn for completed threads without assistant messages", () => {

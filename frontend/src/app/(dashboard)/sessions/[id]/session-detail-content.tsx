@@ -2036,6 +2036,23 @@ export function mergeSessionLogListResponse(
   };
 }
 
+export function mergeVisibleThreadLogs(
+  persisted: ListResponse<SessionLog> | undefined,
+  liveLogs: SessionLog[],
+  messages: SessionMessage[],
+  extraTurnNumbers: number[] = [],
+): SessionLog[] {
+  const persistedLogs = filterThreadLogsForLoadedMessages(
+    persisted?.data ?? [],
+    messages,
+    extraTurnNumbers,
+  );
+  return mergeSessionLogListResponse(
+    { data: persistedLogs, meta: persisted?.meta ?? {} },
+    liveLogs,
+  ).data;
+}
+
 function loadedTurnNumbers(messages: SessionMessage[]): number[] {
   return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
 }
@@ -2365,18 +2382,15 @@ function ChatPanel({
       activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
     );
     if (activeThreadId) {
-      const mergedThreadLogs = mergeSessionLogListResponse(
+      const loadedThreadLogs = mergeVisibleThreadLogs(
         threadLogsQuery.data,
         liveLogsQuery.data?.data ?? [],
-      ).data;
-      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
-        .filter((request) => request.thread_id === activeThreadId)
-        .map((request) => ({ kind: "human_input" as const, data: request }));
-      const loadedThreadLogs = filterThreadLogsForLoadedMessages(
-        mergedThreadLogs,
         threadMessages,
         visibleThreadLogTurns,
       );
+      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
+        .filter((request) => request.thread_id === activeThreadId)
+        .map((request) => ({ kind: "human_input" as const, data: request }));
       return sortTimelineEntries([
         ...buildTimeline(
           mergePendingMessages(threadMessages, optimisticForCurrentView),
@@ -2590,13 +2604,6 @@ function ChatPanel({
     }
 
     if (activeThreadId) {
-      const threadLogs = newLogs.filter((log) => log.thread_id === activeThreadId);
-      if (threadLogs.length === 0) return;
-
-      queryClient.setQueryData<ListResponse<SessionLog>>(
-        activeThreadLogsQueryKey,
-        (existing) => mergeSessionLogListResponse(existing, threadLogs),
-      );
       return;
     }
 
@@ -2604,7 +2611,7 @@ function ChatPanel({
       sessionLiveLogsQueryKey(sessionId),
       (existing) => mergeSessionLogListResponse(existing, newLogs, STREAMED_LOGS_MAX),
     );
-  }, [activeThreadId, activeThreadLogsQueryKey, queryClient, sessionId]);
+  }, [activeThreadId, queryClient, sessionId]);
 
   const mergeSessionStatusUpdate = useCallback((updated: SessionDetail) => {
     queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
