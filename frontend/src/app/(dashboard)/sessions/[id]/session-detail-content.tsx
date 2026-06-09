@@ -399,6 +399,33 @@ function reconcileThreadsForOmittedStatusUpdate(
   });
 }
 
+export function mergeSessionDetailStatusUpdate(
+  existing: SingleResponse<SessionDetail> | undefined,
+  updated: SessionDetail,
+): SingleResponse<SessionDetail> {
+  if (!existing) {
+    return {
+      data: {
+        ...updated,
+        threads: updated.threads ?? [],
+      },
+    };
+  }
+  const existingThreads = existing.data.threads ?? [];
+  const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
+  const threads = hasThreadPayload
+    ? updated.threads
+    : reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
+  return {
+    ...existing,
+    data: {
+      ...existing.data,
+      ...updated,
+      threads,
+    },
+  };
+}
+
 export function applyThreadInboxEventToThreads(
   threads: SessionThread[],
   event: ThreadInboxEvent,
@@ -1959,24 +1986,13 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
 const THREAD_MESSAGE_WINDOW_LIMIT = 60;
-// Sliding window for the SSE log overlay buffer. The persisted logs are
-// fetched separately via the timeline query; streamedLogs only holds the
-// not-yet-persisted overlay that bridges the gap between an SSE push and the
-// next DB fetch. A few thousand entries is enough headroom for any active
-// session, and capping it bounds both memory and the per-event filter cost.
+// Sliding window for live SSE logs that may not be visible in persisted log
+// queries yet. The buffer lives in React Query so remounting the chat panel
+// cannot drop the transcript during the SSE-to-DB handoff.
 const STREAMED_LOGS_MAX = 2000;
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
-}
-
-function normalizeTranscriptContent(content: string): string {
-  return content
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.replace(/[ \t\r]+$/g, ""))
-    .join("\n")
-    .replace(/\n+$/g, "");
 }
 
 export function flattenThreadMessageWindows(
@@ -1998,6 +2014,45 @@ export function filterThreadLogsForLoadedMessages(
   return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
 
+export function mergeSessionLogListResponse(
+  existing: ListResponse<SessionLog> | undefined,
+  incoming: SessionLog[],
+  maxItems?: number,
+): ListResponse<SessionLog> {
+  const byID = new Map<number, SessionLog>();
+  for (const log of existing?.data ?? []) {
+    byID.set(log.id, log);
+  }
+  for (const log of incoming) {
+    byID.set(log.id, log);
+  }
+  let data = Array.from(byID.values()).sort((a, b) => a.id - b.id);
+  if (maxItems !== undefined && maxItems > 0 && data.length > maxItems) {
+    data = data.slice(data.length - maxItems);
+  }
+  return {
+    data,
+    meta: existing?.meta ?? {},
+  };
+}
+
+export function mergeVisibleThreadLogs(
+  persisted: ListResponse<SessionLog> | undefined,
+  liveLogs: SessionLog[],
+  messages: SessionMessage[],
+  extraTurnNumbers: number[] = [],
+): SessionLog[] {
+  const persistedLogs = filterThreadLogsForLoadedMessages(
+    persisted?.data ?? [],
+    messages,
+    extraTurnNumbers,
+  );
+  return mergeSessionLogListResponse(
+    { data: persistedLogs, meta: persisted?.meta ?? {} },
+    liveLogs,
+  ).data;
+}
+
 function loadedTurnNumbers(messages: SessionMessage[]): number[] {
   return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
 }
@@ -2012,6 +2067,18 @@ export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: Se
 
 function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
   return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
+}
+
+function threadLogsWindowQueryKey(sessionId: string, threadId: string, visibleTurnsKey: string): readonly unknown[] {
+  return [...queryKeys.sessions.threadLogs(sessionId, threadId), visibleTurnsKey];
+}
+
+function sessionLiveLogsQueryKey(sessionId: string): readonly unknown[] {
+  return ["session", sessionId, "logs", "live"];
+}
+
+function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly unknown[] {
+  return [...queryKeys.sessions.threadLogs(sessionId, threadId), "live"];
 }
 
 function SessionTimelineSkeleton() {
@@ -2156,14 +2223,12 @@ function ChatPanel({
   onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
-  const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
   const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
@@ -2206,9 +2271,21 @@ function ChatPanel({
     [activeThread, threadMessages],
   );
   const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
+  const activeThreadLogsQueryKey = useMemo(
+    () => activeThreadId
+      ? threadLogsWindowQueryKey(sessionId, activeThreadId, visibleThreadLogTurnsKey)
+      : ["session", sessionId, "thread", "none", "logs"] as const,
+    [activeThreadId, sessionId, visibleThreadLogTurnsKey],
+  );
+  const liveLogsQueryKey = useMemo(
+    () => activeThreadId
+      ? threadLiveLogsQueryKey(sessionId, activeThreadId)
+      : sessionLiveLogsQueryKey(sessionId),
+    [activeThreadId, sessionId],
+  );
 
   const threadLogsQuery = useQuery({
-    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), visibleThreadLogTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
+    queryKey: activeThreadLogsQueryKey,
     queryFn: () => api.sessions.getThreadLogs(
       sessionId,
       activeThreadId!,
@@ -2216,6 +2293,12 @@ function ChatPanel({
     ),
     enabled: !!activeThreadId && threadMessagesQuery.isFetched,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+  });
+  const liveLogsQuery = useQuery({
+    queryKey: liveLogsQueryKey,
+    queryFn: () => ({ data: [], meta: {} }) satisfies ListResponse<SessionLog>,
+    enabled: false,
+    initialData: { data: [], meta: {} } satisfies ListResponse<SessionLog>,
   });
 
   const humanInputStatusFilter = activeThreadId ? undefined : "pending";
@@ -2299,23 +2382,31 @@ function ChatPanel({
       activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
     );
     if (activeThreadId) {
-      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
-        .filter((request) => request.thread_id === activeThreadId)
-        .map((request) => ({ kind: "human_input" as const, data: request }));
-      const loadedThreadLogs = filterThreadLogsForLoadedMessages(
-        threadLogsQuery.data?.data ?? [],
+      const loadedThreadLogs = mergeVisibleThreadLogs(
+        threadLogsQuery.data,
+        liveLogsQuery.data?.data ?? [],
         threadMessages,
         visibleThreadLogTurns,
       );
-      return sortTimelineEntries([...buildTimeline(
-        mergePendingMessages(threadMessages, optimisticForCurrentView),
-        loadedThreadLogs,
-      ), ...threadHumanInputEntries]);
+      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
+        .filter((request) => request.thread_id === activeThreadId)
+        .map((request) => ({ kind: "human_input" as const, data: request }));
+      return sortTimelineEntries([
+        ...buildTimeline(
+          mergePendingMessages(threadMessages, optimisticForCurrentView),
+          loadedThreadLogs,
+        ),
+        ...threadHumanInputEntries,
+      ]);
     }
     const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
+    const sessionLogs = mergeSessionLogListResponse(
+      { data: flattenedTimeline.logs, meta: {} },
+      liveLogsQuery.data?.data ?? [],
+    ).data;
     const entries = sortTimelineEntries([...buildTimeline(
       mergePendingMessages(flattenedTimeline.messages, optimisticForCurrentView),
-      flattenedTimeline.logs,
+      sessionLogs,
     ), ...flattenedTimeline.humanInputs.map((request) => ({ kind: "human_input" as const, data: request }))]);
     const issueDescription = issueQuery.data?.data?.description;
     if (!issueDescription) return entries;
@@ -2331,75 +2422,27 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data, visibleThreadLogTurns]);
+  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data, visibleThreadLogTurns]);
 
-  // Walk baseTimelineEntries once when it changes to derive the dedup keys
-  // used to filter streamedLogs. Splitting this out of the timelineEntries
-  // memo means each new SSE log event no longer triggers an O(N) walk over
-  // the entire base timeline — only the O(M) filter over streamed logs.
-  const baseTimelineDedupKeys = useMemo(() => {
-    const fetchedLogIds = new Set<number>();
-    const assistantTranscriptByTurn = new Map<number, Set<string>>();
-    const planModeSeedMessages: SessionMessage[] = [];
+  const baseTimelineHumanInputIds = useMemo(() => {
     const humanInputIds = new Set<string>();
 
     for (const entry of baseTimelineEntries) {
-      switch (entry.kind) {
-        case "message":
-          if (entry.data.role === "user" && entry.data.content.startsWith("[PLAN_MODE]\n")) {
-            planModeSeedMessages.push(entry.data);
-          }
-          if (entry.data.role === "assistant") {
-            const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
-            contents.add(normalizeTranscriptContent(entry.data.content));
-            assistantTranscriptByTurn.set(entry.data.turn_number, contents);
-          }
-          break;
-        case "plan_message": {
-          const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
-          contents.add(normalizeTranscriptContent(entry.data.content));
-          assistantTranscriptByTurn.set(entry.data.turn_number, contents);
-          break;
-        }
-        case "assistant_output":
-        case "error":
-        case "log":
-        case "plan_output":
-          fetchedLogIds.add(entry.data.id);
-          break;
-        case "tool_group":
-          fetchedLogIds.add(entry.toolUse.id);
-          if (entry.toolResult) {
-            fetchedLogIds.add(entry.toolResult.id);
-          }
-          break;
-        case "human_input":
-          humanInputIds.add(entry.data.id);
-          break;
+      if (entry.kind === "human_input") {
+        humanInputIds.add(entry.data.id);
       }
     }
 
-    return { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages, humanInputIds };
+    return humanInputIds;
   }, [baseTimelineEntries]);
 
   const timelineEntries = useMemo(() => {
-    const { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages, humanInputIds } = baseTimelineDedupKeys;
     const humanInputEntries: TimelineEntry[] = pendingHumanInputs
-      .filter((request) => !humanInputIds.has(request.id))
+      .filter((request) => !baseTimelineHumanInputIds.has(request.id))
       .map((request) => ({ kind: "human_input", data: request }));
 
-    const overlayLogs = streamedLogs.filter((log) => {
-      if (fetchedLogIds.has(log.id)) return false;
-      if (log.level !== "output") return true;
-      if (log.metadata?.type === "tool_result") return true;
-      if (log.metadata?.type === "assistant_final" && log.metadata?.duplicate_of_transcript === true) return false;
-      return !assistantTranscriptByTurn.get(log.turn_number)?.has(normalizeTranscriptContent(log.message));
-    });
-
-    if (overlayLogs.length === 0) return sortTimelineEntries([...baseTimelineEntries, ...humanInputEntries]);
-    const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
-    return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries, ...humanInputEntries]);
-  }, [baseTimelineEntries, baseTimelineDedupKeys, pendingHumanInputs, streamedLogs]);
+    return sortTimelineEntries([...baseTimelineEntries, ...humanInputEntries]);
+  }, [baseTimelineEntries, baseTimelineHumanInputIds, pendingHumanInputs]);
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
@@ -2544,44 +2587,35 @@ function ChatPanel({
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
-    setStreamedLogs((prev) => {
-      const toAdd: SessionLog[] = [];
-      for (const log of newLogs) {
-        if (!seenLogIds.current.has(log.id)) {
-          seenLogIds.current.add(log.id);
-          toAdd.push(log);
-        }
-      }
-      if (toAdd.length === 0) return prev;
-      const next = [...prev, ...toAdd];
-      // Drop oldest entries once we exceed the cap so a long-running session
-      // can't grow the overlay buffer without bound. Older logs already exist
-      // in the persisted timeline once the next refetch lands.
-      if (next.length > STREAMED_LOGS_MAX) {
-        return next.slice(next.length - STREAMED_LOGS_MAX);
-      }
-      return next;
-    });
-  }, []);
+    if (newLogs.length === 0) return;
 
-  const mergeSessionStatusUpdate = useCallback((updated: Session) => {
+    const logsByThread = new Map<string, SessionLog[]>();
+    for (const log of newLogs) {
+      if (!log.thread_id) continue;
+      const threadLogs = logsByThread.get(log.thread_id) ?? [];
+      threadLogs.push(log);
+      logsByThread.set(log.thread_id, threadLogs);
+    }
+    for (const [threadID, threadLogs] of logsByThread) {
+      queryClient.setQueryData<ListResponse<SessionLog>>(
+        threadLiveLogsQueryKey(sessionId, threadID),
+        (existing) => mergeSessionLogListResponse(existing, threadLogs, STREAMED_LOGS_MAX),
+      );
+    }
+
+    if (activeThreadId) {
+      return;
+    }
+
+    queryClient.setQueryData<ListResponse<SessionLog>>(
+      sessionLiveLogsQueryKey(sessionId),
+      (existing) => mergeSessionLogListResponse(existing, newLogs, STREAMED_LOGS_MAX),
+    );
+  }, [activeThreadId, queryClient, sessionId]);
+
+  const mergeSessionStatusUpdate = useCallback((updated: SessionDetail) => {
     queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
-      if (!existing) {
-        return { data: { ...updated, threads: [] } };
-      }
-      const existingThreads = existing.data.threads ?? [];
-      const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
-      const threads = hasThreadPayload
-        ? updated.threads!
-        : reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
-      return {
-        ...existing,
-        data: {
-          ...existing.data,
-          ...updated,
-          threads,
-        },
-      };
+      return mergeSessionDetailStatusUpdate(existing, updated);
     });
   }, [queryClient, sessionId]);
 
