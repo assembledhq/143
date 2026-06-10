@@ -10,6 +10,7 @@ import (
 type UserSettings struct {
 	CodingAgentModelDefault      string                        `json:"coding_agent_model_default,omitempty"`
 	CodingAgentReasoningDefaults map[AgentType]ReasoningEffort `json:"coding_agent_reasoning_defaults,omitempty"`
+	DiffViewerFullScreen         bool                          `json:"diff_viewer_full_screen,omitempty"`
 }
 
 // ParseUserSettings deserializes the JSONB settings column into UserSettings.
