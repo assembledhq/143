@@ -223,44 +223,6 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('shows and saves the active previews per user setting', async () => {
-    settingsGetMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: { preview_max_previews_per_user: 7 },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-01T12:00:00Z',
-      },
-    });
-
-    renderWithProviders(<SettingsPage />);
-
-    const input = await screen.findByLabelText('Active previews per user');
-    await waitFor(() => {
-      expect(input).toHaveValue(7);
-    });
-
-    const user = userEvent.setup();
-    await user.click(input);
-    await user.keyboard('{Control>}a{/Control}4');
-    await user.tab();
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { preview_max_previews_per_user: 4 },
-      });
-    });
-  });
-
-  it('defaults the active previews per user setting to four', async () => {
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByLabelText('Active previews per user')).toHaveValue(4);
-    });
-  });
-
   it('shows a saved indicator only on the pull requests section after PR changes', async () => {
     renderWithProviders(<SettingsPage />);
 
@@ -287,142 +249,12 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('shows static egress network access with copyable public IP', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
-    settingsGetMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: {},
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-01T12:00:00Z',
-      },
-    });
-    settingsUpdateMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: { sandbox_network: { static_egress_enabled: false } },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-06T15:30:00Z',
-      },
-    });
-
+  it('does not render sandbox runtime controls after they move to Runtime settings', async () => {
     renderWithProviders(<SettingsPage />);
 
-    expect(await screen.findByText('Network access')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByLabelText('Use static egress IP for sessions and previews')).toBeChecked();
-    });
-    expect(screen.getByText('Uses a stable public IP for new and hydrated sandboxes.')).toBeInTheDocument();
-    expect(screen.queryByText('New and hydrated sandboxes use the allowlistable public IP when enabled.')).not.toBeInTheDocument();
-    const publicIP = screen.getByText('203.0.113.10');
-    expect(publicIP).toBeInTheDocument();
-    expect(publicIP).toHaveClass('text-xs');
-
-    const copyButton = screen.getByRole('button', { name: 'Copy static egress public IP' });
-    await userEvent.click(copyButton);
-    expect(writeText).toHaveBeenCalledWith('203.0.113.10');
-    expect(screen.getByRole('button', { name: 'Copied static egress public IP' })).toBeInTheDocument();
-
-    const user = userEvent.setup();
-    await user.click(screen.getByLabelText('Use static egress IP for sessions and previews'));
-
-    await waitFor(() => {
-      expect(screen.getByLabelText('Use static egress IP for sessions and previews')).not.toBeChecked();
-    });
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { sandbox_network: { static_egress_enabled: false } },
-      });
-    });
-  });
-
-  it('allows admins to disable static egress when the gateway is unavailable', async () => {
-    settingsGetMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: { sandbox_network: { static_egress_enabled: true } },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-01T12:00:00Z',
-      },
-    });
-    settingsNetworkStatusMock.mockResolvedValue({
-      data: {
-        static_egress_available: false,
-        static_egress_enabled: true,
-        static_egress_public_ip: '203.0.113.10',
-        static_egress_unavailable_reason: 'no active static-egress-capable workers are available',
-      },
-    });
-
-    renderWithProviders(<SettingsPage />);
-
-    const toggle = await screen.findByLabelText('Use static egress IP for sessions and previews');
-    await waitFor(() => {
-      expect(toggle).toBeChecked();
-      expect(toggle).not.toBeDisabled();
-    });
-
-    const user = userEvent.setup();
-    await user.click(toggle);
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { sandbox_network: { static_egress_enabled: false } },
-      });
-    });
-  });
-
-  it('allows admins to enable static egress when workers are unavailable', async () => {
-    settingsGetMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: { sandbox_network: { static_egress_enabled: false } },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-01T12:00:00Z',
-      },
-    });
-    settingsNetworkStatusMock.mockResolvedValue({
-      data: {
-        static_egress_available: false,
-        static_egress_enabled: false,
-        static_egress_public_ip: '203.0.113.10',
-        static_egress_unavailable_reason: 'not all active session workers are static-egress-capable for the configured public IP',
-      },
-    });
-    settingsUpdateMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: { sandbox_network: { static_egress_enabled: true } },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-06T15:30:00Z',
-      },
-    });
-
-    renderWithProviders(<SettingsPage />);
-
-    const toggle = await screen.findByLabelText('Use static egress IP for sessions and previews');
-    await waitFor(() => {
-      expect(toggle).not.toBeChecked();
-      expect(toggle).not.toBeDisabled();
-    });
-
-    const user = userEvent.setup();
-    await user.click(toggle);
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { sandbox_network: { static_egress_enabled: true } },
-      });
-    });
+    expect(await screen.findByText('Organization')).toBeInTheDocument();
+    expect(screen.queryByText('Network access')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Use static egress IP for sessions and previews')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Active previews per user')).not.toBeInTheDocument();
   });
 });

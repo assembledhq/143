@@ -1060,13 +1060,41 @@ export interface OrgSettings {
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };
+  sandbox_lifecycle?: {
+    completed_session_retention_minutes?: number;
+    idle_preview_ttl_minutes?: number;
+    preview_holds_sandbox?: boolean;
+  };
+  sandbox_resources?: {
+    agent_default_tier?: SandboxResourceTier;
+    preview_default_tier?: SandboxResourceTier;
+    allow_repo_resource_requests?: boolean;
+    preview_max_tier?: SandboxResourceTier;
+  };
 }
+
+export type SandboxResourceTier = 'small' | 'standard' | 'large';
 
 export interface NetworkSettingsStatus {
   static_egress_available: boolean;
   static_egress_enabled: boolean;
   static_egress_public_ip?: string;
   static_egress_unavailable_reason?: string;
+}
+
+export interface RuntimeSettingsStatus {
+  static_egress: {
+    available: boolean;
+    enabled: boolean;
+    public_ip?: string;
+  };
+  capacity: {
+    state: 'normal' | 'limited';
+    active_agent_runs: number;
+    max_concurrent_agent_runs: number;
+    active_previews: number;
+    max_previews_per_user: number;
+  };
 }
 
 export interface ProductContext {
