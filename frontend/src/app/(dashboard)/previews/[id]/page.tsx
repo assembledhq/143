@@ -20,6 +20,7 @@ import {
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
 } from "@/lib/preview-bootstrap";
 import { safeExternalUrl } from "@/lib/utils";
+import { pollMs } from "@/lib/poll-intervals";
 
 export default function PreviewLandingPage({
   params,
@@ -43,7 +44,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
     queryFn: () => api.previews.get(id),
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      return status === "starting" ? 3000 : false;
+      return status === "starting" ? pollMs(3000) : false;
     },
   });
   const stopPreview = useMutation({
