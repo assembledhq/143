@@ -1527,7 +1527,8 @@ func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
 	agentSummaryIdx := strings.Index(mockLLM.lastUserPrompt, "<agent_summary>")
 	sessionThreadsIdx := strings.Index(mockLLM.lastUserPrompt, "<session_threads>")
 	require.Greater(t, sessionThreadsIdx, agentSummaryIdx, "session_threads block should follow agent_summary block")
-	require.Contains(t, mockLLM.lastSystemPrompt, "Use the code diff, files changed, issue/session title, and session threads as the source of truth", "system prompt should explicitly de-emphasize the newest summary")
+	require.Contains(t, mockLLM.lastSystemPrompt, "Use the code diff and files changed as the source of truth", "system prompt should make the code changes the primary source of truth")
+	require.Contains(t, mockLLM.lastSystemPrompt, "Use the session title, issue, and session threads only as supporting context", "system prompt should keep conversation context secondary to the code changes")
 }
 
 func TestGeneratePRContent_ThreadStoreError(t *testing.T) {
