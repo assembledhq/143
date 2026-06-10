@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -190,8 +191,58 @@ func cleanDependencyCacheRepoPath(raw string, allowGlob bool) (string, error) {
 	if clean == ".git" || strings.HasPrefix(clean, ".git/") {
 		return "", fmt.Errorf("path must not target .git")
 	}
-	if clean == ".143/cache/preview-install" || strings.HasPrefix(clean, ".143/cache/preview-install/") {
+	if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
 		return "", fmt.Errorf("path must not target preview install markers")
 	}
 	return clean, nil
+}
+
+func dependencyCachePathTargetsPreviewInstallMarkers(clean string) bool {
+	const marker = ".143/cache/preview-install"
+	clean = filepath.ToSlash(filepath.Clean(strings.TrimSpace(clean)))
+	if clean == "" || clean == "." {
+		return false
+	}
+	if clean == marker || strings.HasPrefix(clean, marker+"/") {
+		return true
+	}
+	if !strings.Contains(clean, "*") {
+		return strings.HasPrefix(marker, clean+"/")
+	}
+	return dependencyCacheGlobTargetsPathOrDescendant(clean, marker)
+}
+
+func dependencyCacheGlobTargetsPathOrDescendant(pattern, target string) bool {
+	patternParts := strings.Split(pattern, "/")
+	targetParts := strings.Split(target, "/")
+	if len(patternParts) <= len(targetParts) {
+		for i, patternPart := range patternParts {
+			ok, err := path.Match(patternPart, targetParts[i])
+			if err != nil || !ok {
+				return false
+			}
+		}
+		return true
+	}
+	for i, targetPart := range targetParts {
+		ok, err := path.Match(patternParts[i], targetPart)
+		if err != nil || !ok {
+			return false
+		}
+	}
+	for _, patternPart := range patternParts[len(targetParts):] {
+		if !dependencyCacheGlobSegmentCanMatchNonEmpty(patternPart) {
+			return false
+		}
+	}
+	return true
+}
+
+func dependencyCacheGlobSegmentCanMatchNonEmpty(pattern string) bool {
+	candidate := strings.ReplaceAll(pattern, "*", "x")
+	if candidate == "" {
+		candidate = "x"
+	}
+	ok, err := path.Match(pattern, candidate)
+	return err == nil && ok
 }

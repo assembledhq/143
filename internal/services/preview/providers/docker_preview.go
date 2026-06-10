@@ -1065,6 +1065,7 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	var dependencyCacheKey string
 	var dependencyLockfiles []preview.PreviewInstallLockfileKey
 	var placementKey string
+	forceInstallAfterDependencyRestoreFailure := false
 	if d.dependencyCache != nil && dependencyCacheEnabled && opts.OrgID != uuid.Nil && opts.RepositoryID != uuid.Nil {
 		var keyErr error
 		dependencyCacheKey, dependencyLockfiles, keyErr = preview.ComputePreviewDependencyCacheKey(ctx, d.executor, state.sandbox, install, dependencyPaths)
@@ -1097,6 +1098,7 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(restoreStarted))
 				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
 			} else if restoreErr := d.dependencyCache.Restore(ctx, state.sandbox, hit); restoreErr != nil {
+				forceInstallAfterDependencyRestoreFailure = true
 				notifyDependencyCacheRestore(observer, "restore_failed", dependencyCacheKey, hit.Entry.SizeBytes, restoreErr)
 				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(restoreStarted))
 				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
@@ -1126,10 +1128,13 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 		return err
 	}
 	markerPath := fmt.Sprintf(".143/cache/preview-install/%s.done", cacheKey)
-	if d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
+	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
 		d.saveDependencyCacheAsync(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer)
 		return nil
+	}
+	if forceInstallAfterDependencyRestoreFailure {
+		d.logger.Info().Str("marker", markerPath).Msg("preview install cache ignored after dependency cache restore failure")
 	}
 
 	cmd, err := buildPreviewInstallCommand(install, markerPath)
