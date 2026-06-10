@@ -750,6 +750,12 @@ export const handlers = [
     return HttpResponse.json({ data: [], meta: {} });
   }),
 
+  // Same rationale: the org-switcher polls the domain-joinable surface on
+  // mount. Default to nothing joinable and no verification prompt.
+  http.get('/api/v1/orgs/joinable', () => {
+    return HttpResponse.json({ data: [], email_verification_required: false });
+  }),
+
   http.patch('/api/v1/settings', () => {
     return HttpResponse.json({
       data: {

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { Check, ChevronsUpDown, Mail, Plus, Settings } from "lucide-react";
+import { Check, ChevronsUpDown, Globe, Mail, Plus, Settings } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 
 import { Button } from "@/components/ui/button";
@@ -29,7 +29,9 @@ import { ApiError } from "@/lib/api";
 import { roleLabel } from "@/lib/roles";
 import { CreateOrgDialog } from "@/components/create-org-dialog";
 import { usePendingInvites } from "@/hooks/use-pending-invites";
+import { useJoinableOrgs } from "@/hooks/use-joinable-orgs";
 import type {
+  JoinableOrganization,
   MembershipSummary,
   PendingInvitationForUser,
   SingleResponse,
@@ -80,6 +82,9 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   // practice; the explicit gate keeps a future pre-auth render from polling
   // /api/v1/invitations/pending and producing 401 noise in the console.
   const pendingInvites = usePendingInvites({ enabled: !!userEmail });
+  // Workspaces the user can join via a verified email domain — the
+  // domain-capture sibling of pending invites, same gating rationale.
+  const joinableOrgs = useJoinableOrgs({ enabled: !!userEmail });
 
   const [tabOrgId, setTabOrgId] = useState<string | null>(() => getActiveOrgId());
   const [search, setSearch] = useState("");
@@ -220,6 +225,39 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     [pendingInvites],
   );
 
+  const handleJoinViaDomain = useCallback(
+    async (org: JoinableOrganization) => {
+      try {
+        const result = await joinableOrgs.join(org.org_id);
+        setJustJoined((prev) => ({
+          ...prev,
+          // Prefixed key so a domain-join entry can never collide with an
+          // invitation id in the shared justJoined map.
+          [`domain-${org.org_id}`]: { org_id: result.org_id, org_name: org.org_name },
+        }));
+      } catch (err: unknown) {
+        // NOT_ELIGIBLE means the domain or auto-join setting changed out
+        // from under us — refetch so the section matches reality.
+        if (err instanceof ApiError && err.code === "NOT_ELIGIBLE") {
+          joinableOrgs.refetch();
+          toast.error(`Joining ${org.org_name} is no longer available.`);
+          return;
+        }
+        toast.error(`Couldn't join ${org.org_name}. Please try again.`);
+      }
+    },
+    [joinableOrgs],
+  );
+
+  const handleResendVerification = useCallback(async () => {
+    try {
+      await api.auth.sendEmailVerification();
+      toast.success("Verification email sent — check your inbox.");
+    } catch {
+      toast.error("Couldn't send the verification email. Please try again.");
+    }
+  }, []);
+
   const handleDeclineInvite = useCallback(
     async (invite: PendingInvitationForUser) => {
       try {
@@ -270,12 +308,27 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     () => pendingInvites.invites.filter((inv) => !justJoined[inv.id]),
     [pendingInvites.invites, justJoined],
   );
+  // Domain-joinable orgs, minus those joined in this session and minus any
+  // the memberships cache already knows about (the server filters the
+  // latter too; the local filter just covers the staleness window between
+  // a join and the memberships refetch).
+  const visibleJoinableOrgs = useMemo(
+    () =>
+      joinableOrgs.orgs.filter(
+        (org) =>
+          !justJoined[`domain-${org.org_id}`] &&
+          !memberships.some((m) => m.org_id === org.org_id),
+      ),
+    [joinableOrgs.orgs, justJoined, memberships],
+  );
   const joinedEntries = useMemo(() => Object.entries(justJoined), [justJoined]);
-  const visiblePendingCount = visiblePendingInvites.length;
-  const hasPendingInvites = visiblePendingCount > 0 || joinedEntries.length > 0;
+  const visiblePendingCount = visiblePendingInvites.length + visibleJoinableOrgs.length;
+  const hasPendingInvites =
+    visiblePendingInvites.length > 0 || joinedEntries.length > 0;
+  const hasJoinableOrgs = visibleJoinableOrgs.length > 0;
   const ariaPendingSuffix =
     visiblePendingCount > 0
-      ? `, ${visiblePendingCount} pending invitation${visiblePendingCount === 1 ? "" : "s"}`
+      ? `, ${visiblePendingCount} workspace${visiblePendingCount === 1 ? "" : "s"} available to join`
       : "";
 
   return (
@@ -288,6 +341,7 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
             // clock snapshot used by the per-row "expires soon" check rides
             // on top of the refetched invites identity via nowMs's useMemo.
             pendingInvites.refetch();
+            joinableOrgs.refetch();
           } else {
             setSearch("");
             // Drop the just-joined confirmation rows once the dropdown
@@ -424,6 +478,77 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
                     </div>
                   );
                 })}
+              </div>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {joinableOrgs.emailVerificationRequired && (
+            <>
+              <div className="px-1 pb-1" data-testid="verify-email-prompt">
+                <div className="flex flex-col gap-1.5 rounded-sm px-2 py-1.5 text-sm">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Mail className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <span className="truncate flex-1 font-medium">
+                      Your team has a workspace
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-xs shrink-0"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        void handleResendVerification();
+                      }}
+                      data-testid="verify-email-resend"
+                    >
+                      Verify email
+                    </Button>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Verify your email address to join it automatically.
+                  </div>
+                </div>
+              </div>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {hasJoinableOrgs && (
+            <>
+              <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                Workspaces you can join
+              </DropdownMenuLabel>
+              <div className="px-1 pb-1" data-testid="joinable-orgs-section">
+                {visibleJoinableOrgs.map((org) => (
+                  <div
+                    key={org.org_id}
+                    className="flex flex-col gap-1.5 rounded-sm px-2 py-1.5 text-sm"
+                    data-testid={`joinable-org-${org.org_id}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <span className="truncate flex-1 font-medium" title={org.org_name}>
+                        {org.org_name}
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-6 px-2 text-xs shrink-0"
+                        disabled={joinableOrgs.joiningOrgId === org.org_id}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void handleJoinViaDomain(org);
+                        }}
+                        data-testid={`joinable-org-join-${org.org_id}`}
+                      >
+                        Join
+                      </Button>
+                    </div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      Your verified {org.domain} email grants access
+                    </div>
+                  </div>
+                ))}
               </div>
               <DropdownMenuSeparator />
             </>

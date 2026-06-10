@@ -106,6 +106,13 @@ const (
 	AuditActionTeamInvitationDeclined    AuditAction = "team.invitation_declined"
 	AuditActionTeamInvitationClaimFailed AuditAction = "team.invitation_claim_failed"
 
+	// Verified-domain / auto-join actions
+	AuditActionTeamDomainAdded      AuditAction = "team.domain_added"
+	AuditActionTeamDomainVerified   AuditAction = "team.domain_verified"
+	AuditActionTeamDomainUpdated    AuditAction = "team.domain_updated"
+	AuditActionTeamDomainRemoved    AuditAction = "team.domain_removed"
+	AuditActionTeamMemberAutoJoined AuditAction = "team.member_auto_joined"
+
 	// Organization actions
 	AuditActionOrganizationCreated AuditAction = "organization.created"
 
@@ -178,6 +185,8 @@ func (a AuditAction) Validate() error {
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionTeamInvitationDeclined, AuditActionTeamInvitationClaimFailed,
+		AuditActionTeamDomainAdded, AuditActionTeamDomainVerified, AuditActionTeamDomainUpdated,
+		AuditActionTeamDomainRemoved, AuditActionTeamMemberAutoJoined,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
@@ -226,6 +235,7 @@ const (
 	AuditResourceCLIToken             AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
 	AuditResourceOrgJoinToken         AuditResourceType = "org_join_token" // #nosec G101 -- audit resource type
 	AuditResourceCLITool              AuditResourceType = "cli_tool"
+	AuditResourceOrgDomain            AuditResourceType = "organization_domain"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -238,7 +248,8 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle,
 		AuditResourceAPIClient, AuditResourceAPIToken,
-		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool:
+		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,
+		AuditResourceOrgDomain:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

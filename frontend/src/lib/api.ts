@@ -189,10 +189,26 @@ export const api = {
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
+    // (Re)send the email-verification link to the signed-in user's own
+    // address. Verifying unlocks email-domain auto-join for password
+    // accounts; OAuth accounts are attested by their provider already.
+    sendEmailVerification: () => post<void>('/api/v1/auth/email-verifications'),
+    confirmEmailVerification: (token: string) =>
+      post<import('./types').SingleResponse<import('./types').ConfirmEmailVerificationResponse>>(
+        '/api/v1/auth/email-verifications/confirm',
+        { token },
+      ),
   },
   organizations: {
     create: (name: string) =>
       post<import('./types').SingleResponse<import('./types').OrganizationCreated>>('/api/v1/organizations', { name }),
+    // Workspaces the current user can join because their provider-verified
+    // email domain matches an org's verified auto-join domain. User-scoped,
+    // works for zero-membership users — same family as invitations.listPending.
+    listJoinable: () =>
+      get<import('./types').JoinableOrgsResponse>('/api/v1/orgs/joinable'),
+    join: (orgId: string) =>
+      post<import('./types').SingleResponse<import('./types').MembershipSummary>>(`/api/v1/orgs/${orgId}/join`),
   },
   repositories: {
     list: (opts?: { includeDisconnected?: boolean }) => {
@@ -867,6 +883,15 @@ export const api = {
     createInvitation: (body: { email?: string; github_username?: string; acceptance_method?: 'email' | 'github' | 'either'; role: string }) =>
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
+    listDomains: () =>
+      get<import('./types').ListResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains'),
+    addDomain: (domain: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains', { domain }),
+    verifyDomain: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}/verify`),
+    updateDomain: (id: string, body: { auto_join_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}`, body),
+    removeDomain: (id: string) => del<void>(`/api/v1/team/domains/${id}`),
     githubInviteStatus: () =>
       get<import('./types').SingleResponse<import('./types').GitHubInviteStatus>>('/api/v1/team/github/status'),
     searchGitHubUsers: (q: string) =>
