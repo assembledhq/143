@@ -89,6 +89,8 @@ describe("PWA metadata", () => {
     expect(iconSvg).not.toContain("<circle");
     expect(iconSvg).not.toMatch(/<line[\s>]/);
     expect(iconSvg).not.toContain("<filter");
+    expect(iconSvg).not.toContain("M 540 C 555");
+    expect(iconSvg).not.toContain("M 460 C 445");
   });
 
   it("uses a transparent small-size optimized aircraft mark for the favicon", () => {
@@ -124,8 +126,8 @@ describe("PWA metadata", () => {
     expect(opaquePixels).toBeGreaterThan(9_000);
     expect(opaquePixels).toBeLessThan(18_000);
     expect(aircraftBluePixels).toBeGreaterThan(9_000);
-    expect(darkDetailPixels).toBeGreaterThan(500);
-    expect(darkDetailPixels).toBeLessThan(2_000);
+    expect(darkDetailPixels).toBeGreaterThan(250);
+    expect(darkDetailPixels).toBeLessThan(700);
   });
 
   it("keeps the embedded 16px favicon readable instead of sparse and pixelated", () => {
