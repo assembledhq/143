@@ -1411,7 +1411,7 @@ describe('api client', () => {
       expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456&return_to=%2Fintegrations');
     });
 
-    it('loginSentry redirects to Sentry OAuth', () => {
+    it('loginSentry redirects to backend Sentry OAuth start', () => {
       const loc = { href: '' };
       Object.defineProperty(window, 'location', {
         value: loc,
@@ -1420,7 +1420,19 @@ describe('api client', () => {
       });
 
       api.auth.loginSentry();
-      expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
+    });
+
+    it('integration loginSentry redirects to backend Sentry OAuth start', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.integrations.loginSentry();
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
     });
 
     it('loginLinear redirects to backend Linear OAuth start', () => {
