@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -129,6 +131,105 @@ func (d *DockerFileReader) ListDir(ctx context.Context, containerID, workDir, di
 	}
 
 	return entries, nil
+}
+
+// ListDirRecursive returns all file and directory entries under the workspace
+// using one bounded recursive find call. It is an optional fast path for
+// mention-index construction, where one Docker exec per directory is too
+// expensive.
+func (d *DockerFileReader) ListDirRecursive(ctx context.Context, containerID, workDir string, maxEntries int, ignoredDirNames []string) ([]FileEntry, error) {
+	absPath := resolvePathInWorkDir(workDir, ".")
+	if err := validateExecPath(absPath); err != nil {
+		return nil, fmt.Errorf("list workspace recursively: %w", err)
+	}
+
+	stdout, _, exitCode, err := d.execCmd(ctx, containerID, workDir, recursiveFindArgv(absPath, ignoredDirNames, maxEntries))
+	if err != nil {
+		return nil, fmt.Errorf("list workspace recursively: %w", err)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("list workspace recursively: not found or not accessible")
+	}
+
+	return appendFindEntries(nil, absPath, stdout, maxEntries), nil
+}
+
+const recursiveFindScript = `root=$1
+limit=$2
+shift 2
+count=0
+find "$root" "$@" \( -type d -o -type f \) -print | while IFS= read -r path; do
+  if [ "$path" = "$root" ]; then
+    continue
+  fi
+  if [ "$limit" -gt 0 ] && [ "$count" -ge "$limit" ]; then
+    break
+  fi
+  count=$((count + 1))
+  if [ -d "$path" ]; then
+    kind=dir
+  else
+    kind=file
+  fi
+  printf '%s\t%s\n' "$kind" "$path"
+done`
+
+func recursiveFindArgv(absPath string, ignoredDirNames []string, maxEntries int) []string {
+	argv := []string{"sh", "-c", recursiveFindScript, "find-recursive", absPath, strconv.Itoa(maxEntries)}
+	ignored := sanitizedFindIgnoredNames(ignoredDirNames)
+	if len(ignored) > 0 {
+		argv = append(argv, "(")
+		for i, name := range ignored {
+			if i > 0 {
+				argv = append(argv, "-o")
+			}
+			argv = append(argv, "-name", name)
+		}
+		argv = append(argv, ")", "-prune", "-o")
+	}
+	return argv
+}
+
+func sanitizedFindIgnoredNames(names []string) []string {
+	ignored := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.Contains(name, "/") || unsafePathRE.MatchString(name) {
+			continue
+		}
+		ignored = append(ignored, name)
+	}
+	sort.Strings(ignored)
+	return ignored
+}
+
+func appendFindEntries(entries []FileEntry, rootAbs, stdout string, maxEntries int) []FileEntry {
+	root := strings.TrimRight(filepath.ToSlash(filepath.Clean(rootAbs)), "/")
+	for _, raw := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+		if maxEntries > 0 && len(entries) >= maxEntries {
+			break
+		}
+		kind, rawPath, ok := strings.Cut(strings.TrimSpace(raw), "\t")
+		if !ok {
+			continue
+		}
+		if kind != "dir" && kind != "file" {
+			continue
+		}
+		clean := strings.TrimRight(filepath.ToSlash(filepath.Clean(rawPath)), "/")
+		if clean == "" || clean == "." || clean == root {
+			continue
+		}
+		if !strings.HasPrefix(clean, root+"/") {
+			continue
+		}
+		entries = append(entries, FileEntry{
+			Path: strings.TrimPrefix(clean, root+"/"),
+			Type: kind,
+			Size: 0,
+		})
+	}
+	return entries
 }
 
 // maxFileReadBytes is the maximum number of bytes to read from a file.
