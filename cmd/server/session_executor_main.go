@@ -70,14 +70,6 @@ func runSessionExecutorMain() {
 	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
 		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; session executor refusing to start")
 	}
-	// Heal credentials written by pre-versioning code during the rolling
-	// deploy window (config row without a runtime-state row); no-op once the
-	// fleet is on versioned code.
-	if healed, err := db.ReconcileCodingCredentialRuntimeState(ctx, pool); err != nil {
-		logger.Fatal().Err(err).Msg("coding-credentials runtime-state reconciliation failed; session executor refusing to start")
-	} else if healed > 0 {
-		logger.Warn().Int64("credentials", healed).Msg("backfilled runtime state for credentials written by pre-versioning code")
-	}
 
 	runtime, shutdown, err := buildSessionExecutorRuntime(ctx, cfg, pool, logger)
 	if err != nil {
