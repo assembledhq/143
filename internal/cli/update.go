@@ -89,7 +89,7 @@ func runUpdate(_ []string, stdout, stderr io.Writer) int {
 
 	hasher := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, hasher), resp.Body); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		fmt.Fprintf(stderr, "error: download failed: %s\n", err)
 		return 1
 	}
@@ -107,7 +107,9 @@ func runUpdate(_ []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "warning: server sent no checksum header; installing unverified")
 	}
 
-	if err := os.Chmod(tmpPath, 0o755); err != nil { // #nosec G302 -- executable binary
+	// 0755 is required: this staged file becomes the 143-tools executable.
+	err = os.Chmod(tmpPath, 0o755) // #nosec G302 -- executable binary, not a data file
+	if err != nil {
 		fmt.Fprintf(stderr, "error: %s\n", err)
 		return 1
 	}
