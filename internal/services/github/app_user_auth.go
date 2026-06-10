@@ -31,7 +31,7 @@ var (
 
 type appUserCredentialStore interface {
 	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
-	Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error
+	Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig) error
 	Disable(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
 }
 
@@ -169,7 +169,7 @@ func (s *AppUserAuthService) refreshStoredCredential(ctx context.Context, orgID,
 		}
 		return models.GitHubAppUserConfig{}, err
 	}
-	if err := s.credentials.Upsert(ctx, userID, orgID, *refreshed, false); err != nil {
+	if err := s.credentials.Upsert(ctx, userID, orgID, *refreshed); err != nil {
 		return models.GitHubAppUserConfig{}, fmt.Errorf("persist refreshed github app user credential: %w", err)
 	}
 	return *refreshed, nil

@@ -1073,7 +1073,7 @@ func (h *AuthHandler) storeGitHubToken(r *http.Request, user *models.User, token
 		TokenType:   tokenResp.TokenType,
 		Scope:       tokenResp.Scope,
 	}
-	if err := h.userCredentials.Upsert(r.Context(), user.ID, user.OrgID, cfg, false); err != nil {
+	if err := h.userCredentials.Upsert(r.Context(), user.ID, user.OrgID, cfg); err != nil {
 		// Non-fatal — user can still sign in, just can't create PRs as themselves.
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", user.ID.String()).Msg("failed to store GitHub OAuth token for PR authorship")
 	}

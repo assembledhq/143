@@ -118,50 +118,6 @@ func (s *stubAutomationOrgLookup) GetByID(context.Context, uuid.UUID) (models.Or
 	return s.org, nil
 }
 
-type stubAutomationOrgCredentialLookup struct {
-	list []models.DecryptedCredential
-	get  *models.DecryptedCredential
-	err  error
-}
-
-func (s *stubAutomationOrgCredentialLookup) ListByProvider(context.Context, uuid.UUID, models.ProviderName) ([]models.DecryptedCredential, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.list, nil
-}
-
-func (s *stubAutomationOrgCredentialLookup) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.get, nil
-}
-
-type stubAutomationUserCredentialLookup struct {
-	rows []models.DecryptedUserCredential
-	err  error
-}
-
-func (s *stubAutomationUserCredentialLookup) ListTeamDefaults(context.Context, uuid.UUID) ([]models.DecryptedUserCredential, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.rows, nil
-}
-
-type stubAutomationCodingAuthLookup struct {
-	rows []models.CodingAuth
-	err  error
-}
-
-func (s *stubAutomationCodingAuthLookup) ListCodingAuths(context.Context, uuid.UUID) ([]models.CodingAuth, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.rows, nil
-}
-
 type stubAutomationCodingCredentialLookup struct {
 	rows []models.DecryptedCodingCredential
 	err  error
@@ -529,9 +485,6 @@ func TestAutomationHandler_Create_RejectsUnavailableValidModel(t *testing.T) {
 
 	h := NewAutomationHandler(nil, nil)
 	h.SetOrgStore(&stubAutomationOrgLookup{org: models.Organization{Settings: json.RawMessage(`{}`)}})
-	h.SetOrgCredentialStore(&stubAutomationOrgCredentialLookup{})
-	h.SetUserCredentialStore(&stubAutomationUserCredentialLookup{})
-	h.SetCodingAuthStore(&stubAutomationCodingAuthLookup{})
 	h.SetCodingCredentialStore(&stubAutomationCodingCredentialLookup{})
 
 	body := map[string]any{
@@ -568,9 +521,9 @@ func TestAutomationHandler_Create_AllowsAvailableValidModel(t *testing.T) {
 		)
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	h.SetCodingAuthStore(&stubAutomationCodingAuthLookup{
-		rows: []models.CodingAuth{
-			{Agent: models.AgentTypeClaudeCode, Status: models.CodingAuthStatusHealthy},
+	h.SetCodingCredentialStore(&stubAutomationCodingCredentialLookup{
+		rows: []models.DecryptedCodingCredential{
+			{Provider: models.ProviderAnthropic, Status: models.CodingCredentialStatusActive},
 		},
 	})
 

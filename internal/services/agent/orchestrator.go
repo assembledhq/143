@@ -265,7 +265,7 @@ type GitHubTokenProvider interface {
 
 // CodexAuthProvider abstracts retrieving valid ChatGPT OAuth tokens for Codex.
 type CodexAuthProvider interface {
-	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAISubscriptionConfig, error)
 }
 
 // ClaudeCodeAuthProvider abstracts Claude Code subscription OAuth: the
@@ -298,12 +298,6 @@ type ClaudeCodeAuthTokenStore interface {
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
-}
-
-// UserCredentialProvider abstracts retrieving user-scoped provider credentials.
-type UserCredentialProvider interface {
-	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
-	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 }
 
 // CodingCredentialProvider abstracts the unified coding-credentials resolver.
@@ -791,7 +785,6 @@ type OrchestratorConfig struct {
 	ClaudeCodeAuth     ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials        CredentialProvider
 	Memory             MemoryService            // optional — injects learned memories into agent prompts
-	UserCredentials    UserCredentialProvider   // optional — enables legacy personal/team credential resolution
 	CodingCredentials  CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots          storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
 	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
@@ -851,7 +844,6 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	if env == nil {
 		env = NewAgentEnv(AgentEnvDeps{
 			Credentials:       cfg.Credentials,
-			UserCredentials:   cfg.UserCredentials,
 			CodingCredentials: cfg.CodingCredentials,
 			Orgs:              cfg.Orgs,
 			OrgSettingsCache:  cfg.OrgSettingsCache,
@@ -5882,7 +5874,20 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
 	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
-		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, claudeCodeVersion))
+		// prepareClaudeCodeAPIKeyFallback also removes any stale
+		// ~/.claude/.credentials.json left behind by a previous
+		// subscription-billed turn on a reused container — the CLI prefers
+		// the credentials file over the env var, so leaving it in place
+		// would silently bill a revoked/stale subscription token.
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr != nil {
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("claude API-key auth could not be prepared: %s", fallbackErr),
+				FailureCategoryClaudeCodeAuth,
+				"The Anthropic API key is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
+				[]string{"Retry the session after verifying sandbox access"},
+			)
+			return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr)
+		}
 		return TokenBillingModeAPIKey, nil
 	}
 

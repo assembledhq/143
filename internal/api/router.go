@@ -139,17 +139,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		}
 	}
 	previewSecretBundleStore := db.NewPreviewSecretBundleStore(pool, previewSecretCrypto, cfg.PreviewSecretBundleKEKVersion)
-	// Mirror legacy writes into the unified `coding_credentials` table during the
-	// migration window. Removed in the cleanup PR. See
-	// docs/design/future/65-unified-coding-credentials.md.
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	mirrorLog := func(format string, args ...any) {
-		logger.Warn().Msgf(format, args...)
-	}
-	credentialStore.SetMirrorLogger(mirrorLog)
-	userCredentialStore.SetMirrorLogger(mirrorLog)
-	codingCredentialStore.SetMirrorLogger(mirrorLog)
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
@@ -485,8 +474,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	previewSecretBundleHandler := handlers.NewPreviewSecretBundleHandler(previewSecretBundleStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
-	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
-	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)
 	// Unified coding-credentials handler — see docs/design/future/65-unified-coding-credentials.md.
 	codingCredentialHandler := handlers.NewCodingCredentialHandler(codingCredentialStore, orgStore)
 	var emailSender email.Sender
@@ -522,9 +509,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler.SetJobStore(jobStore)
 	automationHandler.SetRepositoryStore(repoStore)
 	automationHandler.SetOrgStore(orgStore)
-	automationHandler.SetOrgCredentialStore(credentialStore)
-	automationHandler.SetUserCredentialStore(userCredentialStore)
-	automationHandler.SetCodingAuthStore(credentialStore)
 	automationHandler.SetCodingCredentialStore(codingCredentialStore)
 	automationHandler.SetPool(pool)
 	automationHandler.SetLogger(logger)
@@ -540,7 +524,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
-		prService.SetUserCredentialStore(userCredentialStore)
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
 		prService.SetUserStore(userStore)
@@ -569,7 +552,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	settingsHandler.SetLogger(logger)
 	if orgSettingsInvalidator != nil {
 		settingsHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
-		codingAuthHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 		codingCredentialHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 	}
 	credentialHandler.SetAuditEmitter(auditEmitter)
@@ -971,9 +953,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
 
 				// Personal and resolved credential views
-				r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
-				r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
-				r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
+				r.Get("/api/v1/settings/credentials/personal", handlers.LegacyCredentialsGone)
+				r.Get("/api/v1/settings/credentials/resolved", handlers.LegacyCredentialsGone)
+				r.Get("/api/v1/settings/credentials/team", handlers.LegacyCredentialsGone)
 				// Unified coding-credentials reads are safe for every org role:
 				// personal/resolved reads are scoped to the caller, and org rows
 				// are the same read-only fallback metadata already shown on
@@ -1090,7 +1072,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Coding-agents config reads. Builders and members can view what's
 				// configured (so /settings/agent renders read-only when needed);
 				// org-scope mutations stay admin-only.
-				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
+				r.Get("/api/v1/settings/coding-auths", handlers.LegacyCredentialsGone)
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
@@ -1126,8 +1108,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/coding-credentials/reorder", codingCredentialHandler.Reorder)
 
 				// Personal credential management
-				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
-				r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
+				r.Put("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)
+				r.Delete("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)
 				r.Post("/api/v1/integrations/slack/user-links/me", integrationHandler.LinkSlackUserMe)
 				r.Delete("/api/v1/integrations/slack/user-links/me", integrationHandler.UnlinkSlackUserMe)
 
@@ -1303,14 +1285,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/credentials", credentialHandler.List)
 				r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 				r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
-				r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
-				r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
-				r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
-				r.Delete("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Delete)
+				r.Post("/api/v1/settings/coding-auths", handlers.LegacyCredentialsGone)
+				r.Patch("/api/v1/settings/coding-auths/reorder", handlers.LegacyCredentialsGone)
+				r.Patch("/api/v1/settings/coding-auths/{id}", handlers.LegacyCredentialsGone)
+				r.Delete("/api/v1/settings/coding-auths/{id}", handlers.LegacyCredentialsGone)
 
 				// Team default credential management
-				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
-				r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
+				r.Put("/api/v1/settings/credentials/team/{provider}", handlers.LegacyCredentialsGone)
+				r.Delete("/api/v1/settings/credentials/team/{provider}", handlers.LegacyCredentialsGone)
 
 				// Codex / Claude OAuth subscription endpoints moved to the
 				// admin+member group above. The handlers' resolveOAuthScope

@@ -20,7 +20,6 @@ import (
 	"math/rand/v2"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,7 +32,7 @@ import (
 
 const codingCredentialsColumns = `cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
 	rt.status, cc.created_by, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message,
-	cc.team_default_origin_user_id, cc.active, cc.created_at, GREATEST(cc.updated_at, rt.created_at) AS updated_at` // #nosec G101 -- SQL column list
+	cc.active, cc.created_at, GREATEST(cc.updated_at, rt.created_at) AS updated_at` // #nosec G101 -- SQL column list
 
 const codingCredentialsFrom = `coding_credentials cc
 	JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true` // #nosec G101 -- SQL table join, not a credential
@@ -87,18 +86,16 @@ type CreateOpts struct {
 }
 
 type codingCredentialConfigSnapshot struct {
-	ID                      uuid.UUID
-	VersionID               uuid.UUID
-	OrgID                   uuid.UUID
-	UserID                  *uuid.UUID
-	Provider                models.ProviderName
-	Label                   string
-	Config                  []byte
-	Priority                int
-	Status                  models.CodingCredentialRowStatus
-	CreatedBy               *uuid.UUID
-	TeamDefaultOriginUserID *uuid.UUID
-	CreatedAt               time.Time
+	ID        uuid.UUID
+	VersionID uuid.UUID
+	OrgID     uuid.UUID
+	UserID    *uuid.UUID
+	Provider  models.ProviderName
+	Label     string
+	Config    []byte
+	Priority  int
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
 }
 
 type codingCredentialRuntimeSnapshot struct {
@@ -129,112 +126,6 @@ type CodingCredentialStore struct {
 	rng   *rand.Rand
 	rngMu sync.Mutex
 	clock func() time.Time
-
-	// mirrorLogf surfaces structural drift detected during a mirror write
-	// (e.g. a legacy anthropic row with both APIKey and Subscription set).
-	// Production wires the application logger via SetMirrorLogger; nil is
-	// treated as a silent no-op for tests.
-	mirrorLogf func(format string, args ...any)
-
-	// mirrorDriftTotal counts every detected legacy-row drift case (e.g.
-	// dual-set Anthropic APIKey+Subscription rows). mirrorFailureTotal counts
-	// every mirror-write or cascade error returned to the legacy store.
-	// Both are observable via MirrorDriftCount / MirrorFailureCount so the
-	// telemetry pipeline can alert on persistent dual-write inconsistency.
-	// Persistent non-zero values mean the unified table is drifting from the
-	// legacy stores; the cleanup PR retires the mirror, so this signal only
-	// matters during the rollout window.
-	mirrorDriftTotal              atomic.Uint64
-	mirrorFailureTotal            atomic.Uint64
-	mirrorNaturalKeyFallbackTotal atomic.Uint64
-}
-
-// SetMirrorLogger installs the structured-log hook used when the mirror
-// detects drift in a legacy row. Production wires the application logger;
-// tests usually leave it nil.
-//
-// lint:allow-no-orgid reason="process-wide logger configuration; not tenant data"
-func (s *CodingCredentialStore) SetMirrorLogger(logf func(format string, args ...any)) {
-	s.mirrorLogf = logf
-}
-
-func (s *CodingCredentialStore) mirrorWarn(format string, args ...any) {
-	if s == nil || s.mirrorLogf == nil {
-		return
-	}
-	s.mirrorLogf(format, args...)
-}
-
-// recordMirrorDrift increments the drift counter for an observed structural
-// inconsistency (e.g. a legacy Anthropic row with both APIKey and Subscription
-// set). Distinct from recordMirrorFailure: drift means a legacy row is
-// malformed but the mirror succeeded; failure means the mirror itself errored.
-func (s *CodingCredentialStore) recordMirrorDrift() {
-	if s == nil {
-		return
-	}
-	s.mirrorDriftTotal.Add(1)
-}
-
-// recordMirrorFailure increments the failure counter for an unsuccessful
-// mirror write (DB error, cascade error, encryption failure).
-func (s *CodingCredentialStore) recordMirrorFailure() {
-	if s == nil {
-		return
-	}
-	s.mirrorFailureTotal.Add(1)
-}
-
-// MirrorDriftCount returns the running total of detected drift events. A
-// non-zero value during the dual-write window indicates legacy data that
-// would not round-trip cleanly into the unified schema; alert on a
-// non-trivial baseline rather than the first hit, since dual-set legacy rows
-// can pre-date validation.
-//
-// lint:allow-no-orgid reason="process-wide observability counter; not tenant data"
-func (s *CodingCredentialStore) MirrorDriftCount() uint64 {
-	if s == nil {
-		return 0
-	}
-	return s.mirrorDriftTotal.Load()
-}
-
-// MirrorFailureCount returns the running total of mirror-write failures. A
-// sustained non-zero rate means the unified table is drifting from the
-// legacy stores; investigate before letting the cleanup PR retire the mirror.
-//
-// lint:allow-no-orgid reason="process-wide observability counter; not tenant data"
-func (s *CodingCredentialStore) MirrorFailureCount() uint64 {
-	if s == nil {
-		return 0
-	}
-	return s.mirrorFailureTotal.Load()
-}
-
-// recordMirrorNaturalKeyFallback increments when upsertMirroredRow's
-// insert-by-id collides with the (org_id, user_id, provider, label) unique
-// index and falls back to updating the existing natural-key row. The fallback
-// leaves legacy id and unified id divergent for that pair, so we want to
-// confirm the path is unused before the cleanup PR deletes it.
-func (s *CodingCredentialStore) recordMirrorNaturalKeyFallback() {
-	if s == nil {
-		return
-	}
-	s.mirrorNaturalKeyFallbackTotal.Add(1)
-}
-
-// MirrorNaturalKeyFallbackCount returns how many times the mirror has had to
-// reconcile a row by natural key instead of by id. Expected to stay at 0 in
-// production; a non-zero value means an out-of-band writer (e.g. the SQL
-// data-copy migration) landed at the same (scope, provider, label) before the
-// mirror caught up. Read this before retiring the fallback in the cleanup PR.
-//
-// lint:allow-no-orgid reason="process-wide observability counter; not tenant data"
-func (s *CodingCredentialStore) MirrorNaturalKeyFallbackCount() uint64 {
-	if s == nil {
-		return 0
-	}
-	return s.mirrorNaturalKeyFallbackTotal.Load()
 }
 
 // NewCodingCredentialStore constructs a store with default cache TTLs.
@@ -842,7 +733,6 @@ func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, 
 			Label:     label,
 			Config:    encrypted,
 			Priority:  nextPriority,
-			Status:    status,
 			CreatedBy: opts.CreatedBy,
 			CreatedAt: createdAt,
 		}); err != nil {
@@ -1203,41 +1093,6 @@ func (s *CodingCredentialStore) JanitorDeletePendingAuthOlderThan(ctx context.Co
 	return deactivated, nil
 }
 
-// ReconcileCodingCredentialRuntimeState backfills an active runtime-state
-// version for any active config row that lacks one, copying the legacy
-// runtime columns still kept in sync on coding_credentials.
-//
-// The versioned store always writes config and runtime rows in one
-// transaction, so this is a no-op in steady state. The gap it heals is the
-// rolling-deploy window after migration 000167: pre-versioning code inserts
-// config rows only (credential create, pending-auth insert, OAuth promote),
-// and those credentials would otherwise be invisible to every versioned read
-// and mutation path forever. Runs at boot next to the migration sentinel;
-// idempotent, and the ON CONFLICT guard makes concurrent boots safe.
-//
-// lint:allow-no-orgid reason="cross-org self-healing sweep at boot; not caller-scoped tenant data"
-func ReconcileCodingCredentialRuntimeState(ctx context.Context, dbtx DBTX) (int64, error) {
-	tag, err := dbtx.Exec(ctx,
-		`INSERT INTO coding_credential_runtime_state (
-			credential_id, org_id, user_id, status, last_verified_at,
-			rate_limited_until, rate_limited_observed_at, rate_limit_message, active
-		)
-		SELECT cc.id, cc.org_id, cc.user_id, cc.status, cc.last_verified_at,
-		       cc.rate_limited_until, cc.rate_limited_observed_at, cc.rate_limit_message, true
-		FROM coding_credentials cc
-		WHERE cc.active = true
-		  AND NOT EXISTS (
-			SELECT 1 FROM coding_credential_runtime_state rt
-			WHERE rt.credential_id = cc.id AND rt.active = true
-		  )
-		ON CONFLICT (credential_id) WHERE active = true DO NOTHING`,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("reconcile coding credential runtime state: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
-
 // ----- Internals -----
 
 func (s *CodingCredentialStore) withScopedConfigTx(ctx context.Context, scope models.Scope, id uuid.UUID, fn func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error) error {
@@ -1293,7 +1148,7 @@ func (s *CodingCredentialStore) fetchActiveConfigByIDTx(ctx context.Context, tx 
 		args["user_id"] = *scope.UserID
 		query = `SELECT
 				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
-				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				cc.created_by, cc.created_at,
 				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
 			FROM coding_credentials cc
 			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
@@ -1301,7 +1156,7 @@ func (s *CodingCredentialStore) fetchActiveConfigByIDTx(ctx context.Context, tx 
 	} else {
 		query = `SELECT
 				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
-				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				cc.created_by, cc.created_at,
 				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
 			FROM coding_credentials cc
 			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
@@ -1313,20 +1168,6 @@ func (s *CodingCredentialStore) fetchActiveConfigByIDTx(ctx context.Context, tx 
 	return scanActiveConfigRuntime(tx.QueryRow(ctx, query, args))
 }
 
-func (s *CodingCredentialStore) fetchActiveConfigByIDAnyScopeTx(ctx context.Context, tx pgx.Tx, orgID, id uuid.UUID, forUpdate bool) (*codingCredentialConfigSnapshot, *codingCredentialRuntimeSnapshot, error) {
-	query := `SELECT
-			cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
-			cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
-			rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
-		FROM coding_credentials cc
-		JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
-		WHERE cc.id = @id AND cc.org_id = @org_id AND cc.active = true`
-	if forUpdate {
-		query += ` FOR UPDATE OF cc, rt`
-	}
-	return scanActiveConfigRuntime(tx.QueryRow(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID}))
-}
-
 func (s *CodingCredentialStore) fetchActiveConfigByProviderLabelTx(ctx context.Context, tx pgx.Tx, scope models.Scope, provider models.ProviderName, label string, forUpdate bool) (*codingCredentialConfigSnapshot, *codingCredentialRuntimeSnapshot, error) {
 	args := pgx.NamedArgs{"org_id": scope.OrgID, "provider": string(provider), "label": label}
 	var query string
@@ -1334,7 +1175,7 @@ func (s *CodingCredentialStore) fetchActiveConfigByProviderLabelTx(ctx context.C
 		args["user_id"] = *scope.UserID
 		query = `SELECT
 				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
-				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				cc.created_by, cc.created_at,
 				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
 			FROM coding_credentials cc
 			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
@@ -1342,7 +1183,7 @@ func (s *CodingCredentialStore) fetchActiveConfigByProviderLabelTx(ctx context.C
 	} else {
 		query = `SELECT
 				cc.id, cc.version_id, cc.org_id, cc.user_id, cc.provider, cc.label, cc.config, cc.priority,
-				cc.status, cc.created_by, cc.team_default_origin_user_id, cc.created_at,
+				cc.created_by, cc.created_at,
 				rt.status, rt.last_verified_at, rt.rate_limited_until, rt.rate_limited_observed_at, rt.rate_limit_message
 			FROM coding_credentials cc
 			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
@@ -1367,9 +1208,7 @@ func scanActiveConfigRuntime(row pgx.Row) (*codingCredentialConfigSnapshot, *cod
 		&cfg.Label,
 		&cfg.Config,
 		&cfg.Priority,
-		&cfg.Status,
 		&cfg.CreatedBy,
-		&cfg.TeamDefaultOriginUserID,
 		&cfg.CreatedAt,
 		&runtime.Status,
 		&runtime.LastVerifiedAt,
@@ -1404,29 +1243,24 @@ func (s *CodingCredentialStore) insertConfigVersionTx(ctx context.Context, tx pg
 }
 
 func (s *CodingCredentialStore) insertInitialConfigVersionTx(ctx context.Context, tx pgx.Tx, next codingCredentialConfigSnapshot) error {
-	if next.Status == "" {
-		next.Status = models.CodingCredentialStatusActive
-	}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO coding_credentials (
-			id, org_id, user_id, provider, label, config, priority, status, created_by,
-			team_default_origin_user_id, active, created_at, updated_at
+			id, org_id, user_id, provider, label, config, priority, created_by,
+			active, created_at, updated_at
 		) VALUES (
-			@id, @org_id, @user_id, @provider, @label, @config, @priority, @status, @created_by,
-			@team_default_origin_user_id, true, @created_at, now()
+			@id, @org_id, @user_id, @provider, @label, @config, @priority, @created_by,
+			true, @created_at, now()
 		)`,
 		pgx.NamedArgs{
-			"id":                          next.ID,
-			"org_id":                      next.OrgID,
-			"user_id":                     next.UserID,
-			"provider":                    string(next.Provider),
-			"label":                       next.Label,
-			"config":                      next.Config,
-			"priority":                    next.Priority,
-			"status":                      string(next.Status),
-			"created_by":                  next.CreatedBy,
-			"team_default_origin_user_id": next.TeamDefaultOriginUserID,
-			"created_at":                  next.CreatedAt,
+			"id":         next.ID,
+			"org_id":     next.OrgID,
+			"user_id":    next.UserID,
+			"provider":   string(next.Provider),
+			"label":      next.Label,
+			"config":     next.Config,
+			"priority":   next.Priority,
+			"created_by": next.CreatedBy,
+			"created_at": next.CreatedAt,
 		},
 	)
 	return err

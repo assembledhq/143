@@ -48,8 +48,8 @@ const (
 // CredentialStore defines the credential operations needed by the auth
 // service. Every method takes models.Scope so a single Service instance can
 // drive both org-scoped (admin) and personal-scoped (per-user) subscription
-// flows. Production wires *db.ScopedCredentialStore, which routes org scope
-// to OrgCredentialStore and personal scope to CodingCredentialStore.
+// flows. Production wires *db.ScopedCredentialStore, which targets the
+// unified coding_credentials table for both scopes.
 type CredentialStore interface {
 	Disable(ctx context.Context, scope models.Scope, provider models.ProviderName) error
 
@@ -211,11 +211,11 @@ func (s *Service) restorePendingFromDB(ctx context.Context, scope models.Scope, 
 	if s.credentials == nil {
 		return nil, nil
 	}
-	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderOpenAIChatGPT, label)
+	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderOpenAISubscription, label)
 	if err != nil {
 		return nil, nil
 	}
-	cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
+	cfg, cfgOk := cred.Config.(models.OpenAISubscriptionConfig)
 	switch cred.Status {
 	case "active":
 		if !cfgOk {
@@ -247,7 +247,7 @@ func (s *Service) activeSubscriptionStatus(ctx context.Context, scope models.Sco
 	if s.credentials == nil {
 		return nil, nil
 	}
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAIChatGPT)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAISubscription)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
@@ -255,7 +255,7 @@ func (s *Service) activeSubscriptionStatus(ctx context.Context, scope models.Sco
 		if cred.Status != "active" {
 			continue
 		}
-		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
 			continue
 		}
@@ -268,9 +268,8 @@ func (s *Service) activeSubscriptionStatus(ctx context.Context, scope models.Sco
 // The label distinguishes multiple subscriptions (e.g. "Team A", "Team B").
 // createdBy records which user added the subscription; pass nil if unknown.
 //
-// Scope determines where the pending row is persisted: org scope writes to
-// org_credentials (mirrored to coding_credentials), personal scope writes
-// directly to coding_credentials with user_id set.
+// Both scopes persist the pending row to coding_credentials; personal scope
+// sets user_id on the row.
 func (s *Service) InitiateDeviceAuth(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string) (*DeviceAuthResponse, error) {
 	// Serialize concurrent init calls for the same (scope, label). Otherwise
 	// two racing initiations could both reach InsertPendingAuth, with the
@@ -356,7 +355,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, scope models.Scope, cr
 	// real access token, so an in-progress re-auth flow can never wipe a working
 	// subscription.
 	if s.credentials != nil {
-		pendingCfg := models.OpenAIChatGPTConfig{
+		pendingCfg := models.OpenAISubscriptionConfig{
 			DeviceAuthID:    result.DeviceAuthID,
 			UserCode:        result.UserCode,
 			VerificationURI: result.VerificationURI,
@@ -513,7 +512,7 @@ func (s *Service) PollForToken(ctx context.Context, scope models.Scope, label st
 		return &AuthStatus{Status: "error", Message: fmt.Sprintf("token exchange failed: %s", err)}, nil
 	}
 
-	storedCfg := models.OpenAIChatGPTConfig{
+	storedCfg := models.OpenAISubscriptionConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		IDToken:      tokenResp.IDToken,
@@ -642,7 +641,7 @@ func (s *Service) credRefreshMu(credID uuid.UUID) *sync.Mutex {
 // scope with the matching UserID. The unified runtime path constructs scope
 // from the picked credential's UserID (orchestrator.go); the legacy
 // org-fallback GetValidToken path constructs an org scope.
-func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	mu := s.credRefreshMu(credID)
 	mu.Lock()
 	defer mu.Unlock()
@@ -652,9 +651,9 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		return nil, fmt.Errorf("get credential: %w", err)
 	}
 
-	cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+	cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 	if !ok {
-		return nil, fmt.Errorf("credential is not OpenAIChatGPTConfig")
+		return nil, fmt.Errorf("credential is not OpenAISubscriptionConfig")
 	}
 
 	// After acquiring the lock, check if another goroutine already refreshed.
@@ -718,7 +717,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		return nil, fmt.Errorf("parse refresh response: %w", err)
 	}
 
-	newCfg := models.OpenAIChatGPTConfig{
+	newCfg := models.OpenAISubscriptionConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		IDToken:      tokenResp.IDToken,
@@ -749,7 +748,7 @@ const maxRoundRobinAttempts = 5
 // when a credential's refresh fails AND its cached token has already
 // expired, marks that credential invalid and tries the next one in the
 // rotation. Returns nil, nil if no usable ChatGPT credential exists.
-func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	if s.credentials == nil {
 		return nil, nil
 	}
@@ -759,7 +758,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 	var lastErr error
 
 	for attempt := 0; attempt < maxRoundRobinAttempts; attempt++ {
-		cred, err := s.credentials.ClaimNextRoundRobin(ctx, scope, models.ProviderOpenAIChatGPT)
+		cred, err := s.credentials.ClaimNextRoundRobin(ctx, scope, models.ProviderOpenAISubscription)
 		if err != nil {
 			if isNotFoundError(err) {
 				if lastErr != nil {
@@ -778,9 +777,9 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		}
 		tried[cred.ID] = struct{}{}
 
-		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
-			lastErr = fmt.Errorf("credential %s is not OpenAIChatGPTConfig", cred.ID)
+			lastErr = fmt.Errorf("credential %s is not OpenAISubscriptionConfig", cred.ID)
 			continue
 		}
 
@@ -866,7 +865,7 @@ func (s *Service) DisconnectForOrg(ctx context.Context, scope models.Scope, cred
 	// Anthropic API key) from "already disconnected". The provider filter
 	// prevents the codex-auth DELETE endpoint from disabling unrelated
 	// credentials.
-	exists, err := s.credentials.ExistsForProviderByID(ctx, scope, credID, models.ProviderOpenAIChatGPT)
+	exists, err := s.credentials.ExistsForProviderByID(ctx, scope, credID, models.ProviderOpenAISubscription)
 	if err != nil {
 		return fmt.Errorf("check credential ownership: %w", err)
 	}
@@ -902,7 +901,7 @@ func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	})
 	// Clean up refresh mutexes for all credentials in this scope.
 	if s.credentials != nil {
-		creds, _ := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAIChatGPT)
+		creds, _ := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAISubscription)
 		for _, cred := range creds {
 			s.refreshMu.Delete(cred.ID.String())
 		}
@@ -911,7 +910,7 @@ func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	if s.credentials == nil {
 		return nil
 	}
-	return s.credentials.Disable(ctx, scope, models.ProviderOpenAIChatGPT)
+	return s.credentials.Disable(ctx, scope, models.ProviderOpenAISubscription)
 }
 
 // ListSubscriptions returns all connected Codex subscriptions at the given scope.
@@ -920,14 +919,14 @@ func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]
 		return nil, nil
 	}
 
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAIChatGPT)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAISubscription)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 
 	var subs []SubscriptionInfo
 	for _, cred := range creds {
-		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
 			continue
 		}
