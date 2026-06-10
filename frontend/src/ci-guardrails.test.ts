@@ -52,8 +52,8 @@ describe("frontend CI guardrails", () => {
     const affectedTestsStep = frontendTestJob.match(
       /      - name: Run affected tests \(PR\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
     )?.[0];
-    const fullMainStep = frontendTestJob.match(
-      /      - name: Run full tests \(main\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
+    const mainTestsStep = frontendTestJob.match(
+      /      - name: Run affected tests \(main\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
     )?.[0];
     const fullCoverageStep = frontendTestJob.match(
       /      - name: Run full tests with coverage \(scheduled\/manual\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
@@ -64,14 +64,25 @@ describe("frontend CI guardrails", () => {
     expect(affectedTestsStep).not.toContain("--coverage");
     expect(frontendTestJob).not.toContain("diff-cover");
 
-    expect(fullMainStep).toBeDefined();
-    expect(fullMainStep).toContain("if: github.event_name == 'push'");
-    expect(fullMainStep).not.toContain("--coverage");
+    expect(mainTestsStep).toBeDefined();
+    expect(mainTestsStep).toContain("if: github.event_name == 'push'");
+    expect(mainTestsStep).toContain("--changed=push-base");
+    expect(mainTestsStep).not.toContain("--coverage");
 
     expect(fullCoverageStep).toBeDefined();
     expect(fullCoverageStep).toContain("github.event_name == 'schedule'");
     expect(fullCoverageStep).toContain("github.event_name == 'workflow_dispatch'");
     expect(fullCoverageStep).toContain("--coverage");
+
+    // The scheduled coverage run is the only full-suite execution, so it
+    // must fire at least twice a day to bound the exposure window for
+    // breakage that affected-test runs missed.
+    const cronLines = workflow.match(/- cron: "[^"]+"/g) ?? [];
+    expect(cronLines.length).toBeGreaterThan(0);
+    for (const line of cronLines) {
+      const hourField = line.match(/- cron: "\S+ (\S+) /)?.[1] ?? "";
+      expect(hourField.split(",").length).toBeGreaterThanOrEqual(2);
+    }
   });
 
   it("splits Vitest tests into node and jsdom projects", () => {

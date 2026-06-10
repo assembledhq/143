@@ -43,6 +43,9 @@ export default defineConfig({
   test: {
     globals: true,
     css: false,
+    // Vitest 4 defaults to the forks pool; threads runs this suite ~20%
+    // faster end-to-end with identical results.
+    pool: 'threads',
     testTimeout: 5_000,
     hookTimeout: 10_000,
     reporters: process.env.CI ? ['dot'] : ['default'],
