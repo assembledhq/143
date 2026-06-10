@@ -156,7 +156,7 @@ export function CodexDeviceCodeModal({
                   }}
                 >
                   {copied ? (
-                    <span className="flex items-center gap-1.5 text-green-600">
+                    <span className="flex items-center gap-1.5 text-success">
                       <Check className="h-3.5 w-3.5" />
                       Copied
                     </span>
@@ -178,7 +178,7 @@ export function CodexDeviceCodeModal({
             </div>
           </div>
         )}
-        {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-green-600">Connected successfully!</p></div>}
+        {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-success">Connected successfully!</p></div>}
         {(status === "error" || status === "expired") && (
           <div className="mt-4">
             <p className="text-sm text-destructive">{error}</p>

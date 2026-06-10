@@ -229,13 +229,13 @@ export function AgentTabStrip({
                     )}
                     {needsAttention && (
                       <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
                         aria-label="Needs attention"
                       />
                     )}
                     {overlap.length > 0 && (
                       <AlertTriangle
-                        className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                        className="h-3 w-3 shrink-0 text-warning"
                         aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
                       />
                     )}
@@ -255,7 +255,7 @@ export function AgentTabStrip({
                     {deliverySummary && <div className="text-muted-foreground">{deliverySummary}</div>}
                     {overlap.length > 0 && (
                       <div className="pt-1">
-                        <div className="font-medium text-amber-700 dark:text-amber-400">
+                        <div className="font-medium text-warning">
                           Overlap with another tab:
                         </div>
                         <ul className="text-muted-foreground">
@@ -364,11 +364,11 @@ export function AgentTabStrip({
                                 </Badge>
                               )}
                               {needsAttention && (
-                                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
+                                <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-label="Needs attention" />
                               )}
                               {overlap.length > 0 && (
                                 <AlertTriangle
-                                  className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                                  className="h-3 w-3 shrink-0 text-warning"
                                   aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
                                 />
                               )}
@@ -383,7 +383,7 @@ export function AgentTabStrip({
                             {deliverySummary && <div className="text-muted-foreground">{deliverySummary}</div>}
                             {overlap.length > 0 && (
                               <div className="pt-1">
-                                <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>
+                                <div className="font-medium text-warning">Overlap with another tab:</div>
                                 <ul className="text-muted-foreground">
                                   {overlap.slice(0, 5).map((p) => (
                                     <li key={p} className="truncate">{p}</li>

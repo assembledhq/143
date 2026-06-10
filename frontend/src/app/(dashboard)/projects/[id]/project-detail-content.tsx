@@ -224,8 +224,8 @@ export function ProjectDetailContent({ id }: { id: string }) {
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
             {isActive && (
               <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
               </span>
             )}
             {status.label}
@@ -238,8 +238,8 @@ export function ProjectDetailContent({ id }: { id: string }) {
 
         <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
           <Badge variant="outline" className="text-xs px-1.5 py-0">{project.execution_mode}</Badge>
-          {runningCount > 0 && <span className="text-blue-600 dark:text-blue-400">{runningCount} running</span>}
-          {prCount > 0 && <span className="text-emerald-600 dark:text-emerald-400">{prCount} PRs</span>}
+          {runningCount > 0 && <span className="text-info">{runningCount} running</span>}
+          {prCount > 0 && <span className="text-success">{prCount} PRs</span>}
           {specs.length > 0 && <span>{specs.length} specs</span>}
           {attachments.length > 0 && <span>{attachments.length} designs</span>}
           {project.current_phase && <span>Phase: {project.current_phase}</span>}
@@ -266,12 +266,12 @@ export function ProjectDetailContent({ id }: { id: string }) {
             <span>
               {project.completed_tasks} of {project.total_tasks} tasks complete
               {project.failed_tasks > 0 && (
-                <span className="text-red-600 dark:text-red-400"> &middot; {project.failed_tasks} failed</span>
+                <span className="text-destructive"> &middot; {project.failed_tasks} failed</span>
               )}
             </span>
 
             {blockedTasks.length > 0 && (
-              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+              <span className="inline-flex items-center gap-1 text-warning">
                 <AlertTriangle className="h-3 w-3" />
                 {blockedTasks.length} {blockedTasks.length === 1 ? "task needs" : "tasks need"} attention
               </span>

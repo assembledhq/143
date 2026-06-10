@@ -52,9 +52,9 @@ const statusConfig: Record<SessionStatus, { dot: string; text: string; bg: strin
   pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
   running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
   idle: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Idle" },
-  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
-  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
-  completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
+  awaiting_input: { dot: "bg-warning", text: "text-warning", bg: "bg-warning/10", label: "Awaiting input" },
+  needs_human_guidance: { dot: "bg-attention", text: "text-attention", bg: "bg-attention/10", label: "Needs guidance" },
+  completed: { dot: "bg-success", text: "text-success", bg: "bg-success/10", label: "Completed" },
   pr_created: { dot: prMergedAccent.dot, text: prMergedAccent.text, bg: prMergedAccent.bg, label: "PR created" },
   failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
   cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
@@ -455,6 +455,7 @@ export function SessionsPageContent() {
                       {headerGroup.headers.map((header) => (
                         <TableHead
                           key={header.id}
+                          className="uppercase"
                           style={{ width: header.column.getSize() !== 150 ? header.column.getSize() : undefined }}
                         >
                           {header.isPlaceholder

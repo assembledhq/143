@@ -129,7 +129,7 @@ export function SidebarSettingsSection({
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-border/50" />
+      <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-sidebar-border/70" />
       <CollapsibleTrigger asChild>
         <Button
           type="button"
@@ -138,8 +138,8 @@ export function SidebarSettingsSection({
             "flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
             isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] text-xs",
             onSettingsPage
-              ? "bg-sidebar-accent text-sidebar-accent-foreground"
-              : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+              : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
           )}
         >
           <Settings className="h-4 w-4 shrink-0" />
@@ -202,8 +202,8 @@ export function SidebarSettingsSection({
                         className={cn(
                           "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-xs font-medium transition-colors duration-150",
                           active
-                            ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
-                            : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                            ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60 before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
+                            : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
                         )}
                       >
                         <Icon className="h-3.5 w-3.5 shrink-0" />

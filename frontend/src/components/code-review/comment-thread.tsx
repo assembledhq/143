@@ -98,7 +98,7 @@ const SingleComment = memo(function SingleComment({
             </span>
           )}
           {comment.resolved && (
-            <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-0.5">
+            <span className="text-success flex items-center gap-0.5">
               <Check className="h-3 w-3" />
               {comment.resolved_by_pass ? `Resolved in pass ${comment.resolved_by_pass}` : "Resolved"}
             </span>
@@ -119,7 +119,7 @@ const SingleComment = memo(function SingleComment({
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 w-6 p-0 text-muted-foreground hover:text-emerald-600"
+              className="h-6 w-6 p-0 text-muted-foreground hover:text-success"
               title="Resolve"
               onClick={() => onUpdate(comment.id, { resolved: true })}
             >

@@ -72,9 +72,9 @@ export const ChangesTab = memo(function ChangesTab({
       {hasDiff ? (
         <div className="flex min-h-0 flex-1 flex-col">
           {diffTruncationText ? (
-            <div className="mx-4 mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">
+            <div className="mx-4 mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
               <p className="font-medium">Large diff truncated</p>
-              <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
+              <p className="mt-1 text-warning/80">{diffTruncationText}</p>
             </div>
           ) : null}
           <div className="flex-1 overflow-hidden">

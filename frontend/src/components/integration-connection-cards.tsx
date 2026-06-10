@@ -152,11 +152,11 @@ function IntegrationAuthErrorAlert({ info }: { info: IntegrationAuthErrorInfo })
   return (
     <div
       role="alert"
-      className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+      className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"
     >
       <div className="font-medium">Reconnect required</div>
-      <p className="mt-0.5 text-amber-700/90 dark:text-amber-200/90">{info.reason}</p>
-      <p className="mt-0.5 text-xs text-amber-700/70 dark:text-amber-200/70">
+      <p className="mt-0.5 text-warning/90">{info.reason}</p>
+      <p className="mt-0.5 text-xs text-warning/70">
         Last seen at {observedAt}
       </p>
     </div>

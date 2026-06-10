@@ -79,17 +79,17 @@ export function NoReposWarning({
     return (
       <div
         className={cn(
-          "rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3",
+          "rounded-lg border border-warning/20 bg-warning/5 px-4 py-3",
           compact ? "space-y-3" : "flex items-start gap-3",
         )}
       >
         <div className={cn("flex gap-3", compact && "items-start")}>
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
           <div className="min-w-0 flex-1">
             <Badge variant="secondary" className="mb-2">
               GitHub setup required
             </Badge>
-            <p className="text-xs text-amber-700 dark:text-amber-300">
+            <p className="text-xs text-warning">
               Connect GitHub before creating sessions or projects. Until a repository is linked, the agent won&apos;t have any code to work with.
             </p>
           </div>
@@ -107,9 +107,9 @@ export function NoReposWarning({
   // After a successful sync that found repos, show success briefly then hide
   if (syncResult && syncResult.repos_synced > 0 && hasRepos) {
     return (
-      <div className="flex items-center gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
-        <Check className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-        <p className="text-xs text-emerald-700 dark:text-emerald-300">
+      <div className="flex items-center gap-3 rounded-lg border border-success/20 bg-success/5 px-4 py-3">
+        <Check className="h-4 w-4 shrink-0 text-success" />
+        <p className="text-xs text-success">
           {syncResult.repos_synced} repositor{syncResult.repos_synced === 1 ? "y" : "ies"} synced.
         </p>
       </div>
@@ -120,16 +120,16 @@ export function NoReposWarning({
   if (hasRepos) return null;
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
-      <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+    <div className="flex items-center gap-3 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3">
+      <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
       <div className="flex-1 min-w-0">
-        <p className="text-xs text-amber-700 dark:text-amber-300">
+        <p className="text-xs text-warning">
           {shouldChooseRepos
             ? "GitHub is connected, but no repositories are claimed for this organization. Choose repositories in integrations before creating sessions or projects."
             : "GitHub is connected but no repositories are synced. Sessions won't have access to your code."}
         </p>
         {syncError && needsReinstall && (
-          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          <p className="mt-1 text-xs text-warning">
             The GitHub App installation ID is missing. Please reconnect GitHub to fix this.
           </p>
         )}
@@ -139,7 +139,7 @@ export function NoReposWarning({
           </p>
         )}
         {syncResult && syncResult.repos_synced === 0 && !shouldChooseRepos && (
-          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          <p className="mt-1 text-xs text-warning">
             No repositories found. Make sure the GitHub App has access to at least one repository.
           </p>
         )}

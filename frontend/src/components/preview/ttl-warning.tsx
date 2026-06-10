@@ -138,7 +138,7 @@ export function TTLWarning({
       {recycleCountdown.visible && (
         <Badge
           variant="secondary"
-          className="text-xs gap-1 bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
+          className="text-xs gap-1 bg-warning/15 text-warning border-warning/20"
           data-testid="recycle-warning"
         >
           <RefreshCw className="size-3" />
@@ -152,7 +152,7 @@ export function TTLWarning({
             "text-xs gap-1",
             remaining.expired
               ? "bg-destructive/15 text-destructive border-destructive/20"
-              : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
+              : "bg-warning/15 text-warning border-warning/20"
           )}
         >
           <Clock className="size-3" />
