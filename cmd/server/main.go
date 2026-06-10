@@ -1105,10 +1105,7 @@ func configureSessionExecutorDispatch(
 		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
 			Image:       cfg.SessionExecutorImage,
 			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds: []string{
-				"/var/run/docker.sock:/var/run/docker.sock",
-				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
-			},
+			Binds:       sessionExecutorBinds(),
 			GroupAdd:    sessionExecutorGroupAddFromEnv(),
 			Env:         os.Environ(),
 			StopTimeout: cfg.SessionExecutorStopTimeout,
@@ -1117,6 +1114,14 @@ func configureSessionExecutorDispatch(
 		Image:                 cfg.SessionExecutorImage,
 		BuildSHA:              version.BuildSHA,
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
+	}
+}
+
+func sessionExecutorBinds() []string {
+	return []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
 	}
 }
 
