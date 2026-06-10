@@ -269,6 +269,9 @@ type OrgSettings struct {
 
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
 
+	SandboxLifecycle SandboxLifecycleSettings `json:"sandbox_lifecycle,omitempty"`
+	SandboxResources SandboxResourceSettings  `json:"sandbox_resources,omitempty"`
+
 	// LinearAutomation controls how 143 reflects session events back into
 	// Linear. The two write levels are intentionally separate so teams can
 	// adopt visibility (attachment + rolling comment) before they are ready
@@ -285,6 +288,56 @@ type OrgSettings struct {
 // SandboxNetworkSettings controls per-org sandbox egress behavior.
 type SandboxNetworkSettings struct {
 	StaticEgressEnabled bool `json:"static_egress_enabled,omitempty"`
+}
+
+// SandboxLifecycleSettings controls cleanup and retention defaults for runtime artifacts.
+type SandboxLifecycleSettings struct {
+	CompletedSessionRetentionMinutes int   `json:"completed_session_retention_minutes,omitempty"`
+	IdlePreviewTTLMinutes            int   `json:"idle_preview_ttl_minutes,omitempty"`
+	PreviewHoldsSandbox              *bool `json:"preview_holds_sandbox,omitempty"`
+}
+
+// EffectivePreviewHoldsSandbox applies the default preview hold policy.
+func (s SandboxLifecycleSettings) EffectivePreviewHoldsSandbox() bool {
+	if s.PreviewHoldsSandbox == nil {
+		return true
+	}
+	return *s.PreviewHoldsSandbox
+}
+
+// SandboxResourceTier is a named resource-size tier for sandbox runtime defaults.
+type SandboxResourceTier string
+
+const (
+	SandboxResourceTierSmall    SandboxResourceTier = "small"
+	SandboxResourceTierStandard SandboxResourceTier = "standard"
+	SandboxResourceTierLarge    SandboxResourceTier = "large"
+)
+
+// Validate returns an error when the tier is not one of the supported values.
+func (t SandboxResourceTier) Validate() error {
+	switch t {
+	case "", SandboxResourceTierSmall, SandboxResourceTierStandard, SandboxResourceTierLarge:
+		return nil
+	default:
+		return fmt.Errorf("invalid sandbox resource tier: %q", t)
+	}
+}
+
+// SandboxResourceSettings controls org-level sandbox resource defaults and bounds.
+type SandboxResourceSettings struct {
+	AgentDefaultTier          SandboxResourceTier `json:"agent_default_tier,omitempty"`
+	PreviewDefaultTier        SandboxResourceTier `json:"preview_default_tier,omitempty"`
+	AllowRepoResourceRequests *bool               `json:"allow_repo_resource_requests,omitempty"`
+	PreviewMaxTier            SandboxResourceTier `json:"preview_max_tier,omitempty"`
+}
+
+// EffectiveAllowRepoResourceRequests applies the default resource policy.
+func (s SandboxResourceSettings) EffectiveAllowRepoResourceRequests() bool {
+	if s.AllowRepoResourceRequests == nil {
+		return true
+	}
+	return *s.AllowRepoResourceRequests
 }
 
 func (s OrgSettings) EffectiveCodingAgentTabToolsEnabled() bool {
@@ -578,6 +631,13 @@ const (
 	DefaultPreviewMaxPreviewsPerUser = 4
 	MinPreviewMaxPreviewsPerUser     = 1
 	MaxPreviewMaxPreviewsPerUser     = 20
+
+	DefaultCompletedSessionRetentionMinutes = 60
+	MinCompletedSessionRetentionMinutes     = 0
+	MaxCompletedSessionRetentionMinutes     = 24 * 60
+	DefaultIdlePreviewTTLMinutes            = 4 * 60
+	MinIdlePreviewTTLMinutes                = 15
+	MaxIdlePreviewTTLMinutes                = 24 * 60
 )
 
 // ContextLimits returns the default context limits for this org size.
@@ -762,6 +822,29 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.PreviewMaxPreviewsPerUser = MinPreviewMaxPreviewsPerUser
 	} else if s.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser {
 		s.PreviewMaxPreviewsPerUser = MaxPreviewMaxPreviewsPerUser
+	}
+	if s.SandboxLifecycle.CompletedSessionRetentionMinutes == 0 {
+		s.SandboxLifecycle.CompletedSessionRetentionMinutes = DefaultCompletedSessionRetentionMinutes
+	} else if s.SandboxLifecycle.CompletedSessionRetentionMinutes < MinCompletedSessionRetentionMinutes {
+		s.SandboxLifecycle.CompletedSessionRetentionMinutes = MinCompletedSessionRetentionMinutes
+	} else if s.SandboxLifecycle.CompletedSessionRetentionMinutes > MaxCompletedSessionRetentionMinutes {
+		s.SandboxLifecycle.CompletedSessionRetentionMinutes = MaxCompletedSessionRetentionMinutes
+	}
+	if s.SandboxLifecycle.IdlePreviewTTLMinutes == 0 {
+		s.SandboxLifecycle.IdlePreviewTTLMinutes = DefaultIdlePreviewTTLMinutes
+	} else if s.SandboxLifecycle.IdlePreviewTTLMinutes < MinIdlePreviewTTLMinutes {
+		s.SandboxLifecycle.IdlePreviewTTLMinutes = MinIdlePreviewTTLMinutes
+	} else if s.SandboxLifecycle.IdlePreviewTTLMinutes > MaxIdlePreviewTTLMinutes {
+		s.SandboxLifecycle.IdlePreviewTTLMinutes = MaxIdlePreviewTTLMinutes
+	}
+	if s.SandboxResources.AgentDefaultTier == "" {
+		s.SandboxResources.AgentDefaultTier = SandboxResourceTierStandard
+	}
+	if s.SandboxResources.PreviewDefaultTier == "" {
+		s.SandboxResources.PreviewDefaultTier = SandboxResourceTierStandard
+	}
+	if s.SandboxResources.PreviewMaxTier == "" {
+		s.SandboxResources.PreviewMaxTier = SandboxResourceTierLarge
 	}
 
 	if s.RuntimeBudgets.NoProgressTimeoutSeconds <= 0 {

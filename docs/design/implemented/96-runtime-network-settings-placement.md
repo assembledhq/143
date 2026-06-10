@@ -1,7 +1,7 @@
 # Runtime / Sandbox Settings
 
-> **Status:** Partially implemented first pass
-> **Last reviewed:** 2026-06-09
+> **Status:** Implemented
+> **Last reviewed:** 2026-06-10
 
 143 currently exposes shared sandbox runtime controls across multiple settings pages. Static egress lives under Organization -> General, preview capacity lives on General, and coding-agent execution limits live under Platform -> Coding agents. That split makes each individual setting understandable in isolation, but it hides the product model: these settings all affect how 143 creates, schedules, networks, and retains sandbox runtimes for an organization.
 
@@ -22,7 +22,7 @@ Create a Platform-level **Runtime** or **Sandbox** settings page as the authorit
 2. Per-worker health, deployment generation, hostnames, WireGuard internals, or static-egress capability details.
 3. A general-purpose infrastructure settings page.
 4. Duplicating the same setting on Coding agents and Preview.
-5. Changing the underlying org-settings storage model in the first implementation pass.
+5. Requiring a database migration for settings that fit in the existing org settings JSON.
 
 ## Information Architecture
 
@@ -68,7 +68,7 @@ UI:
 - Use `AutosaveIndicator` in the section header.
 
 Customer-facing copy rule:
-- Do not render `static_egress_unavailable_reason` or any wording such as `not all active session workers are static-egress-capable for the configured public IP`.
+- Do not render `static_egress_unavailable_reason` or any worker capability detail.
 - Customer copy may say `Static egress is not currently available for new sandbox starts.`
 - Detailed worker-readiness causes belong in logs, operator tooling, or an admin-only internal diagnostic endpoint.
 
@@ -155,15 +155,14 @@ Session runtime                                     Saved
 
 ### 4. Lifecycle Defaults
 
-Owns cleanup and retention policies for runtime artifacts. This can start as a future-only section if the backend settings do not exist yet.
+Owns cleanup and retention policies for runtime artifacts.
 
-Potential controls:
+Controls:
 - Default idle preview cleanup window.
 - Default sandbox retention after completed runs.
 - Whether previews may hold a sandbox after a session turn completes.
-- Default restart/recycle behavior for stale previews.
 
-Proposed settings shape:
+Settings shape:
 
 ```json
 {
@@ -176,28 +175,27 @@ Proposed settings shape:
 ```
 
 API/schema impact:
-- Add `SandboxLifecycleSettings` to `internal/models/org_settings.go`.
-- Add validation tests for min/max ranges and defaults.
-- Add frontend `OrgSettings.sandbox_lifecycle` type.
+- `SandboxLifecycleSettings` lives in `internal/models/org_settings.go`.
+- Validation tests cover min/max ranges and defaults.
+- Frontend `OrgSettings.sandbox_lifecycle` mirrors the backend payload.
 - Reuse `PATCH /api/v1/settings`.
 - No DB migration is required if the setting remains in the existing organization settings JSON.
 
 UI:
 - Use `Card`, `Input`, `Switch`, and `AutosaveIndicator`.
-- Keep controls disabled or hidden until backend policy exists.
 - Do not expose worker cleanup implementation details.
 
 ### 5. Resource Defaults
 
 Owns org-level upper bounds and defaults for sandbox resource sizing. This should not replace repo-declared `.143/config.json` resource requests; it should bound or default them.
 
-Potential controls:
+Controls:
 - Default CPU/memory/disk tier for agent sessions.
 - Default CPU/memory/disk tier for previews.
 - Maximum allowed preview resource request.
 - Whether repo-declared preview resources are honored.
 
-Proposed settings shape:
+Settings shape:
 
 ```json
 {
@@ -211,9 +209,9 @@ Proposed settings shape:
 ```
 
 API/schema impact:
-- Add typed string enums in `internal/models` for resource tiers, with `Validate() error` and table-driven tests.
-- Add `SandboxResourceSettings` to `OrgSettings`.
-- Add frontend types and option constants.
+- Typed string enums in `internal/models` validate resource tiers with `Validate() error` and table-driven tests.
+- `SandboxResourceSettings` lives in `OrgSettings`.
+- Frontend types and option constants are wired into the Runtime page.
 - Reuse `PATCH /api/v1/settings`.
 - If the backend needs exact CPU/memory/disk values in responses, expose them as read-only resolved metadata from a runtime status endpoint rather than duplicating constants in the frontend.
 
@@ -227,14 +225,14 @@ UI:
 
 Provides a product-safe read-only summary that helps admins understand whether runtime features are available without exposing fleet internals.
 
-Possible first-pass rows:
+Rows:
 - Static egress: `Available` / `Unavailable`
-- Preview startup: `Ready` / `Degraded` if a backend aggregate exists
-- Runtime capacity: `Normal` / `Limited` if a backend aggregate exists
+- Agent runs: active count against the configured org concurrency limit
+- Active previews: active count against the configured per-user limit
+- Capacity: `Normal` / `Limited`
 
 API/schema impact:
-- Existing `GET /api/v1/settings/network` can continue to power the static egress row.
-- If diagnostics grow beyond network status, add `GET /api/v1/settings/runtime/status` returning a sanitized org-scoped status payload:
+- `GET /api/v1/settings/runtime/status` returns a sanitized org-scoped status payload:
 
 ```json
 {
@@ -248,7 +246,8 @@ API/schema impact:
       "state": "normal",
       "active_agent_runs": 2,
       "max_concurrent_agent_runs": 5,
-      "active_previews": 3
+      "active_previews": 3,
+      "max_previews_per_user": 4
     }
   }
 }
@@ -265,15 +264,20 @@ UI:
 - Use `Table` only if there are enough rows to scan; otherwise use stacked rows with `border-border` separators.
 - Use `EmptyState` only if diagnostics are unavailable because the feature is not configured.
 
-## First Implementation Pass
+## Implementation
 
-Move these existing controls into `/settings/runtime`:
+`/settings/runtime` is the authoritative Platform settings page for shared sandbox runtime policy. Runtime owns:
 
-1. Network access card from General settings. **Implemented.**
-2. Preview capacity card from General settings. **Implemented.**
-3. `max_concurrent_runs` and `max_session_duration_seconds` controls from Coding agents. **Implemented.**
-4. `coding_agent_tab_tools_enabled` control from Coding agents. **Implemented.**
-5. Sanitized static-egress diagnostics using the existing network status API. **Implemented.**
+- Sandbox network static egress toggle.
+- Copyable static egress public IP.
+- Product-safe static egress availability copy that does not expose worker capability diagnostics.
+- Concurrent coding-agent run limit.
+- Active previews per user.
+- Maximum session duration.
+- Sandbox tab tools.
+- Lifecycle defaults for completed-session retention, idle preview TTL, and preview sandbox hold behavior.
+- Resource defaults for agent tier, preview tier, preview max tier, and repo resource request policy.
+- Sanitized runtime diagnostics for static egress and capacity.
 
 Keep these controls where they are:
 
@@ -283,33 +287,14 @@ Keep these controls where they are:
 - PR authorship, draft PR default, auto-archive, and builder PR review gate: General / Pull requests.
 - LLM model defaults: LLM or Coding agents, depending on the existing page contract.
 
-Optional first-pass behavior:
-- Leave a short link row on Coding agents: `Runtime limits moved to Runtime settings`.
-- Leave a short link row on Preview: `Preview capacity is managed in Runtime settings`.
-- Do not duplicate editable controls across pages.
-
-## Implemented First Pass
-
-The first pass added `/settings/runtime` as an admin-only Platform settings page and moved shared sandbox runtime controls into it. Runtime now owns:
-
-- Sandbox network static egress toggle.
-- Copyable static egress public IP.
-- Product-safe static egress availability copy that does not expose worker capability diagnostics.
-- Concurrent coding-agent run limit.
-- Active previews per user.
-- Maximum session duration.
-- Sandbox tab tools.
-- Sanitized runtime diagnostics for static egress availability and public IP.
-
-The first pass also:
+The implementation also:
 
 - Added Runtime to the settings sidebar.
 - Added `/settings/runtime` to settings role guards.
 - Added a browser-title rule for `Runtime settings`.
 - Removed duplicated runtime controls from General and Coding agents.
-- Added focused frontend coverage for the new page, old-page removals, sidebar, role guards, and page title.
-
-This design remains under `future/` because lifecycle defaults, resource defaults, and the broader runtime status endpoint are still future work.
+- Added compact links from Coding agents and Preview to Runtime.
+- Added focused backend and frontend coverage for the new page, old-page removals, sidebar, role guards, page title, lifecycle/resource validation, and runtime status.
 
 ## Component Guidance
 
@@ -334,9 +319,9 @@ Layout rules:
 
 ## API and Schema Summary
 
-No DB migration is needed for the first pass if settings continue to live in `organizations.settings`.
+No DB migration is needed because settings continue to live in `organizations.settings`.
 
-First-pass reusable fields:
+Reusable fields:
 
 | UI control | Existing setting/API |
 |---|---|
@@ -346,28 +331,19 @@ First-pass reusable fields:
 | Maximum session duration | `settings.max_session_duration_seconds` |
 | Active previews per user | `settings.preview_max_previews_per_user` |
 | Sandbox tab tools | `settings.coding_agent_tab_tools_enabled` |
+| Completed session retention | `settings.sandbox_lifecycle.completed_session_retention_minutes` |
+| Idle preview TTL | `settings.sandbox_lifecycle.idle_preview_ttl_minutes` |
+| Preview holds sandbox | `settings.sandbox_lifecycle.preview_holds_sandbox` |
+| Agent default tier | `settings.sandbox_resources.agent_default_tier` |
+| Preview default tier | `settings.sandbox_resources.preview_default_tier` |
+| Repo resource request policy | `settings.sandbox_resources.allow_repo_resource_requests` |
+| Preview max tier | `settings.sandbox_resources.preview_max_tier` |
+| Runtime diagnostics | `GET /api/v1/settings/runtime/status` |
 
-First-pass frontend work:
-- Add `/settings/runtime/page.tsx`.
-- Add `/settings/runtime/page.test.tsx`.
-- Add Runtime to `SidebarSettingsSection` under Platform.
-- Add `/settings/runtime` to settings role guards.
-- Move tests for the migrated controls from General/Coding agents or add coverage that the old pages no longer render those controls.
-- Update `queryKeys` only if a new runtime status endpoint is added.
+Resource tiers are typed backend enum strings: `small`, `standard`, and `large`. Runtime status uses org-scoped active session and active preview counters and does not return worker internals.
 
-Potential future backend work:
-- Add `sandbox_lifecycle` settings.
-- Add `sandbox_resources` settings.
-- Add typed resource-tier and runtime-status enums.
-- Add `GET /api/v1/settings/runtime/status` for product-safe diagnostics.
-- Add org-scoped store/service methods for any aggregated runtime counts.
-
-Remaining work before this can move to `implemented/`:
-
-- Implement `sandbox_lifecycle` policy and UI controls.
-- Implement `sandbox_resources` policy and UI controls.
-- Add a broader sanitized runtime status endpoint if the product wants capacity or preview-startup diagnostics beyond static egress.
-- Decide whether repo-declared resource requests can be constrained by org policy and expose the resulting resolved tier metadata safely.
+Remaining future enhancement:
+- If repo-declared resource requests need exact CPU/memory/disk summaries in the UI, expose read-only resolved tier metadata safely from a runtime endpoint rather than duplicating infrastructure constants in the frontend.
 
 ## Placement Tradeoffs
 
@@ -420,6 +396,6 @@ Cons:
 
 ## Recommendation
 
-Create Settings -> Platform -> **Runtime** and move shared sandbox controls there. Start with existing settings so the first implementation does not require schema migration. Add lifecycle, resource defaults, and sanitized runtime diagnostics only when the backend policy exists.
+Settings -> Platform -> **Runtime** is the shared sandbox policy home. Coding agents and Preview link to it, but do not duplicate the editable controls.
 
 The guiding rule: if a setting changes how a sandbox is created, scheduled, networked, retained, or cleaned up across more than one product surface, it belongs on Runtime. If it configures credentials, model choice, PR behavior, preview secrets, or team access, it belongs on the existing specialized page.

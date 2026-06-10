@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldAlert, Trash2 } from "lucide-react";
@@ -269,6 +270,14 @@ export default function AgentPage() {
             <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
+          <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
+            <p className="text-xs text-muted-foreground">
+              Shared sandbox networking, lifecycle, and capacity controls live in Runtime.
+            </p>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/settings/runtime">Runtime settings</Link>
+            </Button>
+          </div>
 
           <section className="space-y-3">
             <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
@@ -330,6 +339,14 @@ export default function AgentPage() {
             </Button>
           )}
         />
+        <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
+          <p className="text-xs text-muted-foreground">
+            Shared sandbox networking, lifecycle, and capacity controls live in Runtime.
+          </p>
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings/runtime">Runtime settings</Link>
+          </Button>
+        </div>
 
         <section className="space-y-4">
           <div className="space-y-1.5">

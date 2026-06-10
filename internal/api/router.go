@@ -254,6 +254,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		PublicIP:          cfg.StaticEgressPublicIP,
 		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
 	})
+	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -997,6 +998,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
 				r.Get("/api/v1/settings/network", settingsHandler.GetNetworkStatus)
+				r.Get("/api/v1/settings/runtime/status", settingsHandler.GetRuntimeStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 				r.Get("/api/v1/pm/current", pmHandler.Current)

@@ -460,6 +460,25 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	if settings.PreviewMaxPreviewsPerUser != 0 && (settings.PreviewMaxPreviewsPerUser < MinPreviewMaxPreviewsPerUser || settings.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser) {
 		return fmt.Errorf("preview_max_previews_per_user must be between %d and %d", MinPreviewMaxPreviewsPerUser, MaxPreviewMaxPreviewsPerUser)
 	}
+	if settings.SandboxLifecycle.CompletedSessionRetentionMinutes != 0 &&
+		(settings.SandboxLifecycle.CompletedSessionRetentionMinutes < MinCompletedSessionRetentionMinutes ||
+			settings.SandboxLifecycle.CompletedSessionRetentionMinutes > MaxCompletedSessionRetentionMinutes) {
+		return fmt.Errorf("sandbox_lifecycle.completed_session_retention_minutes must be between %d and %d", MinCompletedSessionRetentionMinutes, MaxCompletedSessionRetentionMinutes)
+	}
+	if settings.SandboxLifecycle.IdlePreviewTTLMinutes != 0 &&
+		(settings.SandboxLifecycle.IdlePreviewTTLMinutes < MinIdlePreviewTTLMinutes ||
+			settings.SandboxLifecycle.IdlePreviewTTLMinutes > MaxIdlePreviewTTLMinutes) {
+		return fmt.Errorf("sandbox_lifecycle.idle_preview_ttl_minutes must be between %d and %d", MinIdlePreviewTTLMinutes, MaxIdlePreviewTTLMinutes)
+	}
+	if err := settings.SandboxResources.AgentDefaultTier.Validate(); err != nil {
+		return fmt.Errorf("sandbox_resources.agent_default_tier: %w", err)
+	}
+	if err := settings.SandboxResources.PreviewDefaultTier.Validate(); err != nil {
+		return fmt.Errorf("sandbox_resources.preview_default_tier: %w", err)
+	}
+	if err := settings.SandboxResources.PreviewMaxTier.Validate(); err != nil {
+		return fmt.Errorf("sandbox_resources.preview_max_tier: %w", err)
+	}
 	if settings.LLMModel != "" && !IsSupportedLLMModel(settings.LLMModel) {
 		return fmt.Errorf("llm_model must be one of: %v", AvailableLLMModels)
 	}

@@ -63,6 +63,7 @@ describe("Agent settings page", () => {
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
     expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Runtime settings" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();

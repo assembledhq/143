@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
@@ -117,6 +118,14 @@ export default function PreviewSettingsPage() {
     <PageContainer size="default">
       <div className="space-y-8">
         <PageHeader title="Preview" description="Configure preview secrets and API access." />
+        <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
+          <p className="text-xs text-muted-foreground">
+            Shared sandbox networking, lifecycle, and capacity controls live in Runtime.
+          </p>
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings/runtime">Runtime settings</Link>
+          </Button>
+        </div>
         <PreviewSecretsSection />
         <PreviewAPISection />
       </div>
