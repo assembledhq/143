@@ -719,11 +719,10 @@ export const api = {
         auth_token: authToken,
         project_slug: projectSlug,
       }),
-    connectMezmo: (apiKey: string, baseUrl?: string, dataset?: string) =>
+    connectMezmo: (apiKey: string, baseUrl?: string) =>
       post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/mezmo/connect', {
         api_key: apiKey,
         base_url: baseUrl ?? '',
-        dataset: dataset ?? '',
       }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; repos_seen?: number; errors: number } }>('/api/v1/integrations/github/sync'),
