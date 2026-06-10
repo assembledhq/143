@@ -296,7 +296,9 @@ it('renders issues in the data table', async () => {
 
 **API client tests** (`src/lib/__tests__/api.test.ts`): Test error handling, parameter construction, response parsing.
 
-**MSW for API mocking**: Use `msw` (Mock Service Worker) to intercept network requests in tests. Define handlers in `src/test/mocks/handlers.ts`.
+**MSW for API mocking**: Use `msw` (Mock Service Worker) to intercept network requests in tests. Define handlers in `src/test/mocks/handlers.ts`. The server is a per-worker singleton (`src/test/mocks/server.ts`); never call `server.listen()`/`server.close()` from individual test files — use `server.use()` for per-test overrides (reset automatically after each test).
+
+**Worker reuse (`isolate: false`)**: vitest reuses one worker — one module graph and one jsdom window — across many test files (`vitest.config.ts`). `src/test/setup.ts` keeps files independent: it calls `vi.resetModules()` after each file so `vi.mock` factories and module-level state cannot leak across files, and restores pristine descriptors for commonly-overridden globals (`window.matchMedia`, `window.location`, `window.ResizeObserver`, `navigator.clipboard`, `navigator.vibrate`) plus `document.title`, stubbed globals, and fake timers. If a test overrides some other shared global, add it to the pristine list in setup.ts or restore it in the test file's own `afterAll`. The node project gets the same per-file `vi.resetModules()` via `src/test/setup-node.ts`.
 
 ## Integration Tools (Sentry, Linear, Notion, Slack)
 
