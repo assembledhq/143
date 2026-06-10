@@ -843,8 +843,8 @@ func TestValidateConfig_Resources(t *testing.T) {
 		},
 		{
 			name:       "memory exceeds cap",
-			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "2Gi"}},
-			wantErrSub: "at most 1Gi",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "16Gi"}},
+			wantErrSub: "at most 8Gi",
 		},
 		{
 			name:       "storage exceeds cap",
@@ -1521,14 +1521,14 @@ func TestResolveResourceLimits(t *testing.T) {
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"app": {}},
 			},
-			expected: models.ResourceLimits{MemoryMiB: 384, CPUMillis: 500, DiskMiB: 10 * 1024},
+			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 500, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service without managed infrastructure uses standard preview tier",
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
 			},
-			expected: models.ResourceLimits{MemoryMiB: 768, CPUMillis: 1000, DiskMiB: 10 * 1024},
+			expected: models.ResourceLimits{MemoryMiB: 2048, CPUMillis: 1000, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service with managed infrastructure uses heavy preview tier",
@@ -1538,7 +1538,7 @@ func TestResolveResourceLimits(t *testing.T) {
 					"db": {Template: "postgres-17"},
 				},
 			},
-			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 2000, DiskMiB: 10 * 1024},
+			expected: models.ResourceLimits{MemoryMiB: 4096, CPUMillis: 2000, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "requests override topology defaults when limits are omitted",
@@ -1587,7 +1587,7 @@ func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
 
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
-	require.Equal(t, 1024, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
+	require.Equal(t, 4096, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
 	require.Equal(t, 2.0, sandboxCfg.CPULimit, "sandbox config should convert preview millicores into CPU cores")
 	require.Equal(t, 10, sandboxCfg.DiskLimitGB, "sandbox config should round preview disk MiB up to whole GiB")
 }
