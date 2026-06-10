@@ -1108,7 +1108,7 @@ func TestGateway_ServeHTTP_Proxy_ExpiredSameInstanceCookieShowsRestart(t *testin
 	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "expired preview cookie should be cleared")
 	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
 	require.Contains(t, w.Body.String(), "Restart preview", "stopped preview overlay should expose the restart action")
-	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped preview overlay should show terminal status")
+	require.Contains(t, w.Body.String(), "Stopped · "+stoppedAt.Format("Jan 2, 2006 15:04 MST"), "stopped preview overlay should show terminal status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
