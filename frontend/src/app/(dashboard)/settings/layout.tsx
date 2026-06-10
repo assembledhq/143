@@ -11,6 +11,7 @@ const ADMIN_ONLY_PATHS = new Set([
   "/settings",
   "/settings/llm",
   "/settings/autopilot",
+  "/settings/runtime",
   "/settings/previews",
   "/settings/usage",
   "/settings/audit-log",
