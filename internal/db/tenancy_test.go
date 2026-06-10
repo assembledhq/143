@@ -111,6 +111,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 
 		{"organization_memberships", "count(*) from organization_memberships where user_id"}, // CountForUser: user-scoped aggregate; the membership set IS the authoritative org list
 		{"coding_credentials", "where status = 'pending_auth'"},                              // JanitorDeletePendingAuthOlderThan: cross-org system cleanup of expired OAuth handshakes
+		{"coding_credentials", "rt.status = 'pending_auth'"},                                 // JanitorDeletePendingAuthOlderThan (versioned runtime state): same cross-org system cleanup
 		{"coding_credentials", "where provider = 'anthropic'"},                               // EnsureAnthropicSplitSentinel: cross-org migration gate before serving traffic
 		{"coding_credentials", "coding_credentials_migrations"},                              // global migration-sentinel table; name prefix overlaps coding_credentials
 	}

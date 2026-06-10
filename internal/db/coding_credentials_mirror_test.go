@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -26,6 +25,58 @@ func devEncoded(t *testing.T, cfg models.ProviderConfig) []byte {
 	plaintext, err := json.Marshal(cfg)
 	require.NoError(t, err)
 	return crypto.DevEncrypt(plaintext)
+}
+
+func expectMirrorNoExistingID(mock pgxmock.PgxPoolIface, argCount int) {
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(argCount)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns))
+}
+
+func expectMirrorInsertVersions(mock pgxmock.PgxPoolIface, configArgs []any) {
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(configArgs...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+}
+
+func expectMirrorInitialUpsert(mock pgxmock.PgxPoolIface, userID *uuid.UUID, configArgs []any) {
+	mock.ExpectBegin()
+	expectMirrorNoExistingID(mock, 2)
+	naturalArgs := 3
+	if userID != nil {
+		naturalArgs = 4
+	}
+	expectMirrorNoExistingID(mock, naturalArgs)
+	expectMirrorInsertVersions(mock, configArgs)
+	mock.ExpectCommit()
+}
+
+func expectMirrorTeamDefaultDelete(mock pgxmock.PgxPoolIface, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, found bool) {
+	q := mock.ExpectQuery(`WITH target AS \(\s+SELECT DISTINCT id, org_id, user_id, provider\s+FROM coding_credentials`).
+		WithArgs(codingAnyArgs(3)...)
+	if found {
+		q.WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
+			AddRow(orgID, userID, string(provider)))
+		return
+	}
+	q.WillReturnError(pgx.ErrNoRows)
+}
+
+func expectMirrorDisableRuntime(mock pgxmock.PgxPoolIface, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	mock.ExpectQuery(`WITH current AS \(`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
+			AddRow(orgID, userID, string(provider)))
+}
+
+func expectMirrorDeleteVersions(mock pgxmock.PgxPoolIface, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	mock.ExpectQuery(`WITH target AS \(\s+SELECT DISTINCT id, org_id, user_id, provider\s+FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
+			AddRow(orgID, userID, string(provider)))
 }
 
 // TestOrgCredentialStore_MirrorsCodingProviderWrites is the headline mirror
@@ -133,8 +184,8 @@ func TestOrgCredentialStore_MirrorsCodingProviderWrites(t *testing.T) {
 			//    payload to translate.
 			encryptedLegacyCfg := devEncoded(t, tc.cfg)
 			now := time.Now()
-			mock.ExpectQuery("SELECT id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at\\s+FROM org_credentials WHERE id = @id").
-				WithArgs(newID).
+			mock.ExpectQuery("SELECT id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at\\s+FROM org_credentials WHERE id = @id AND org_id = @org_id").
+				WithArgs(newID, orgID).
 				WillReturnRows(pgxmock.NewRows(codingAuthColumns).
 					AddRow(newID, orgID, string(provider), "", encryptedLegacyCfg, "active", 1, (*time.Time)(nil), (*time.Time)(nil), (*uuid.UUID)(nil), now, now))
 
@@ -143,23 +194,19 @@ func TestOrgCredentialStore_MirrorsCodingProviderWrites(t *testing.T) {
 			//    can verify the rewrap.
 			var capturedEncrypted []byte
 
-			mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-				WithArgs(
-					newID,                   // id
-					orgID,                   // org_id
-					(*uuid.UUID)(nil),       // user_id (NULL)
-					tc.expectMirrorProvider, // provider (translated)
-					"",                      // label
-					captureBytes(&capturedEncrypted),
-					1,                 // priority
-					"active",          // status
-					(*uuid.UUID)(nil), // created_by
-					(*time.Time)(nil), // last_verified_at
-					pgxmock.AnyArg(),  // created_at
-					pgxmock.AnyArg(),  // updated_at
-					(*uuid.UUID)(nil), // team_default_origin_user_id (org rows never carry the marker)
-				).
-				WillReturnResult(pgxmock.NewResult("INSERT", 1))
+			expectMirrorInitialUpsert(mock, nil, []any{
+				newID,                   // id
+				orgID,                   // org_id
+				(*uuid.UUID)(nil),       // user_id (NULL)
+				tc.expectMirrorProvider, // provider (translated)
+				"",                      // label
+				captureBytes(&capturedEncrypted),
+				1,                 // priority
+				"active",          // status
+				(*uuid.UUID)(nil), // created_by
+				(*uuid.UUID)(nil), // team_default_origin_user_id (org rows never carry the marker)
+				pgxmock.AnyArg(),  // created_at
+			})
 
 			id, err := legacy.UpsertWithLabel(context.Background(), orgID, nil, "", tc.cfg)
 			require.NoError(t, err)
@@ -211,10 +258,7 @@ func TestOrgCredentialStore_MirrorDisableInvalidatesCache(t *testing.T) {
 	mock.ExpectExec(`UPDATE org_credentials SET status = 'disabled'.*WHERE id = @id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING org_id, user_id, provider`).
-		WithArgs(rowID, orgID).
-		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
-			AddRow(orgID, (*uuid.UUID)(nil), string(models.ProviderAnthropic)))
+	expectMirrorDisableRuntime(mock, orgID, (*uuid.UUID)(nil), models.ProviderAnthropic)
 
 	require.NoError(t, legacy.DisableByID(context.Background(), orgID, rowID))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -249,10 +293,7 @@ func TestOrgCredentialStore_MirrorDeleteInvalidatesCache(t *testing.T) {
 	mock.ExpectExec(`DELETE FROM org_credentials`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	mock.ExpectQuery(`DELETE FROM coding_credentials\s+WHERE id = @id AND org_id = @org_id\s+RETURNING org_id, user_id, provider`).
-		WithArgs(rowID, orgID).
-		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
-			AddRow(orgID, &userID, string(models.ProviderAnthropic)))
+	expectMirrorDeleteVersions(mock, orgID, &userID, models.ProviderAnthropic)
 
 	require.NoError(t, legacy.DeleteCodingAuth(context.Background(), orgID, rowID))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -286,8 +327,8 @@ func TestOrgCredentialStore_MirrorDisableMissingRowIsNoop(t *testing.T) {
 	mock.ExpectExec(`UPDATE org_credentials SET status = 'disabled'`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING`).
-		WithArgs(rowID, orgID).
+	mock.ExpectQuery(`WITH current AS \(`).
+		WithArgs(codingAnyArgs(2)...).
 		WillReturnError(pgx.ErrNoRows)
 
 	require.NoError(t, legacy.DisableByID(context.Background(), orgID, rowID))
@@ -352,21 +393,15 @@ func TestCodingCredentialStore_MirrorUserCredential(t *testing.T) {
 			store := NewCodingCredentialStore(mock, nil)
 			if !tt.expectNoop {
 				if tt.row.IsTeamDefault {
-					mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-						WithArgs(codingAnyArgs(13)...).
-						WillReturnResult(pgxmock.NewResult("INSERT", 1))
+					expectMirrorInitialUpsert(mock, nil, codingAnyArgs(11))
 				} else {
 					uid := tt.row.UserID
 					tt.expectUserID = &uid
 					// Personal-scope mirror writes always sweep any prior
 					// team-default mirror row at the natural key first; see
 					// MirrorUserCredential for the rationale.
-					mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider\s+AND team_default_origin_user_id = @origin_user_id`).
-						WithArgs(codingAnyArgs(3)...).
-						WillReturnResult(pgxmock.NewResult("DELETE", 0))
-					mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-						WithArgs(codingAnyArgs(13)...).
-						WillReturnResult(pgxmock.NewResult("INSERT", 1))
+					expectMirrorTeamDefaultDelete(mock, tt.row.OrgID, nil, tt.row.Provider, false)
+					expectMirrorInitialUpsert(mock, &uid, codingAnyArgs(11))
 				}
 			}
 
@@ -418,29 +453,24 @@ func TestMirrorUserCredential_TeamDefaultLabelMatchesMigration(t *testing.T) {
 	}
 	cfg := models.AnthropicConfig{APIKey: "sk-ant-test-1234567890"}
 
-	// Positional arg order on the mirror UPSERT (see upsertMirroredRow):
+	// Positional arg order on the mirror config INSERT:
 	//   id, org_id, user_id, provider, label, config, priority, status,
-	//   created_by, last_verified_at, created_at, updated_at,
-	//   team_default_origin_user_id
+	//   created_by, team_default_origin_user_id, created_at
 	// We only constrain `label` (index 4); everything else is AnyArg.
 	wantLabel := teamDefaultMirrorLabel(userID)
-	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-		WithArgs(
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			wantLabel,
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-		).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectMirrorInitialUpsert(mock, nil, []any{
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		wantLabel,
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+	})
 
 	require.NoError(t, store.MirrorUserCredential(context.Background(), row, cfg),
 		"MirrorUserCredential should accept the team-default row")
@@ -490,15 +520,13 @@ func TestMirrorProviderHelpers(t *testing.T) {
 	require.NoError(t, NoopMirror().MirrorUserCredentialDisable(context.Background(), uuid.New(), uuid.New(), uuid.New(), models.ProviderOpenAI), "noop mirror should ignore user disable")
 }
 
-// TestMirrorUpsertIncludesProviderInOnConflict locks in the fix for the case
+// TestMirrorUpsertIncludesProviderInConfigVersion locks in the fix for the case
 // where a legacy Anthropic row's mirror representation flips between
 // `anthropic_subscription` (when Subscription is set) and `anthropic` (when
-// only APIKey is set) on the same legacy id. Without `provider` in the SET
-// list, the unified row's provider would never be rewritten and the stored
-// (provider, config) pair would diverge — the next decrypt would fail with
-// "invalid <provider> config" because ParseCodingProviderConfig dispatches on
-// provider name.
-func TestMirrorUpsertIncludesProviderInOnConflict(t *testing.T) {
+// only APIKey is set) on the same legacy id. The new config version must carry
+// the translated provider so the stored (provider, config) pair stays
+// decryptable.
+func TestMirrorUpsertIncludesProviderInConfigVersion(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -515,24 +543,30 @@ func TestMirrorUpsertIncludesProviderInOnConflict(t *testing.T) {
 	// MirrorUserCredential first sweeps any prior team-default row (the
 	// idempotent natural-key delete), then runs the upsert. The order is
 	// load-bearing — pgxmock matches expectations FIFO.
-	mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider\s+AND team_default_origin_user_id = @origin_user_id`).
-		WithArgs(codingAnyArgs(3)...).
-		WillReturnResult(pgxmock.NewResult("DELETE", 0))
-	// The upsert SQL must include `provider = EXCLUDED.provider` in the SET
-	// list. We assert that with a regex on the rendered SQL.
-	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET.*provider\s*=\s*EXCLUDED\.provider`).
-		WithArgs(codingAnyArgs(13)...).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectMirrorTeamDefaultDelete(mock, row.OrgID, nil, row.Provider, false)
+	expectMirrorInitialUpsert(mock, &row.UserID, []any{
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		string(models.ProviderAnthropic),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+	})
 
 	require.NoError(t, store.MirrorUserCredential(context.Background(), row, models.AnthropicConfig{APIKey: "sk-ant-test"}))
-	require.NoError(t, mock.ExpectationsWereMet(), "ON CONFLICT SET must include provider so subscription↔key transitions stay consistent")
+	require.NoError(t, mock.ExpectationsWereMet(), "mirror config version must include provider so subscription↔key transitions stay consistent")
 }
 
 // TestMirrorUpsertReparentsUserCredentialOnIDConflict locks in the
 // personal↔team-default transition. A legacy user_credentials row keeps the
-// same id when is_team_default flips, so the mirror must update user_id on
-// ON CONFLICT (id); otherwise the unified row remains personal-scoped and
-// never becomes an org fallback.
+// same id when is_team_default flips, so the mirror must insert a new active
+// config version with user_id=NULL; otherwise the unified row remains
+// personal-scoped and never becomes an org fallback.
 func TestMirrorUpsertReparentsUserCredentialOnIDConflict(t *testing.T) {
 	t.Parallel()
 
@@ -547,9 +581,19 @@ func TestMirrorUpsertReparentsUserCredentialOnIDConflict(t *testing.T) {
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 
-	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET.*user_id\s*=\s*EXCLUDED\.user_id`).
-		WithArgs(codingAnyArgs(13)...).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectMirrorInitialUpsert(mock, nil, []any{
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		(*uuid.UUID)(nil),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+	})
 
 	require.NoError(t, store.MirrorUserCredential(context.Background(), row, models.AnthropicConfig{APIKey: "sk-ant-test"}),
 		"team-default mirror should update the existing unified row's scope")
@@ -584,16 +628,11 @@ func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
 	mock.ExpectBegin()
 	// Step 1: id-keyed disable returns the row's scope/provider for cache
 	// invalidation.
-	mock.ExpectQuery(`UPDATE coding_credentials SET status = 'disabled'.*WHERE id = @id AND org_id = @org_id.*RETURNING`).
-		WithArgs(id, orgID).
-		WillReturnRows(pgxmock.NewRows([]string{"org_id", "user_id", "provider"}).
-			AddRow(orgID, &userID, string(models.ProviderAnthropic)))
+	expectMirrorDisableRuntime(mock, orgID, &userID, models.ProviderAnthropic)
 
 	// Step 2: cascade-delete the marker-keyed team-default row (any args; we
 	// just need the call to fire).
-	mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider\s+AND team_default_origin_user_id = @origin_user_id`).
-		WithArgs(codingAnyArgs(3)...).
-		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	expectMirrorTeamDefaultDelete(mock, orgID, nil, models.ProviderAnthropic, true)
 	mock.ExpectCommit()
 
 	require.NoError(t, store.MirrorUserCredentialDisable(context.Background(), id, orgID, userID, models.ProviderAnthropic))
@@ -606,11 +645,10 @@ func TestMirrorUserCredentialDisableCascadesTeamDefault(t *testing.T) {
 	}
 }
 
-// TestMirrorUpsertNaturalKeyFallback exercises the rare path where the
-// id-keyed INSERT trips on the (org_id, user_id, provider, label) unique
-// index — e.g. an out-of-band row already present at the same natural key.
-// upsertMirroredRow must catch the 23505 unique_violation, fall back to an
-// UPDATE keyed by the natural key, and still invalidate the resolver cache.
+// TestMirrorUpsertNaturalKeyFallback exercises the rare path where another
+// active row already exists at the same (org_id, user_id, provider, label).
+// upsertMirroredRow must fall back to that logical credential id by inserting
+// new config/runtime versions and still invalidate the resolver cache.
 // Without this fallback the legacy write would surface as a mirror failure
 // every time, even though the unified table has a perfectly serviceable row.
 func TestMirrorUpsertNaturalKeyFallback(t *testing.T) {
@@ -629,20 +667,26 @@ func TestMirrorUpsertNaturalKeyFallback(t *testing.T) {
 	// invalidates — same observable behaviour as the happy path.
 	store.resolverCache.put(orgID, nil, models.ProviderAnthropic, []models.DecryptedCodingCredential{{ID: uuid.New()}})
 
-	// 1. Id-keyed INSERT fails with 23505. isUniqueViolation matches by
-	//    SQLState, so a *pgconn.PgError with Code "23505" is enough.
-	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-		WithArgs(codingAnyArgs(13)...).
-		WillReturnError(&pgconn.PgError{Code: "23505"})
-
-	// 2. Fallback UPDATE keys by (org_id, user_id IS NULL, provider, label).
-	//    Org-scoped row uses the user_id IS NULL branch, so @user_id is not
-	//    referenced in the SQL — pgx only binds the 9 named args that the
-	//    query actually mentions (org_id, provider, label, config, priority,
-	//    status, last_verified_at, updated_at, team_default_origin_user_id).
-	mock.ExpectExec(`(?s)UPDATE coding_credentials SET.*WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`).
-		WithArgs(codingAnyArgs(9)...).
+	existingID := uuid.New()
+	mock.ExpectBegin()
+	expectMirrorNoExistingID(mock, 2)
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+			AddRow(codingCredentialSnapshotRow(t, store, models.Scope{OrgID: orgID}, existingID, models.ProviderAnthropic, models.CodingCredentialStatusActive)...))
+	mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+		WithArgs(codingAnyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(codingAnyArgs(11)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
 
 	org := models.OrgCredential{
 		ID:        rowID,
@@ -668,6 +712,136 @@ func TestMirrorUpsertNaturalKeyFallback(t *testing.T) {
 		"natural-key fallback must record exactly one observation so the cleanup PR can confirm the path is unused before deleting it")
 }
 
+// TestMirrorUpsertPreservesRateLimitState locks in that a legacy mirror write
+// carries forward the durable rate-limit metadata held only by the unified
+// runtime state. Legacy tables know nothing about rate limits, so without the
+// carry-forward every legacy write (status update, stack reorder, …) would
+// silently clear a credential's cross-worker rate-limit marker.
+func TestMirrorUpsertPreservesRateLimitState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+	orgID := uuid.New()
+	rowID := uuid.New()
+	until := time.Now().UTC().Add(30 * time.Minute)
+	observed := until.Add(-time.Minute)
+	message := "rate limited by provider"
+
+	limited := codingCredentialSnapshotRow(t, store, models.Scope{OrgID: orgID}, rowID, models.ProviderAnthropic, models.CodingCredentialStatusActive)
+	limited[14] = &until    // rate_limited_until
+	limited[15] = &observed // rate_limited_observed_at
+	limited[16] = &message  // rate_limit_message
+
+	mock.ExpectBegin()
+	// Fetch by id finds the existing logical credential with rate-limit state.
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).AddRow(limited...))
+	// The natural-key fetch resolves to the same logical id — no fallback.
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).AddRow(limited...))
+	mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(codingAnyArgs(11)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Positional order on the runtime INSERT: credential_id, org_id, user_id,
+	// status, last_verified_at, rate_limited_until, rate_limited_observed_at,
+	// rate_limit_message. The last three must be the carried-forward values.
+	mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			&until,
+			&observed,
+			&message,
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	org := models.OrgCredential{
+		ID:        rowID,
+		OrgID:     orgID,
+		Provider:  models.ProviderAnthropic,
+		Status:    "active",
+		Label:     "team",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	require.NoError(t, store.MirrorOrgCredential(context.Background(), org, models.AnthropicConfig{APIKey: "sk-ant-test-1234567890"}))
+	require.NoError(t, mock.ExpectationsWereMet(), "mirror runtime version must carry forward rate-limit state")
+}
+
+func TestMirrorUpsertNaturalKeyFallbackDeletesStaleIDRow(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+	orgID := uuid.New()
+	legacyID := uuid.New()
+	conflictID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+			AddRow(codingCredentialSnapshotRow(t, store, models.Scope{OrgID: orgID}, legacyID, models.ProviderOpenAI, models.CodingCredentialStatusActive)...))
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+			AddRow(codingCredentialSnapshotRow(t, store, models.Scope{OrgID: orgID}, conflictID, models.ProviderAnthropic, models.CodingCredentialStatusActive)...))
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).
+			AddRow(codingCredentialSnapshotRow(t, store, models.Scope{OrgID: orgID}, conflictID, models.ProviderAnthropic, models.CodingCredentialStatusActive)...))
+	mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(codingAnyArgs(11)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(8)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectMirrorDeleteVersions(mock, orgID, nil, models.ProviderOpenAI)
+	mock.ExpectCommit()
+
+	org := models.OrgCredential{
+		ID:        legacyID,
+		OrgID:     orgID,
+		Provider:  models.ProviderAnthropic,
+		Status:    "active",
+		Label:     "team",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err = store.MirrorOrgCredential(context.Background(), org, models.AnthropicConfig{APIKey: "sk-ant-test-1234567890"})
+
+	require.NoError(t, err, "natural-key fallback should reconcile without leaving the legacy-id row active")
+	require.NoError(t, mock.ExpectationsWereMet(), "natural-key fallback should deactivate the stale legacy-id row")
+	require.Equal(t, uint64(1), store.MirrorNaturalKeyFallbackCount(), "fallback should record one natural-key reconciliation")
+}
+
 // captureBytes returns a pgxmock argument matcher that records the bytes
 // passed in this slot into out. Used by the mirror tests to inspect the
 // re-encrypted config without needing access to a fixed key.
@@ -688,43 +862,30 @@ func (c *bytesCaptor) Match(arg any) bool {
 	return true
 }
 
-// TestMirrorUpsertConflictTargetIsIDOnly locks the ON CONFLICT clause to
-// `(id)` exactly. If a future change adds another column to the conflict
-// target (e.g. `(id, provider)`), the dual-write mirror would silently mint
-// a new row every time a credential's provider flipped between
-// `anthropic_subscription` and `anthropic` (or `openai_chatgpt` →
-// `openai_subscription`) instead of overwriting the existing unified row.
-// The natural-key index would catch most cases, but split-brain duplicates
-// can still appear during the rollout window. Pinning the target as a
-// source-file invariant makes that regression a test failure rather than a
-// runtime drift no one notices until the unified count diverges.
-func TestMirrorUpsertConflictTargetIsIDOnly(t *testing.T) {
+// TestMirrorUpsertUsesInsertOnlyVersions locks the mirror to the versioned
+// write path. The versioned schema no longer has a unique id conflict target,
+// so mirror upserts must lock the active logical credential and insert new
+// config/runtime versions.
+func TestMirrorUpsertUsesInsertOnlyVersions(t *testing.T) {
 	t.Parallel()
 
 	body, err := os.ReadFile("coding_credentials_mirror.go")
 	require.NoError(t, err, "test should read mirror source")
 
 	src := string(body)
-	require.Contains(t, src, "ON CONFLICT (id) DO UPDATE",
-		"mirror upsert SQL must use ON CONFLICT (id) only")
-	// Reject any conflict target with extra columns. Three common forms
-	// (no space, leading space, comment-then-comma) are all rejected.
-	for _, bad := range []string{
-		"ON CONFLICT (id,",
-		"ON CONFLICT (id ,",
-		"ON CONFLICT (id\n",
-	} {
-		require.NotContains(t, src, bad,
-			"mirror upsert conflict target must remain (id) only — found %q", bad)
-	}
+	require.Contains(t, src, "insertConfigVersionTx",
+		"mirror upsert should write new config versions")
+	require.Contains(t, src, "insertRuntimeVersionTx",
+		"mirror upsert should write new runtime versions")
+	require.NotContains(t, src, "ON CONFLICT (id) DO UPDATE",
+		"mirror upsert must not rely on the old id primary key conflict target")
 }
 
 // TestMirrorUserCredentialTeamDefaultFlipInvalidatesBothScopes covers the
 // regression where a personal user_credentials row promoted to is_team_default
 // = true left a stale entry in the originating user's personal-scope resolver
-// cache. ON CONFLICT (id) flips user_id from <user> to NULL on the same
-// legacy id, but upsertMirroredRow only invalidates the new (org) scope key.
-// The fix is to also invalidate the originating user's personal scope; this
+// cache. The mirror inserts a new config version with user_id=NULL on the same
+// legacy id and also invalidates the originating user's personal scope; this
 // test guards both directions of the fanout.
 func TestMirrorUserCredentialTeamDefaultFlipInvalidatesBothScopes(t *testing.T) {
 	t.Parallel()
@@ -742,9 +903,7 @@ func TestMirrorUserCredentialTeamDefaultFlipInvalidatesBothScopes(t *testing.T) 
 	store.resolverCache.put(orgID, &userID, models.ProviderAnthropic, []models.DecryptedCodingCredential{{ID: uuid.New()}})
 	store.resolverCache.put(orgID, nil, models.ProviderAnthropic, []models.DecryptedCodingCredential{{ID: uuid.New()}})
 
-	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-		WithArgs(codingAnyArgs(13)...).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectMirrorInitialUpsert(mock, nil, codingAnyArgs(11))
 
 	row := models.UserCredential{
 		ID: uuid.New(), UserID: userID, OrgID: orgID,
@@ -783,13 +942,9 @@ func TestMirrorUserCredentialTeamDefaultClearInvalidatesBothScopes(t *testing.T)
 
 	// Step 1: clear-stale-team-default sweep returns >0 rows so the org
 	// scope is invalidated by deleteTeamDefaultMirror.
-	mock.ExpectExec(`DELETE FROM coding_credentials\s+WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider\s+AND team_default_origin_user_id = @origin_user_id`).
-		WithArgs(codingAnyArgs(3)...).
-		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	expectMirrorTeamDefaultDelete(mock, orgID, nil, models.ProviderAnthropic, true)
 	// Step 2: id-keyed upsert flips user_id back to the personal user.
-	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-		WithArgs(codingAnyArgs(13)...).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectMirrorInitialUpsert(mock, &userID, codingAnyArgs(11))
 
 	row := models.UserCredential{
 		ID: uuid.New(), UserID: userID, OrgID: orgID,
@@ -832,19 +987,19 @@ func TestMirrorDivergenceRecovers(t *testing.T) {
 	// First attempt: transient DB failure (e.g. statement timeout, connection
 	// reset). The mirror returns the error to the legacy store, which logs
 	// and bumps the failure counter.
-	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-		WithArgs(codingAnyArgs(13)...).
+	mock.ExpectBegin()
+	expectMirrorNoExistingID(mock, 2)
+	expectMirrorNoExistingID(mock, 3)
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(codingAnyArgs(11)...).
 		WillReturnError(errors.New("connection reset"))
+	mock.ExpectRollback()
 	err = store.MirrorOrgCredential(context.Background(), row, cfg)
 	require.Error(t, err, "first mirror write should surface the transient error")
 	require.Equal(t, uint64(1), store.MirrorFailureCount(), "transient failure must be counted")
 
-	// Second attempt with the same row: succeeds. ON CONFLICT (id) means
-	// whatever state the unified row is in after the first failure, the
-	// retry rewrites it deterministically.
-	mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
-		WithArgs(codingAnyArgs(13)...).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	// Second attempt with the same row succeeds and writes both active versions.
+	expectMirrorInitialUpsert(mock, nil, codingAnyArgs(11))
 	require.NoError(t, store.MirrorOrgCredential(context.Background(), row, cfg))
 	require.NoError(t, mock.ExpectationsWereMet())
 	require.Equal(t, uint64(1), store.MirrorFailureCount(),

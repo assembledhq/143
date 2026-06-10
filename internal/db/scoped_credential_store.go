@@ -26,6 +26,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -79,7 +80,7 @@ func (s *ScopedCredentialStore) InsertPendingAuth(ctx context.Context, scope mod
 // active; otherwise a fresh row is inserted.
 //
 // Concurrency note: the personal path is NOT atomic — it does a separate
-// GetByProviderAndLabel + (PromotePending | UpdateConfig | Create). The
+// GetByProviderAndLabel + (PromotePending | UpdateConfigVerified | Create). The
 // legacy OrgCredentialStore.UpsertWithLabel is single-statement so it
 // avoids this race. In practice we get away with it because the auth
 // services serialise concurrent Initiate/Complete calls per (scope, label)
@@ -109,12 +110,13 @@ func (s *ScopedCredentialStore) UpsertWithLabel(ctx context.Context, scope model
 				}
 				return &existing.ID, nil
 			case models.CodingCredentialStatusActive,
-				models.CodingCredentialStatusInvalid,
-				models.CodingCredentialStatusDisabled:
-				if err := s.coding.UpdateConfig(ctx, scope, existing.ID, unified); err != nil {
+				models.CodingCredentialStatusInvalid:
+				if err := s.coding.UpdateConfigVerified(ctx, scope, existing.ID, unified); err != nil {
 					return nil, err
 				}
 				return &existing.ID, nil
+			case models.CodingCredentialStatusDisabled:
+				return s.coding.Create(ctx, scope, label, unified, CreateOpts{CreatedBy: createdBy})
 			}
 		}
 		return s.coding.Create(ctx, scope, label, unified, CreateOpts{CreatedBy: createdBy})
@@ -141,11 +143,11 @@ func (s *ScopedCredentialStore) UpsertByID(ctx context.Context, scope models.Sco
 		if row.Status == models.CodingCredentialStatusPendingAuth {
 			return s.coding.PromotePending(ctx, scope, id, unified)
 		}
-		// UpdateConfig refuses to resurrect disabled rows — matches the
-		// legacy UpsertByID's `WHERE status != 'disabled'` guard.
-		return s.coding.UpdateConfig(ctx, scope, id, unified)
+		// UpdateConfigVerified refuses to resurrect disabled rows — matches
+		// the legacy UpsertByID's `WHERE status != 'disabled'` guard.
+		return s.coding.UpdateConfigVerified(ctx, scope, id, unified)
 	}
-	return s.org.UpsertByID(ctx, scope.OrgID, id, cfg)
+	return normalizeOrgNotFound(s.org.UpsertByID(ctx, scope.OrgID, id, cfg))
 }
 
 // GetByID returns the credential at (scope, id). The returned row carries
@@ -231,7 +233,17 @@ func (s *ScopedCredentialStore) UpdateStatusByID(ctx context.Context, scope mode
 	if scope.IsPersonal() {
 		return s.coding.UpdateStatus(ctx, scope, id, status)
 	}
-	return s.org.UpdateStatusByID(ctx, scope.OrgID, id, models.CredentialStatus(status))
+	return normalizeOrgNotFound(s.org.UpdateStatusByID(ctx, scope.OrgID, id, models.CredentialStatus(status)))
+}
+
+// normalizeOrgNotFound maps the legacy org store's pgx.ErrNoRows onto the
+// unified ErrCodingCredentialNotFound sentinel so both scope branches of the
+// adapter surface the same not-found error to the auth services.
+func normalizeOrgNotFound(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrCodingCredentialNotFound
+	}
+	return err
 }
 
 // ExistsForProviderByID is used by Disconnect to verify an id belongs to the

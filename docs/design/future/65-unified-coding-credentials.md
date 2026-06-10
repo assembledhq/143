@@ -27,6 +27,11 @@
 > - `/settings/account/page.test.tsx` rewritten for the new API; all 1469 frontend tests pass.
 > - `/settings/agent` left untouched. Its writes flow through the legacy `codingAuths` client, which still hits `OrgCredentialStore`, which mirrors into `coding_credentials`. The unified resolver therefore picks up admin-side changes without any frontend swap. The optional UX improvements from the doc (Used-by column, shared add-auth dialog parameterised by scope) are deferred to a follow-up PR.
 >
+> **Versioned credential/runtime cutover (landed 2026-06-06):**
+> - `coding_credentials.id` now identifies the stable logical credential, while `coding_credentials.version_id` is the config-version primary key and `active` selects the current config version.
+> - Runtime health moved to insert-only `coding_credential_runtime_state` versions. Resolver/list paths join active config to active runtime state; config changes and runtime mutations version independently.
+> - Detailed current semantics live in [implemented/91-versioned-coding-credentials-runtime-state.md](../implemented/91-versioned-coding-credentials-runtime-state.md).
+>
 > **PR 5 — cleanup (outstanding):**
 > - Drop coding-provider rows from `org_credentials`, drop `user_credentials`, drop `is_team_default` and the legacy `personal/team_default/org` cascade in `agent/env.go`, remove `AnthropicConfig.Subscription`, rename `OpenAIChatGPTConfig` → `OpenAISubscriptionConfig` everywhere (~20 files), retire the `coding_credentials_mirror.go` dual-write helpers, and 410-Gone the `/api/v1/settings/credentials/personal,team` + `/api/v1/settings/coding-auths` paths.
 > - Boot-time refusal-to-serve guard against an unwritten `anthropic_split` sentinel — wire as a startup check before serving traffic.
@@ -374,7 +379,7 @@ func (s *codingCredentialStore) PickRunnable(
 
 **Health cache.** `s.health` is an in-process LRU keyed by `credential_id` that holds short-TTL (60–90s) "do not pick" markers. The agent runtime writes a marker when a credential returns 429 or auth-rejected; entries expire automatically. Properties:
 
-- A rate-limited credential stops getting picked within seconds with no DB write.
+- A rate-limited credential stops getting picked within seconds through the in-process cache, and durable rate-limit observations are also written to the versioned runtime-state table so other workers can skip the credential.
 - Random selection naturally rediscovers a credential once its marker expires — no separate "retry" bookkeeping.
 - The cache is per-process. With multiple app hosts each host learns independently; given typical 60-90s TTLs and the cost of a wasted attempt being one rejected request, the eventual-consistency cost is acceptable. If we later want cross-host, swap the LRU for Redis with the same interface.
 
