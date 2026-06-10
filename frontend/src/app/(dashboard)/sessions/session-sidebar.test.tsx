@@ -503,7 +503,7 @@ describe('SessionSidebar', () => {
     const selectedRow = selectedLink.parentElement;
 
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/20', 'bg-background', 'shadow-sm');
+    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/25', 'bg-card', 'shadow-sm');
 
     fireEvent.click(selectedRow!);
 
@@ -527,6 +527,22 @@ describe('SessionSidebar', () => {
     expect(screen.queryByText('Opening')).not.toBeInTheDocument();
     expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveTextContent('Completed');
     expect(screen.getByText('Other session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('lets plain row links navigate through Next Link instead of imperative router push', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Native link session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Native link session')).closest('a');
+    expect(link).not.toBeNull();
+
+    await userEvent.click(link!);
+
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
   });
 
   it('does not hold a target row pending when switching from one selected session to another', async () => {
@@ -633,7 +649,7 @@ describe('SessionSidebar', () => {
     });
   });
 
-  it('opens a clicked session with client navigation', async () => {
+  it('opens a clicked session through its direct link', async () => {
     const session = makeSession({
       id: 's1',
       result_summary: 'Instant open session',
@@ -650,7 +666,8 @@ describe('SessionSidebar', () => {
 
     await userEvent.click(link!);
 
-    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
   });
 
   // -----------------------------------------------------------------------
@@ -1039,7 +1056,7 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
     expect(selectedRow?.className).toContain('ring-primary/10');
     expect(selectedRow?.className).toContain('shadow-sm');
@@ -1061,7 +1078,7 @@ describe('SessionSidebar', () => {
     const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
 
     expect(selectedRow).toHaveClass('border', 'p-1');
-    expect(selectedRow).toHaveClass('border-primary/20');
+    expect(selectedRow).toHaveClass('border-primary/25');
     expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
   });
 
@@ -1084,7 +1101,7 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
     expect(selectedRow?.className).toContain('ring-primary/10');
     expect(selectedRow?.className).toContain('shadow-sm');

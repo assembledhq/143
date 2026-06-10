@@ -50,9 +50,9 @@ export function ProviderKeyRow({
           }
           className={
             configured
-              ? "inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500"
+              ? "inline-block h-2 w-2 shrink-0 rounded-full bg-success"
               : usingPlatformDefault
-                ? "inline-block h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                ? "inline-block h-2 w-2 shrink-0 rounded-full bg-warning"
                 : "inline-block h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40"
           }
         />

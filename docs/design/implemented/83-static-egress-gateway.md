@@ -10,6 +10,7 @@
 - When disabled, new and hydrated sandboxes use the default `143-sandbox` bridge.
 - When enabled, new and hydrated sandboxes use `143-sandbox-static-egress` plus the static-egress resolver file.
 - Workers advertise `static_egress_capable=true` only when the customer-facing public IP is configured and host reconciliation has written `/etc/143/static-egress-capable` after installing and probing the WireGuard policy route.
+- Durable session-executor containers mount `/etc/143` read-only so executor-owned `run_agent` and `continue_session` jobs can verify the same host capability marker before creating or hydrating sandboxes.
 - Preview worker selection requires `static_egress_capable=true` for opted-in organizations.
 - Preview infrastructure containers join the sandbox container's selected bridge, so static-egress previews keep same-network access to managed preview dependencies.
 - Live preview reuse checks the existing container network. If the current container does not match the requested egress mode, preview startup fails closed with a restart-required message instead of silently using the wrong route.

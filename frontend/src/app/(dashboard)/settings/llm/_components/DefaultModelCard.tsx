@@ -116,14 +116,14 @@ interface OwnerCaptionProps {
 function OwnerCaption({ ownerName, usesPlatformDefault }: OwnerCaptionProps) {
   if (!ownerName) {
     return (
-      <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+      <p className="flex items-center gap-1.5 text-xs text-warning">
         <AlertTriangle className="h-3 w-3" />
         No provider key configured for this model
       </p>
     );
   }
   return (
-    <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+    <p className="flex items-center gap-1.5 text-xs text-success">
       <Check className="h-3 w-3" />
       {usesPlatformDefault
         ? `Using 143's default ${ownerName} key`

@@ -1,7 +1,9 @@
 package preview
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -26,13 +29,28 @@ import (
 )
 
 type dependencyCacheExec struct {
-	payload    []byte
-	execCalls  []string
-	writeFiles map[string][]byte
-	mu         sync.Mutex
+	payload        []byte
+	execCalls      []string
+	writeFiles     map[string][]byte
+	readersWritten map[string][]byte
+	mu             sync.Mutex
 }
 
-func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
+type evictingDependencyCacheExec struct {
+	*dependencyCacheExec
+	localPath string
+}
+
+func (e *evictingDependencyCacheExec) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	if strings.Contains(cmd, "rm -rf --") {
+		if err := os.Remove(e.localPath); err != nil && !os.IsNotExist(err) {
+			return -1, err
+		}
+	}
+	return e.dependencyCacheExec.Exec(ctx, sb, cmd, stdout, stderr)
+}
+
+func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	e.mu.Lock()
 	e.execCalls = append(e.execCalls, cmd)
 	e.mu.Unlock()
@@ -42,11 +60,20 @@ func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd stri
 	case strings.Contains(cmd, "tar czf -"):
 		_, err := stdout.Write(e.payload)
 		return 0, err
+	case strings.Contains(cmd, "tar tzf"):
+		if stderr != nil {
+			_, _ = stderr.Write([]byte("validated\n"))
+		}
+		return 0, nil
+	case strings.Contains(cmd, "tar xzf"):
+		return 0, nil
 	case strings.Contains(cmd, "tar czf "):
 		return 0, nil
 	case strings.HasPrefix(cmd, "cat "):
 		_, err := stdout.Write(e.payload)
 		return 0, err
+	case strings.Contains(cmd, "rm -rf --"):
+		return 0, nil
 	case strings.HasPrefix(cmd, "rm -f "):
 		return 0, nil
 	default:
@@ -56,6 +83,35 @@ func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd stri
 
 func (e *dependencyCacheExec) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
 	return nil, nil
+}
+
+func (e *dependencyCacheExec) WriteFileFromReader(_ context.Context, _ *agent.Sandbox, path string, reader io.Reader, _ int64) error {
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.readersWritten == nil {
+		e.readersWritten = make(map[string][]byte)
+	}
+	e.readersWritten[path] = append([]byte(nil), body...)
+	return nil
+}
+
+func (e *dependencyCacheExec) ExecWithStdin(_ context.Context, _ *agent.Sandbox, cmd string, stdin io.Reader, _, _ io.Writer) (int, error) {
+	body, err := io.ReadAll(stdin)
+	if err != nil {
+		return -1, err
+	}
+	e.mu.Lock()
+	e.execCalls = append(e.execCalls, cmd)
+	if e.readersWritten == nil {
+		e.readersWritten = make(map[string][]byte)
+	}
+	e.readersWritten["stdin:"+cmd] = append([]byte(nil), body...)
+	e.mu.Unlock()
+	return 0, nil
 }
 
 func (e *dependencyCacheExec) WriteFile(_ context.Context, _ *agent.Sandbox, path string, body []byte) error {
@@ -74,9 +130,58 @@ func (e *dependencyCacheExec) calls() []string {
 	return append([]string(nil), e.execCalls...)
 }
 
+func (e *dependencyCacheExec) writtenFilePaths() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	paths := make([]string, 0, len(e.writeFiles)+len(e.readersWritten))
+	for path := range e.writeFiles {
+		paths = append(paths, path)
+	}
+	for path := range e.readersWritten {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
 type memorySnapshotStore struct {
 	mu    sync.Mutex
 	blobs map[string][]byte
+}
+
+type dependencyCacheFailingLoadStore struct{}
+
+func (s dependencyCacheFailingLoadStore) Save(context.Context, string, io.Reader) error {
+	return nil
+}
+
+func (s dependencyCacheFailingLoadStore) Load(context.Context, string, io.Writer) error {
+	return fmt.Errorf("load should be skipped by size preflight")
+}
+
+func (s dependencyCacheFailingLoadStore) Delete(context.Context, string) error {
+	return nil
+}
+
+func makeDependencyCacheTarGz(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	for name, body := range files {
+		data := []byte(body)
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: 0o600,
+			Size: int64(len(data)),
+		}), "test archive header should be written")
+		_, err := tw.Write(data)
+		require.NoError(t, err, "test archive body should be written")
+	}
+	require.NoError(t, tw.Close(), "test archive tar writer should close")
+	require.NoError(t, gzw.Close(), "test archive gzip writer should close")
+	return buf.Bytes()
 }
 
 func newMemorySnapshotStore() *memorySnapshotStore {
@@ -120,7 +225,7 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	repoID := uuid.New()
 	sessionID := uuid.New()
 	cacheKey := strings.Repeat("a", 64)
-	payload := []byte("compressed dependency archive")
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.bin/next": "next"})
 	now := time.Now().UTC()
 
 	mock, err := pgxmock.NewPool()
@@ -162,6 +267,41 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	require.Contains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "tar czf -", "Save should stream tar output instead of creating a sandbox temp archive")
 	require.NotContains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "cat /tmp/preview-dependency-cache-", "Save should not read back a sandbox temp archive")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSharedDependencyCache_SaveRejectsPreviewInstallMarkerParentPath(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cacheKey := strings.Repeat("a", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{".143/cache/some-build-cache": "cache"})
+	now := time.Now().UTC()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, cacheKey, "", "deps/blob.tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(mock),
+		Executor:  &dependencyCacheExec{payload: payload},
+		BlobStore: newMemorySnapshotStore(),
+		Logger:    zerolog.Nop(),
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	_, err = cache.Save(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, cacheKey, []string{".143/cache"}, DependencyCacheMetadata{
+		OrgID:  orgID,
+		RepoID: repoID,
+	})
+	require.Error(t, err, "Save should reject cache paths that can include preview install markers")
+	require.Contains(t, err.Error(), "preview install markers", "Save error should explain marker path protection")
 }
 
 func TestSharedDependencyCache_EvictLocalLRURemovesOldestBlobAndLocation(t *testing.T) {
@@ -297,4 +437,180 @@ func TestSharedDependencyCache_RestoreDeletesMetadataOnChecksumMismatch(t *testi
 	require.Error(t, err, "Restore should reject corrupted cache blobs")
 	require.Contains(t, err.Error(), "checksum mismatch", "Restore should explain checksum failures")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSharedDependencyCache_RestoreRejectsPreviewInstallMarkerParentPath(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cacheKey := strings.Repeat("e", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{".143/cache/some-build-cache": "cache"})
+	sum := sha256.Sum256(payload)
+	metadataJSON, err := json.Marshal(DependencyCacheMetadata{
+		EffectivePaths: []string{".143/cache"},
+		ChecksumSHA256: fmt.Sprintf("%x", sum[:]),
+	})
+	require.NoError(t, err, "dependency cache metadata should marshal")
+	blobStore := newMemorySnapshotStore()
+	require.NoError(t, blobStore.Save(ctx, "deps/blob.tar.gz", bytes.NewReader(payload)), "test blob should save")
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(nil),
+		Executor:  &dependencyCacheExec{},
+		BlobStore: blobStore,
+		Logger:    zerolog.Nop(),
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			ID:         uuid.New(),
+			OrgID:      uuid.New(),
+			RepoID:     uuid.New(),
+			CacheKey:   cacheKey,
+			BlobKey:    "deps/blob.tar.gz",
+			SizeBytes:  int64(len(payload)),
+			Metadata:   metadataJSON,
+			LastUsedAt: time.Now().UTC(),
+		},
+		BlobKey: "deps/blob.tar.gz",
+	})
+	require.Error(t, err, "Restore should reject cache metadata that can include preview install markers")
+	require.Contains(t, err.Error(), "preview install markers", "Restore error should explain marker path protection")
+}
+
+func TestSharedDependencyCache_RestoreSkipsOversizedBlobBeforeSandboxMutation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cacheKey := strings.Repeat("f", 64)
+	metadataJSON, err := json.Marshal(DependencyCacheMetadata{
+		EffectivePaths: []string{"node_modules"},
+	})
+	require.NoError(t, err, "dependency cache metadata should marshal")
+
+	exec := &dependencyCacheExec{}
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(nil),
+		Executor:  exec,
+		BlobStore: dependencyCacheFailingLoadStore{},
+		Logger:    zerolog.Nop(),
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			ID:         uuid.New(),
+			OrgID:      uuid.New(),
+			RepoID:     uuid.New(),
+			CacheKey:   cacheKey,
+			BlobKey:    "deps/oversized.tar.gz",
+			SizeBytes:  dependencyCacheMaxBlobBytes + 1,
+			Metadata:   metadataJSON,
+			LastUsedAt: time.Now().UTC(),
+		},
+		BlobKey: "deps/oversized.tar.gz",
+	})
+	require.Error(t, err, "Restore should skip blobs that exceed the restore size cap")
+	require.Contains(t, err.Error(), "too large", "Restore should explain the size preflight failure")
+	require.Empty(t, exec.calls(), "Restore should not mutate the sandbox after size preflight failure")
+}
+
+func TestSharedDependencyCache_RestoreStreamsExtractWithoutSandboxTempBlob(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	entryID := uuid.New()
+	cacheKey := strings.Repeat("a", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.bin/next": "next"})
+	sum := sha256.Sum256(payload)
+	metadataJSON, err := json.Marshal(DependencyCacheMetadata{
+		EffectivePaths: []string{"node_modules"},
+		ChecksumSHA256: fmt.Sprintf("%x", sum[:]),
+	})
+	require.NoError(t, err, "dependency cache metadata should marshal")
+	blobStore := newMemorySnapshotStore()
+	require.NoError(t, blobStore.Save(ctx, "deps/blob.tar.gz", bytes.NewReader(payload)), "test blob should save")
+
+	exec := &dependencyCacheExec{}
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(nil),
+		Executor:  exec,
+		BlobStore: blobStore,
+		Logger:    zerolog.Nop(),
+		Prefix:    "deps",
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			ID:         entryID,
+			OrgID:      orgID,
+			RepoID:     repoID,
+			CacheKey:   cacheKey,
+			BlobKey:    "deps/blob.tar.gz",
+			SizeBytes:  int64(len(payload)),
+			Metadata:   metadataJSON,
+			LastUsedAt: time.Now().UTC(),
+		},
+		BlobKey: "deps/blob.tar.gz",
+	})
+	require.NoError(t, err, "Restore should stream and extract a valid cache blob")
+	calls := strings.Join(exec.calls(), "\n")
+	require.Contains(t, calls, "tar xzf -", "Restore should extract the archive from stdin")
+	require.NotContains(t, calls, "/tmp/preview-dependency-cache-", "Restore should not stage a compressed blob in sandbox /tmp")
+	require.NotContains(t, strings.Join(exec.writtenFilePaths(), "\n"), "/tmp/preview-dependency-cache-", "Restore should not write the compressed blob as a sandbox file")
+}
+
+func TestSharedDependencyCache_RestoreLocalBlobSurvivesConcurrentEviction(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	localDir := t.TempDir()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cacheKey := strings.Repeat("b", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.bin/next": "next"})
+	sum := sha256.Sum256(payload)
+	metadataJSON, err := json.Marshal(DependencyCacheMetadata{
+		EffectivePaths: []string{"node_modules"},
+		ChecksumSHA256: fmt.Sprintf("%x", sum[:]),
+	})
+	require.NoError(t, err, "dependency cache metadata should marshal")
+	localPath := filepath.Join(localDir, cacheKey[:2], cacheKey+".tar.gz")
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750), "local dependency cache dir should be created")
+	require.NoError(t, os.WriteFile(localPath, payload, 0o600), "local dependency cache blob should be written")
+
+	baseExec := &dependencyCacheExec{}
+	exec := &evictingDependencyCacheExec{
+		dependencyCacheExec: baseExec,
+		localPath:           localPath,
+	}
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(nil),
+		Executor:  exec,
+		BlobStore: newMemorySnapshotStore(),
+		Logger:    zerolog.Nop(),
+		LocalDir:  localDir,
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	err = cache.Restore(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			ID:         uuid.New(),
+			OrgID:      orgID,
+			RepoID:     repoID,
+			CacheKey:   cacheKey,
+			BlobKey:    "deps/blob.tar.gz",
+			SizeBytes:  int64(len(payload)),
+			Metadata:   metadataJSON,
+			LastUsedAt: time.Now().UTC(),
+		},
+		BlobKey: "deps/blob.tar.gz",
+	})
+	require.NoError(t, err, "Restore should stream the validated local blob even if local LRU removes its path before extraction")
+	require.NoFileExists(t, localPath, "test should simulate local LRU eviction during restore cleanup")
+	require.Contains(t, strings.Join(baseExec.calls(), "\n"), "tar xzf -", "Restore should still extract from a stable local blob reader")
 }

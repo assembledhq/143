@@ -258,6 +258,45 @@ describe('api client', () => {
       expect(url.searchParams.get('limit')).toBe('25');
     });
 
+    it('fetches thread message windows around anchors and after cursors', async () => {
+      const capturedUrls: string[] = [];
+      const mockWindow = {
+        data: [],
+        meta: {
+          has_older: false,
+          has_newer: false,
+          thread_status: 'idle',
+          window_position: 'around',
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
+          capturedUrls.push(request.url);
+          return HttpResponse.json(mockWindow);
+        }),
+      );
+
+      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
+        position: 'around',
+        anchorMessageId: 456,
+        limit: 80,
+      });
+      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
+        after: '789',
+        limit: 40,
+      });
+
+      const aroundUrl = new URL(capturedUrls[0]!);
+      expect(aroundUrl.searchParams.get('position')).toBe('around');
+      expect(aroundUrl.searchParams.get('anchor_message_id')).toBe('456');
+      expect(aroundUrl.searchParams.get('limit')).toBe('80');
+
+      const afterUrl = new URL(capturedUrls[1]!);
+      expect(afterUrl.searchParams.get('after')).toBe('789');
+      expect(afterUrl.searchParams.get('limit')).toBe('40');
+    });
+
     it('fetches thread logs only for loaded message turns', async () => {
       let capturedUrl: string | undefined;
       const mockLogs = {
@@ -1411,7 +1450,7 @@ describe('api client', () => {
       expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456&return_to=%2Fintegrations');
     });
 
-    it('loginSentry redirects to Sentry OAuth', () => {
+    it('loginSentry redirects to backend Sentry OAuth start', () => {
       const loc = { href: '' };
       Object.defineProperty(window, 'location', {
         value: loc,
@@ -1420,7 +1459,19 @@ describe('api client', () => {
       });
 
       api.auth.loginSentry();
-      expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
+    });
+
+    it('integration loginSentry redirects to backend Sentry OAuth start', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.integrations.loginSentry();
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
     });
 
     it('loginLinear redirects to backend Linear OAuth start', () => {

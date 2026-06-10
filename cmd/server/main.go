@@ -39,6 +39,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -196,6 +197,14 @@ func main() {
 	// no anthropic rows pass the gate automatically.
 	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
 		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; server refusing to start")
+	}
+	// Heal credentials written by pre-versioning code during the rolling
+	// deploy window (config row without a runtime-state row); no-op once the
+	// fleet is on versioned code.
+	if healed, err := db.ReconcileCodingCredentialRuntimeState(ctx, pool); err != nil {
+		logger.Fatal().Err(err).Msg("coding-credentials runtime-state reconciliation failed; server refusing to start")
+	} else if healed > 0 {
+		logger.Warn().Int64("credentials", healed).Msg("backfilled runtime state for credentials written by pre-versioning code")
 	}
 
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
@@ -690,6 +699,11 @@ func main() {
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
 		scheduler.SetSessionStore(sessionStore)
+		scheduler.SetDomainRecheck(
+			db.NewOrganizationDomainStore(pool),
+			domains.NewVerifier(),
+			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
+		)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -1079,10 +1093,7 @@ func configureSessionExecutorDispatch(
 		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
 			Image:       cfg.SessionExecutorImage,
 			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds: []string{
-				"/var/run/docker.sock:/var/run/docker.sock",
-				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
-			},
+			Binds:       sessionExecutorBinds(),
 			GroupAdd:    sessionExecutorGroupAddFromEnv(),
 			Env:         os.Environ(),
 			StopTimeout: cfg.SessionExecutorStopTimeout,
@@ -1091,6 +1102,14 @@ func configureSessionExecutorDispatch(
 		Image:                 cfg.SessionExecutorImage,
 		BuildSHA:              version.BuildSHA,
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
+	}
+}
+
+func sessionExecutorBinds() []string {
+	return []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
 	}
 }
 

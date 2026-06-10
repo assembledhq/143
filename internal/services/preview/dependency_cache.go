@@ -1,7 +1,9 @@
 package preview
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,15 +47,18 @@ type DependencyCacheSaveResult struct {
 }
 
 type DependencyCacheMetadata struct {
-	OrgID          uuid.UUID                   `json:"org_id"`
-	RepoID         uuid.UUID                   `json:"repo_id"`
-	SessionID      uuid.UUID                   `json:"session_id"`
-	PlacementKey   string                      `json:"placement_key"`
-	InstallCommand []string                    `json:"install_command"`
-	EffectivePaths []string                    `json:"effective_paths"`
-	LockfileHashes map[string]string           `json:"lockfile_hashes"`
-	ChecksumSHA256 string                      `json:"checksum_sha256"`
-	Lockfiles      []PreviewInstallLockfileKey `json:"lockfiles,omitempty"`
+	OrgID               uuid.UUID                   `json:"org_id"`
+	RepoID              uuid.UUID                   `json:"repo_id"`
+	SessionID           uuid.UUID                   `json:"session_id"`
+	PlacementKey        string                      `json:"placement_key"`
+	InstallCommand      []string                    `json:"install_command"`
+	EffectivePaths      []string                    `json:"effective_paths"`
+	LockfileHashes      map[string]string           `json:"lockfile_hashes"`
+	ChecksumSHA256      string                      `json:"checksum_sha256"`
+	Lockfiles           []PreviewInstallLockfileKey `json:"lockfiles,omitempty"`
+	ArchiveBytes        int64                       `json:"archive_bytes,omitempty"`
+	ArchivePayloadBytes int64                       `json:"archive_payload_bytes,omitempty"`
+	ArchiveFileCount    int64                       `json:"archive_file_count,omitempty"`
 }
 
 type DependencyCacheConfig struct {
@@ -77,8 +83,8 @@ type SharedDependencyCache struct {
 	localMaxBytes int64
 }
 
-type dependencyCacheStreamWriter interface {
-	WriteFileFromReader(ctx context.Context, sb *agent.Sandbox, path string, reader io.Reader, size int64) error
+type dependencyCacheStdinExecutor interface {
+	ExecWithStdin(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 }
 
 type dependencyCacheStagedBlob struct {
@@ -86,7 +92,18 @@ type dependencyCacheStagedBlob struct {
 	sizeBytes int64
 	checksum  string
 	fromLocal bool
+	file      *os.File
 	cleanup   func()
+}
+
+func (b *dependencyCacheStagedBlob) rewind() error {
+	if b.file == nil {
+		return fmt.Errorf("dependency cache staged blob reader is not available")
+	}
+	if _, err := b.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind dependency cache staged blob: %w", err)
+	}
+	return nil
 }
 
 func NewDependencyCache(cfg DependencyCacheConfig) (*SharedDependencyCache, error) {
@@ -151,6 +168,9 @@ func (c *SharedDependencyCache) Restore(ctx context.Context, sb *agent.Sandbox, 
 			return fmt.Errorf("dependency cache restore: invalid metadata path %q: %w", p, err)
 		}
 	}
+	if hit.Entry.SizeBytes > dependencyCacheMaxBlobBytes {
+		return fmt.Errorf("dependency cache restore: blob too large (%d bytes, max %d); narrow preview.install.cache.paths or disable dependency caching for this preview", hit.Entry.SizeBytes, dependencyCacheMaxBlobBytes)
+	}
 	blob, err := c.stageBlob(ctx, hit)
 	if err != nil {
 		if errors.Is(err, storage.ErrSnapshotNotFound) {
@@ -170,15 +190,21 @@ func (c *SharedDependencyCache) Restore(ctx context.Context, sb *agent.Sandbox, 
 		}
 		return fmt.Errorf("dependency cache restore: checksum mismatch")
 	}
-	tmpPath := dependencyCacheTmpPath()
-	if err := c.writeSandboxFile(ctx, sb, tmpPath, blob.path, blob.sizeBytes); err != nil {
-		return fmt.Errorf("dependency cache restore: stage blob: %w", err)
+	if err := blob.rewind(); err != nil {
+		return fmt.Errorf("dependency cache restore: %w", err)
 	}
-	defer func() {
-		if cleanupExit, cleanupErr := c.executor.Exec(context.WithoutCancel(ctx), sb, "rm -f "+shellQuote(tmpPath), io.Discard, io.Discard); cleanupErr != nil || cleanupExit != 0 {
-			c.logger.Warn().Err(cleanupErr).Int("exit_code", cleanupExit).Msg("failed to remove staged dependency cache blob after restore")
+	stats, err := validateDependencyCacheArchiveReader(blob.file, paths)
+	if err != nil {
+		if blob.fromLocal {
+			c.removeLocalBlob(ctx, hit.Entry.CacheKey)
 		}
-	}()
+		return fmt.Errorf("dependency cache restore: validate archive: %w", err)
+	}
+	c.logger.Debug().
+		Str("cache_key", hit.Entry.CacheKey).
+		Int64("archive_payload_bytes", stats.payloadBytes).
+		Int64("archive_file_count", stats.fileCount).
+		Msg("dependency cache restore archive validated")
 	cleanArgs := make([]string, 0, len(paths))
 	for _, p := range paths {
 		clean, err := cleanDependencyCacheRepoPath(p, true)
@@ -191,8 +217,10 @@ func (c *SharedDependencyCache) Restore(ctx context.Context, sb *agent.Sandbox, 
 	if exitCode, err := c.executor.Exec(ctx, sb, cleanCmd, io.Discard, io.Discard); err != nil || exitCode != 0 {
 		return fmt.Errorf("dependency cache restore: remove existing paths exited %d: %w", exitCode, err)
 	}
-	extractCmd := buildDependencyCacheExtractCommand(sb.WorkDir, tmpPath, paths)
-	if exitCode, err := c.executor.Exec(ctx, sb, extractCmd, io.Discard, io.Discard); err != nil || exitCode != 0 {
+	if err := blob.rewind(); err != nil {
+		return fmt.Errorf("dependency cache restore: %w", err)
+	}
+	if exitCode, err := c.extractSandboxArchive(ctx, sb, blob.file); err != nil || exitCode != 0 {
 		return fmt.Errorf("dependency cache restore: extract exited %d: %w", exitCode, err)
 	}
 	if !blob.fromLocal {
@@ -241,8 +269,15 @@ func (c *SharedDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cac
 		return DependencyCacheSaveResult{}, err
 	}
 	defer staged.cleanup()
+	stats, err := validateDependencyCacheArchive(staged.path, existing)
+	if err != nil {
+		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: validate archive: %w", err)
+	}
 	metadata.EffectivePaths = existing
 	metadata.ChecksumSHA256 = staged.checksum
+	metadata.ArchiveBytes = staged.sizeBytes
+	metadata.ArchivePayloadBytes = stats.payloadBytes
+	metadata.ArchiveFileCount = stats.fileCount
 	if metadata.PlacementKey == "" {
 		placementKey, err := ComputePreviewDependencyCachePlacementKey(metadata.OrgID, metadata.RepoID, "", "", &models.PreviewInstallConfig{Command: metadata.InstallCommand}, existing)
 		if err == nil {
@@ -326,42 +361,59 @@ func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCa
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("dependency cache restore: blob too large (>%d bytes max)", dependencyCacheMaxBlobBytes)
 	}
+	readFile, err := os.Open(path) // #nosec G304 -- path is under a private temp dir.
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("dependency cache restore: open staged blob: %w", err)
+	}
 	return &dependencyCacheStagedBlob{
 		path:      path,
 		sizeBytes: counter.count,
 		checksum:  hex.EncodeToString(hasher.Sum(nil)),
 		fromLocal: false,
-		cleanup:   func() { _ = os.RemoveAll(dir) },
+		file:      readFile,
+		cleanup: func() {
+			_ = readFile.Close()
+			_ = os.RemoveAll(dir)
+		},
 	}, nil
 }
 
 func (c *SharedDependencyCache) stageLocalBlob(path string) (*dependencyCacheStagedBlob, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if fi.Size() > dependencyCacheMaxBlobBytes {
-		return nil, fmt.Errorf("dependency cache restore: local blob too large (%d bytes, max %d)", fi.Size(), dependencyCacheMaxBlobBytes)
-	}
 	file, err := os.Open(path) // #nosec G304 -- path is derived from localBlobPath.
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	fi, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if fi.Size() > dependencyCacheMaxBlobBytes {
+		_ = file.Close()
+		return nil, fmt.Errorf("dependency cache restore: local blob too large (%d bytes, max %d)", fi.Size(), dependencyCacheMaxBlobBytes)
+	}
 	hasher := sha256.New()
 	counter := &cappedCountingWriter{limit: dependencyCacheMaxBlobBytes}
 	if _, err := io.Copy(io.MultiWriter(hasher, counter), file); err != nil {
+		_ = file.Close()
 		return nil, err
 	}
 	if counter.exceeded {
+		_ = file.Close()
 		return nil, fmt.Errorf("dependency cache restore: local blob too large (>%d bytes max)", dependencyCacheMaxBlobBytes)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("dependency cache restore: rewind local blob: %w", err)
 	}
 	return &dependencyCacheStagedBlob{
 		path:      path,
 		sizeBytes: counter.count,
 		checksum:  hex.EncodeToString(hasher.Sum(nil)),
 		fromLocal: true,
-		cleanup:   func() {},
+		file:      file,
+		cleanup:   func() { _ = file.Close() },
 	}, nil
 }
 
@@ -406,26 +458,105 @@ func (c *SharedDependencyCache) stageSandboxArchive(ctx context.Context, sb *age
 	}, nil
 }
 
-func (c *SharedDependencyCache) writeSandboxFile(ctx context.Context, sb *agent.Sandbox, sandboxPath, localPath string, sizeBytes int64) error {
+type dependencyCacheArchiveStats struct {
+	payloadBytes int64
+	fileCount    int64
+}
+
+func validateDependencyCacheArchive(localPath string, paths []string) (dependencyCacheArchiveStats, error) {
 	file, err := os.Open(localPath) // #nosec G304 -- localPath is staged by dependency cache.
 	if err != nil {
-		return err
+		return dependencyCacheArchiveStats{}, err
 	}
 	defer file.Close()
-	if streamer, ok := c.executor.(dependencyCacheStreamWriter); ok {
-		return streamer.WriteFileFromReader(ctx, sb, sandboxPath, file, sizeBytes)
-	}
-	if sizeBytes > dependencyCacheMaxBlobBytes {
-		return fmt.Errorf("blob too large (%d bytes, max %d)", sizeBytes, dependencyCacheMaxBlobBytes)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, dependencyCacheMaxBlobBytes+1))
+	return validateDependencyCacheArchiveReader(file, paths)
+}
+
+func validateDependencyCacheArchiveReader(reader io.Reader, paths []string) (dependencyCacheArchiveStats, error) {
+	gzr, err := gzip.NewReader(reader)
 	if err != nil {
-		return err
+		return dependencyCacheArchiveStats{}, fmt.Errorf("open gzip stream: %w", err)
 	}
-	if int64(len(data)) > dependencyCacheMaxBlobBytes {
-		return fmt.Errorf("blob too large (>%d bytes max)", dependencyCacheMaxBlobBytes)
+	defer gzr.Close()
+	allowed := sortedNormalizedDependencyPaths(paths)
+	if len(allowed) == 0 {
+		return dependencyCacheArchiveStats{}, fmt.Errorf("no effective paths")
 	}
-	return c.executor.WriteFile(ctx, sb, sandboxPath, data)
+	tr := tar.NewReader(gzr)
+	var stats dependencyCacheArchiveStats
+	for {
+		header, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return dependencyCacheArchiveStats{}, fmt.Errorf("read tar header: %w", err)
+		}
+		name, err := cleanDependencyCacheArchiveName(header.Name)
+		if err != nil {
+			return dependencyCacheArchiveStats{}, err
+		}
+		if dependencyCachePathTargetsPreviewInstallMarkers(name) {
+			return dependencyCacheArchiveStats{}, fmt.Errorf("archive entry %q must not target preview install markers", header.Name)
+		}
+		if !dependencyCacheArchiveNameAllowed(name, allowed) {
+			return dependencyCacheArchiveStats{}, fmt.Errorf("archive entry %q is outside effective cache paths", header.Name)
+		}
+		if header.Size > 0 {
+			stats.payloadBytes += header.Size
+		}
+		if header.Typeflag == tar.TypeReg {
+			stats.fileCount++
+		}
+	}
+	return stats, nil
+}
+
+func cleanDependencyCacheArchiveName(raw string) (string, error) {
+	name := filepath.ToSlash(strings.TrimSpace(raw))
+	if name == "" {
+		return "", fmt.Errorf("archive entry has empty path")
+	}
+	if strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("archive entry %q uses an absolute path", raw)
+	}
+	clean := path.Clean(name)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return "", fmt.Errorf("archive entry %q escapes the repo root", raw)
+	}
+	return clean, nil
+}
+
+func dependencyCacheArchiveNameAllowed(name string, allowed []string) bool {
+	for _, candidate := range allowed {
+		if dependencyCacheArchiveNameMatchesPath(name, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func dependencyCacheArchiveNameMatchesPath(name, allowed string) bool {
+	if !strings.Contains(allowed, "*") {
+		return name == allowed || strings.HasPrefix(name, allowed+"/")
+	}
+	parts := strings.Split(name, "/")
+	for i := 1; i <= len(parts); i++ {
+		prefix := strings.Join(parts[:i], "/")
+		if ok, err := path.Match(allowed, prefix); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *SharedDependencyCache) extractSandboxArchive(ctx context.Context, sb *agent.Sandbox, reader io.Reader) (int, error) {
+	executor, ok := c.executor.(dependencyCacheStdinExecutor)
+	if !ok {
+		return -1, fmt.Errorf("executor does not support streaming dependency cache restore")
+	}
+	cmd := fmt.Sprintf("tar xzf - -C %s", shellQuote(sb.WorkDir))
+	return executor.ExecWithStdin(ctx, sb, cmd, reader, io.Discard, io.Discard)
 }
 
 func (c *SharedDependencyCache) writeLocalBlobFromFile(ctx context.Context, hit *DependencyCacheHit, sourcePath string, sizeBytes int64, checksum string) {
@@ -593,10 +724,6 @@ func (c *SharedDependencyCache) localBlobEntries() ([]dependencyCacheLocalEntry,
 		return nil
 	})
 	return entries, total, err
-}
-
-func dependencyCacheTmpPath() string {
-	return "/tmp/preview-dependency-cache-" + uuid.NewString() + ".tar.gz"
 }
 
 func buildDependencyCacheExtractCommand(workDir, tmpPath string, paths []string) string {

@@ -32,6 +32,7 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     expect(await screen.findByRole("heading", { level: 1, name: "Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Runtime settings" })).toHaveAttribute("href", "/settings/runtime");
     expect((await screen.findAllByText("assembled-dev"))[0]).toBeInTheDocument();
     expect(screen.getAllByText("env DATABASE_URL")[0]).toBeInTheDocument();
     expect(bundleRequests).toContain("repo-1");

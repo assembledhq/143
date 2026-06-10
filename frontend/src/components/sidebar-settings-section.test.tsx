@@ -37,6 +37,7 @@ describe("SidebarSettingsSection", () => {
       "Coding agents",
       "LLM",
       "Autopilot",
+      "Runtime",
       "Preview",
       "Evals",
       "General",
@@ -66,6 +67,7 @@ describe("SidebarSettingsSection", () => {
     for (const hidden of [
       "LLM",
       "Autopilot",
+      "Runtime",
       "Preview",
       "General",
       "Usage",
@@ -87,6 +89,7 @@ describe("SidebarSettingsSection", () => {
       "Coding agents",
       "LLM",
       "Autopilot",
+      "Runtime",
       "Preview",
       "Evals",
       "General",
@@ -113,6 +116,7 @@ describe("SidebarSettingsSection", () => {
     for (const hidden of [
       "Integrations",
       "Preview",
+      "Runtime",
       "Evals",
       "Team",
       "LLM",

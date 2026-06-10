@@ -24,17 +24,22 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/domains"
+	"github.com/assembledhq/143/internal/services/email"
 )
 
 type AuthHandler struct {
-	cfg             *config.Config
-	pool            db.TxStarter
-	userStore       *db.UserStore
-	sessionStore    *db.AuthSessionStore
-	invitationStore *db.InvitationStore
-	memberships     *db.OrganizationMembershipStore
-	userCredentials *db.UserCredentialStore
-	audit           *db.AuditEmitter
+	cfg                *config.Config
+	pool               db.TxStarter
+	userStore          *db.UserStore
+	sessionStore       *db.AuthSessionStore
+	invitationStore    *db.InvitationStore
+	memberships        *db.OrganizationMembershipStore
+	userCredentials    *db.UserCredentialStore
+	orgDomains         *db.OrganizationDomainStore
+	emailVerifications *db.EmailVerificationStore
+	emailSender        email.Sender
+	audit              *db.AuditEmitter
 	// gitHubAPIBaseURL / gitHubOAuthBaseURL are overridable so tests can
 	// point the OAuth callback flow at a local httptest.Server instead of
 	// mutating http.DefaultTransport (which would silently redirect any
@@ -95,6 +100,22 @@ func (h *AuthHandler) SetUserCredentialStore(store *db.UserCredentialStore) {
 	h.userCredentials = store
 }
 
+// SetOrgDomainStore injects the verified-domain store, enabling email-domain
+// auto-join during OAuth signup. When nil, signups always create a fresh org.
+func (h *AuthHandler) SetOrgDomainStore(store *db.OrganizationDomainStore) {
+	h.orgDomains = store
+}
+
+// SetEmailVerificationDeps wires the token store and email sender that power
+// the password-signup verification flow. sender may be nil (SMTP not
+// configured): tokens are still issued and confirmable, only delivery is
+// skipped, so self-hosted setups degrade to logged links instead of a
+// broken endpoint.
+func (h *AuthHandler) SetEmailVerificationDeps(store *db.EmailVerificationStore, sender email.Sender) {
+	h.emailVerifications = store
+	h.emailSender = sender
+}
+
 func NewAuthHandler(
 	cfg *config.Config,
 	pool db.TxStarter,
@@ -153,17 +174,18 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
-		ID:          user.ID,
-		OrgID:       user.OrgID,
-		Email:       loadedUser.Email,
-		Name:        loadedUser.Name,
-		Role:        user.Role,
-		GitHubID:    loadedUser.GitHubID,
-		GitHubLogin: loadedUser.GitHubLogin,
-		AvatarURL:   loadedUser.AvatarURL,
-		GoogleID:    loadedUser.GoogleID,
-		Settings:    loadedUser.Settings,
-		CreatedAt:   loadedUser.CreatedAt,
+		ID:            user.ID,
+		OrgID:         user.OrgID,
+		Email:         loadedUser.Email,
+		Name:          loadedUser.Name,
+		Role:          user.Role,
+		GitHubID:      loadedUser.GitHubID,
+		GitHubLogin:   loadedUser.GitHubLogin,
+		AvatarURL:     loadedUser.AvatarURL,
+		GoogleID:      loadedUser.GoogleID,
+		EmailVerified: loadedUser.EmailVerified,
+		Settings:      loadedUser.Settings,
+		CreatedAt:     loadedUser.CreatedAt,
 	}})
 }
 
@@ -403,6 +425,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Password accounts have no provider attestation — send the
+	// verification link so they can prove the address and unlock
+	// email-domain auto-join. Best-effort; never blocks the signup.
+	h.sendEmailVerificationFor(r, user)
+
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.respondWithSession(w, r, user, sessionToken)
 }
@@ -515,9 +542,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch the verified-email list once: it feeds both the
+	// commit-attribution noreply derivation and the provider-verification
+	// check that gates email-domain auto-join.
+	ghEmails := h.fetchGitHubEmails(r.Context(), tokenResp.AccessToken)
+
 	// Compute the GitHub-attribution noreply email up-front so every account
 	// path (existing, link, signup, invite) persists it consistently.
-	noreplyEmail := h.fetchGitHubNoreplyEmail(r.Context(), tokenResp.AccessToken, ghUser.ID, ghUser.Login)
+	noreplyEmail := selectGitHubNoreplyEmail(ghEmails, ghUser.ID, ghUser.Login)
 
 	email := ghUser.Email
 	if email == "" {
@@ -548,7 +580,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		// Known GitHub user — update and sign in.
 		existingUser.Name = displayName
-		existingUser.Email = email
+		existingUser.Email = h.resolveExistingGitHubEmail(r.Context(), existingUser.Email, email, ghEmails)
 		existingUser.GitHubLogin = &ghUser.Login
 		existingUser.AvatarURL = &ghUser.AvatarURL
 		existingUser.GitHubNoreplyEmail = &noreplyEmail
@@ -556,7 +588,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", upsertErr)
 			return
 		}
-		h.claimPendingInvitationForExistingUser(r, pendingInvite, email, ghUser.Login, existingUser.ID)
+		h.markGitHubEmailVerified(r, existingUser.ID, ghEmails, existingUser.Email)
+		h.claimPendingInvitationForExistingUser(r, pendingInvite, existingUser.Email, ghUser.Login, existingUser.ID)
 		// An existing user carrying a join token for an org they're not in
 		// gets the membership granted; already-a-member or a bad token is a
 		// no-op (matches ClaimInvitation's best-effort posture).
@@ -573,10 +606,21 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Try email match for account linking.
 	if emailUser, emailErr := h.userStore.GetByEmail(r.Context(), email); emailErr == nil {
+		// Linking grants full access to the existing account, so it demands
+		// the strongest proof: GitHub must list this exact address as
+		// verified. A nil ghEmails (failed /user/emails fetch) also blocks —
+		// fail closed on a one-time linking event rather than admit the
+		// unverified-email account-takeover class (nOAuth, Nhost CVE).
+		if !gitHubEmailVerified(ghEmails, email) {
+			writeError(w, r, http.StatusForbidden, "EMAIL_NOT_VERIFIED",
+				"An account with this email already exists, and GitHub does not report the address as verified. Verify it in your GitHub email settings and try again.")
+			return
+		}
 		if linkErr := h.userStore.LinkGitHubAccount(r.Context(), emailUser.ID, emailUser.OrgID, ghUser.ID, ghUser.Login, ghUser.AvatarURL, noreplyEmail); linkErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account", linkErr)
 			return
 		}
+		h.markEmailVerified(r, emailUser.ID, true, email)
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, email, ghUser.Login, emailUser.ID)
 		h.applyJoinTokenForExistingUser(r, pendingJoin, &emailUser)
 		h.storeGitHubToken(r, &emailUser, tokenResp)
@@ -619,6 +663,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", createErr)
 				return
 			}
+			h.markGitHubEmailVerified(r, createdUser.ID, ghEmails, email)
 			h.storeGitHubToken(r, createdUser, tokenResp)
 			h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 			if cliIntent != nil {
@@ -663,6 +708,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.emitJoinTokenUsed(r, createdUser.ID, usedToken, string(createdUser.Role))
+		h.markGitHubEmailVerified(r, createdUser.ID, ghEmails, email)
 		h.storeGitHubToken(r, createdUser, tokenResp)
 		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		if cliIntent != nil {
@@ -681,13 +727,44 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		GitHubNoreplyEmail: &noreplyEmail,
 		AvatarURL:          &ghUser.AvatarURL,
 	}
-	sessionToken, err := h.createSignupOrg(r.Context(), ghUser.Login+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
+	upsertGitHub := func(ctx context.Context, us *db.UserStore, u *models.User) error {
 		return us.UpsertFromGitHub(ctx, u)
-	})
+	}
+
+	// Domain capture: a GitHub-verified email on a domain some org has
+	// DNS-verified with auto-join enabled lands the user directly in that
+	// org instead of a lonely fresh one. The capture email may differ from
+	// the profile email: engineers commonly keep their profile email
+	// private (so `email` is the noreply fallback) or personal, while the
+	// verified work address sits in /user/emails — selectGitHubAutoJoinEmail
+	// finds it and it becomes the account's identity.
+	if joinEmail, ok := h.selectGitHubAutoJoinEmail(r.Context(), email, ghEmails); ok {
+		user.Email = joinEmail
+		if sessionToken, joined := h.tryDomainAutoJoin(r, user, true, upsertGitHub); joined {
+			h.storeGitHubToken(r, user, tokenResp)
+			h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
+			// CLI-initiated logins must finish the loopback handshake, not
+			// redirect the browser to the web app — a teammate at a
+			// captured-domain org running `143-tools login` as their very
+			// first sign-in lands on this path.
+			if cliIntent != nil {
+				h.finishCLILoginWithSession(w, r, user, sessionToken, cliIntent)
+				return
+			}
+			h.redirectWithSession(w, r, sessionToken)
+			return
+		}
+		// Capture failed mid-flight (e.g. domain toggled off in the race
+		// window) — restore the default identity for the fresh-org path.
+		user.Email = email
+	}
+
+	sessionToken, err := h.createSignupOrg(r.Context(), ghUser.Login+"'s Org", user, upsertGitHub)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create account", err)
 		return
 	}
+	h.markGitHubEmailVerified(r, user.ID, ghEmails, email)
 
 	h.storeGitHubToken(r, user, tokenResp)
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
@@ -765,6 +842,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Account linking: try Google ID → email → create new.
 	if existingUser, googleErr := h.userStore.GetByGoogleID(r.Context(), gUser.Sub); googleErr == nil {
+		h.markEmailVerified(r, existingUser.ID, gUser.EmailVerified, gUser.Email)
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, gUser.Email, "", existingUser.ID)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &existingUser)
@@ -772,10 +850,18 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if emailUser, emailErr := h.userStore.GetByEmail(r.Context(), gUser.Email); emailErr == nil {
+		// Same linking gate as the GitHub flow: full account access
+		// requires the provider to attest the address.
+		if !gUser.EmailVerified {
+			writeError(w, r, http.StatusForbidden, "EMAIL_NOT_VERIFIED",
+				"An account with this email already exists, and Google does not report the address as verified.")
+			return
+		}
 		if linkErr := h.userStore.LinkGoogleAccount(r.Context(), emailUser.ID, emailUser.OrgID, gUser.Sub, gUser.Picture); linkErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link Google account", linkErr)
 			return
 		}
+		h.markEmailVerified(r, emailUser.ID, true, gUser.Email)
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, gUser.Email, "", emailUser.ID)
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		h.createSessionAndRedirect(w, r, &emailUser)
@@ -815,6 +901,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 				writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", createErr)
 				return
 			}
+			h.markEmailVerified(r, createdUser.ID, gUser.EmailVerified, gUser.Email)
 			h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 			h.redirectWithSession(w, r, sessionToken)
 			return
@@ -828,13 +915,25 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		GoogleID:  &gUser.Sub,
 		AvatarURL: &gUser.Picture,
 	}
-	sessionToken, err := h.createSignupOrg(r.Context(), name+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
+	upsertGoogle := func(ctx context.Context, us *db.UserStore, u *models.User) error {
 		return us.UpsertFromGoogle(ctx, u)
-	})
+	}
+
+	// Domain capture: a Google-verified email on a domain some org has
+	// DNS-verified with auto-join enabled lands the user directly in that
+	// org instead of a lonely fresh one.
+	if sessionToken, ok := h.tryDomainAutoJoin(r, user, gUser.EmailVerified, upsertGoogle); ok {
+		h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
+		h.redirectWithSession(w, r, sessionToken)
+		return
+	}
+
+	sessionToken, err := h.createSignupOrg(r.Context(), name+"'s Org", user, upsertGoogle)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create account", err)
 		return
 	}
+	h.markEmailVerified(r, user.ID, gUser.EmailVerified, gUser.Email)
 
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
 	h.redirectWithSession(w, r, sessionToken)
@@ -898,6 +997,16 @@ func (h *AuthHandler) ClaimInvitation(w http.ResponseWriter, r *http.Request) {
 
 	h.emitInvitationAccepted(r, user.ID, inv)
 
+	// Possessing the emailed token proves receipt at the invited address
+	// (tokens only leave the server inside the invitation email). When that
+	// address is the account's own email, record the proof — it unlocks
+	// email-domain features for password accounts without a separate
+	// verification round-trip. The in-app accept-by-ID path deliberately
+	// does NOT do this: clicking a button proves nothing about the inbox.
+	if inv != nil && inv.Email != nil && strings.EqualFold(*inv.Email, user.Email) {
+		h.markEmailVerified(r, user.ID, true, user.Email)
+	}
+
 	// Echo the *effective* role, not the invite's role: GrantAtLeast never
 	// downgrades, so a user who already held admin stays admin even if the
 	// invite named a lower role. Returning inv.Role would mislead the
@@ -948,6 +1057,210 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- shared helpers ---
+
+// markEmailVerified best-effort synchronizes the stored email-verification
+// watermark with the provider's attestation — stamping on attested=true and
+// clearing on attested=false (the provider email was just upserted as the
+// user's current address, so an unattested address must drop any stamp the
+// previous address earned). Failures only degrade domain-based join
+// discovery, never the login itself.
+func (h *AuthHandler) markEmailVerified(r *http.Request, userID uuid.UUID, attested bool, email string) {
+	if h.userStore == nil {
+		return
+	}
+	if err := h.userStore.SetEmailVerification(r.Context(), userID, email, attested); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", userID.String()).Msg("failed to record email verification")
+	}
+}
+
+// resolveExistingGitHubEmail decides which email an existing GitHub-linked
+// account keeps on login. The default is today's refresh behavior: adopt
+// the incoming profile email. The exception is identity stickiness for
+// captured work addresses — when the stored email is still GitHub-verified
+// AND its domain is company-verified, it IS the account's canonical
+// identity (invitations, the team directory, and every domain feature key
+// on it), and the profile email — typically the noreply fallback or a
+// personal address — must not overwrite it. Without this, an account
+// created via alternate-email domain capture silently reverts to its
+// noreply address on the second login.
+//
+// The protection drops the moment GitHub stops attesting the stored
+// address (e.g. it was removed after leaving the company) or the domain's
+// verification is deleted; a nil emails list (failed fetch) also falls
+// back to the refresh path rather than trusting stale state.
+func (h *AuthHandler) resolveExistingGitHubEmail(ctx context.Context, stored, incoming string, emails []gitHubEmail) string {
+	if stored == "" || strings.EqualFold(stored, incoming) {
+		return incoming
+	}
+	if !gitHubEmailVerified(emails, stored) {
+		return incoming
+	}
+	if h.orgDomains == nil {
+		return incoming
+	}
+	storedDomain := domains.EmailDomain(stored)
+	if storedDomain == "" || domains.IsPublicEmailDomain(storedDomain) {
+		return incoming
+	}
+	exists, err := h.orgDomains.VerifiedDomainExists(ctx, storedDomain)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("verified-domain lookup failed during email resolution; refreshing from profile")
+		return incoming
+	}
+	if exists {
+		return stored
+	}
+	return incoming
+}
+
+// markGitHubEmailVerified is markEmailVerified with GitHub's tri-state
+// folded in: a nil emails slice means the /user/emails fetch failed — no
+// information — so the stored watermark is left untouched rather than
+// cleared. Only an affirmative listing (verified or not) updates it.
+func (h *AuthHandler) markGitHubEmailVerified(r *http.Request, userID uuid.UUID, emails []gitHubEmail, email string) {
+	if emails == nil {
+		return
+	}
+	h.markEmailVerified(r, userID, gitHubEmailVerified(emails, email), email)
+}
+
+// selectGitHubAutoJoinEmail picks the email address to attempt domain
+// capture with for a brand-new GitHub signup. Preference order:
+//
+//  1. The profile email, when GitHub attests it and its domain is captured.
+//  2. Any other GitHub-verified address (primary first) whose domain is
+//     captured — this is the common "profile email private or personal,
+//     work email verified on the account" case.
+//
+// An alternate address is only chosen when no existing account owns it —
+// silently merging into another account's identity would be a takeover
+// shape, so that case falls back to the classic signup instead.
+// Returns ("", false) when no capture-eligible address exists.
+func (h *AuthHandler) selectGitHubAutoJoinEmail(ctx context.Context, profileEmail string, emails []gitHubEmail) (string, bool) {
+	if h.orgDomains == nil {
+		return "", false
+	}
+
+	captured := func(addr string) bool {
+		d := domains.EmailDomain(addr)
+		if d == "" || domains.IsPublicEmailDomain(d) {
+			return false
+		}
+		if _, err := h.orgDomains.FindAutoJoinOrgByDomain(ctx, d); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("auto-join domain lookup failed during email selection")
+			}
+			return false
+		}
+		return true
+	}
+
+	if gitHubEmailVerified(emails, profileEmail) && captured(profileEmail) {
+		return profileEmail, true
+	}
+
+	// Primary first, then the rest, verified non-noreply only.
+	ordered := make([]gitHubEmail, 0, len(emails))
+	for _, e := range emails {
+		if e.Primary {
+			ordered = append(ordered, e)
+		}
+	}
+	for _, e := range emails {
+		if !e.Primary {
+			ordered = append(ordered, e)
+		}
+	}
+	for _, e := range ordered {
+		if !e.Verified || strings.EqualFold(e.Email, profileEmail) ||
+			strings.HasSuffix(strings.ToLower(e.Email), "@users.noreply.github.com") {
+			continue
+		}
+		if !captured(e.Email) {
+			continue
+		}
+		if _, err := h.userStore.GetByEmail(ctx, e.Email); err == nil {
+			// Address already owned by an account — don't merge identities.
+			continue
+		}
+		return e.Email, true
+	}
+	return "", false
+}
+
+// tryDomainAutoJoin attempts the domain-capture path for a brand-new OAuth
+// user: when the provider attests the email and its domain is verified by
+// an org with auto-join enabled, the user is created directly as a member
+// of that org. Returns (sessionToken, true) on success; ("", false) means
+// "no auto-join applies" and the caller proceeds with the fresh-org signup.
+// Internal errors also return false (logged) — a broken auto-join must
+// degrade to the classic signup rather than strand the user at login.
+func (h *AuthHandler) tryDomainAutoJoin(r *http.Request, user *models.User, emailAttested bool, createUser signupUserCreateFunc) (string, bool) {
+	if h.orgDomains == nil || !emailAttested {
+		return "", false
+	}
+	emailDomain := domains.EmailDomain(user.Email)
+	if emailDomain == "" || domains.IsPublicEmailDomain(emailDomain) {
+		return "", false
+	}
+
+	target, err := h.orgDomains.FindAutoJoinOrgByDomain(r.Context(), emailDomain)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("auto-join domain lookup failed; falling back to fresh-org signup")
+		}
+		return "", false
+	}
+
+	// Legacy users.org_id / users.role columns — same sunset note as
+	// createSignupOrg; the membership grant inside createAutoJoinUser is
+	// the authoritative write.
+	user.OrgID = target.OrgID
+	user.Role = models.RoleMember
+	sessionToken, err := h.createAutoJoinUser(r.Context(), user, createUser)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("org_id", target.OrgID.String()).
+			Msg("domain auto-join failed; falling back to fresh-org signup")
+		user.OrgID = uuid.Nil
+		user.Role = ""
+		return "", false
+	}
+
+	h.emitAutoJoinEvent(r, user, target)
+	return sessionToken, true
+}
+
+// emitAutoJoinEvent records the org-side audit trail for a domain-capture
+// join, so admins can answer "who entered via the verified domain and when".
+// The caller still emits the standard auth.register event for the user side.
+func (h *AuthHandler) emitAutoJoinEvent(r *http.Request, user *models.User, target models.JoinableOrganization) {
+	if h.audit == nil {
+		return
+	}
+	userIDStr := user.ID.String()
+	params := db.UserActionParams{
+		OrgID:        target.OrgID,
+		UserID:       user.ID,
+		Action:       models.AuditActionTeamMemberAutoJoined,
+		ResourceType: models.AuditResourceTeamMember,
+		ResourceID:   &userIDStr,
+		Details: marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+			"email":  user.Email,
+			"domain": target.Domain,
+			"role":   string(user.Role),
+		}),
+	}
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		params.RequestID = &reqID
+	}
+	if ua := r.UserAgent(); ua != "" {
+		params.UserAgent = &ua
+	}
+	if ip := parseClientIP(r); ip != nil {
+		params.IPAddress = ip
+	}
+	h.audit.EmitUserAction(r.Context(), params)
+}
 
 // persistSessionTx inserts a session row for the user via the given DBTX and
 // returns the opaque token. Callers pass a pgx.Tx for signup flows (so the
@@ -1164,25 +1477,17 @@ type gitHubEmail struct {
 // produces a usable address either way.
 const noreplyEmailHTTPTimeout = 10 * time.Second
 
-// fetchGitHubNoreplyEmail returns the address GitHub uses to attribute commits
-// to the user's profile.
+// fetchGitHubEmails retrieves the /user/emails list (nil on any failure).
+// The single fetch feeds both the commit-attribution noreply selection
+// (selectGitHubNoreplyEmail) and the provider-verification check
+// (gitHubEmailVerified).
 //
-// Strategy (in order):
-//  1. Probe `GET /user/emails` and look for the user's `noreply` entry —
-//     this is what GitHub itself recommends for committing as the user.
-//  2. Fall back to the deterministic `{user_id}+{login}@users.noreply.github.com`
-//     form. This format has been the canonical scheme since August 2017 and
-//     is always linkable to the user's GitHub account.
-//
-// Errors from /user/emails are non-fatal: the function still returns the
-// computed fallback so the caller can persist it. We never return an empty
-// string for a real GitHub user.
-func (h *AuthHandler) fetchGitHubNoreplyEmail(ctx context.Context, accessToken string, userID int64, login string) string {
-	// Pass h.httpClient (may be nil) directly rather than going through
-	// gitHubHTTPClient(): when nil, the inner function applies the explicit
-	// noreplyEmailHTTPTimeout. http.DefaultClient has no timeout, so going
-	// through gitHubHTTPClient() would silently drop that guarantee.
-	return fetchGitHubNoreplyEmailFrom(ctx, h.httpClient, h.gitHubAPIBase()+"/user/emails", accessToken, userID, login)
+// Pass h.httpClient (may be nil) directly rather than going through
+// gitHubHTTPClient(): when nil, the inner function applies the explicit
+// noreplyEmailHTTPTimeout. http.DefaultClient has no timeout, so going
+// through gitHubHTTPClient() would silently drop that guarantee.
+func (h *AuthHandler) fetchGitHubEmails(ctx context.Context, accessToken string) []gitHubEmail {
+	return fetchGitHubEmailsFrom(ctx, h.httpClient, h.gitHubAPIBase()+"/user/emails", accessToken)
 }
 
 // fetchGitHubNoreplyEmailFrom is the testable seam for the noreply lookup.
@@ -1195,11 +1500,18 @@ func (h *AuthHandler) fetchGitHubNoreplyEmail(ctx context.Context, accessToken s
 // needs an explicit timeout because the OAuth login critical path can't
 // rely on http.DefaultClient (which has no timeout).
 func fetchGitHubNoreplyEmailFrom(ctx context.Context, client *http.Client, emailsURL, accessToken string, userID int64, login string) string {
-	fallback := computeNoreplyEmail(userID, login)
+	emails := fetchGitHubEmailsFrom(ctx, client, emailsURL, accessToken)
+	return selectGitHubNoreplyEmail(emails, userID, login)
+}
 
+// fetchGitHubEmailsFrom retrieves the user's email list from GET
+// /user/emails. Errors are non-fatal and return nil — callers treat a
+// missing list as "no information" (fallback noreply address, email not
+// provider-verified).
+func fetchGitHubEmailsFrom(ctx context.Context, client *http.Client, emailsURL, accessToken string) []gitHubEmail {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, emailsURL, nil)
 	if err != nil {
-		return fallback
+		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -1209,17 +1521,39 @@ func fetchGitHubNoreplyEmailFrom(ctx context.Context, client *http.Client, email
 	}
 	resp, err := client.Do(req) // #nosec G704 -- URL is GitHub API endpoint or test override
 	if err != nil {
-		return fallback
+		return nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Common when the OAuth scope/App permission lacks `user:email` —
-		// the fallback is correct and safe to persist.
-		return fallback
+		// Common when the OAuth scope/App permission lacks `user:email`.
+		return nil
 	}
 
 	var emails []gitHubEmail
 	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
+		return nil
+	}
+	return emails
+}
+
+// gitHubEmailVerified reports whether GitHub attests the given address as
+// verified for this account. The /user/emails list is authoritative: an
+// address absent from it (including the public-profile email of someone
+// else's account — impossible — or an empty fetch) is not verified.
+func gitHubEmailVerified(emails []gitHubEmail, email string) bool {
+	for _, e := range emails {
+		if e.Verified && strings.EqualFold(e.Email, email) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectGitHubNoreplyEmail picks the commit-attribution noreply address from
+// the email list, falling back to the deterministic computed form.
+func selectGitHubNoreplyEmail(emails []gitHubEmail, userID int64, login string) string {
+	fallback := computeNoreplyEmail(userID, login)
+	if len(emails) == 0 {
 		return fallback
 	}
 
@@ -1274,6 +1608,11 @@ type googleUser struct {
 	Email   string `json:"email"`
 	Name    string `json:"name"`
 	Picture string `json:"picture"`
+	// EmailVerified is Google's attestation that the account owns this
+	// address. Practically always true for Google accounts, but the spec
+	// allows false (e.g. some federated workspace setups) — and auto-join
+	// must never fire on an unattested address.
+	EmailVerified bool `json:"email_verified"`
 }
 
 func (h *AuthHandler) exchangeGoogleCode(code string) (*googleTokenResponse, error) {
@@ -1454,6 +1793,17 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 	}
 	if err := txUserStore.CreateWithPassword(ctx, user); err != nil {
 		return nil, "", nil, fmt.Errorf("create invited user: %w", err)
+	}
+
+	// Claiming an emailed invitation token IS proof of address ownership:
+	// the token only ever leaves the server inside the email sent to this
+	// address (InvitationResponse omits it), and validateInvitationWithStore
+	// just matched the registering email against the invite. Stamp it so
+	// the user immediately qualifies for email-domain features.
+	if inv.Email != nil && strings.EqualFold(*inv.Email, email) {
+		if verr := txUserStore.SetEmailVerification(ctx, user.ID, email, true); verr != nil {
+			return nil, "", nil, fmt.Errorf("mark invited email verified: %w", verr)
+		}
 	}
 
 	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, role)

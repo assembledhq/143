@@ -119,17 +119,22 @@ import {
 } from "@/lib/session-pr-snapshot";
 import {
   readStoredSessionActiveThread,
+  readStoredSessionAnchorPosition,
   readStoredSessionScrollPosition,
   resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  type SessionAnchorPosition,
   type SessionScrollViewerScope,
+  writeStoredSessionAnchorPosition,
   writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
+import { readCachedViewerScope } from "@/lib/viewer-scope-cache";
 import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
+import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
 import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -156,10 +161,12 @@ import {
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
+import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
+import { SessionDetailLoadingSkeleton, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
@@ -249,10 +256,10 @@ const statusConfig: Record<DisplayStatusKey, { color: string; label: string }> =
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
   idle: { color: "bg-primary/10 text-primary", label: "Idle" },
-  awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
-  needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
-  completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
-  pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  awaiting_input: { color: "bg-warning/10 text-warning", label: "Awaiting input" },
+  needs_human_guidance: { color: "bg-attention/10 text-attention", label: "Needs guidance" },
+  completed: { color: "bg-success/10 text-success", label: "Completed" },
+  pr_created: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR created" },
   pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
   pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
@@ -628,7 +635,7 @@ function isRuntimeRecoveryActive(session: Session): boolean {
 
 function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
   return (
-    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300`}>
+    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-info/10 border-info/30 text-info`}>
       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
       <span>
         <span className="font-medium">Restoring runtime from checkpoint</span>
@@ -681,10 +688,10 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     <div className="space-y-4">
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
-        <Card className="border-l-2 border-l-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/10">
+        <Card className="border-l-2 border-l-success bg-success/5">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs flex items-center gap-2">
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <CheckCircle2 className="h-3.5 w-3.5 text-success" />
               Result
             </CardTitle>
           </CardHeader>
@@ -695,10 +702,10 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
       )}
 
       {isDeployRecovery && (
-        <Card className="border-l-2 border-l-amber-500 bg-amber-50/30 dark:bg-amber-950/10">
+        <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs flex items-center gap-2">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+              <AlertTriangle className="h-3.5 w-3.5 text-warning" />
               Resumed after deploy
             </CardTitle>
           </CardHeader>
@@ -788,7 +795,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
               </Button>
             )}
             {isCodexAuthFailure && isCodexAuthenticated && (
-              <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+              <p className="text-xs text-success flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 {checkpointRetryUnavailable
                   ? "ChatGPT connected — open the retry menu and choose Start over from beginning."
@@ -834,8 +841,8 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${status.color}`}>
             {isActive && (
               <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
               </span>
             )}
             {status.label}
@@ -1127,8 +1134,25 @@ function SessionComposer({
     queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
     enabled: showMentionPicker,
     staleTime: 30 * 1000,
+    // Keep the previous query's results rendered while the next keystroke's
+    // request is in flight so the picker doesn't blank out between queries.
+    placeholderData: (previous) => previous,
   });
   const fileMentions = useMemo(() => fileMentionsQuery.data?.data ?? [], [fileMentionsQuery.data]);
+
+  const mentionWarmQueryClient = useQueryClient();
+  useEffect(() => {
+    // Warm the backend's mention index as soon as the composer mounts: the
+    // empty-q request returns [] immediately but kicks off the workspace
+    // walk server-side, so the index is (usually) hot by the time the user
+    // opens the @-picker with a real query.
+    if (!repositoryId) return;
+    void mentionWarmQueryClient.prefetchQuery({
+      queryKey: queryKeys.sessions.composerFiles(sessionId, ""),
+      queryFn: () => api.sessions.composerFiles(sessionId, ""),
+      staleTime: 30 * 1000,
+    });
+  }, [mentionWarmQueryClient, sessionId, repositoryId]);
 
   const slashCommandsQuery = useSessionComposerSlashCommands({
     agentType,
@@ -1601,7 +1625,7 @@ function SessionComposer({
                     variant="secondary"
                     className={cn(
                       "gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1",
-                      isInvalid && "border-amber-500/60 bg-amber-100/40 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100",
+                      isInvalid && "border-warning/60 bg-warning/10 text-warning",
                     )}
                     data-invalid={isInvalid || undefined}
                     title={isInvalid ? `${command.token} is a ${command.agent_type} command. Switch agent or remove it.` : undefined}
@@ -1623,7 +1647,7 @@ function SessionComposer({
             </div>
           )}
           {hasInvalidCommands && (
-            <p className="px-3 pb-2 text-xs text-amber-600 dark:text-amber-300" role="alert">
+            <p className="px-3 pb-2 text-xs text-warning" role="alert">
               {invalidCommandTokens.join(", ")} {invalidCommandTokens.length === 1 ? "is" : "are"} not valid for this agent. Remove the chip{invalidCommandTokens.length === 1 ? "" : "s"} to continue.
             </p>
           )}
@@ -1908,6 +1932,12 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
 const THREAD_MESSAGE_WINDOW_LIMIT = 60;
+// First-paint logs window fetched in parallel with the message window, before
+// the loaded messages have resolved which exact turns are visible. Sized to
+// cover at least the turns a full message window can span (every turn carries
+// one or more messages, so 60 messages never span more than 60 turns).
+const THREAD_LOG_BOOTSTRAP_TURNS = THREAD_MESSAGE_WINDOW_LIMIT;
+const THREAD_LOG_BOOTSTRAP_TURNS_KEY = `latest:${THREAD_LOG_BOOTSTRAP_TURNS}`;
 // Sliding window for live SSE logs that may not be visible in persisted log
 // queries yet. The buffer lives in React Query so remounting the chat panel
 // cannot drop the transcript during the SSE-to-DB handoff.
@@ -1987,8 +2017,8 @@ export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: Se
   return Array.from(turns).sort((a, b) => a - b);
 }
 
-function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
-  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
+function threadMessageWindowQueryKey(sessionId: string, threadId: string, anchorMessageId?: number | null): readonly unknown[] {
+  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window", anchorMessageId ?? "latest"];
 }
 
 function threadLogsWindowQueryKey(sessionId: string, threadId: string, visibleTurnsKey: string): readonly unknown[] {
@@ -2001,114 +2031,6 @@ function sessionLiveLogsQueryKey(sessionId: string): readonly unknown[] {
 
 function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly unknown[] {
   return [...queryKeys.sessions.threadLogs(sessionId, threadId), "live"];
-}
-
-function SessionTimelineSkeleton() {
-  const rows: { align: "left" | "right"; widths: string[] }[] = [
-    { align: "right", widths: ["w-3/5", "w-2/5"] },
-    { align: "left", widths: ["w-4/5", "w-3/4", "w-1/2"] },
-    { align: "left", widths: ["w-2/3", "w-1/3"] },
-    { align: "left", widths: ["w-3/4", "w-3/5"] },
-  ];
-
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label="Loading session activity"
-      data-testid="session-timeline-skeleton"
-      className="space-y-3 py-1"
-    >
-      {rows.map((row, i) => (
-        <div
-          key={i}
-          className={`flex ${row.align === "right" ? "justify-end" : "justify-start"}`}
-        >
-          <div
-            className={`max-w-[92%] min-w-[40%] rounded-lg px-3 py-2.5 space-y-2 animate-pulse ${
-              row.align === "right" ? "bg-primary/10" : "bg-muted"
-            }`}
-          >
-            {row.widths.map((w, j) => (
-              <div
-                key={j}
-                className={`h-3 rounded ${w} ${
-                  row.align === "right" ? "bg-primary/20" : "bg-muted-foreground/15"
-                }`}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-      <span className="sr-only">Loading session activity…</span>
-    </div>
-  );
-}
-
-function SkeletonLine({ className }: { className: string }) {
-  return <div className={cn("rounded bg-muted-foreground/15", className)} />;
-}
-
-function SessionDetailLoadingSkeleton() {
-  return (
-    <div
-      data-testid="session-detail-loading-skeleton"
-      aria-busy="true"
-      className="flex h-full min-h-0 bg-background"
-    >
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
-          <div className="min-w-0 flex-1 animate-pulse space-y-2">
-            <SkeletonLine className="h-4 w-2/5 max-w-[360px]" />
-            <SkeletonLine className="h-3 w-1/4 max-w-[220px]" />
-          </div>
-          <div className="flex shrink-0 gap-2 animate-pulse">
-            <SkeletonLine className="h-8 w-8 rounded-md" />
-            <SkeletonLine className="h-8 w-8 rounded-md" />
-          </div>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="hidden h-10 shrink-0 border-b border-border px-3 md:flex md:items-center">
-            <div className="flex gap-2 animate-pulse">
-              <SkeletonLine className="h-6 w-24 rounded-md" />
-              <SkeletonLine className="h-6 w-28 rounded-md" />
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden p-4">
-            <div className="mx-auto flex h-full max-w-3xl flex-col justify-end gap-3">
-              <SessionTimelineSkeleton />
-            </div>
-          </div>
-          <div className="shrink-0 border-t border-border p-3">
-            <div className="animate-pulse rounded-lg border border-border bg-card p-3">
-              <SkeletonLine className="h-16 w-full rounded-md" />
-              <div className="mt-3 flex items-center justify-between">
-                <div className="flex gap-2">
-                  <SkeletonLine className="h-8 w-8 rounded-md" />
-                  <SkeletonLine className="h-8 w-24 rounded-md" />
-                </div>
-                <SkeletonLine className="h-8 w-8 rounded-md" />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="hidden w-[360px] shrink-0 border-l border-border bg-background md:flex md:flex-col">
-        <div className="h-12 shrink-0 border-b border-border px-3">
-          <div className="flex h-full items-center gap-2 animate-pulse">
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-          </div>
-        </div>
-        <div className="space-y-4 p-4 animate-pulse">
-          <SkeletonLine className="h-24 w-full rounded-md" />
-          <SkeletonLine className="h-16 w-full rounded-md" />
-          <SkeletonLine className="h-32 w-full rounded-md" />
-        </div>
-      </div>
-    </div>
-  );
 }
 
 type ChatPanelProps = {
@@ -2146,9 +2068,12 @@ function ChatPanel({
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
+  const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<ThreadMessageWindowResponse[]>([]);
+  const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
+  const initialAnchorCancelledRef = useRef(false);
   const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
@@ -2161,6 +2086,10 @@ function ChatPanel({
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
+  const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
+    if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;
+    return readStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
+  }, [activeThreadId, sessionId, viewerScope]);
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
@@ -2170,34 +2099,58 @@ function ChatPanel({
   });
 
   const threadMessagesQuery = useInfiniteQuery({
-    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages", "window"],
+    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null) : ["session", sessionId, "thread", "none", "messages", "window"],
     queryFn: ({ pageParam }) =>
       api.sessions.getThreadMessageWindow(
         sessionId,
         activeThreadId!,
         pageParam
           ? { before: pageParam as string, limit: THREAD_MESSAGE_WINDOW_LIMIT }
-          : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+          : initialThreadAnchorPosition
+            ? { position: "around", anchorMessageId: initialThreadAnchorPosition.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
-    enabled: !!activeThreadId,
+    enabled: !!activeThreadId && !!viewerScope,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessages = useMemo(() => {
-    return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
-  }, [threadMessagesQuery.data?.pages]);
+    const messages = flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
+    const seen = new Set(messages.map((message) => message.id));
+    for (const page of newerThreadMessagePages) {
+      for (const message of page.data ?? []) {
+        if (seen.has(message.id)) continue;
+        messages.push(message);
+        seen.add(message.id);
+      }
+    }
+    return messages;
+  }, [newerThreadMessagePages, threadMessagesQuery.data?.pages]);
+  const newestThreadWindow = newerThreadMessagePages.at(-1) ?? threadMessagesQuery.data?.pages[0];
+  const hasNewerThreadMessages = !!activeThreadId && !!newestThreadWindow?.meta.has_newer;
+  const nextNewerThreadCursor = newestThreadWindow?.meta.next_newer_cursor;
   const visibleThreadLogTurns = useMemo(
     () => getVisibleThreadLogTurns(threadMessages, activeThread),
     [activeThread, threadMessages],
   );
   const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
+  // Until the message window resolves which turns are visible, fetch the
+  // thread's latest turns of logs instead of waiting — this runs in parallel
+  // with the messages fetch instead of serializing one round trip behind the
+  // other. Over-fetched turns are harmless: mergeVisibleThreadLogs filters
+  // persisted logs down to the turns of the loaded messages.
+  const threadLogsBootstrapMode = !threadMessagesQuery.isFetched;
   const activeThreadLogsQueryKey = useMemo(
     () => activeThreadId
-      ? threadLogsWindowQueryKey(sessionId, activeThreadId, visibleThreadLogTurnsKey)
+      ? threadLogsWindowQueryKey(
+          sessionId,
+          activeThreadId,
+          threadLogsBootstrapMode ? THREAD_LOG_BOOTSTRAP_TURNS_KEY : visibleThreadLogTurnsKey,
+        )
       : ["session", sessionId, "thread", "none", "logs"] as const,
-    [activeThreadId, sessionId, visibleThreadLogTurnsKey],
+    [activeThreadId, sessionId, threadLogsBootstrapMode, visibleThreadLogTurnsKey],
   );
   const liveLogsQueryKey = useMemo(
     () => activeThreadId
@@ -2211,9 +2164,23 @@ function ChatPanel({
     queryFn: () => api.sessions.getThreadLogs(
       sessionId,
       activeThreadId!,
-      visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
+      threadLogsBootstrapMode
+        ? { latestTurns: THREAD_LOG_BOOTSTRAP_TURNS }
+        : visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
-    enabled: !!activeThreadId && threadMessagesQuery.isFetched,
+    enabled: !!activeThreadId,
+    // Carry the previous window across key changes within the same thread
+    // (bootstrap → precise turns, or the visible turn set growing) so tool
+    // entries don't blink out while the next window loads. Windows from a
+    // different thread must not carry over: their logs can share turn numbers
+    // with the new thread's messages and would survive the visible-turns
+    // filter.
+    placeholderData: (previousData, previousQuery) => {
+      if (!previousQuery || !activeThreadId) return undefined;
+      const threadScopedPrefix = queryKeys.sessions.threadLogs(sessionId, activeThreadId);
+      const previousPrefix = previousQuery.queryKey.slice(0, threadScopedPrefix.length);
+      return JSON.stringify(previousPrefix) === JSON.stringify(threadScopedPrefix) ? previousData : undefined;
+    },
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const liveLogsQuery = useQuery({
@@ -2393,15 +2360,54 @@ function ChatPanel({
     writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
   }, [activeThreadId, sessionId, viewerScope]);
 
+  const findFirstVisibleMessageAnchor = useCallback((el: HTMLDivElement) => {
+    const containerTop = el.getBoundingClientRect().top;
+    const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-session-message-id]"));
+    for (const node of nodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom < containerTop) continue;
+      const rawID = node.dataset.sessionMessageId;
+      const id = rawID ? Number(rawID) : NaN;
+      if (!Number.isInteger(id) || id <= 0) continue;
+      return {
+        anchor: { kind: "message" as const, id },
+        offsetPx: Math.max(0, containerTop - rect.top),
+        scrollTopFallback: el.scrollTop,
+      };
+    }
+    return null;
+  }, []);
+
+  const persistCurrentScrollPosition = useCallback((el: HTMLDivElement) => {
+    if (typeof window === "undefined" || !viewerScope) return;
+    const anchorPosition = activeThreadId ? findFirstVisibleMessageAnchor(el) : null;
+    if (anchorPosition) {
+      writeStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, anchorPosition, activeThreadId);
+      return;
+    }
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, el.scrollTop, activeThreadId);
+  }, [activeThreadId, findFirstVisibleMessageAnchor, sessionId, viewerScope]);
+
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
       clearTimeout(saveScrollTimerRef.current);
     }
     saveScrollTimerRef.current = setTimeout(() => {
-      persistScrollPosition(scrollTop);
+      const el = scrollRef.current;
+      if (el) {
+        persistCurrentScrollPosition(el);
+      } else {
+        persistScrollPosition(scrollTop);
+      }
       saveScrollTimerRef.current = null;
     }, SCROLL_POSITION_SAVE_DEBOUNCE_MS);
-  }, [persistScrollPosition]);
+  }, [persistCurrentScrollPosition, persistScrollPosition]);
+
+  const cancelPendingInitialAnchorRestore = useCallback(() => {
+    if (initialAnchorAppliedRef.current) return;
+    initialAnchorCancelledRef.current = true;
+    initialAnchorAppliedRef.current = true;
+  }, []);
 
   const syncScrollState = useCallback((el: HTMLDivElement) => {
     isNearBottomRef.current = isNearBottom(el);
@@ -2416,9 +2422,37 @@ function ChatPanel({
   }, []);
 
   const scrollToLiveEdge = useCallback(() => {
+    cancelPendingInitialAnchorRestore();
+    if (activeThreadId && hasNewerThreadMessages) {
+      setIsFetchingNewerThreadMessages(true);
+      void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+        position: "latest",
+        limit: THREAD_MESSAGE_WINDOW_LIMIT,
+      }).then((window) => {
+        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
+          threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null),
+          { pages: [window], pageParams: [undefined] },
+        );
+        setNewerThreadMessagePages([]);
+        requestAnimationFrame(scrollToLiveEdgePosition);
+      }).catch((error) => {
+        toast.error(error instanceof ApiError ? error.message : "Failed to load latest messages");
+      }).finally(() => {
+        setIsFetchingNewerThreadMessages(false);
+      });
+      return;
+    }
     scrollToLiveEdgePosition();
+    const el = scrollRef.current;
+    if (el) {
+      if (saveScrollTimerRef.current) {
+        clearTimeout(saveScrollTimerRef.current);
+        saveScrollTimerRef.current = null;
+      }
+      persistScrollPosition(el.scrollTop);
+    }
     setShowJumpToLatest(false);
-  }, [scrollToLiveEdgePosition]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, initialThreadAnchorPosition?.anchor.id, persistScrollPosition, queryClient, scrollToLiveEdgePosition, sessionId]);
 
   const focusTranscript = useCallback(() => {
     scrollRef.current?.focus({ preventScroll: true });
@@ -2466,6 +2500,21 @@ function ChatPanel({
     void threadMessagesQuery.fetchNextPage();
   }, [threadMessagesQuery]);
 
+  const loadNewerThreadMessages = useCallback(() => {
+    if (!activeThreadId || !nextNewerThreadCursor || isFetchingNewerThreadMessages) return;
+    setIsFetchingNewerThreadMessages(true);
+    void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+      after: nextNewerThreadCursor,
+      limit: THREAD_MESSAGE_WINDOW_LIMIT,
+    }).then((window) => {
+      setNewerThreadMessagePages((pages) => [...pages, window]);
+    }).catch((error) => {
+      toast.error(error instanceof ApiError ? error.message : "Failed to load newer messages");
+    }).finally(() => {
+      setIsFetchingNewerThreadMessages(false);
+    });
+  }, [activeThreadId, isFetchingNewerThreadMessages, nextNewerThreadCursor, sessionId]);
+
   useLayoutEffect(() => {
     const snapshot = olderMessagesPrependSnapshotRef.current;
     const el = scrollRef.current;
@@ -2480,6 +2529,7 @@ function ChatPanel({
     (_entry: TimelineEntry, index: number) =>
       ({
         "data-session-entry-index": index,
+        ...(_entry.kind === "message" ? { "data-session-message-id": _entry.data.id } : {}),
       }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>,
     [],
   );
@@ -2539,6 +2589,7 @@ function ChatPanel({
     queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
       return mergeSessionDetailStatusUpdate(existing, updated);
     });
+    applySessionDetailToSessionListCaches(queryClient, updated);
   }, [queryClient, sessionId]);
 
   const mergeThreadInboxUpdate = useCallback((event: ThreadInboxEvent) => {
@@ -2697,12 +2748,19 @@ function ChatPanel({
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (hasLoadedTimelineInputs) {
+      cancelPendingInitialAnchorRestore();
+    }
     syncScrollState(el);
+    if (activeThreadId && isNearBottom(el) && hasNewerThreadMessages && !isFetchingNewerThreadMessages) {
+      loadNewerThreadMessages();
+    }
     schedulePersistScrollPosition(el.scrollTop);
-  }, [schedulePersistScrollPosition, syncScrollState]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasLoadedTimelineInputs, hasNewerThreadMessages, isFetchingNewerThreadMessages, loadNewerThreadMessages, schedulePersistScrollPosition, syncScrollState]);
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
+    initialAnchorCancelledRef.current = false;
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -2718,13 +2776,37 @@ function ChatPanel({
   }, [persistScrollPosition]);
 
   useEffect(() => {
-    if (!hasLoadedTimelineInputs || initialAnchorAppliedRef.current || !viewerScope) return;
+    if (
+      !hasLoadedTimelineInputs ||
+      initialAnchorAppliedRef.current ||
+      initialAnchorCancelledRef.current ||
+      !viewerScope
+    ) return;
 
     const el = scrollRef.current;
     if (!el) return;
 
+    const firstThreadWindow = threadMessagesQuery.data?.pages[0];
+    if (
+      activeThreadId &&
+      initialThreadAnchorPosition &&
+      firstThreadWindow?.meta.anchor_found
+    ) {
+      const target = el.querySelector<HTMLElement>(`[data-session-message-id="${initialThreadAnchorPosition.anchor.id}"]`);
+      if (target) {
+        el.scrollTop = target.offsetTop + initialThreadAnchorPosition.offsetPx;
+        syncScrollState(el);
+        initialAnchorAppliedRef.current = true;
+        return;
+      }
+    }
+
+    const ignoreStoredScrollTop =
+      activeThreadId &&
+      !!initialThreadAnchorPosition &&
+      firstThreadWindow?.meta.anchor_found === false;
     const storedScrollTop =
-      typeof window === "undefined"
+      ignoreStoredScrollTop || typeof window === "undefined"
         ? null
         : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
     const anchor = resolveInitialSessionAnchor({
@@ -2762,7 +2844,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2848,6 +2930,24 @@ function ChatPanel({
               onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
               getEntryContainerProps={getEntryContainerProps}
             />
+            {activeThreadId && hasNewerThreadMessages ? (
+              <div className="flex justify-center pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadNewerThreadMessages}
+                  disabled={isFetchingNewerThreadMessages}
+                >
+                  {isFetchingNewerThreadMessages ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowDown className="h-4 w-4" />
+                  )}
+                  Load newer
+                </Button>
+              </div>
+            ) : null}
           </>
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
@@ -3120,6 +3220,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
+      if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
@@ -3156,12 +3257,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
     [user],
   );
-  const session = data?.data;
-  usePageTitle(session ? sessionTitle(session) : null, "Session");
+  const rawSession = data?.data;
+  const isProvisionalSession = isProvisionalSessionDetail(rawSession);
+  const session = isProvisionalSession ? undefined : rawSession;
+  // Tab title from whatever payload is available — the provisional row's
+  // title matches what the user just clicked, so don't wait for the
+  // authoritative detail to label the tab.
+  usePageTitle(rawSession ? sessionTitle(rawSession) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
-    centerMode === "review" ||
-    detailTab === "changes"
+    !isProvisionalSession &&
+    (centerMode === "review" ||
+      detailTab === "changes")
   );
   const diffRevisionKey = useMemo(() => {
     if (!session) return null;
@@ -3257,6 +3364,40 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  // Warm the stored active thread's first message window in parallel with the
+  // session detail fetch. Without this, the messages request can't start
+  // until the detail payload arrives, the thread-selection effect runs, and
+  // ChatPanel mounts — a full extra round trip on every page open even
+  // though the server answers in single-digit milliseconds. The stored
+  // thread id (and, pre-auth, the cached viewer scope) is a hint: if it
+  // turns out stale, the normal resolution flow corrects the selection and
+  // this prefetch is just unused cache. ChatPanel's useInfiniteQuery shares
+  // the exact query key, so React Query dedupes against the in-flight fetch.
+  const didPrefetchThreadMessagesRef = useRef(false);
+  useEffect(() => {
+    if (didPrefetchThreadMessagesRef.current || typeof window === "undefined") return;
+    didPrefetchThreadMessagesRef.current = true;
+    const scope: SessionScrollViewerScope | null = user
+      ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id }
+      : readCachedViewerScope(window.localStorage);
+    if (!scope) return;
+    const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, scope);
+    if (!storedThreadId) return;
+    const anchor = readStoredSessionAnchorPosition(window.localStorage, id, scope, storedThreadId);
+    void queryClient.prefetchInfiniteQuery({
+      queryKey: threadMessageWindowQueryKey(id, storedThreadId, anchor?.anchor.id ?? null),
+      queryFn: () =>
+        api.sessions.getThreadMessageWindow(
+          id,
+          storedThreadId,
+          anchor
+            ? { position: "around", anchorMessageId: anchor.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+        ),
+      initialPageParam: undefined as string | undefined,
+    });
+  }, [id, queryClient, user]);
 
   // Full-screen diff viewer. The preference lives on the user settings
   // document so it sticks across sessions; mobile review already fills the
@@ -3586,6 +3727,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
@@ -3717,9 +3859,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (!pullRequestId) {
         throw new Error("Pull request not found");
       }
+      const body = activeThread?.id ? { thread_id: activeThread.id } : undefined;
       return action === "fix_tests"
-        ? api.pullRequests.fixTests(pullRequestId)
-        : api.pullRequests.resolveConflicts(pullRequestId);
+        ? api.pullRequests.fixTests(pullRequestId, body)
+        : api.pullRequests.resolveConflicts(pullRequestId, body);
     },
     onMutate: (action) => {
       setRepairActionError(null);
@@ -3734,6 +3877,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
         return;
+      }
+      if (response.data.thread_id && response.data.thread_id !== activeThreadId) {
+        setActiveThreadId(response.data.thread_id);
       }
       try {
         await queryClient.refetchQueries({ queryKey: repairHealthQueryKey, type: "active" });
@@ -3897,14 +4043,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [session?.id, session?.status, session?.title]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
-    if (id) {
+    if (session?.id) {
       api.sessions.recordView(id).then(() => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
       }).catch((err) => {
         console.error("failed to record session view", err);
       });
     }
-  }, [id, queryClient]);
+  }, [id, queryClient, session?.id]);
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
@@ -5112,8 +5258,27 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  if (isLoading) {
-    return <SessionDetailLoadingSkeleton />;
+  if (isLoading || (isProvisionalSession && !error)) {
+    // Metadata-first paint: the provisional row seeded by the sidebar (or a
+    // partially settled payload) already carries the title, status, and
+    // agent. Show those immediately and confine the shimmer to the parts we
+    // genuinely don't have yet, so opening a session never hides data the
+    // client already holds.
+    const provisionalStatus = rawSession ? getDisplayStatus(rawSession.status) : null;
+    return (
+      <SessionDetailLoadingSkeleton
+        metadata={
+          rawSession && provisionalStatus
+            ? {
+                title: sessionTitle(rawSession),
+                statusLabel: provisionalStatus.label,
+                statusColor: provisionalStatus.color,
+                agentType: rawSession.agent_type,
+              }
+            : null
+        }
+      />
+    );
   }
 
   if (error || !session) {
@@ -5483,6 +5648,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <PRHealthBanner
                 health={prHealth}
                 currentSessionId={id}
+                currentThreadId={activeThread?.id ?? null}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
@@ -5492,7 +5658,13 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onMerge={handleMergeAction}
                 onQueueMergeWhenReady={handleQueueMergeWhenReady}
                 onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
+                onOpenRepairSession={(sessionId, threadId) => {
+                  if (sessionId === id && threadId) {
+                    setActiveThreadId(threadId);
+                    return;
+                  }
+                  router.push(`/sessions/${sessionId}`);
+                }}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
@@ -5799,7 +5971,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
-              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-warning/10 border-warning/30 text-warning">
                 <Clock className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
@@ -5810,7 +5982,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <RuntimeRecoveryNotice />
             )}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired && (
-              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-info/10 border-info/30 text-info">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
@@ -6044,7 +6216,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </SheetDescription>
             </SheetHeader>
             {composerIsSnapshotExpired ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-warning/10 border-warning/30 text-warning">
                 <Clock className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
@@ -6055,7 +6227,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <RuntimeRecoveryNotice border="border-b" />
             ) : null}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-info/10 border-info/30 text-info">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.

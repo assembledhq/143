@@ -376,7 +376,7 @@ describe('ProjectSidebar', () => {
     await screen.findByText('Test Project');
 
     const selectedLink = screen.getByText('Test Project').closest('a');
-    expect(selectedLink?.className).toContain('bg-background');
+    expect(selectedLink?.className).toContain('bg-card');
     expect(selectedLink?.className).toContain('shadow-sm');
     expect(selectedLink?.className).toContain('border');
   });

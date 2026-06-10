@@ -282,9 +282,10 @@ type CircleCIConfig struct {
 }
 
 // MezmoConfig stores a Mezmo service key plus optional base URL (for
-// self-hosted/enterprise endpoints, defaults to https://api.mezmo.com) and an
-// optional dataset used to scope log queries. This is the persisted credential
-// shape; the runtime provider config lives in
+// self-hosted/enterprise endpoints, defaults to https://api.mezmo.com). Dataset
+// is retained only to parse older saved credentials; new connections reject it
+// because Mezmo's documented v2 export API does not support dataset scoping.
+// This is the persisted credential shape; the runtime provider config lives in
 // internal/services/integration.MezmoConfig, mirroring the CircleCI split.
 type MezmoConfig struct {
 	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field

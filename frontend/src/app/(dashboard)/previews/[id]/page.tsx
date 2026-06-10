@@ -18,6 +18,7 @@ import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+  PREVIEW_LAUNCH_COMPLETE_EVENT,
 } from "@/lib/preview-bootstrap";
 import { safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
@@ -35,6 +36,10 @@ export function PreviewLandingContent({ id }: { id: string }) {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const launchMode = searchParams.get("launch") === "1";
+  // Popup mode: this page was opened by the preview-domain control overlay,
+  // which stays put and waits for a launch-complete message instead of being
+  // navigated away from.
+  const popupMode = launchMode && searchParams.get("popup") === "1";
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bootstrappedPreviewIdRef = useRef<string | null>(null);
   const launchStartAttemptedRef = useRef<string | null>(null);
@@ -108,6 +113,17 @@ export function PreviewLandingContent({ id }: { id: string }) {
       if (event.origin !== previewOrigin) return;
       if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
         if (bootstrappedPreviewIdRef.current === activePreviewId) {
+          if (popupMode && window.opener) {
+            // Include the preview URL so an overlay served on an alias host
+            // (runtime instance ID vs stable target ID) can navigate to the
+            // host the session cookie was actually minted for.
+            (window.opener as Window).postMessage(
+              { type: PREVIEW_LAUNCH_COMPLETE_EVENT, url: previewUrl },
+              previewOrigin,
+            );
+            window.close();
+            return;
+          }
           window.location.href = previewUrl;
         }
         return;
@@ -133,7 +149,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [bootstrapPreview, isReady, launchMode, preview?.preview_id, previewOrigin, previewUrl]);
+  }, [bootstrapPreview, isReady, launchMode, popupMode, preview?.preview_id, previewOrigin, previewUrl]);
 
   if (launchMode) {
     const launchError =
@@ -265,11 +281,11 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
                 {/* Alerts */}
                 {preview.new_commits_available ? (
-                  <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                  <div className="flex items-start gap-3 rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <div className="min-w-0">
                       <p className="font-medium">New commits available</p>
-                      <p className="break-all text-amber-800 dark:text-amber-300">
+                      <p className="break-all text-warning/80">
                         Latest: {preview.latest_commit_sha?.slice(0, 12) ?? "unknown"}
                       </p>
                     </div>

@@ -934,6 +934,88 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(routerPush).not.toHaveBeenCalled();
   });
 
+  it('starts PR repair actions in the currently active thread', async () => {
+    const threadedSession: Session = {
+      ...mockSessions[0],
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: mockSessions[0].id,
+          org_id: 'org-1',
+          agent_type: 'claude_code',
+          label: 'Main',
+          status: 'completed',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-review',
+          session_id: mockSessions[0].id,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Review',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:01:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+    let repairBody: unknown;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadedSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
+        return HttpResponse.json({
+          data: [],
+          meta: { has_older: false, thread_status: 'idle' },
+        });
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', async ({ request }) => {
+        repairBody = await request.json();
+        return HttpResponse.json({
+          data: {
+            session_id: threadedSession.id,
+            thread_id: 'thread-review',
+            mode: 'reconstructed',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 1,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={threadedSession.id} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Review/ }));
+    await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
+
+    await waitFor(() => {
+      expect(repairBody).toEqual({ thread_id: 'thread-review' });
+    });
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
   it('keeps the repair CTA suppressed while the original-session repair starts', async () => {
     let repairRequested = false;
     server.use(

@@ -727,7 +727,6 @@ function IntegrationDetailSheet({
   onReplaceNotionToken,
   onReplaceCircleCIToken,
   onReplaceMezmoCredentials,
-  mezmoDataset,
   mezmoBaseURL,
 }: {
   provider: IntegrationKey | null;
@@ -746,7 +745,6 @@ function IntegrationDetailSheet({
   onReplaceNotionToken: () => void;
   onReplaceCircleCIToken: () => void;
   onReplaceMezmoCredentials: () => void;
-  mezmoDataset?: string;
   mezmoBaseURL?: string;
 }) {
   if (!provider) return null;
@@ -816,11 +814,9 @@ function IntegrationDetailSheet({
               <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
                 <dt className="text-muted-foreground">Base URL</dt>
                 <dd className="truncate">{mezmoBaseURL || "https://api.mezmo.com (default)"}</dd>
-                <dt className="text-muted-foreground">Dataset</dt>
-                <dd className="truncate">{mezmoDataset || "All datasets"}</dd>
               </dl>
               <p className="text-sm text-muted-foreground">
-                Replace the Mezmo service key, base URL, or dataset used for production log queries.
+                Replace the Mezmo service key or base URL used for production log queries.
               </p>
               <Button size="sm" variant="outline" onClick={onReplaceMezmoCredentials}>Replace credentials</Button>
             </div>
@@ -1007,8 +1003,8 @@ export default function IntegrationsPage() {
   const [mezmoDialogOpen, setMezmoDialogOpen] = useState(false);
   const [mezmoError, setMezmoError] = useState<string | null>(null);
   const mezmoConnectMutation = useMutation({
-    mutationFn: ({ apiKey, baseUrl, dataset }: { apiKey: string; baseUrl: string; dataset: string }) =>
-      api.integrations.connectMezmo(apiKey, baseUrl, dataset),
+    mutationFn: ({ apiKey, baseUrl }: { apiKey: string; baseUrl: string }) =>
+      api.integrations.connectMezmo(apiKey, baseUrl),
     onSuccess: () => {
       setMezmoDialogOpen(false);
       setMezmoError(null);
@@ -1089,7 +1085,7 @@ export default function IntegrationsPage() {
         mezmoConnected={Boolean(mezmoIntegration)}
         mezmoLoading={mezmoConnectMutation.isPending}
         onConnectGitHub={() => api.integrations.loginGitHub()}
-        onConnectSentry={() => api.auth.loginSentry()}
+        onConnectSentry={() => api.integrations.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
         onConnectSlack={() => api.integrations.loginSlack()}
         onConnectNotion={() => {
@@ -1121,7 +1117,7 @@ export default function IntegrationsPage() {
           ) : undefined,
           mezmo: mezmoIntegration ? (
             <p className="mt-1.5 text-xs text-muted-foreground">
-              {mezmoIntegration.mezmo_dataset ? `Dataset: ${mezmoIntegration.mezmo_dataset}` : "Production log queries are enabled"}
+              Production log queries are enabled
             </p>
           ) : undefined,
         }}
@@ -1161,7 +1157,6 @@ export default function IntegrationsPage() {
           setMezmoError(null);
           setMezmoDialogOpen(true);
         }}
-        mezmoDataset={mezmoIntegration?.mezmo_dataset}
         mezmoBaseURL={mezmoIntegration?.mezmo_base_url}
       />
 
@@ -1257,8 +1252,7 @@ export default function IntegrationsPage() {
             >
               Open Mezmo
             </a>
-            . Base URL and dataset are optional; leave them blank to use the
-            default Mezmo search scope.
+            . Base URL is optional; leave it blank to use the default Mezmo API host.
           </>
         }
         fields={[
@@ -1274,22 +1268,11 @@ export default function IntegrationsPage() {
               content: "Only needed for self-hosted or regional Mezmo deployments. Leave blank to use https://api.mezmo.com.",
             },
           },
-          {
-            id: "dataset",
-            label: "Dataset (optional)",
-            placeholder: "e.g. production",
-            type: "text",
-            optional: true,
-            tooltip: {
-              ariaLabel: "Where to find the Mezmo dataset",
-              content: "In Mezmo Log Analysis, open Search, then use the dataset selector near the top of the log viewer. Copy that selected dataset name exactly. Leave blank to query across the default Mezmo scope.",
-            },
-          },
         ]}
         submitting={mezmoConnectMutation.isPending}
         error={mezmoError}
         onSubmit={(values) =>
-          mezmoConnectMutation.mutate({ apiKey: values.apiKey, baseUrl: values.baseUrl, dataset: values.dataset })
+          mezmoConnectMutation.mutate({ apiKey: values.apiKey, baseUrl: values.baseUrl })
         }
       />
     </PageContainer>

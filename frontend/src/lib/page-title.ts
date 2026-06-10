@@ -45,6 +45,7 @@ const PAGE_TITLE_RULES: PageTitleRule[] = [
   { pattern: /^\/settings\/integrations$/, title: "Integration settings" },
   { pattern: /^\/settings\/integrations\/github\/setup$/, title: "GitHub setup" },
   { pattern: /^\/settings\/llm$/, title: "LLM settings" },
+  { pattern: /^\/settings\/runtime$/, title: "Runtime settings" },
   { pattern: /^\/settings\/team$/, title: "Team settings" },
   { pattern: /^\/settings\/usage$/, title: "Usage" },
 ];

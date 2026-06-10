@@ -20,11 +20,11 @@ export const taskStatusConfig: Record<
   { color: string; label: string; icon: typeof Circle }
 > = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending", icon: Circle },
-  blocked: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Blocked", icon: Pause },
+  blocked: { color: "bg-warning/10 text-warning", label: "Blocked", icon: Pause },
   delegated: { color: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400", label: "Delegated", icon: ArrowUpRight },
-  running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running", icon: Loader2 },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed", icon: CheckCircle2 },
-  failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed", icon: AlertCircle },
+  running: { color: "bg-info/10 text-info", label: "Running", icon: Loader2 },
+  completed: { color: "bg-success/10 text-success", label: "Completed", icon: CheckCircle2 },
+  failed: { color: "bg-destructive/10 text-destructive", label: "Failed", icon: AlertCircle },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped", icon: Ban },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled", icon: Ban },
 };

@@ -88,6 +88,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"users", "where github_id"},                                    // pre-auth lookup by GitHub ID
 		{"users", "where lower(email)"},                                 // pre-auth lookup by email (case-insensitive)
 		{"users", "where google_id"},                                    // pre-auth lookup by Google ID
+		{"users", "set email_verified_at"},                              // MarkEmailVerified: user-scoped identity write by globally unique user id + provider-asserted email
 		// GetByIDGlobal: the auth middleware loads user identity *before* the
 		// active-org is resolved (multi-org users; org comes from the session
 		// hint or X-Active-Org-ID header against organization_memberships, not
