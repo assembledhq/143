@@ -362,7 +362,8 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
@@ -420,7 +421,8 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
@@ -472,7 +474,8 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),

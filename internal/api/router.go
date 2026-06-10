@@ -108,6 +108,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	evalRunStore := db.NewEvalRunStore(pool)
 	evalBatchStore := db.NewEvalBatchStore(pool)
 	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
+	evalDatasetStore := db.NewEvalDatasetStore(pool)
+	evalReleaseGateStore := db.NewEvalReleaseGateStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	previewStore := db.NewPreviewStore(pool)
 	previewAPITokenStore := db.NewPreviewAPITokenStore(pool)
@@ -598,6 +600,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmDocumentHandler.SetAuditEmitter(auditEmitter)
 	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, evalBootstrapStore, jobStore, pool)
 	evalHandler.SetAuditEmitter(auditEmitter)
+	evalHandler.SetSessionStore(sessionStore)
+	evalHandler.SetDatasetStore(evalDatasetStore)
+	evalHandler.SetReleaseGateStore(evalReleaseGateStore)
+	evalHandler.SetRepositoryStore(repoStore)
+	if prService != nil && sandboxProvider != nil {
+		evalHandler.SetCandidateValidator(handlers.NewEvalCandidateValidator(repoStore, prService, sandboxProvider))
+	}
 	// Redis-backed pub/sub for the eval batch + bootstrap detail SSEs. nil
 	// when redisClient is nil — handlers will return 503 and the frontend
 	// will continue to fall back to its existing polling path.
@@ -844,11 +853,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
+		internalEvalHandler := handlers.NewInternalEvalHandler(evalBootstrapStore, sessionStore, cfg.SessionSecret, logger)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
 			r.Post("/projects/propose", internalProjectHandler.Propose)
+			r.Post("/eval/candidates", internalEvalHandler.AddCandidate)
+			r.Post("/evals/bootstrap/{bootstrap_run_id}/candidates", internalEvalHandler.AddCandidate)
 			r.Get("/session-tabs", internalSessionTabsHandler.List)
 			r.Post("/session-tabs", internalSessionTabsHandler.Create)
 			r.Get("/session-tabs/{thread_id}", internalSessionTabsHandler.Get)
@@ -1256,6 +1268,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
 				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
+				r.Get("/api/v1/evals/datasets", evalHandler.ListDatasets)
+				r.Get("/api/v1/evals/release-gates", evalHandler.ListReleaseGates)
 
 				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
 				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
@@ -1446,8 +1460,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
 				r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
 				r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
+				r.Post("/api/v1/evals/compare", evalHandler.StartCompare)
 				r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
 				r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
+				r.Patch("/api/v1/evals/bootstrap/candidates/{candidate_id}", evalHandler.ReviewBootstrapCandidate)
+				r.Post("/api/v1/evals/datasets", evalHandler.CreateDataset)
+				r.Post("/api/v1/evals/datasets/{datasetId}/tasks", evalHandler.AddDatasetTask)
+				r.Post("/api/v1/evals/release-gates", evalHandler.UpsertReleaseGate)
 			})
 		})
 	})

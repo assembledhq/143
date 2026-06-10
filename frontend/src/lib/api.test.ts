@@ -1706,6 +1706,25 @@ describe('api client', () => {
       });
       expect(result.data).toHaveLength(1);
     });
+
+    it('reviews a bootstrap candidate', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.patch('/api/v1/evals/bootstrap/candidates/cand-1', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { candidate_id: 'cand-1', status: 'needs_revision' } });
+        }),
+      );
+      const result = await api.evals.reviewBootstrapCandidate('cand-1', {
+        status: 'needs_revision',
+        rejection_reason: 'Needs deterministic scoring.',
+      });
+      expect(capturedBody).toEqual({
+        status: 'needs_revision',
+        rejection_reason: 'Needs deterministic scoring.',
+      });
+      expect(result.data.status).toBe('needs_revision');
+    });
   });
 
   describe('repository preview secret bundles', () => {

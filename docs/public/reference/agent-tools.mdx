@@ -51,6 +51,7 @@ Only configured namespaces appear in `143-tools --help`.
 | `issue` | `create` |
 | `pr` | `create` |
 | `project` | `propose` |
+| `eval` | `add` |
 
 ## Error tracking
 
@@ -498,4 +499,29 @@ Common use: turn repeated findings across issues into a reviewed project proposa
 
 ```bash
 143-tools project propose --repository_id 00000000-0000-0000-0000-000000000000 --title "Harden webhook delivery" --goal "Retries preserve idempotency and surface permanent failures" --reasoning "Recent production errors share the same delivery path."
+```
+
+### `eval add`
+
+Add a candidate eval task from a session launched by the eval settings bootstrap flow. This namespace is not exposed to ordinary coding sessions.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--pr_number` | number | Yes | Source pull request number. |
+| `--pr_title` | string | Yes | Source pull request title. |
+| `--base_commit_sha` | string | Yes | Commit SHA before the fix. |
+| `--solution_commit_sha` | string | Yes | Commit SHA containing the fix. |
+| `--solution_diff` | string | Yes | Diff that solved the issue. |
+| `--issue_description` | string | Yes | Reproducible eval task prompt. |
+| `--scoring_criteria` | string | Yes | JSON array of scoring criteria. |
+| `--complexity` | `trivial` \| `simple` \| `moderate` \| `complex` | Yes | Candidate task complexity. |
+| `--fitness_score` | number | Yes | Candidate quality score from `0` to `1`. |
+| `--fitness_reasoning` | string | Yes | Why the candidate is useful for regression protection. |
+| `--evidence` | string | No | Optional JSON evidence gathered while selecting the candidate. |
+| `--warnings` | comma-separated strings | No | Reviewer warnings about ambiguity or setup risk. |
+
+Common use: while bootstrapping evals, record a PR-derived coding task that should become a reviewed eval candidate.
+
+```bash
+143-tools eval add --pr_number 42 --pr_title "Fix checkout timeout" --base_commit_sha abc123 --solution_commit_sha def456 --solution_diff "$(git show --format= --patch def456)" --issue_description "Reproduce and fix the checkout timeout." --scoring_criteria '[{"name":"fixes-timeout","grader_type":"llm_judge","description":"The checkout path no longer times out."}]' --complexity moderate --fitness_score 0.9 --fitness_reasoning "Real regression with clear before/after behavior."
 ```

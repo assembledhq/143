@@ -53,6 +53,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 
 		// Internal API routes — use claims.OrgID from internal JWT, not middleware.
 		"InternalIssueHandler.Create":            "internal API, uses claims.OrgID",
+		"InternalEvalHandler.AddCandidate":       "internal sandbox API, uses claims.OrgID and requires eval_bootstrap session origin",
 		"InternalPullRequestHandler.Create":      "internal API, uses claims.OrgID",
 		"InternalProjectHandler.Propose":         "internal API, uses claims.OrgID",
 		"InternalSessionTabsHandler.List":        "internal sandbox API, uses claims.OrgID and claims.SessionID",
