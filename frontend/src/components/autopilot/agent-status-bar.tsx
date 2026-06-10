@@ -7,8 +7,8 @@ import type { PMStatus } from "@/lib/types";
 
 export const agentStatusDotColors: Record<string, string> = {
   running: "bg-primary",
-  completed: "bg-green-500",
-  failed: "bg-red-500",
+  completed: "bg-success",
+  failed: "bg-destructive",
   idle: "bg-muted-foreground/30",
 };
 
@@ -63,7 +63,7 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
 
       <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
         isRunning ? "bg-primary/10 text-primary shadow-[var(--glow-primary-sm)]"
-        : agentStatus === "completed" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+        : agentStatus === "completed" ? "bg-success/10 text-success"
         : agentStatus === "failed" ? "bg-destructive/10 text-destructive"
         : "bg-muted text-muted-foreground"
       }`}>

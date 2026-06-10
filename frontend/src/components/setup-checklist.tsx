@@ -44,7 +44,7 @@ function StepSection({
         <div
           className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ring-1 ${
             completed
-              ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 dark:text-emerald-400"
+              ? "bg-success/10 text-success ring-success/20"
               : "bg-muted text-muted-foreground ring-border/50"
           }`}
         >

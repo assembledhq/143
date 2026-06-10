@@ -503,7 +503,7 @@ describe('SessionSidebar', () => {
     const selectedRow = selectedLink.parentElement;
 
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/20', 'bg-background', 'shadow-sm');
+    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/25', 'bg-card', 'shadow-sm');
 
     fireEvent.click(selectedRow!);
 
@@ -1056,7 +1056,7 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
     expect(selectedRow?.className).toContain('ring-primary/10');
     expect(selectedRow?.className).toContain('shadow-sm');
@@ -1078,7 +1078,7 @@ describe('SessionSidebar', () => {
     const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
 
     expect(selectedRow).toHaveClass('border', 'p-1');
-    expect(selectedRow).toHaveClass('border-primary/20');
+    expect(selectedRow).toHaveClass('border-primary/25');
     expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
   });
 
@@ -1101,7 +1101,7 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
     expect(selectedRow?.className).toContain('ring-primary/10');
     expect(selectedRow?.className).toContain('shadow-sm');

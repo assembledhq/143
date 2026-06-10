@@ -14,6 +14,7 @@ import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { SwipeActionRow } from "@/components/swipe-action-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Kbd } from "@/components/ui/kbd";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useFilterSuffix, usePeopleFilter } from "@/hooks/use-people-filter";
@@ -40,10 +41,10 @@ const statusConfig: Record<string, { dot: string; label: string }> = {
   pending: { dot: "bg-muted-foreground/50", label: "Pending" },
   running: { dot: "bg-primary", label: "Running" },
   idle: { dot: "bg-primary", label: "Idle" },
-  awaiting_input: { dot: "bg-amber-500", label: "Awaiting input" },
-  needs_human_guidance: { dot: "bg-orange-500", label: "Needs guidance" },
-  completed: { dot: "bg-emerald-500", label: "Completed" },
-  pr_created: { dot: "bg-violet-500", label: "PR created" },
+  awaiting_input: { dot: "bg-warning", label: "Awaiting input" },
+  needs_human_guidance: { dot: "bg-attention", label: "Needs guidance" },
+  completed: { dot: "bg-success", label: "Completed" },
+  pr_created: { dot: prMergedAccent.dot, label: "PR created" },
   failed: { dot: "bg-destructive", label: "Failed" },
   cancelled: { dot: "bg-muted-foreground/50", label: "Cancelled" },
   skipped: { dot: "bg-muted-foreground/30", label: "Skipped" },
@@ -57,7 +58,7 @@ const filterTabs = [
 
 const newSessionOptionId = "new-session";
 const sessionSidebarOptionFrameClass = "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150";
-const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-muted/30 md:shadow-none";
+const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-card px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-transparent md:shadow-none";
 
 function SessionSidebarOptionFrame({
   id,
@@ -177,7 +178,7 @@ function PRStatusBadge({ prSummary }: { prSummary?: SessionListItem["pr_summary"
     dotColor = "bg-muted-foreground";
     label = "Closed";
   } else if (prSummary.ci_status === "success") {
-    dotColor = "bg-emerald-500";
+    dotColor = "bg-success";
     label = "CI passed";
   } else if (prSummary.ci_status === "failure") {
     dotColor = "bg-destructive";
@@ -278,7 +279,7 @@ function CurrentSessionContextRow({
       ariaLabel={title}
       ariaSelected={ariaSelected}
       optionRef={optionRef}
-      className="border-primary/20 bg-background shadow-sm ring-1 ring-primary/10"
+      className="border-primary/25 bg-card shadow-sm ring-1 ring-primary/10"
     >
       <SessionSidebarRowSurface
         href={href}
@@ -287,7 +288,7 @@ function CurrentSessionContextRow({
       >
         <span
           aria-hidden="true"
-          className="absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/55 transition-colors duration-150"
+          className="absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary transition-colors duration-150"
         />
         <div className="flex items-start gap-2.5 min-w-0">
           <div className="mt-1.5 shrink-0">
@@ -302,7 +303,7 @@ function CurrentSessionContextRow({
               <p className="text-xs font-medium text-foreground truncate leading-snug">
                 {title}
               </p>
-              <span className="shrink-0 rounded-md border border-primary/20 bg-background/70 px-1.5 py-0.5 text-xs font-medium text-primary">
+              <span className="shrink-0 rounded-md border border-primary/20 bg-card/70 px-1.5 py-0.5 text-xs font-medium text-primary">
                 Current
               </span>
             </div>
@@ -857,7 +858,7 @@ export function SessionSidebar() {
   }, [filterSuffix, focusSearch, moveActiveSession, router]);
 
   return (
-    <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
+    <div className="w-full h-full border-r border-border bg-panel flex flex-col">
       {/* Header */}
       <div className="px-4 pt-3 pb-3 space-y-3">
 
@@ -876,8 +877,9 @@ export function SessionSidebar() {
                   e.currentTarget.blur();
                 }
               }}
-              className="h-8 pl-8 text-xs"
+              className="h-8 pl-8 pr-8 text-xs"
             />
+            <Kbd className="absolute right-2 top-1/2 hidden -translate-y-1/2 md:inline-flex">/</Kbd>
           </div>
           <PeopleFilter
             mode={mode}
@@ -894,10 +896,11 @@ export function SessionSidebar() {
           href={`/sessions/new${filterSuffix}`}
           onMouseEnter={() => prefetchRoute(`/sessions/new${filterSuffix}`)}
           onFocus={() => prefetchRoute(`/sessions/new${filterSuffix}`)}
-          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
+          className="relative flex items-center justify-center gap-2 w-full h-9 rounded-md bg-primary bg-[image:var(--gradient-primary)] text-xs font-medium text-white shadow-sm hover:bg-[image:var(--gradient-primary-hover)] hover:shadow-[var(--glow-primary-sm)] transition-all"
         >
           <Plus className="h-4 w-4" />
           New session
+          <Kbd variant="primary" className="absolute right-2 top-1/2 hidden -translate-y-1/2 md:inline-flex">N</Kbd>
         </Link>
 
         {/* Filter tabs */}
@@ -954,7 +957,7 @@ export function SessionSidebar() {
               id={`session-sidebar-option-${newSessionOptionId}`}
               ariaLabel="New session draft"
               ariaSelected={!currentActiveSessionId}
-              className={!currentActiveSessionId ? "border-primary/20 bg-background shadow-sm ring-1 ring-primary/10" : undefined}
+              className={!currentActiveSessionId ? "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10" : undefined}
             >
               <SessionSidebarRowSurface
                 href={`/sessions/new${filterSuffix}`}
@@ -962,7 +965,7 @@ export function SessionSidebar() {
                 className={
                   !currentActiveSessionId
                     ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                    : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                    : "hover:border-border/60 hover:bg-card md:hover:border-transparent md:hover:bg-muted/50"
                 }
               >
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -1068,8 +1071,8 @@ export function SessionSidebar() {
                 onMouseDown={() => seedSessionDetailCache(session)}
                 className={cn(
                   "cursor-pointer",
-                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
-                  isSelected && "border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
+                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-muted/40 ring-1 ring-ring/20",
+                  isSelected && "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10",
                 )}
                 onClick={(event) => {
                   // Clicks on the frame padding (outside the inner link surface)
@@ -1091,14 +1094,14 @@ export function SessionSidebar() {
                   className={
                     isSelected
                       ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                      : "hover:border-border/60 hover:bg-background md:hover:border-transparent md:hover:bg-background/60"
+                      : "hover:border-border/60 hover:bg-card md:hover:border-transparent md:hover:bg-muted/50"
                   }
                 >
                   <span
                     aria-hidden="true"
                     className={cn(
                       "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
-                      isSelected && "bg-primary/55",
+                      isSelected && "bg-primary",
                     )}
                   />
                   <div className="flex items-start gap-2.5 min-w-0">

@@ -165,17 +165,17 @@ const ErrorEntry = memo(function ErrorEntry({ log }: { log: SessionLog }) {
   const displayMessage = !isLong || expanded ? log.message : log.message.slice(0, 200) + "...";
 
   return (
-    <div className="mx-2 min-w-0 max-w-full rounded-md border border-red-200 dark:border-red-900/50 bg-red-500/5 px-3 py-2">
+    <div className="mx-2 min-w-0 max-w-full rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
       <div className="flex items-start gap-2 min-w-0">
-        <AlertTriangle className="h-3.5 w-3.5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+        <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
-          <pre className="text-xs font-mono whitespace-pre-wrap break-all text-red-700 dark:text-red-400 max-w-full">
+          <pre className="text-xs font-mono whitespace-pre-wrap break-all text-destructive max-w-full">
             {displayMessage}
           </pre>
           {isLong && (
             <button
               onClick={() => setExpanded(!expanded)}
-              className="text-xs text-red-600 dark:text-red-400 hover:underline mt-1"
+              className="text-xs text-destructive hover:underline mt-1"
             >
               {expanded ? "Show less" : "Show more"}
             </button>
