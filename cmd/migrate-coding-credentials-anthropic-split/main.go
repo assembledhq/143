@@ -250,7 +250,7 @@ func runBatch(
 	// be skipped (operator manually advances the cursor and re-runs) without
 	// rescanning earlier rows.
 	// Only active config versions are split. Inactive rows are immutable
-	// version history under the insert-only schema (migration 000164) and
+	// version history under the insert-only schema (migration 000165) and
 	// must keep the (provider, config) pair they were written with. The
 	// active filter also keeps the (created_at, id) keyset unique — created_at
 	// is carried across versions of the same logical id.

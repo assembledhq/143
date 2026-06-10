@@ -1209,7 +1209,7 @@ func (s *CodingCredentialStore) JanitorDeletePendingAuthOlderThan(ctx context.Co
 //
 // The versioned store always writes config and runtime rows in one
 // transaction, so this is a no-op in steady state. The gap it heals is the
-// rolling-deploy window after migration 000164: pre-versioning code inserts
+// rolling-deploy window after migration 000165: pre-versioning code inserts
 // config rows only (credential create, pending-auth insert, OAuth promote),
 // and those credentials would otherwise be invisible to every versioned read
 // and mutation path forever. Runs at boot next to the migration sentinel;
