@@ -129,6 +129,41 @@ func TestPreviewWildcardTLSUsesCloudflareDNSChallenge(t *testing.T) {
 	require.Contains(t, string(provisionScript), "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s", "fresh app provisioning should project the frontend preview-origin fallback into /opt/143/.env on the app host")
 }
 
+// TestCLIDistributionRoutesProxyToAPI pins the Caddyfile rules that send the
+// 143-tools installer and download routes to the Go server instead of the
+// Next.js frontend fallthrough. Without these, `curl https://143.com/install.sh`
+// would return the frontend's 404 page — the install one-liner depends on it.
+func TestCLIDistributionRoutesProxyToAPI(t *testing.T) {
+	t.Parallel()
+
+	caddyfile, err := os.ReadFile("../deploy/Caddyfile")
+	require.NoError(t, err, "test should read the Caddyfile")
+	caddyText := string(caddyfile)
+
+	// Anchor to the line-start occurrence: the www. and *.preview. site
+	// headers contain "{$DOMAIN:143.dev}" as a substring and appear first.
+	mainStart := strings.Index(caddyText, "\n{$DOMAIN:143.dev} {")
+	require.NotEqual(t, -1, mainStart, "Caddyfile should contain the main site block")
+	mainBlock := extractCaddySiteBlock(t, caddyText[mainStart:], "{$DOMAIN:143.dev}")
+	require.Contains(t, mainBlock, "@cli_dist path /install.sh /install/* /download/*",
+		"main site block should match the CLI installer and download paths")
+	require.Contains(t, mainBlock, "handle @cli_dist",
+		"main site block should have an explicit handle for CLI distribution routes")
+
+	cliDistIndex := strings.Index(mainBlock, "handle @cli_dist")
+	apiIndex := strings.Index(mainBlock, "handle /api/*")
+	frontendFallthroughIndex := strings.LastIndex(mainBlock, "\thandle {")
+	require.NotEqual(t, -1, cliDistIndex, "handle @cli_dist must exist in the main site block")
+	require.NotEqual(t, -1, apiIndex, "handle /api/* must exist in the main site block")
+	require.NotEqual(t, -1, frontendFallthroughIndex, "frontend fallthrough handle must exist in the main site block")
+	require.Less(t, cliDistIndex, frontendFallthroughIndex,
+		"CLI distribution handle must appear before the frontend fallthrough, or Caddy routes installs to Next.js")
+
+	cliDistBlock := mainBlock[cliDistIndex:frontendFallthroughIndex]
+	require.Contains(t, cliDistBlock, "name api", "CLI distribution routes must proxy to the api upstream")
+	require.Contains(t, cliDistBlock, "port 8080", "CLI distribution routes must target the main API port")
+}
+
 func TestPreviewWildcardProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
 	t.Parallel()
 

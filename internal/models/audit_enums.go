@@ -126,6 +126,14 @@ const (
 	AuditActionAuthLogout   AuditAction = "auth.logout"
 	AuditActionAuthRegister AuditAction = "auth.register"
 
+	// CLI auth + local agent gateway actions
+	AuditActionAuthCLILogin        AuditAction = "auth.cli_login"
+	AuditActionAuthCLILogout       AuditAction = "auth.cli_logout"
+	AuditActionOrgJoinTokenCreated AuditAction = "org.join_token_created" // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenRevoked AuditAction = "org.join_token_revoked" // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenUsed    AuditAction = "org.join_token_used"    // #nosec G101 -- audit action name
+	AuditActionCLIToolInvoked      AuditAction = "cli.tool_invoked"
+
 	// Eval actions
 	AuditActionEvalTaskCreated  AuditAction = "eval_task.created"
 	AuditActionEvalTaskUpdated  AuditAction = "eval_task.updated"
@@ -175,6 +183,9 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
+		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
+		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
+		AuditActionCLIToolInvoked,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
 		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted,
 		AuditActionAPIClientCreated, AuditActionAPIClientUpdated, AuditActionAPIClientDisabled,
@@ -211,7 +222,10 @@ const (
 	AuditResourceOrganization         AuditResourceType = "organization"
 	AuditResourcePreviewSecretBundle  AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
 	AuditResourceAPIClient            AuditResourceType = "api_client"
-	AuditResourceAPIToken             AuditResourceType = "api_token" // #nosec G101 -- audit resource type
+	AuditResourceAPIToken             AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
+	AuditResourceCLIToken             AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
+	AuditResourceOrgJoinToken         AuditResourceType = "org_join_token" // #nosec G101 -- audit resource type
+	AuditResourceCLITool              AuditResourceType = "cli_tool"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -223,7 +237,8 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle,
-		AuditResourceAPIClient, AuditResourceAPIToken:
+		AuditResourceAPIClient, AuditResourceAPIToken,
+		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

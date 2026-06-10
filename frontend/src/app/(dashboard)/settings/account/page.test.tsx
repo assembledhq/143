@@ -383,9 +383,10 @@ describe("Account settings page", () => {
             codex: "high",
           },
         },
+        // Merge-patch endpoint: the queued save carries only the agent that
+        // changed while the first request was in flight.
         {
           coding_agent_reasoning_defaults: {
-            codex: "high",
             claude_code: "max",
           },
         },
@@ -449,9 +450,10 @@ describe("Account settings page", () => {
             codex: "high",
           },
         },
+        // Merge-patch endpoint: the queued save carries only the agent that
+        // changed while the first request was in flight.
         {
           coding_agent_reasoning_defaults: {
-            codex: "high",
             claude_code: "max",
           },
         },

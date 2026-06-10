@@ -56,6 +56,12 @@ type teamSessionStore interface {
 	DeleteByUserID(ctx context.Context, userID uuid.UUID) error
 }
 
+// teamCLITokenStore revokes a removed member's CLI credentials when they
+// have no memberships left.
+type teamCLITokenStore interface {
+	RevokeAllForUser(ctx context.Context, userID uuid.UUID) (int64, error)
+}
+
 // teamInvitationStore is the interface for invitation operations.
 type teamInvitationStore interface {
 	Create(ctx context.Context, inv *models.Invitation) error
@@ -102,6 +108,13 @@ type TeamHandler struct {
 	emailSender  email.Sender
 	frontendURL  string
 	audit        *db.AuditEmitter
+	cliTokens    teamCLITokenStore
+}
+
+// SetCLITokenStore wires CLI-token revocation into member removal. Optional;
+// when nil, removal skips the CLI-token sweep.
+func (h *TeamHandler) SetCLITokenStore(cliTokens teamCLITokenStore) {
+	h.cliTokens = cliTokens
 }
 
 // SetGitHubIntegration wires the integration store and GitHub App service so
@@ -341,6 +354,15 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	} else if remaining == 0 {
 		if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to delete sessions for removed user")
+		}
+		// CLI tokens resolve org access through memberships, so they are
+		// already inert for a zero-membership user — revoking them too cuts
+		// the credential entirely (and clears the user's "CLI sessions"
+		// list) instead of leaving live-looking tokens around.
+		if h.cliTokens != nil {
+			if _, err := h.cliTokens.RevokeAllForUser(r.Context(), memberID); err != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to revoke CLI tokens for removed user")
+			}
 		}
 	}
 

@@ -54,7 +54,7 @@ const (
 //	143-tools --help
 //	143-tools <namespace> --help
 //	143-tools <namespace> <action> --help
-func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr io.Writer) int {
+func RunCLI(ctx context.Context, tr ToolSource, args []string, stdout, stderr io.Writer) int {
 	commands := buildCLICommands(tr.ListTools())
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printCLIUsage(commands, stdout)
