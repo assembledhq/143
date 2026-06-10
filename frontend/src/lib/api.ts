@@ -2,8 +2,6 @@ import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
 import { normalizeAPIResponse } from './api-normalize';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
-const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
-const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
 
 export class ApiError extends Error {
   constructor(public code: string, message: string, public details?: unknown) {
@@ -178,12 +176,7 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/auth/google/login${qs ? `?${qs}` : ''}`;
     },
     loginSentry: () => {
-      const params = new URLSearchParams({
-        client_id: SENTRY_CLIENT_ID,
-        response_type: 'code',
-        redirect_uri: SENTRY_REDIRECT_URI,
-      });
-      window.location.href = `https://sentry.io/oauth/authorize/?${params.toString()}`;
+      window.location.href = `${API_BASE}/api/v1/integrations/sentry/login`;
     },
     loginEmail: (email: string, password: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
@@ -706,6 +699,9 @@ export const api = {
     },
     loginLinear: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
+    },
+    loginSentry: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/sentry/login`;
     },
     connectLinear: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/linear/connect'),
     loginSlack: () => {

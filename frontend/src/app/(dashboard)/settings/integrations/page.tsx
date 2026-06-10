@@ -1089,7 +1089,7 @@ export default function IntegrationsPage() {
         mezmoConnected={Boolean(mezmoIntegration)}
         mezmoLoading={mezmoConnectMutation.isPending}
         onConnectGitHub={() => api.integrations.loginGitHub()}
-        onConnectSentry={() => api.auth.loginSentry()}
+        onConnectSentry={() => api.integrations.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
         onConnectSlack={() => api.integrations.loginSlack()}
         onConnectNotion={() => {
