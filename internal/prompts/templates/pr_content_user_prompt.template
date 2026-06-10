@@ -10,6 +10,12 @@
 </agent_summary>
 
 {{ end }}
+{{ if .ThreadContext }}
+<session_threads>
+{{ .ThreadContext }}
+</session_threads>
+
+{{ end }}
 {{ if .SessionTitle }}
 <session_title>
 {{ .SessionTitle }}

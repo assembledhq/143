@@ -53,6 +53,10 @@ type PreviewStopper interface {
 	StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error
 }
 
+type sessionThreadLister interface {
+	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
+}
+
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
 	tokenProvider   *Service
@@ -66,6 +70,7 @@ type PRService struct {
 	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
 	sessionMessages *db.SessionMessageStore
+	sessionThreads  sessionThreadLister
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
@@ -166,6 +171,10 @@ func (s *PRService) SetUserCredentialStore(store *db.UserCredentialStore) {
 
 func (s *PRService) SetSessionMessageStore(store *db.SessionMessageStore) {
 	s.sessionMessages = store
+}
+
+func (s *PRService) SetSessionThreadStore(store sessionThreadLister) {
+	s.sessionThreads = store
 }
 
 // SetAppUserAuth wires the refresh-aware GitHub App user auth service used to
@@ -3052,6 +3061,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 	if run.ResultSummary != nil && *run.ResultSummary != "" {
 		userData.ResultSummary = *run.ResultSummary
 	}
+	userData.ThreadContext = s.buildPRThreadContext(ctx, run)
 	if run.Title != nil && *run.Title != "" {
 		userData.SessionTitle = *run.Title
 	}
@@ -3089,6 +3099,62 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 	}
 
 	return result, nil
+}
+
+func (s *PRService) buildPRThreadContext(ctx context.Context, run *models.Session) string {
+	if s.sessionThreads == nil || run == nil {
+		return ""
+	}
+	threads, err := s.sessionThreads.ListBySessionWithOptions(ctx, run.OrgID, run.ID, false)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load session threads for PR content")
+		return ""
+	}
+	// Pass the session-level summary so formatPRThreadContext can skip any thread
+	// whose summary is already surfaced in <agent_summary>, preventing the same
+	// content (typically the last-completing thread's summary) from appearing twice.
+	return formatPRThreadContext(threads, run.PrimaryThreadID, stringValue(run.ResultSummary))
+}
+
+func formatPRThreadContext(threads []models.SessionThread, primaryThreadID *uuid.UUID, sessionSummary string) string {
+	if len(threads) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	included := 0
+	for _, thread := range threads {
+		summary := strings.TrimSpace(stringValue(thread.ResultSummary))
+		if summary == "" {
+			continue
+		}
+		// Skip threads whose summary is identical to the session-level summary
+		// already included in <agent_summary> to avoid redundant context.
+		if sessionSummary != "" && summary == sessionSummary {
+			continue
+		}
+		included++
+		label := strings.TrimSpace(thread.Label)
+		if label == "" {
+			label = "Thread"
+		}
+		if primaryThreadID != nil && thread.ID == *primaryThreadID {
+			label += " (primary)"
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", label, truncateText(summary, 1200))
+		if included >= 8 {
+			break
+		}
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // prTitleRegexp and prBodyRegexp extract content from the XML tags the LLM returns.
