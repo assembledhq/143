@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
-import { act } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { NuqsTestingAdapter } from 'nuqs/adapters/testing';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { api } from '@/lib/api';
+import { queryKeys } from '@/lib/query-keys';
 import type { Issue, PullRequest, ReviewLoopFixMode, Session, SessionDiff, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionTimelineEntry, User, SingleResponse, ListResponse, ThreadMessageWindowResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
@@ -135,6 +138,20 @@ function getChatScroller(container: HTMLElement): HTMLDivElement {
   return scroller as HTMLDivElement;
 }
 
+function renderSessionDetailWithQueryClient(id: string, queryClient: QueryClient) {
+  function Harness() {
+    return (
+      <NuqsTestingAdapter>
+        <QueryClientProvider client={queryClient}>
+          <SessionDetailContent id={id} />
+        </QueryClientProvider>
+      </NuqsTestingAdapter>
+    );
+  }
+
+  return render(<Harness />);
+}
+
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
   default: ({ children, href, ...props }: React.ComponentProps<'a'> & { href: string }) => (
@@ -154,6 +171,46 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
     expect(screen.queryByText('Loading session...')).not.toBeInTheDocument();
+  });
+
+  it('refetches authoritative detail immediately when provisional detail is cached as fresh', async () => {
+    const sessionId = 'session-abcdef12-3456-7890';
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          staleTime: 30_000,
+          gcTime: Infinity,
+        },
+      },
+    });
+    queryClient.setQueryData(queryKeys.sessions.detail(sessionId), {
+      data: {
+        ...mockSessions[0],
+        result_summary: 'Provisional list title',
+        threads: [],
+      },
+    } satisfies SingleResponse<Session>);
+    let detailRequests = 0;
+    server.use(
+      http.get(`/api/v1/sessions/${sessionId}`, () => {
+        detailRequests += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            result_summary: 'Authoritative detail title',
+            threads: [],
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderSessionDetailWithQueryClient(sessionId, queryClient);
+
+    await waitFor(() => {
+      expect(detailRequests).toBe(1);
+    });
+    expect(await screen.findAllByText('Authoritative detail title')).not.toHaveLength(0);
   });
 
   it('renders session with result summary as title', async () => {

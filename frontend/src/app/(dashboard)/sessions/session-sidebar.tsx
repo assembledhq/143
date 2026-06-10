@@ -5,7 +5,7 @@ import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandler, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandler, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type MouseEventHandler, type ReactNode } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -66,6 +66,7 @@ function SessionSidebarOptionFrame({
   children,
   optionRef,
   onClick,
+  onMouseDown,
 }: {
   id: string;
   ariaLabel?: string;
@@ -74,6 +75,7 @@ function SessionSidebarOptionFrame({
   children: ReactNode;
   optionRef?: (node: HTMLDivElement | null) => void;
   onClick?: MouseEventHandler<HTMLDivElement>;
+  onMouseDown?: MouseEventHandler<HTMLDivElement>;
 }) {
   return (
     <div
@@ -85,6 +87,7 @@ function SessionSidebarOptionFrame({
       data-active={ariaSelected ? "true" : undefined}
       className={cn(sessionSidebarOptionFrameClass, className)}
       onClick={onClick}
+      onMouseDown={onMouseDown}
     >
       {children}
     </div>
@@ -98,6 +101,7 @@ function SessionSidebarRowSurface({
   onClick,
   onFocus,
   onMouseEnter,
+  onMouseDown,
   children,
 }: {
   href?: string;
@@ -106,6 +110,7 @@ function SessionSidebarRowSurface({
   onClick?: MouseEventHandler<HTMLAnchorElement>;
   onFocus?: FocusEventHandler<HTMLAnchorElement>;
   onMouseEnter?: MouseEventHandler<HTMLAnchorElement>;
+  onMouseDown?: MouseEventHandler<HTMLAnchorElement>;
   children: ReactNode;
 }) {
   const surfaceClassName = cn(sessionSidebarLinkSurfaceClass, className);
@@ -129,6 +134,7 @@ function SessionSidebarRowSurface({
       onClick={onClick}
       onFocus={onFocus}
       onMouseEnter={onMouseEnter}
+      onMouseDown={onMouseDown}
     >
       {children}
     </Link>
@@ -208,6 +214,19 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
     session.linear_identifier_hint ??
     session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
   return <SharedSessionLinearBadge label={linearLabel} />;
+}
+
+function provisionalSessionDetailFromListItem(session: SessionListItem): SingleResponse<SessionDetail> {
+  return {
+    data: {
+      ...session,
+      threads: session.threads ?? [],
+    },
+  };
+}
+
+function isPlainLeftClick(event: ReactMouseEvent<HTMLAnchorElement>): boolean {
+  return (event.button === 0 || event.button === undefined) && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
 // ---------------------------------------------------------------------------
@@ -719,11 +738,41 @@ export function SessionSidebar() {
     [currentActiveSessionId, displayedSessions],
   );
 
+  const seedSessionDetailCache = useCallback((session: SessionListItem) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(
+      queryKeys.sessions.detail(session.id),
+      (current) => current ?? provisionalSessionDetailFromListItem(session),
+    );
+  }, [queryClient]);
+
+  useEffect(() => {
+    for (const session of displayedSessions) {
+      seedSessionDetailCache(session);
+    }
+  }, [displayedSessions, seedSessionDetailCache]);
+
+  const navigateToSession = useCallback((session: SessionListItem, href: string) => {
+    seedSessionDetailCache(session);
+    router.push(href);
+  }, [router, seedSessionDetailCache]);
+
+  const handleSessionLinkClick = useCallback((
+    session: SessionListItem,
+    href: string,
+    event: ReactMouseEvent<HTMLAnchorElement>,
+  ) => {
+    if (event.defaultPrevented || !isPlainLeftClick(event)) {
+      return;
+    }
+    event.preventDefault();
+    navigateToSession(session, href);
+  }, [navigateToSession]);
+
   const openActiveSession = useCallback(() => {
     if (!activeSession) return;
     const sessionHref = `/sessions/${activeSession.id}${filterSuffix}`;
-    router.push(sessionHref);
-  }, [activeSession, filterSuffix, router]);
+    navigateToSession(activeSession, sessionHref);
+  }, [activeSession, filterSuffix, navigateToSession]);
 
   const prefetchRoute = useCallback((href: string) => {
     router.prefetch(href);
@@ -1029,6 +1078,7 @@ export function SessionSidebar() {
                     optionRefs.current.delete(session.id);
                   }
                 }}
+                onMouseDown={() => seedSessionDetailCache(session)}
                 className={cn(
                   currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-background/80 ring-1 ring-ring/20",
                   isSelected && "cursor-pointer border-primary/20 bg-background shadow-sm ring-1 ring-primary/10",
@@ -1037,12 +1087,14 @@ export function SessionSidebar() {
                   if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
                     return;
                   }
-                  router.push(sessionHref);
+                  navigateToSession(session, sessionHref);
                 }}
               >
                 <SessionSidebarRowSurface
                   href={sessionHref}
                   ariaCurrent={isSelected ? "page" : undefined}
+                  onClick={(event) => handleSessionLinkClick(session, sessionHref, event)}
+                  onMouseDown={() => seedSessionDetailCache(session)}
                   onMouseEnter={() => prefetchRoute(sessionHref)}
                   onFocus={() => prefetchRoute(sessionHref)}
                   className={
