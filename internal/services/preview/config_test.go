@@ -1237,6 +1237,15 @@ func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 			wantErr: "must not target preview install markers",
 		},
 		{
+			name: "rejects marker parent path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache"}},
+			},
+			wantErr: "must not target preview install markers",
+		},
+		{
 			name: "rejects broad path",
 			install: &models.PreviewInstallConfig{
 				Command:   []string{"npm", "ci"},

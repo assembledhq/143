@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -190,8 +191,28 @@ func cleanDependencyCacheRepoPath(raw string, allowGlob bool) (string, error) {
 	if clean == ".git" || strings.HasPrefix(clean, ".git/") {
 		return "", fmt.Errorf("path must not target .git")
 	}
-	if clean == ".143/cache/preview-install" || strings.HasPrefix(clean, ".143/cache/preview-install/") {
+	if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
 		return "", fmt.Errorf("path must not target preview install markers")
 	}
 	return clean, nil
+}
+
+func dependencyCachePathTargetsPreviewInstallMarkers(clean string) bool {
+	const marker = ".143/cache/preview-install"
+	clean = filepath.ToSlash(filepath.Clean(strings.TrimSpace(clean)))
+	if clean == "" || clean == "." {
+		return false
+	}
+	if clean == marker || strings.HasPrefix(clean, marker+"/") {
+		return true
+	}
+	if !strings.Contains(clean, "*") {
+		return strings.HasPrefix(marker, clean+"/")
+	}
+	for _, candidate := range []string{".143", ".143/cache", marker} {
+		if ok, err := path.Match(clean, candidate); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
