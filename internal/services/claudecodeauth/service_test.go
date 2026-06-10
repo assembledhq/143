@@ -41,6 +41,7 @@ type mockCredentialStore struct {
 	disableLabeledErr     error
 	hasActiveLabeledErr   error
 	getByProviderLabelErr error
+	upsertByIDCalls       int
 }
 
 func newMockCredentialStore() *mockCredentialStore {
@@ -208,6 +209,7 @@ func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, scope models.S
 }
 
 func (m *mockCredentialStore) UpsertByID(_ context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
+	m.upsertByIDCalls++
 	if m.upsertByIDErr != nil {
 		return m.upsertByIDErr
 	}
@@ -627,6 +629,7 @@ func TestStoreTokenByID_PersistsHarvestedSubscription(t *testing.T) {
 	require.True(t, ok, "stored credential config should remain AnthropicConfig")
 	require.NotNil(t, cfg.Subscription, "stored credential should contain a subscription")
 	require.Equal(t, sub, *cfg.Subscription, "stored credential should contain the harvested subscription")
+	require.Equal(t, 1, store.upsertByIDCalls, "StoreTokenByID should persist exactly one harvested credential version")
 }
 
 func TestStoreTokenByID_RejectsInvalidHarvestedAccessToken(t *testing.T) {
@@ -655,6 +658,7 @@ func TestStoreTokenByID_RejectsInvalidHarvestedAccessToken(t *testing.T) {
 	cfg := store.creds[credID].Config.(models.AnthropicConfig)
 	require.Equal(t, "old-access", cfg.Subscription.AccessToken, "StoreTokenByID should not overwrite with an invalid harvested token")
 	require.Equal(t, "old-refresh", cfg.Subscription.RefreshToken, "StoreTokenByID should preserve the existing refresh token after validation failure")
+	require.Equal(t, 0, store.upsertByIDCalls, "StoreTokenByID should not persist invalid harvested credentials")
 }
 
 func TestStoreTokenByID_DoesNotOverwriteNewerStoredToken(t *testing.T) {
@@ -677,6 +681,7 @@ func TestStoreTokenByID_DoesNotOverwriteNewerStoredToken(t *testing.T) {
 	cfg := store.creds[credID].Config.(models.AnthropicConfig)
 	require.Equal(t, "newer-access", cfg.Subscription.AccessToken, "StoreTokenByID should preserve the newer stored access token")
 	require.Equal(t, "newer-refresh", cfg.Subscription.RefreshToken, "StoreTokenByID should preserve the newer stored refresh token")
+	require.Equal(t, 0, store.upsertByIDCalls, "StoreTokenByID should not persist stale harvested credentials")
 }
 
 func TestRefreshTokenByID_PreservesRefreshTokenWhenEmpty(t *testing.T) {
