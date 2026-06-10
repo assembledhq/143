@@ -39,6 +39,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
       />
     );
 
@@ -52,6 +54,59 @@ describe("integration connection cards", () => {
 
     expect(onConnectSentry).toHaveBeenCalledTimes(1);
     expect(onConnectLinear).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the Mezmo card and triggers connect", async () => {
+    const user = userEvent.setup();
+    const onConnectMezmo = vi.fn();
+
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        slackConnected={false}
+        notionConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={onConnectMezmo}
+      />
+    );
+
+    expect(screen.getByText("Mezmo")).toBeInTheDocument();
+    expect(screen.getByAltText("Mezmo logo")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Connect Mezmo" }));
+
+    expect(onConnectMezmo).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a Disconnect button for Mezmo when connected with a handler", () => {
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        slackConnected={false}
+        notionConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
+        mezmoConnected
+        onConnectMezmo={vi.fn()}
+        onDisconnect={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Disconnect Mezmo" })).toBeInTheDocument();
   });
 
   it("shows connected repo names when GitHub is connected", () => {
@@ -144,6 +199,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
       />
     );
 
@@ -164,6 +221,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
       />
     );
 
@@ -186,6 +245,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
       />
     );
 
@@ -209,6 +270,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
       />
     );
 
@@ -288,6 +351,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
         onDisconnect={vi.fn()}
       />
     );
@@ -333,6 +398,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
       />
     );
 
@@ -369,6 +436,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
         readOnly
       />
     );
@@ -396,6 +465,8 @@ describe("integration connection cards", () => {
         onConnectNotion={vi.fn()}
         circleciConnected={false}
         onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
         onDisconnect={vi.fn()}
         readOnly
       />

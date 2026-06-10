@@ -233,6 +233,8 @@ export interface Integration {
   notion_workspace_id?: string;
   notion_workspace_name?: string;
   circleci_project_slug?: string;
+  mezmo_dataset?: string;
+  mezmo_base_url?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
