@@ -130,6 +130,7 @@ import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
+import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
 import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -2433,6 +2434,7 @@ function ChatPanel({
     queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
       return mergeSessionDetailStatusUpdate(existing, updated);
     });
+    applySessionDetailToSessionListCaches(queryClient, updated);
   }, [queryClient, sessionId]);
 
   const mergeThreadInboxUpdate = useCallback((event: ThreadInboxEvent) => {
