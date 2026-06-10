@@ -142,7 +142,7 @@ func TestCodingCredentialsSchemaDeclaresTeamDefaultMarker(t *testing.T) {
 func TestCodingCredentialsVersioningMigrationUsesInsertOnlyRuntimeState(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000165_coding_credentials_insert_only_versioning.up.sql")
+	body, err := os.ReadFile("../../migrations/000167_coding_credentials_insert_only_versioning.up.sql")
 	require.NoError(t, err, "test should read the coding credential insert-only versioning migration")
 
 	sql := string(body)
@@ -246,7 +246,7 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 		orgCredID, userCredID, orgID, userID)
 	require.NoError(t, err, "test should seed pre-migration coding credentials")
 
-	body, err := os.ReadFile("../../migrations/000165_coding_credentials_insert_only_versioning.up.sql")
+	body, err := os.ReadFile("../../migrations/000167_coding_credentials_insert_only_versioning.up.sql")
 	require.NoError(t, err, "test should read the versioning migration")
 	_, err = conn.Exec(ctx, string(body))
 	require.NoError(t, err, "versioning migration should apply to the pre-migration schema")
@@ -329,7 +329,7 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "reconciliation should be idempotent")
 	require.Zero(t, healed, "second reconciliation pass should be a no-op")
 
-	downBody, err := os.ReadFile("../../migrations/000165_coding_credentials_insert_only_versioning.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000167_coding_credentials_insert_only_versioning.down.sql")
 	require.NoError(t, err, "test should read the versioning down migration")
 	_, err = conn.Exec(ctx, string(downBody))
 	require.NoError(t, err, "versioning down migration should apply cleanly")

@@ -90,7 +90,7 @@ func countAnthropicRows(ctx context.Context, dbtx DBTX, table string) (int, erro
 
 // countActiveUnifiedAnthropicRows is the coding_credentials variant of
 // countAnthropicRows. Under the insert-only versioning schema (migration
-// 000165) inactive rows are immutable history and never deleted, so an
+// 000167) inactive rows are immutable history and never deleted, so an
 // anthropic credential that was deactivated long ago must not hold the boot
 // gate closed — only active config versions represent split work.
 //
