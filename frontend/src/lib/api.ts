@@ -876,6 +876,18 @@ export const api = {
         `/api/v1/team/github/users?q=${encodeURIComponent(q)}`,
       ),
   },
+  cli: {
+    // Org join links for the `curl .../install/<token> | sh` onboarding flow (admin-only).
+    listJoinTokens: () =>
+      get<import('./types').ListResponse<import('./types').JoinToken>>('/api/v1/org/join-tokens'),
+    createJoinToken: (body: { name?: string; role?: string; max_uses?: number; expires_in_days?: number }) =>
+      post<import('./types').SingleResponse<import('./types').CreatedJoinToken>>('/api/v1/org/join-tokens', body),
+    revokeJoinToken: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
+    // The caller's own CLI device tokens (any authenticated user).
+    listCliTokens: () =>
+      get<import('./types').ListResponse<import('./types').CliToken>>('/api/v1/auth/cli-tokens'),
+    revokeCliToken: (id: string) => del<void>(`/api/v1/auth/cli-tokens/${id}`),
+  },
   projects: {
     list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; created_by_ids?: string[]; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();

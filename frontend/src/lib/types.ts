@@ -1267,6 +1267,46 @@ export interface InvitationResponse {
   created_at: string;
 }
 
+// JoinToken is a multi-use, revocable org join link backing the CLI install
+// one-liner (`curl .../install/<token> | sh`). Only the display prefix is
+// ever returned after creation.
+export interface JoinToken {
+  id: string;
+  token_prefix: string;
+  name: string;
+  role: string;
+  max_uses?: number | null;
+  use_count: number;
+  expires_at?: string | null;
+  status: 'active' | 'revoked' | 'expired' | 'exhausted';
+  created_at: string;
+}
+
+// CreatedJoinToken is the create response: the plaintext token and the
+// ready-to-paste install command, shown exactly once.
+export interface CreatedJoinToken {
+  id: string;
+  token: string;
+  token_prefix: string;
+  role: string;
+  name: string;
+  expires_at?: string | null;
+  max_uses?: number | null;
+  install_command: string;
+}
+
+// CliToken is one row in the user's own "CLI sessions" list — a per-device
+// credential minted by `143-tools login`.
+export interface CliToken {
+  id: string;
+  token_prefix: string;
+  device_name: string;
+  expires_at: string;
+  last_used_at?: string | null;
+  last_used_ip?: string | null;
+  created_at: string;
+}
+
 // PendingInvitationForUser is the invitee-facing shape: the recipient of an
 // invitation only needs to know which org they're being invited into, by whom,
 // at what role, and when it expires. The token is intentionally omitted —
