@@ -5,7 +5,7 @@ import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandler, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type MouseEventHandler, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandler, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
@@ -24,6 +24,7 @@ import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/ses
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { ListResponse, SessionCounts, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { markProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
   workingSet,
@@ -218,15 +219,11 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
 
 function provisionalSessionDetailFromListItem(session: SessionListItem): SingleResponse<SessionDetail> {
   return {
-    data: {
+    data: markProvisionalSessionDetail({
       ...session,
       threads: session.threads ?? [],
-    },
+    }),
   };
-}
-
-function isPlainLeftClick(event: ReactMouseEvent<HTMLAnchorElement>): boolean {
-  return (event.button === 0 || event.button === undefined) && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
 // ---------------------------------------------------------------------------
@@ -756,17 +753,9 @@ export function SessionSidebar() {
     router.push(href);
   }, [router, seedSessionDetailCache]);
 
-  const handleSessionLinkClick = useCallback((
-    session: SessionListItem,
-    href: string,
-    event: ReactMouseEvent<HTMLAnchorElement>,
-  ) => {
-    if (event.defaultPrevented || !isPlainLeftClick(event)) {
-      return;
-    }
-    event.preventDefault();
-    navigateToSession(session, href);
-  }, [navigateToSession]);
+  const handleSessionLinkClick = useCallback((session: SessionListItem) => {
+    seedSessionDetailCache(session);
+  }, [seedSessionDetailCache]);
 
   const openActiveSession = useCallback(() => {
     if (!activeSession) return;
@@ -1093,7 +1082,7 @@ export function SessionSidebar() {
                 <SessionSidebarRowSurface
                   href={sessionHref}
                   ariaCurrent={isSelected ? "page" : undefined}
-                  onClick={(event) => handleSessionLinkClick(session, sessionHref, event)}
+                  onClick={() => handleSessionLinkClick(session)}
                   onMouseDown={() => seedSessionDetailCache(session)}
                   onMouseEnter={() => prefetchRoute(sessionHref)}
                   onFocus={() => prefetchRoute(sessionHref)}
