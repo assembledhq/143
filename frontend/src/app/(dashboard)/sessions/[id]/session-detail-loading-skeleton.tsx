@@ -72,6 +72,31 @@ export function SessionDetailLoadingSkeleton({
       className="flex h-full min-h-0 bg-background"
     >
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* Mirrors MobileSessionTopBar's geometry (back button, title, two
+            icon buttons) so the swap to the real page does not shift layout.
+            The controls stay shimmer — they need session data to act — but
+            the title is real as soon as we know it. */}
+        <div
+          data-testid="session-detail-skeleton-mobile-top-bar"
+          className="flex shrink-0 items-center gap-1 border-b border-border bg-background/95 px-2 py-2 md:hidden"
+        >
+          <span className="animate-pulse">
+            <SkeletonLine className="h-9 w-9 rounded-md" />
+          </span>
+          {metadata ? (
+            <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+              {metadata.title}
+            </p>
+          ) : (
+            <div className="min-w-0 flex-1 animate-pulse">
+              <SkeletonLine className="h-4 w-3/5 max-w-[240px]" />
+            </div>
+          )}
+          <span className="flex shrink-0 gap-1 animate-pulse">
+            <SkeletonLine className="h-9 w-9 rounded-md" />
+            <SkeletonLine className="h-9 w-9 rounded-md" />
+          </span>
+        </div>
         <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
           {metadata ? (
             // Mirrors the loaded header's title row (same type classes and
