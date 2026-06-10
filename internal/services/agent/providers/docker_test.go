@@ -2496,6 +2496,34 @@ func TestDockerProvider_WriteFile(t *testing.T) {
 	}
 }
 
+func TestDockerProvider_ExecWithStdin(t *testing.T) {
+	t.Parallel()
+
+	var gotConfig container.ExecOptions
+	mock := &mockDockerClient{
+		containerExecCreateFn: func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			gotConfig = config
+			return container.ExecCreateResponse{ID: "test-exec-id"}, nil
+		},
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{
+		ID:      "test-container",
+		WorkDir: "/workspace/repo",
+		Env:     map[string]string{"NODE_ENV": "test"},
+	}
+
+	exitCode, err := p.ExecWithStdin(context.Background(), sb, "tar xzf - -C /workspace/repo", strings.NewReader("archive-bytes"), io.Discard, io.Discard)
+	require.NoError(t, err, "ExecWithStdin should stream stdin without error")
+	require.Equal(t, 0, exitCode, "ExecWithStdin should return the inspected exit code")
+	require.Equal(t, []string{"sh", "-c", "tar xzf - -C /workspace/repo"}, gotConfig.Cmd, "ExecWithStdin should run the requested shell command")
+	require.True(t, gotConfig.AttachStdin, "ExecWithStdin should attach stdin")
+	require.True(t, gotConfig.AttachStdout, "ExecWithStdin should attach stdout")
+	require.True(t, gotConfig.AttachStderr, "ExecWithStdin should attach stderr")
+	require.Equal(t, "/workspace/repo", gotConfig.WorkingDir, "ExecWithStdin should use the sandbox working directory")
+	require.Contains(t, gotConfig.Env, "NODE_ENV=test", "ExecWithStdin should pass sandbox environment variables")
+}
+
 func TestDockerProvider_Options(t *testing.T) {
 	t.Parallel()
 

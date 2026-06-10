@@ -151,6 +151,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveBootstrapPage(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/bootstrap/exchange":
 		g.handleBootstrapExchange(w, r, previewID)
+	case r.Method == http.MethodGet && r.URL.Path == previewControlStatusPath:
+		g.servePreviewControlStatus(w, r, previewID)
 	default:
 		g.handleProxy(w, r, previewID)
 	}
@@ -443,6 +445,16 @@ func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	statusURL := g.previewStatusURL(previewID)
+	cfg, err := json.Marshal(map[string]any{
+		"appOrigin":     g.resolvedAppOrigin(),
+		"controlUrl":    controlURL,
+		"statusPath":    previewControlStatusPath,
+		"restartable":   data.Restartable,
+		"initialStatus": string(data.Status),
+	})
+	if err != nil {
+		cfg = []byte("null")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -456,6 +468,7 @@ func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Requ
 		stdhtml.EscapeString(controlURL),
 		stdhtml.EscapeString(data.ActionLabel),
 		stdhtml.EscapeString(statusURL),
+		cfg,
 	); err != nil {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to write preview control overlay")
 	}
@@ -467,13 +480,15 @@ type previewControlOverlayData struct {
 	StatusLine  string
 	ActionLabel string
 	AutoLaunch  bool
+	Restartable bool
+	Status      models.PreviewStatus
 }
 
 func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID) previewControlOverlayData {
 	fallback := previewControlOverlayData{
-		Title:       "Start preview",
-		Description: "This preview is not connected in this browser yet. Start it from 143; when it is ready, the preview opens here.",
-		StatusLine:  "Status: Not connected",
+		Title:       "Preview not connected",
+		Description: "Start the preview from 143 and it will open here.",
+		StatusLine:  "Not connected",
 		ActionLabel: "Start preview",
 	}
 	if g.store == nil {
@@ -486,24 +501,74 @@ func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID
 		}
 		return fallback
 	}
-	statusLine := "Status: " + previewStatusLabel(instance.Status)
+	label := previewStatusLabel(instance.Status)
+	statusLine := label
 	if instance.StoppedAt != nil {
-		statusLine += " · stopped " + instance.StoppedAt.UTC().Format("Jan 2, 2006 15:04 MST")
+		statusLine += " · " + instance.StoppedAt.UTC().Format("Jan 2, 2006 15:04 MST")
 	}
 	if instance.Status.IsActive() {
 		return previewControlOverlayData{
 			Title:       "Open preview",
-			Description: "This preview is running, but this browser is not connected yet. 143 will connect it and open the preview here.",
+			Description: "This preview is running — opening it through 143.",
 			StatusLine:  statusLine,
 			ActionLabel: "Open preview",
 			AutoLaunch:  true,
+			Status:      instance.Status,
 		}
 	}
 	return previewControlOverlayData{
-		Title:       "Restart preview",
-		Description: "This preview is stopped. Restart it from 143; when it is ready, the preview opens here.",
+		Title:       "Preview " + strings.ToLower(label),
+		Description: "Restart it to pick up where you left off — this page reconnects automatically.",
 		StatusLine:  statusLine,
 		ActionLabel: "Restart preview",
+		Restartable: true,
+		Status:      instance.Status,
+	}
+}
+
+// previewControlStatusResponse is the unauthenticated status payload polled by
+// the control overlay while a restart is in flight. It exposes only what the
+// overlay itself already renders without auth: the status and stop time.
+type previewControlStatusResponse struct {
+	Status    string  `json:"status"`
+	Label     string  `json:"label"`
+	Active    bool    `json:"active"`
+	StoppedAt *string `json:"stopped_at,omitempty"`
+}
+
+func (g *Gateway) servePreviewControlStatus(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	writeNotFound := func() {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{Code: "PREVIEW_NOT_FOUND", Message: "preview not found"},
+		})
+	}
+	if g.store == nil {
+		writeNotFound()
+		return
+	}
+	instance, err := g.store.GetPreviewForPublicHost(r.Context(), previewID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to load preview control status")
+		}
+		writeNotFound()
+		return
+	}
+	resp := previewControlStatusResponse{
+		Status: string(instance.Status),
+		Label:  previewStatusLabel(instance.Status),
+		Active: instance.Status.IsActive(),
+	}
+	if instance.StoppedAt != nil {
+		stoppedAt := instance.StoppedAt.UTC().Format(time.RFC3339)
+		resp.StoppedAt = &stoppedAt
+	}
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to write preview control status")
 	}
 }
 
@@ -533,11 +598,15 @@ func (g *Gateway) previewControlURL(previewID uuid.UUID) string {
 }
 
 func (g *Gateway) previewStatusURL(previewID uuid.UUID) string {
+	return g.resolvedAppOrigin() + "/previews/" + previewID.String()
+}
+
+func (g *Gateway) resolvedAppOrigin() string {
 	appOrigin := strings.TrimRight(g.appOrigin, "/")
 	if appOrigin == "" {
-		appOrigin = "https://143.dev"
+		return "https://143.dev"
 	}
-	return appOrigin + "/previews/" + previewID.String()
+	return appOrigin
 }
 
 const previewControlOverlayHTML = `<!DOCTYPE html>
@@ -557,26 +626,151 @@ p { margin: 10px 0 0; font-size: 14px; line-height: 1.5; color: color-mix(in srg
 .actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
 a { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; border-radius: 8px; padding: 0 14px; font-size: 14px; font-weight: 600; text-decoration: none; }
 .primary { background: CanvasText; color: Canvas; }
+.primary[aria-disabled="true"] { opacity: 0.6; pointer-events: none; }
 .secondary { border: 1px solid color-mix(in srgb, CanvasText 16%%, transparent); color: CanvasText; }
 </style>
 </head>
 <body>
 <main class="panel">
 <p class="eyebrow">143 preview</p>
-<h1>%s</h1>
-<p>%s</p>
-<p class="status">%s</p>
+<h1 id="pv-title">%s</h1>
+<p id="pv-desc">%s</p>
+<p class="status" id="pv-status">%s</p>
 <div class="actions">
-<a class="primary" href="%s">%s</a>
+<a class="primary" id="pv-action" href="%s">%s</a>
 <a class="secondary" href="%s">View status and logs</a>
 </div>
 </main>
+<script>window.__143PreviewControl = %s;</script>
+<script>
+(function() {
+  "use strict";
+  var cfg = window.__143PreviewControl;
+  if (!cfg || !cfg.restartable) return;
+  var titleEl = document.getElementById("pv-title");
+  var descEl = document.getElementById("pv-desc");
+  var statusEl = document.getElementById("pv-status");
+  var actionEl = document.getElementById("pv-action");
+  var original = {
+    title: titleEl.textContent,
+    desc: descEl.textContent,
+    status: statusEl.textContent,
+    action: actionEl.textContent
+  };
+  var restarting = false;
+  var popup = null;
+  var pollTimer = null;
+  var activeSince = 0;
+
+  function setPanel(title, desc, status) {
+    titleEl.textContent = title;
+    descEl.textContent = desc;
+    statusEl.textContent = status;
+    document.title = title;
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function enableAction() {
+    restarting = false;
+    actionEl.textContent = original.action;
+    actionEl.removeAttribute("aria-disabled");
+  }
+
+  function resetPanel() {
+    stopPolling();
+    enableAction();
+    setPanel(original.title, original.desc, original.status);
+  }
+
+  function fallbackLaunch() {
+    stopPolling();
+    window.location.href = cfg.controlUrl;
+  }
+
+  // The popup posts this once it has connected the browser to the restarted
+  // preview (the session cookie is set at that point). The cookie is scoped
+  // to the host in data.url; when this overlay is on an alias host (runtime
+  // instance ID vs stable target ID) we must navigate there instead of
+  // reloading in place.
+  window.addEventListener("message", function(event) {
+    if (event.origin !== cfg.appOrigin) return;
+    var data = event.data;
+    if (!data || data.type !== "preview_launch_complete") return;
+    stopPolling();
+    statusEl.textContent = "Connected";
+    var dest = null;
+    try { dest = new URL(data.url); } catch (e) {}
+    if (dest && (dest.protocol === "https:" || dest.protocol === "http:") && dest.origin !== window.location.origin) {
+      window.location.href = dest.href;
+      return;
+    }
+    window.location.reload();
+  });
+
+  function poll() {
+    fetch(cfg.statusPath, {cache: "no-store"}).then(function(resp) {
+      return resp.ok ? resp.json() : null;
+    }).then(function(state) {
+      if (!state || !restarting) return;
+      if (state.status === cfg.initialStatus) {
+        // The restart has not been picked up yet. If the popup was closed
+        // without starting anything, put the panel back.
+        if (popup && popup.closed) resetPanel();
+        return;
+      }
+      if (state.status === "failed") {
+        stopPolling();
+        enableAction();
+        setPanel("Preview failed to start", "Check status and logs for details, then try restarting again.", state.label);
+        return;
+      }
+      if (state.active && state.status !== "starting") {
+        // Ready. The popup finishes the browser handshake and notifies us;
+        // if it is gone or stuck, fall back to the full launch flow.
+        if (!activeSince) activeSince = Date.now();
+        if (!popup || popup.closed || Date.now() - activeSince > 15000) {
+          fallbackLaunch();
+          return;
+        }
+        statusEl.textContent = "Connecting this browser…";
+        return;
+      }
+      statusEl.textContent = state.label + "…";
+    }).catch(function() {});
+  }
+
+  actionEl.addEventListener("click", function(event) {
+    event.preventDefault();
+    if (restarting) return;
+    popup = window.open(cfg.controlUrl + "&popup=1", "143-preview-launch", "popup=yes,width=440,height=400");
+    if (!popup) {
+      // Popup blocked: fall back to the full-page launch flow.
+      window.location.href = cfg.controlUrl;
+      return;
+    }
+    restarting = true;
+    activeSince = 0;
+    setPanel("Restarting preview", "Keep this tab open — the preview opens here when it is ready.", "Restart requested…");
+    actionEl.textContent = "Restarting…";
+    actionEl.setAttribute("aria-disabled", "true");
+    pollTimer = setInterval(poll, 2500);
+    poll();
+  });
+})();
+</script>
 </body>
 </html>`
 
 const (
 	previewPlatformPathPrefix = "/__143_"
 	previewHeartbeatPath      = previewPlatformPathPrefix + "heartbeat"
+	previewControlStatusPath  = previewPlatformPathPrefix + "control/status"
 )
 
 func shouldRecordPreviewLastPath(r *http.Request) bool {

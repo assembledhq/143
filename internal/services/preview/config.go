@@ -738,7 +738,7 @@ func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []str
 			break
 		}
 	}
-	if clean == ".143/cache/preview-install" || strings.HasPrefix(clean, ".143/cache/preview-install/") {
+	if dependencyCachePathTargetsPreviewInstallMarkers(filepath.ToSlash(clean)) {
 		errs = append(errs, fmt.Sprintf("%s: path %q must not target preview install markers", field, raw))
 	}
 	if !validPreviewInstallCleanPath.MatchString(raw) {
@@ -774,6 +774,9 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 	add := func(raw string) {
 		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
 		if clean == "" || clean == "." {
+			return
+		}
+		if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
 			return
 		}
 		if _, ok := seen[clean]; ok {
