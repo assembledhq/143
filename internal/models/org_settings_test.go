@@ -554,7 +554,7 @@ func TestParseOrgSettings_SandboxLifecycleDefaultsAndOverrides(t *testing.T) {
 func TestParseOrgSettings_SandboxResourceDefaultsAndOverrides(t *testing.T) {
 	t.Parallel()
 
-	raw := json.RawMessage(`{"sandbox_resources":{"agent_default_tier":"large","preview_default_tier":"small","allow_repo_resource_requests":false,"preview_max_tier":"standard"}}`)
+	raw := json.RawMessage(`{"sandbox_resources":{"agent_default_tier":"large","preview_default_tier":"small","allow_repo_resource_requests":false,"preview_max_tier":"standard","preview_max_cpu_millis":1500,"preview_max_memory_mib":4096,"preview_max_ephemeral_disk_mib":6144}}`)
 
 	s, err := ParseOrgSettings(raw)
 	require.NoError(t, err, "ParseOrgSettings should accept sandbox resource settings")
@@ -562,6 +562,62 @@ func TestParseOrgSettings_SandboxResourceDefaultsAndOverrides(t *testing.T) {
 	require.Equal(t, SandboxResourceTierSmall, s.SandboxResources.PreviewDefaultTier, "preview default tier should pass through")
 	require.False(t, s.SandboxResources.EffectiveAllowRepoResourceRequests(), "explicit false should be preserved")
 	require.Equal(t, SandboxResourceTierStandard, s.SandboxResources.PreviewMaxTier, "preview max tier should pass through")
+	require.Equal(t, 1500, s.SandboxResources.PreviewMaxCPUMillis, "preview CPU max should pass through")
+	require.Equal(t, 4096, s.SandboxResources.PreviewMaxMemoryMiB, "preview memory max should pass through")
+	require.Equal(t, 6144, s.SandboxResources.PreviewMaxEphemeralDiskMiB, "preview disk max should pass through")
+}
+
+func TestParseOrgSettings_SandboxResourceLimitDefaultsAndClamps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		raw               json.RawMessage
+		expectedCPUMillis int
+		expectedMemoryMiB int
+		expectedDiskMiB   int
+	}{
+		{
+			name:              "missing values default to platform caps",
+			raw:               json.RawMessage(`{}`),
+			expectedCPUMillis: DefaultPreviewMaxCPUMillis,
+			expectedMemoryMiB: DefaultPreviewMaxMemoryMiB,
+			expectedDiskMiB:   DefaultPreviewMaxEphemeralDiskMiB,
+		},
+		{
+			name:              "zero values default to platform caps",
+			raw:               json.RawMessage(`{"sandbox_resources":{"preview_max_cpu_millis":0,"preview_max_memory_mib":0,"preview_max_ephemeral_disk_mib":0}}`),
+			expectedCPUMillis: DefaultPreviewMaxCPUMillis,
+			expectedMemoryMiB: DefaultPreviewMaxMemoryMiB,
+			expectedDiskMiB:   DefaultPreviewMaxEphemeralDiskMiB,
+		},
+		{
+			name:              "below minimum clamps up",
+			raw:               json.RawMessage(`{"sandbox_resources":{"preview_max_cpu_millis":-1,"preview_max_memory_mib":-1,"preview_max_ephemeral_disk_mib":-1}}`),
+			expectedCPUMillis: MinPreviewMaxCPUMillis,
+			expectedMemoryMiB: MinPreviewMaxMemoryMiB,
+			expectedDiskMiB:   MinPreviewMaxEphemeralDiskMiB,
+		},
+		{
+			name:              "above maximum clamps down",
+			raw:               json.RawMessage(`{"sandbox_resources":{"preview_max_cpu_millis":99999,"preview_max_memory_mib":99999,"preview_max_ephemeral_disk_mib":99999}}`),
+			expectedCPUMillis: MaxPreviewMaxCPUMillis,
+			expectedMemoryMiB: MaxPreviewMaxMemoryMiB,
+			expectedDiskMiB:   MaxPreviewMaxEphemeralDiskMiB,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should normalize preview resource caps")
+			require.Equal(t, tt.expectedCPUMillis, s.SandboxResources.PreviewMaxCPUMillis, "preview CPU max should be normalized")
+			require.Equal(t, tt.expectedMemoryMiB, s.SandboxResources.PreviewMaxMemoryMiB, "preview memory max should be normalized")
+			require.Equal(t, tt.expectedDiskMiB, s.SandboxResources.PreviewMaxEphemeralDiskMiB, "preview disk max should be normalized")
+		})
+	}
 }
 
 func TestSandboxResourceTierValidate(t *testing.T) {

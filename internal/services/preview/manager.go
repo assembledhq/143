@@ -282,7 +282,11 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 	if input.PreviewTargetID == uuid.Nil {
 		return nil, fmt.Errorf("preview target id is required")
 	}
-	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+	resourcePolicy, err := m.resourcePolicy(ctx, input.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateConfigWithResourcePolicy(input.Config, resourcePolicy); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
 	}
 	existing, err := store.GetActivePreviewForTarget(ctx, input.OrgID, input.PreviewTargetID)
@@ -295,7 +299,7 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 		return nil, err
 	}
 
-	limits := ResolveResourceLimits(input.Config)
+	limits := ResolveResourceLimitsWithPolicy(input.Config, resourcePolicy)
 	configDigest := computeConfigDigest(input.Config)
 	profileName := input.ProfileName
 	if profileName == "" {
@@ -365,7 +369,11 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	if store == nil {
 		return nil, fmt.Errorf("preview store is not configured")
 	}
-	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+	resourcePolicy, err := m.resourcePolicy(ctx, input.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateConfigWithResourcePolicy(input.Config, resourcePolicy); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
@@ -383,7 +391,7 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		return nil, err
 	}
 
-	limits := ResolveResourceLimits(input.Config)
+	limits := ResolveResourceLimitsWithPolicy(input.Config, resourcePolicy)
 	configDigest := computeConfigDigest(input.Config)
 	profileName := input.ProfileName
 	if profileName == "" {
@@ -541,7 +549,11 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if input.Sandbox == nil {
 		return nil, fmt.Errorf("sandbox must not be nil")
 	}
-	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+	resourcePolicy, err := m.resourcePolicy(ctx, input.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateConfigWithResourcePolicy(input.Config, resourcePolicy); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
@@ -554,7 +566,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	newDigest := computeConfigDigest(input.Config)
 	needsUpdate := newDigest != instance.ConfigDigest || len(instance.RecycleSandbox) == 0
 	if needsUpdate {
-		limits := ResolveResourceLimits(input.Config)
+		limits := ResolveResourceLimitsWithPolicy(input.Config, resourcePolicy)
 		scratch := &models.PreviewInstance{}
 		if err := storeRecycleInput(scratch, input); err != nil {
 			return nil, fmt.Errorf("marshal recycle input: %w", err)
@@ -1618,11 +1630,15 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		return fmt.Errorf("load recycle input: %w", err)
 	}
 	if refreshedConfig != nil {
-		if errs := ValidateConfig(refreshedConfig); len(errs) > 0 {
+		resourcePolicy, policyErr := m.resourcePolicy(ctx, orgID)
+		if policyErr != nil {
+			return policyErr
+		}
+		if errs := ValidateConfigWithResourcePolicy(refreshedConfig, resourcePolicy); len(errs) > 0 {
 			return fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 		}
 		input.Config = refreshedConfig
-		limits := ResolveResourceLimits(refreshedConfig)
+		limits := ResolveResourceLimitsWithPolicy(refreshedConfig, resourcePolicy)
 		configJSON, err := json.Marshal(refreshedConfig)
 		if err != nil {
 			return fmt.Errorf("marshal refreshed recycle config: %w", err)
@@ -1978,6 +1994,21 @@ func (m *Manager) maxPreviewsPerUser(ctx context.Context, orgID uuid.UUID) (int,
 		return settings.PreviewMaxPreviewsPerUser, nil
 	}
 	return m.maxPerUser, nil
+}
+
+func (m *Manager) resourcePolicy(ctx context.Context, orgID uuid.UUID) (ResourcePolicy, error) {
+	if m.orgSettings == nil {
+		return defaultResourcePolicy(), nil
+	}
+	org, err := m.orgSettings.GetByID(ctx, orgID)
+	if err != nil {
+		return ResourcePolicy{}, fmt.Errorf("load org preview resource settings: %w", err)
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return ResourcePolicy{}, fmt.Errorf("parse org preview resource settings: %w", err)
+	}
+	return ResourcePolicyFromOrgSettings(settings), nil
 }
 
 func hasPreviewMaxPreviewsPerUserSetting(raw json.RawMessage) (bool, error) {

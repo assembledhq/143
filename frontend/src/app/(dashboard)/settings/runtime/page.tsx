@@ -20,15 +20,24 @@ import { queryKeys } from "@/lib/query-keys";
 import {
   DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES,
   DEFAULT_IDLE_PREVIEW_TTL_MINUTES,
+  DEFAULT_PREVIEW_MAX_CPU_MILLIS,
+  DEFAULT_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
+  DEFAULT_PREVIEW_MAX_MEMORY_MIB,
   DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER,
   MAX_COMPLETED_SESSION_RETENTION_MINUTES,
   MAX_CONCURRENT_RUNS,
   MAX_IDLE_PREVIEW_TTL_MINUTES,
+  MAX_PREVIEW_MAX_CPU_MILLIS,
+  MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
+  MAX_PREVIEW_MAX_MEMORY_MIB,
   MAX_PREVIEW_MAX_PREVIEWS_PER_USER,
   MAX_SESSION_DURATION_MINUTES,
   MIN_COMPLETED_SESSION_RETENTION_MINUTES,
   MIN_CONCURRENT_RUNS,
   MIN_IDLE_PREVIEW_TTL_MINUTES,
+  MIN_PREVIEW_MAX_CPU_MILLIS,
+  MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
+  MIN_PREVIEW_MAX_MEMORY_MIB,
   MIN_PREVIEW_MAX_PREVIEWS_PER_USER,
   MIN_SESSION_DURATION_MINUTES,
   clampNumber,
@@ -336,6 +345,40 @@ function ResourceDefaultsSection() {
   const previewDefaultTier = resources.preview_default_tier ?? "standard";
   const allowRepoResourceRequests = resources.allow_repo_resource_requests ?? true;
   const previewMaxTier = resources.preview_max_tier ?? "large";
+  const previewMaxCPUMillis =
+    resources.preview_max_cpu_millis ?? DEFAULT_PREVIEW_MAX_CPU_MILLIS;
+  const previewMaxMemoryMiB =
+    resources.preview_max_memory_mib ?? DEFAULT_PREVIEW_MAX_MEMORY_MIB;
+  const previewMaxEphemeralDiskMiB =
+    resources.preview_max_ephemeral_disk_mib ?? DEFAULT_PREVIEW_MAX_EPHEMERAL_DISK_MIB;
+
+  const previewMaxCPUField = useAutosaveNumericField({
+    serverValue: previewMaxCPUMillis,
+    autosave,
+    toPatch: (value) => ({ settings: { sandbox_resources: { preview_max_cpu_millis: value } } }),
+    clamp: (value) =>
+      clampNumber(value, MIN_PREVIEW_MAX_CPU_MILLIS, MAX_PREVIEW_MAX_CPU_MILLIS),
+  });
+  const previewMaxMemoryField = useAutosaveNumericField({
+    serverValue: previewMaxMemoryMiB,
+    autosave,
+    toPatch: (value) => ({ settings: { sandbox_resources: { preview_max_memory_mib: value } } }),
+    clamp: (value) =>
+      clampNumber(value, MIN_PREVIEW_MAX_MEMORY_MIB, MAX_PREVIEW_MAX_MEMORY_MIB),
+  });
+  const previewMaxDiskField = useAutosaveNumericField({
+    serverValue: previewMaxEphemeralDiskMiB,
+    autosave,
+    toPatch: (value) => ({
+      settings: { sandbox_resources: { preview_max_ephemeral_disk_mib: value } },
+    }),
+    clamp: (value) =>
+      clampNumber(
+        value,
+        MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
+        MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
+      ),
+  });
 
   return (
     <section className="space-y-3">
@@ -389,7 +432,7 @@ function ResourceDefaultsSection() {
               <div className="space-y-1">
                 <Label htmlFor="allow-repo-resource-requests">Allow repo resource requests</Label>
                 <p className="text-xs text-muted-foreground">
-                  Allows repository preview config to request a sandbox tier up to the org limit.
+                  Allows repository preview config to request CPU, memory, and disk up to the org limits.
                 </p>
               </div>
               <Switch
@@ -402,6 +445,63 @@ function ResourceDefaultsSection() {
                 }}
                 aria-label="Allow repo resource requests"
               />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="preview-max-cpu-millis">Preview CPU request max</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="preview-max-cpu-millis"
+                  type="number"
+                  inputMode="numeric"
+                  min={MIN_PREVIEW_MAX_CPU_MILLIS}
+                  max={MAX_PREVIEW_MAX_CPU_MILLIS}
+                  value={previewMaxCPUField.value}
+                  onChange={previewMaxCPUField.onChange}
+                  onBlur={previewMaxCPUField.onBlur}
+                />
+                <span className="text-xs text-muted-foreground">millicores</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Hard platform cap is {MAX_PREVIEW_MAX_CPU_MILLIS} millicores.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="preview-max-memory-mib">Preview memory request max</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="preview-max-memory-mib"
+                  type="number"
+                  inputMode="numeric"
+                  min={MIN_PREVIEW_MAX_MEMORY_MIB}
+                  max={MAX_PREVIEW_MAX_MEMORY_MIB}
+                  value={previewMaxMemoryField.value}
+                  onChange={previewMaxMemoryField.onChange}
+                  onBlur={previewMaxMemoryField.onBlur}
+                />
+                <span className="text-xs text-muted-foreground">MiB</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Hard platform cap is {MAX_PREVIEW_MAX_MEMORY_MIB} MiB.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="preview-max-ephemeral-disk-mib">Preview ephemeral disk request max</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="preview-max-ephemeral-disk-mib"
+                  type="number"
+                  inputMode="numeric"
+                  min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                  max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                  value={previewMaxDiskField.value}
+                  onChange={previewMaxDiskField.onChange}
+                  onBlur={previewMaxDiskField.onBlur}
+                />
+                <span className="text-xs text-muted-foreground">MiB</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Hard platform cap is {MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB.
+              </p>
             </div>
           </div>
         </CardContent>
