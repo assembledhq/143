@@ -156,7 +156,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	sandboxCfg.SessionID = reservation.ID.String()
 	sandboxCfg.OrgID = payload.OrgID.String()
 	sandboxCfg.Purpose = "branch_preview"
-	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, payload.Config)
+	ApplyPreviewInstanceResourceLimitsToSandboxConfig(&sandboxCfg, reservation)
 	if err := r.applyBranchPreviewSandboxNetwork(ctx, payload.OrgID, &sandboxCfg); err != nil {
 		r.abort(ctx, reservation, "", fmt.Sprintf("resolve sandbox network: %v", err))
 		return fmt.Errorf("resolve sandbox network: %w", err)
@@ -302,7 +302,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		return fmt.Errorf("get session: %w", err)
 	}
 
-	acq := r.acquireSandbox(ctx, payload.OrgID, &session, payload.Config)
+	acq := r.acquireSandbox(ctx, payload.OrgID, &session, reservation)
 	if acq.Err != nil {
 		r.logger.Warn().Err(acq.Err).
 			Str("session_id", payload.SessionID.String()).
@@ -510,7 +510,7 @@ func (r *StartRunner) applyBranchPreviewSandboxNetwork(ctx context.Context, orgI
 	return agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, cfg)
 }
 
-func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
+func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, reservation *models.PreviewInstance) acquireSandboxResult {
 	workDir := r.resolveSandboxWorkDir(ctx, session)
 	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, r.orgs, orgID, r.staticEgress)
 	if expectedErr != nil {
@@ -562,7 +562,7 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
-	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	ApplyPreviewInstanceResourceLimitsToSandboxConfig(&sandboxCfg, reservation)
 	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, orgID, r.staticEgress, &sandboxCfg); err != nil {
 		return acquireSandboxResult{ErrCode: "STATIC_EGRESS_UNAVAILABLE", Err: err}
 	}

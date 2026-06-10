@@ -352,6 +352,27 @@ func TestValidateSettingsModels(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "rejects preview CPU cap above platform maximum",
+			settings: OrgSettings{
+				SandboxResources: SandboxResourceSettings{PreviewMaxCPUMillis: MaxPreviewMaxCPUMillis + 1},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview memory cap above platform maximum",
+			settings: OrgSettings{
+				SandboxResources: SandboxResourceSettings{PreviewMaxMemoryMiB: MaxPreviewMaxMemoryMiB + 1},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview disk cap above platform maximum",
+			settings: OrgSettings{
+				SandboxResources: SandboxResourceSettings{PreviewMaxEphemeralDiskMiB: MaxPreviewMaxEphemeralDiskMiB + 1},
+			},
+			wantErr: true,
+		},
+		{
 			name: "rejects invalid codex model",
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{

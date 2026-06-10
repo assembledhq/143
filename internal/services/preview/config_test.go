@@ -843,7 +843,7 @@ func TestValidateConfig_Resources(t *testing.T) {
 		},
 		{
 			name:       "memory exceeds cap",
-			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "16Gi"}},
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "9Gi"}},
 			wantErrSub: "at most 8Gi",
 		},
 		{
@@ -921,6 +921,86 @@ func TestParseCPUQuantity(t *testing.T) {
 			require.NoError(t, err, "CPU quantity should parse")
 			require.True(t, ok, "CPU quantity should be treated as set")
 			require.Equal(t, tt.expected, actual, "CPU quantity should normalize to millicores")
+		})
+	}
+}
+
+func TestValidateConfigWithResourcePolicy_Resources(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Primary:        "app",
+		Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		Credentials:    models.CredentialConfig{Mode: "none"},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "2", Memory: "8Gi", EphemeralStorage: "10Gi"},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		policy     ResourcePolicy
+		memory     string
+		wantErrSub string
+	}{
+		{
+			name: "platform maximum accepts full resource ceiling",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: true,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              MaxPreviewMemoryMiB,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+		},
+		{
+			name: "org maximum can be lower than platform ceiling",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: true,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              4096,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+			wantErrSub: "preview.resources.limits.memory must be at most 4Gi",
+		},
+		{
+			name: "org maximum cannot raise above platform ceiling",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: true,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              MaxPreviewMemoryMiB * 2,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+			memory:     "9Gi",
+			wantErrSub: "preview.resources.limits.memory must be at most 8Gi",
+		},
+		{
+			name: "repo resource requests can be disabled",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: false,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              MaxPreviewMemoryMiB,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+			wantErrSub: "preview.resources cannot be set when repo resource requests are disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			testCfg := *cfg
+			if tt.memory != "" {
+				testCfg.Resources.Limits.Memory = tt.memory
+			}
+			errs := ValidateConfigWithResourcePolicy(&testCfg, tt.policy)
+			if tt.wantErrSub == "" {
+				require.Empty(t, errs, "resource policy should accept the config")
+				return
+			}
+			require.NotEmpty(t, errs, "resource policy should reject the config")
+			require.Contains(t, strings.Join(errs, "; "), tt.wantErrSub, "resource policy error should explain the effective cap")
 		})
 	}
 }
@@ -1571,6 +1651,21 @@ func TestResolveResourceLimits(t *testing.T) {
 	}
 }
 
+func TestResolveResourceLimitsWithPolicy_ClampsToOrgMaximum(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{"app": {}},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "2", Memory: "8Gi", EphemeralStorage: "10Gi"},
+		},
+	}
+	policy := ResourcePolicy{AllowRepoResourceRequests: true, MaxCPUMillis: 1500, MaxMemoryMiB: 4096, MaxDiskMiB: 6 * 1024}
+	expected := models.ResourceLimits{MemoryMiB: 4096, CPUMillis: 1500, DiskMiB: 6 * 1024}
+
+	require.Equal(t, expected, ResolveResourceLimitsWithPolicy(&cfg, policy), "resource tier should respect org maximums")
+}
+
 func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1606,6 +1701,23 @@ func TestApplyResourceLimitsToSandboxConfig_RoundsDiskUp(t *testing.T) {
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
 	require.Equal(t, 2, sandboxCfg.DiskLimitGB, "sandbox config should round non-whole GiB disk limits up for Docker quota support")
+}
+
+func TestApplyPreviewInstanceResourceLimitsToSandboxConfig(t *testing.T) {
+	t.Parallel()
+
+	sandboxCfg := agent.DefaultSandboxConfig()
+	instance := &models.PreviewInstance{
+		MemoryLimitMB:  4096,
+		CPULimitMillis: 1500,
+		DiskLimitMB:    1537,
+	}
+
+	ApplyPreviewInstanceResourceLimitsToSandboxConfig(&sandboxCfg, instance)
+
+	require.Equal(t, 4096, sandboxCfg.MemoryLimitMB, "sandbox memory should use persisted preview limit")
+	require.Equal(t, 1.5, sandboxCfg.CPULimit, "sandbox CPU should use persisted preview limit")
+	require.Equal(t, 2, sandboxCfg.DiskLimitGB, "sandbox disk should round persisted MiB limit up to GiB")
 }
 
 func TestLookupInfraTemplate(t *testing.T) {

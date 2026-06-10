@@ -464,6 +464,15 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "INVALID_SETTINGS",
 		},
 		{
+			name: "returns bad request for preview resource cap above platform maximum",
+			body: `{"settings":{"sandbox_resources":{"preview_max_memory_mib":99999}}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
 			name: "returns bad request for invalid sandbox lifecycle retention",
 			body: `{"settings":{"sandbox_lifecycle":{"completed_session_retention_minutes":99999}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
