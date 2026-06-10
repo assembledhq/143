@@ -629,33 +629,9 @@ export const api = {
       }),
     delete: (provider: string) => del(`/api/v1/settings/credentials/${provider}`),
   },
-  userCredentials: {
-    listPersonal: () =>
-      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/personal'),
-    upsertPersonal: (provider: string, config: Record<string, unknown>, isTeamDefault?: boolean) =>
-      request<import('./types').SingleResponse<import('./types').UserCredentialSummary>>(`/api/v1/settings/credentials/personal/${provider}`, {
-        method: 'PUT',
-        body: JSON.stringify({ config, is_team_default: isTeamDefault ?? false }),
-      }),
-    deletePersonal: (provider: string) =>
-      del(`/api/v1/settings/credentials/personal/${provider}`),
-    listTeamDefaults: () =>
-      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/team'),
-    setTeamDefault: (provider: string, userId: string) =>
-      request(`/api/v1/settings/credentials/team/${provider}`, {
-        method: 'PUT',
-        body: JSON.stringify({ user_id: userId }),
-      }),
-    removeTeamDefault: (provider: string) =>
-      del(`/api/v1/settings/credentials/team/${provider}`),
-    listResolved: () =>
-      get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
-  },
-  // Unified coding-credentials API — replaces the split userCredentials +
-  // codingAuths surface. See docs/design/future/65-unified-coding-credentials.md.
-  // The legacy `codingAuths` and `userCredentials` clients below still work
-  // (their writes are mirrored into coding_credentials by the backend) and
-  // remain in use by /settings/agent until the cleanup PR.
+  // Unified coding-credentials API — replaces the legacy split
+  // userCredentials + codingAuths surface, whose endpoints now return
+  // 410 Gone. See docs/design/future/65-unified-coding-credentials.md.
   codingCredentials: {
     list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
       get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
@@ -689,31 +665,6 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify({ scope, ordered_ids: orderedIDs }),
       }),
-  },
-  codingAuths: {
-    list: () =>
-      get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
-    create: (body: {
-      agent: string;
-      auth_type: string;
-      label?: string;
-      api_key?: string;
-      api_type?: string;
-      base_url?: string;
-      agent_defaults?: Record<string, string>;
-    }) =>
-      post<import('./types').SingleResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths', body),
-    reorder: (ids: string[]) =>
-      request('/api/v1/settings/coding-auths/reorder', {
-        method: 'PATCH',
-        body: JSON.stringify({ ids }),
-      }),
-    update: (id: string, body: { label?: string }) =>
-      request<import('./types').SingleResponse<import('./types').CodingAuth>>(`/api/v1/settings/coding-auths/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      }),
-    delete: (id: string) => del(`/api/v1/settings/coding-auths/${id}`),
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),

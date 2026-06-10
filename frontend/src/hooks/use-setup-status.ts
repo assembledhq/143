@@ -16,12 +16,8 @@ export function useSetupStatus() {
     queryKey: [...queryKeys.codexAuth.status, "personal"],
     queryFn: () => api.codexAuth.status(undefined, "personal"),
   });
-  const { data: resolvedCredsResponse, isLoading: resolvedCredsLoading } = useQuery({
-    queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.userCredentials.listResolved(),
-  });
   const { data: resolvedCodingCredentialsResponse, isLoading: resolvedCodingCredentialsLoading } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "resolved"],
+    queryKey: queryKeys.codingCredentials.list("resolved"),
     queryFn: () => api.codingCredentials.list("resolved"),
   });
 
@@ -37,12 +33,11 @@ export function useSetupStatus() {
 
   const rawSettings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgent = rawSettings?.default_agent_type ?? "codex";
-  const resolvedCredentials = resolvedCredsResponse?.data ?? [];
   const resolvedCodingCredentials = resolvedCodingCredentialsResponse?.data ?? [];
 
   const agentConnected = isAgentAvailable(
     defaultAgent,
-    resolvedCredentials,
+    [],
     codexAuthStatusResponse?.data,
     resolvedCodingCredentials,
   );
@@ -52,7 +47,7 @@ export function useSetupStatus() {
   const githubReady = integrations.some((i) => i.provider === "github" && i.status === "active")
     && repositories.length > 0;
 
-  const isLoading = settingsLoading || codexAuthLoading || resolvedCredsLoading || resolvedCodingCredentialsLoading || integrationsLoading || repositoriesLoading;
+  const isLoading = settingsLoading || codexAuthLoading || resolvedCodingCredentialsLoading || integrationsLoading || repositoriesLoading;
   const isSetupComplete = agentConnected && githubReady;
 
   return {
