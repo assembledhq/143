@@ -1285,6 +1285,42 @@ export interface PendingInvitationForUser {
   created_at: string;
 }
 
+export interface OrgJoinToken {
+  id: string;
+  token_prefix: string;
+  name: string;
+  role: string;
+  use_count: number;
+  max_uses?: number | null;
+  expires_at?: string | null;
+  revoked_at?: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface OrgJoinTokenCreated extends OrgJoinToken {
+  token: string;
+  install_command: string;
+}
+
+export interface CreateOrgJoinTokenRequest {
+  name: string;
+  role: string;
+  max_uses?: number | null;
+  expires_in_days?: number | null;
+}
+
+export interface CLIToken {
+  id: string;
+  token_prefix: string;
+  device_name?: string;
+  last_org_id?: string | null;
+  expires_at: string;
+  last_used_at?: string | null;
+  last_used_ip?: string | null;
+  created_at: string;
+}
+
 export interface GitHubInviteStatus {
   connected: boolean;
 }

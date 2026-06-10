@@ -17,6 +17,88 @@ function emptyCodingCredentialsHandlers() {
 }
 
 describe("Account settings page", () => {
+  it("shows the tokenless CLI install command and the user's CLI sessions", async () => {
+    server.use(
+      ...emptyCodingCredentialsHandlers(),
+      http.get("/api/v1/auth/cli-tokens", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: "cli-1",
+              token_prefix: "143u_laptop",
+              device_name: "Alice MacBook Pro",
+              last_org_id: "org-1",
+              expires_at: "2026-09-01T00:00:00Z",
+              last_used_at: "2026-06-02T12:00:00Z",
+              created_at: "2026-06-01T00:00:00Z",
+            },
+          ],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    expect(await screen.findByRole("heading", { name: "143-tools CLI" })).toBeInTheDocument();
+    expect(screen.getByText("curl -fsSL http://localhost:3000/install.sh | sh")).toBeInTheDocument();
+    expect(await screen.findByText("Alice MacBook Pro")).toBeInTheDocument();
+    expect(screen.getByText("143u_laptop")).toBeInTheDocument();
+  });
+
+  it("revokes a CLI session from account settings", async () => {
+    const user = userEvent.setup();
+    let revokedPath = "";
+    server.use(
+      ...emptyCodingCredentialsHandlers(),
+      http.get("/api/v1/auth/cli-tokens", () => {
+        return HttpResponse.json({
+          data: [
+            {
+              id: "cli-1",
+              token_prefix: "143u_laptop",
+              device_name: "Alice MacBook Pro",
+              expires_at: "2026-09-01T00:00:00Z",
+              created_at: "2026-06-01T00:00:00Z",
+            },
+          ],
+          meta: {},
+        });
+      }),
+      http.delete("/api/v1/auth/cli-tokens/:id", ({ request }) => {
+        revokedPath = new URL(request.url).pathname;
+        return HttpResponse.json({ data: { status: "revoked" } });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Revoke CLI session Alice MacBook Pro" }));
+
+    await waitFor(() => {
+      expect(revokedPath).toBe("/api/v1/auth/cli-tokens/cli-1");
+    });
+  });
+
+  it("hides the CLI card when the backend does not expose CLI token support", async () => {
+    let cliTokensRequested = false;
+    server.use(
+      ...emptyCodingCredentialsHandlers(),
+      http.get("/api/v1/auth/cli-tokens", () => {
+        cliTokensRequested = true;
+        return HttpResponse.json({ error: { code: "NOT_FOUND", message: "not found" } }, { status: 404 });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    await waitFor(() => {
+      expect(cliTokensRequested).toBe(true);
+    });
+    expect(screen.queryByRole("heading", { name: "143-tools CLI" })).not.toBeInTheDocument();
+    expect(screen.queryByText("curl -fsSL http://localhost:3000/install.sh | sh")).not.toBeInTheDocument();
+  });
+
   it("renders the personal stack alongside the org fallback", async () => {
     server.use(
       http.get("/api/v1/coding-credentials", ({ request }) => {

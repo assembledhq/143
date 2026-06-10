@@ -11,6 +11,9 @@ const {
   revokeInvitationMock,
   githubInviteStatusMock,
   searchGitHubUsersMock,
+  listJoinTokensMock,
+  createJoinTokenMock,
+  revokeJoinTokenMock,
   currentUserMock,
 } = vi.hoisted(() => ({
   listMembersMock: vi.fn().mockResolvedValue({
@@ -57,6 +60,21 @@ const {
   revokeInvitationMock: vi.fn().mockResolvedValue(undefined),
   githubInviteStatusMock: vi.fn().mockResolvedValue({ data: { connected: false } }),
   searchGitHubUsersMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
+  listJoinTokensMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
+  createJoinTokenMock: vi.fn().mockResolvedValue({
+    data: {
+      id: 'join-1',
+      token: '143j_testtoken123',
+      install_command: 'curl -fsSL https://143.example/install/143j_testtoken123 | sh',
+      token_prefix: '143j_test',
+      name: 'Team CLI install link',
+      role: 'member',
+      use_count: 0,
+      status: 'active',
+      created_at: '2026-06-01T00:00:00Z',
+    },
+  }),
+  revokeJoinTokenMock: vi.fn().mockResolvedValue(undefined),
   currentUserMock: {
     id: 'user-1',
     email: 'admin@example.com',
@@ -76,6 +94,11 @@ vi.mock('@/lib/api', () => ({
       revokeInvitation: revokeInvitationMock,
       githubInviteStatus: githubInviteStatusMock,
       searchGitHubUsers: searchGitHubUsersMock,
+    },
+    orgJoinTokens: {
+      list: listJoinTokensMock,
+      create: createJoinTokenMock,
+      revoke: revokeJoinTokenMock,
     },
     auth: {
       me: vi.fn().mockResolvedValue({ data: { id: 'user-1', email: 'admin@example.com', name: 'Admin User', role: 'admin' } }),
@@ -100,6 +123,24 @@ describe('TeamSettingsPage', () => {
     revokeInvitationMock.mockClear();
     githubInviteStatusMock.mockClear();
     searchGitHubUsersMock.mockClear();
+    listJoinTokensMock.mockClear();
+    createJoinTokenMock.mockClear();
+    revokeJoinTokenMock.mockClear();
+    listJoinTokensMock.mockResolvedValue({ data: [], meta: {} });
+    createJoinTokenMock.mockResolvedValue({
+      data: {
+        id: 'join-1',
+        token: '143j_testtoken123',
+        install_command: 'curl -fsSL https://143.example/install/143j_testtoken123 | sh',
+        token_prefix: '143j_test',
+        name: 'Team CLI install link',
+        role: 'member',
+        use_count: 0,
+        status: 'active',
+        created_at: '2026-06-01T00:00:00Z',
+      },
+    });
+    revokeJoinTokenMock.mockResolvedValue(undefined);
     currentUserMock.id = 'user-1';
     currentUserMock.email = 'admin@example.com';
     currentUserMock.name = 'Admin User';
@@ -116,6 +157,96 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByText('Member User')).toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
     expect(screen.getByText('member@example.com')).toBeInTheDocument();
+  });
+
+  it('renders an admin CLI install card on the team settings page', async () => {
+    listJoinTokensMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'join-1',
+          token_prefix: '143j_live',
+          name: 'Team CLI install link',
+          role: 'member',
+          use_count: 3,
+          max_uses: null,
+          status: 'active',
+          created_at: '2026-06-01T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    expect(await screen.findByRole('heading', { name: 'CLI install' })).toBeInTheDocument();
+    expect(screen.getByText(/Create a join-capable install command/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create install link' })).toBeInTheDocument();
+    expect(await screen.findByText('143j_live')).toBeInTheDocument();
+    expect(screen.getByText(/3 uses/)).toBeInTheDocument();
+  });
+
+  it('creates a member-scoped CLI install link and shows the one-time command', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Create install link' }));
+
+    await waitFor(() => {
+      expect(createJoinTokenMock).toHaveBeenCalledWith({
+        name: 'Team CLI install link',
+        role: 'member',
+      });
+    });
+    expect(await screen.findByText('curl -fsSL https://143.example/install/143j_testtoken123 | sh')).toBeInTheDocument();
+    expect(screen.getByText(/This full command is shown once/)).toBeInTheDocument();
+  });
+
+  it('revokes an existing CLI install link from the team page', async () => {
+    const user = userEvent.setup();
+    listJoinTokensMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'join-1',
+          token_prefix: '143j_live',
+          name: 'Team CLI install link',
+          role: 'member',
+          use_count: 0,
+          status: 'active',
+          created_at: '2026-06-01T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Revoke CLI install link 143j_live' }));
+
+    await waitFor(() => {
+      expect(revokeJoinTokenMock).toHaveBeenCalledWith('join-1');
+    });
+  });
+
+  it('hides the CLI install card from non-admin team viewers', async () => {
+    currentUserMock.role = 'member';
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    await screen.findByText('Admin User');
+    expect(screen.queryByRole('heading', { name: 'CLI install' })).not.toBeInTheDocument();
+    expect(listJoinTokensMock).not.toHaveBeenCalled();
+  });
+
+  it('hides the CLI install card when the backend does not expose join-token support', async () => {
+    listJoinTokensMock.mockRejectedValueOnce(new Error('not found'));
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(listJoinTokensMock).toHaveBeenCalled();
+    });
+    expect(screen.queryByRole('heading', { name: 'CLI install' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create install link' })).not.toBeInTheDocument();
   });
 
   it('renders the members in list format with column headers', async () => {

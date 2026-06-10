@@ -876,6 +876,18 @@ export const api = {
         `/api/v1/team/github/users?q=${encodeURIComponent(q)}`,
       ),
   },
+  orgJoinTokens: {
+    list: () =>
+      get<import('./types').ListResponse<import('./types').OrgJoinToken>>('/api/v1/org/join-tokens'),
+    create: (body: import('./types').CreateOrgJoinTokenRequest) =>
+      post<import('./types').SingleResponse<import('./types').OrgJoinTokenCreated>>('/api/v1/org/join-tokens', body),
+    revoke: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
+  },
+  cliTokens: {
+    list: () =>
+      get<import('./types').ListResponse<import('./types').CLIToken>>('/api/v1/auth/cli-tokens'),
+    revoke: (id: string) => del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/auth/cli-tokens/${id}`),
+  },
   projects: {
     list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; created_by_ids?: string[]; include_archived?: boolean; only_archived?: boolean }) => {
       const searchParams = new URLSearchParams();
