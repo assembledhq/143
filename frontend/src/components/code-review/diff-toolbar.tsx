@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, FolderSearch, Rows3, Search, X, Files, MessageSquare } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, FolderSearch, Maximize2, Minimize2, Rows3, Search, X, Files, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -24,6 +24,8 @@ interface DiffToolbarProps {
   canGoNext?: boolean;
   mobileChromeCollapsed?: boolean;
   onOpenComposer?: () => void;
+  isFullScreen?: boolean;
+  onToggleFullScreen?: () => void;
 }
 
 export function DiffToolbar({
@@ -43,6 +45,8 @@ export function DiffToolbar({
   canGoNext = false,
   mobileChromeCollapsed = false,
   onOpenComposer,
+  isFullScreen = false,
+  onToggleFullScreen,
 }: DiffToolbarProps) {
   const [showSearch, setShowSearch] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -251,6 +255,19 @@ export function DiffToolbar({
               Split
             </button>
           </div>
+
+          {onToggleFullScreen && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-7 w-7 p-0", isFullScreen && "text-primary")}
+              onClick={onToggleFullScreen}
+              title={isFullScreen ? "Exit full screen (Esc)" : "Full screen"}
+              aria-label={isFullScreen ? "Exit full screen" : "Enter full screen"}
+            >
+              {isFullScreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            </Button>
+          )}
 
           {onBrowseRepo && (
             <Button
