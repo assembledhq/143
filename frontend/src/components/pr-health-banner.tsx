@@ -43,6 +43,7 @@ export type ReviewPRAction = {
 type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
   currentSessionId?: string;
+  currentThreadId?: string | null;
   pendingAction: PRBannerAction;
   repairError?: string | null;
   mergeAuthRequired?: boolean;
@@ -52,7 +53,7 @@ type PRHealthBannerProps = {
   onMerge: () => void;
   onQueueMergeWhenReady?: () => void;
   onCancelMergeWhenReady?: () => void;
-  onOpenRepairSession?: (sessionId: string) => void;
+  onOpenRepairSession?: (sessionId: string, threadId?: string) => void;
   pushChanges?: PushChangesAction;
   reviewAction?: ReviewPRAction;
 };
@@ -60,6 +61,7 @@ type PRHealthBannerProps = {
 export function PRHealthBanner({
   health,
   currentSessionId,
+  currentThreadId,
   pendingAction,
   repairError,
   mergeAuthRequired = false,
@@ -73,7 +75,7 @@ export function PRHealthBanner({
   pushChanges,
   reviewAction,
 }: PRHealthBannerProps) {
-  const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId);
+  const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId, currentThreadId);
   const isHealthy = activeRepairState.label === null && health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
@@ -204,7 +206,7 @@ export function PRHealthBanner({
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => onOpenRepairSession(activeRepairState.openSessionID!)}
+                        onClick={() => onOpenRepairSession(activeRepairState.openSessionID!, activeRepairState.openThreadID ?? undefined)}
                       >
                         Open repair session
                       </Button>
@@ -382,9 +384,11 @@ export function PRHealthBanner({
 function deriveActiveRepairState(
   activeRepairs: PullRequestHealthResponse["active_repairs"],
   currentSessionId?: string,
+  currentThreadId?: string | null,
 ): {
   label: string | null;
   openSessionID: string | null;
+  openThreadID: string | null;
   suppressFixTests: boolean;
   suppressResolveConflicts: boolean;
   suppressMerge: boolean;
@@ -393,6 +397,10 @@ function deriveActiveRepairState(
   const resolveConflicts = repairs.find((repair) => repair.action_type === "resolve_conflicts");
   const fixTests = repairs.find((repair) => repair.action_type === "fix_tests");
   const dominantRepair = resolveConflicts ?? fixTests ?? null;
+  const repairIsInDifferentView = !!dominantRepair && (
+    dominantRepair.session_id !== currentSessionId ||
+    (currentThreadId != null && !!dominantRepair.thread_id && dominantRepair.thread_id !== currentThreadId)
+  );
 
   return {
     label: dominantRepair
@@ -400,7 +408,8 @@ function deriveActiveRepairState(
         ? "Resolve conflicts running"
         : "Fix tests running"
       : null,
-    openSessionID: dominantRepair && dominantRepair.session_id !== currentSessionId ? dominantRepair.session_id : null,
+    openSessionID: dominantRepair && repairIsInDifferentView ? dominantRepair.session_id : null,
+    openThreadID: dominantRepair?.thread_id ?? null,
     suppressFixTests: !!fixTests || !!resolveConflicts,
     suppressResolveConflicts: !!resolveConflicts,
     suppressMerge: repairs.length > 0,

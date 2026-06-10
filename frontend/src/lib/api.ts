@@ -227,8 +227,8 @@ export const api = {
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
-    fixTests: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`),
-    resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
+    fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
+    resolveConflicts: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`, body ?? {}),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
     queueMergeWhenReady: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
     cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
